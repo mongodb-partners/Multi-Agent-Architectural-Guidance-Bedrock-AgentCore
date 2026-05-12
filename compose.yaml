@@ -1,0 +1,50 @@
+# Full stack: API + Streamlit. From repo root:
+#   docker compose up --build
+#
+# Default: dev-mock agent loop (no Bedrock/MongoDB required). Override via `.env` or shell.
+
+name: bedrock-multi-agent
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: api/Dockerfile
+    ports:
+      - "${API_PORT:-3000}:3000"
+    environment:
+      PORT: "3000"
+      CHAT_MODE: "${CHAT_MODE:-live}"
+      DEV_MOCK_BACKENDS: "${DEV_MOCK_BACKENDS:-1}"
+      # Optional: MONGODB_URI, PERSIST_CHAT_SESSIONS=1, AWS_REGION, REQUIRE_AUTH, AUTH_JWKS_URI, AUTH_ISSUER, etc.
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "bun",
+          "-e",
+          "fetch('http://127.0.0.1:3000/health').then(r=>process.exit(r.ok?0:1))",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  ui:
+    build:
+      context: ui
+      dockerfile: Dockerfile
+    ports:
+      - "${STREAMLIT_PORT:-8501}:8501"
+    environment:
+      STREAMLIT_API_URL: http://api:3000
+      STREAMLIT_BROWSER_GATHER_USAGE_STATS: "false"
+      # When API uses REQUIRE_AUTH=true, set Cognito (see .env.example — matching AUTH_* on api):
+      # STREAMLIT_COGNITO_POOL_ID: ...
+      # STREAMLIT_COGNITO_CLIENT_ID: ...
+      # STREAMLIT_COGNITO_CLIENT_SECRET: ...
+      # STREAMLIT_COGNITO_DOMAIN: your-domain.auth.region.amazoncognito.com
+      # STREAMLIT_COGNITO_REDIRECT_URI: http://localhost:8501/
+    depends_on:
+      api:
+        condition: service_healthy

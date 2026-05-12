@@ -1,0 +1,28 @@
+{
+  "tools": [
+    {
+      "name": "notify_fulfillment_lambda",
+      "description": "POST order payload to a Lambda Function URL (set ORDER_NOTIFY_LAMBDA_URL in env).",
+      "method": "POST",
+      "url": "${ORDER_NOTIFY_LAMBDA_URL}",
+      "timeoutMs": 30000,
+      "headers": {
+        "Content-Type": "application/json"
+      },
+      "parameters": [
+        {
+          "name": "orderId",
+          "type": "string",
+          "description": "Order id to send",
+          "required": true
+        },
+        {
+          "name": "event",
+          "type": "string",
+          "description": "e.g. shipped, cancelled",
+          "required": true
+        }
+      ]
+    }
+  ]
+}

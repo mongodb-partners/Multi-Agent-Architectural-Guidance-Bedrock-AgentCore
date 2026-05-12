@@ -1,0 +1,33 @@
+# AgentCore Runtime container — build from repository root:
+#   docker buildx build --platform linux/arm64 -f api/Dockerfile.agentcore -t <ecr-uri>:latest .
+#
+# IMPORTANT: AgentCore Runtime requires linux/arm64. Do NOT build for amd64.
+# Port: 8080 (required by AgentCore Runtime; not configurable)
+# Entry: /ping (health) + /invocations (agent execution)
+
+FROM --platform=linux/arm64 oven/bun:1 AS runtime
+
+WORKDIR /app
+
+ENV NODE_ENV=production \
+    PORT=8080 \
+    CHAT_MODE=live
+
+# Install dependencies
+COPY api/package.json api/bun.lock ./
+RUN bun install --frozen-lockfile --production
+
+# Copy source and config
+COPY api/tsconfig.json ./
+COPY api/src ./src
+COPY config ./config
+
+RUN chown -R bun:bun /app
+USER bun
+
+EXPOSE 8080
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+    CMD bun -e "fetch('http://127.0.0.1:8080/ping').then(r=>process.exit(r.ok?0:1))"
+
+CMD ["bun", "run", "src/agent-runtime-server.ts"]

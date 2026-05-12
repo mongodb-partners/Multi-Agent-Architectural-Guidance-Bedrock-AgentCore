@@ -1,0 +1,25 @@
+# Suggested chat prompts surfaced in the sidebar.
+# Grouped by category — the UI renders one button per prompt.
+groups:
+  - title: Routing & handoff
+    prompts:
+      - label: Order status
+        text: Where is my order #12345?
+      - label: Product question
+        text: What's the difference between the X-2 and X-3 models?
+      - label: Troubleshooting
+        text: My device shows error code E-104 — can you help?
+
+  - title: MongoDB lens
+    prompts:
+      - label: Find an order (Atlas)
+        text: Look up order 12345 in MongoDB and tell me the shipment status.
+      - label: Vector search
+        text: Show me similar products to the X-2 using vector search.
+
+  - title: Memory
+    prompts:
+      - label: Identity fact
+        text: My email is alice@example.com — remember that for future questions.
+      - label: Preference fact
+        text: I prefer dark roast coffee and 12oz cups.

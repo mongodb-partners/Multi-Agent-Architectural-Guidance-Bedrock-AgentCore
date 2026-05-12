@@ -1,0 +1,173 @@
+# Demo script — live multi-agent (Nova models + real Atlas data)
+
+Use this for **live screen share** demos against the running local stack.
+
+**Stack:** API `:3000` + Streamlit UI `:8501` — Nova Lite (orchestrator) + Nova Pro (specialists) + MongoDB Atlas M10 + Bedrock KB.
+
+**Audience:** technical buyers, platform engineers, or leadership who care that **new behavior ships by editing markdown** (`config/agents/`, `config/skills/`) rather than forking JavaScript.
+
+**Runtime:** ~10–12 minutes for the full arc; ~5 minutes for a tight cut (scenes 1 + 3 + 5).
+
+---
+
+## Before the demo
+
+Ensure AWS creds are fresh and both services are running.
+
+```bash
+# 1. Verify creds
+source env.sh && aws sts get-caller-identity
+
+# 2. Start stack (kill old processes first)
+lsof -ti:3000,8501 | xargs kill -9 2>/dev/null
+source env.sh && source .env.live && export PATH=”$HOME/.bun/bin:$PATH” && export ORCHESTRATOR_MODE=swarm
+cd api && nohup bun run dev > ../logs/api.log 2>&1 &
+~/.venvs/multiagent-ui/bin/streamlit run ui/app.py --server.headless true &
+
+# 3. Confirm health
+curl -s http://localhost:3000/health | python3 -m json.tool
+```
+
+Open **http://localhost:8501** in your browser.
+
+**Presenter line:** *”Everything you see is driven from markdown in `config/agents/` and `config/skills/`. The API hot-reloads them — changing agent behavior is a markdown edit, not a code deploy.”*
+
+---
+
+## Scene 0 — Orient the UI (30 s)
+
+1. Sidebar: point at **Active session**, **New session**, **Target agent**.
+2. Open **About this agent** on **Orchestrator** — read the one-line description.
+3. **Wow hook:** *“Specialists are separate agents with their own tools and skills; the orchestrator only routes.”*
+
+---
+
+## Scene 1 — Swarm: order tracking (handoff + real data) (~2.5 min)
+
+Target agent = **orchestrator**.
+
+```text
+Can you check on my order for me?
+```
+
+*(agent asks for order ID — show it working)*
+
+```text
+Order ORD-1001 for alex@example.com.
+```
+
+**Call out while it streams:**
+- 🔀 **Handoff: orchestrator → order-management** — Strands Swarm, not a hardcoded `if`
+- Real Atlas query returns **shipped + TRK-9001-US** tracking link
+
+**Presenter line:** *”The orchestrator has no tools. It routes. The specialist queries real MongoDB Atlas — same data that would back a production customer portal.”*
+
+---
+
+## Scene 2 — Troubleshooting: error code + ticket escalation (~2.5 min)
+
+New session, **orchestrator**.
+
+```text
+My device has a serious hardware error — HW-900 error, three red blinks. Dana Patel, dana@example.com, serial SN-D4321, Compact Widget from ORD-3002.
+```
+
+**Call out:**
+- Handoff to **troubleshooting**
+- Agent immediately escalates (HW-900 is non-recoverable — no self-service steps)
+- Ticket created with ID + 4-hour SLA + express replacement offer
+
+**Presenter line:** *”The escalation rule is in `SKILL.md` — three lines of markdown. No code change required to add or modify it.”*
+
+---
+
+## Scene 3 — Product recommendation: outdoor use case (~2 min)
+
+New session, **orchestrator**.
+
+```text
+I need a widget for outdoor and garage use — it needs to be tough and waterproof.
+```
+
+*(agent may ask follow-up)*
+
+```text
+Looking for IP67 rating if possible, will be used in harsh conditions.
+```
+
+**Call out:**
+- Handoff to **product-recommendation**
+- Agent queries catalog and returns **Outdoor Widget Rugged (SKU-7, $59.99, IP67)**
+
+---
+
+## Scene 4 — Direct specialist (speed round) (~1.5 min)
+
+Click **New session**. Set **Target agent** to **order-management**.
+
+```text
+I need to cancel order ORD-1002 for blake@example.com. I no longer need it.
+```
+
+**Call out:** Agent queries Atlas, confirms `processing` status, says it can be cancelled — no orchestrator hop.
+
+**Presenter line:** *”Target a specialist directly for power users or API integrations. Same agent, same tools, no routing overhead.”*
+
+---
+
+## Scene 5 — Config is the product (~2 min)
+
+Switch to the **repo** (IDE or GitHub):
+
+1. Open [`config/agents/orchestrator.agent.md`](../config/agents/orchestrator.agent.md) — **handoffs** table in frontmatter.
+2. Open [`config/skills/order-management/SKILL.md`](../config/skills/order-management/SKILL.md) — tool usage + `read_skill_resource` paths.
+3. Open [`data/dev/mongo-fixtures.json`](../data/dev/mongo-fixtures.json) — **orders** / **products** / **customers**.
+
+**Presenter line:** *“A new vertical is mostly new markdown under `config/` plus data shape—not a new microservice per customer.”*
+
+---
+
+## Tight 5-minute cut
+
+1. Scene 0 — orient UI (30 s)
+2. Scene 1 — ORD-1001 order track (2 min)
+3. Scene 3 — outdoor product recommendation (1.5 min)
+4. Scene 5 — show `config/` (1 min)
+
+---
+
+## If something breaks
+
+| Symptom | Likely fix |
+|---------|------------|
+| `[stub]` in reply | API missing `CHAT_MODE=live` |
+| No handoff lines | `ORCHESTRATOR_MODE=swarm` not set, or target agent isn’t **orchestrator** |
+| Empty / errors | API not running; check `curl -s http://127.0.0.1:3000/health` |
+| UI can’t reach API | `STREAMLIT_API_URL` / firewall; default `http://127.0.0.1:3000` |
+
+---
+
+## After the demo
+
+- Point to [`DEV_STATUS.md`](../DEV_STATUS.md) for the full env matrix. Optional setup (persistence, auth, real backends) is summarized in **[Before the demo](#before-the-demo)** above.
+- Point to [`TASKS.md`](../TASKS.md) demo acceptance for what’s still open for a **full** production story (auth, persistent memory, Atlas, etc.).
+- **Docker option:** run `docker compose up --build` (or `make docker-up`) from the repo root to show the full stack in containers — no Bun or Python install required. Uses the same `DEV_MOCK_BACKENDS=1` defaults.
+
+---
+
+## KT checklist (handoff for the next owner)
+
+Use this after a demo session so someone else can **run it again** and **explain the boundaries** without you in the room.
+
+| # | Topic | They should be able to… |
+|---|--------|-------------------------|
+| 1 | **Run the stack** | Start API (`bun run dev` in `api/`) + UI (`streamlit run app.py` in `ui/`) with `CHAT_MODE=live` and `DEV_MOCK_BACKENDS=1`. |
+| 2 | **Swarm vs single** | Set or unset `ORCHESTRATOR_MODE=swarm`, pick **orchestrator** vs a specialist in the UI, and state what changes (handoffs vs direct agent). |
+| 3 | **Where config lives** | Open `config/agents/*.agent.md` (persona + `handoffs` + `tools`) and `config/skills/*/SKILL.md` (domain instructions + progressive disclosure). |
+| 4 | **Dev data** | Point to `data/dev/mongo-fixtures.json` and say it backs `mongodb_query` / vector/KB **mocks** when `DEV_MOCK_BACKENDS=1`. |
+| 5 | **API contract** | Name `POST /chat` (SSE), `GET /agents`, `GET /skills`, `GET /sessions`, `DELETE /sessions/:id`, `GET /http-tools`, and where events are documented ([`docs/api-reference.md`](api-reference.md)). |
+| 6 | **What’s actually missing** | List at least three **not implemented** items (configurable behavior belongs in [Before the demo](#before-the-demo)): e.g. **multi-instance** coherence for Mongo-backed **`chat_sessions`**; **AgentCore** Memory/Gateway/Code Interpreter wired into product flows (SDK validate only today); **Lambda** handlers under **`lambda/base-tools/`** for Gateway mode; **full Terraform/ECS/ALB** rollout beyond stubs/images; **long-term memory** still raw turn excerpts, not PII-safe extraction + vector recall. Source of truth: [`TASKS.md`](../TASKS.md), [`DEV_STATUS.md`](../DEV_STATUS.md). |
+| 7 | **Extend a vertical** | Describe the steps to add a new skill folder + reference an agent’s `skills:` list (or walk through [`docs/skills-authoring-guide.md`](skills-authoring-guide.md) / [`docs/agent-authoring-guide.md`](agent-authoring-guide.md)). |
+| 8 | **Regression** | Run `cd api && bun run typecheck && bun run test:all` before a big demo or config change. |
+
+**Optional deep dives (assign reading):** [`AGENTS.md`](../AGENTS.md) (contributor rules), [`docs/architecture.md`](architecture.md), [`docs/configuration-guide.md`](configuration-guide.md).

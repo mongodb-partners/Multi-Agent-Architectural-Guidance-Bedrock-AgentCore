@@ -1,0 +1,63 @@
+# Product Support Guide: Hardware Faults and Escalation
+
+## Hardware fault indicator — HW-900
+
+HW-900 and a three-blink red LED pattern indicate a non-recoverable hardware fault.
+This is detected by the device's self-test routine at boot.
+
+IMPORTANT: Do NOT continue asking the customer to power-cycle the device. Repeated resets will not fix HW-900 and can worsen the fault.
+
+Immediate escalation procedure:
+1. Ask the customer for the serial number printed on the underside of the device or in Settings > About.
+2. Request proof of purchase (order ID, receipt, or delivery confirmation).
+3. Capture a brief description of when the fault first appeared.
+4. Check warranty status: standard 12 months, Pro series 24 months, Premium tier 36 months.
+5. For in-warranty devices, initiate express replacement — target delivery within 2 business days.
+6. For out-of-warranty devices, present repair vs. replacement cost options.
+7. Generate a support ticket with error code HW-900, serial number, and proof of purchase.
+
+## Thermal shutdowns (Error: THERM-101)
+
+Repeated thermal shutdowns indicate inadequate heat dissipation:
+
+1. Remove any case or cover — restricted airflow is the most common cause.
+2. Move the device to a cool, hard, well-ventilated surface.
+3. Wait 15 minutes before powering on.
+4. Clear dust from the ventilation vents using compressed air.
+5. Avoid using the device while it is charging.
+6. Three or more THERM-101 events in one week indicate a failing thermal management system — escalate.
+
+## Display issues (Error: DISP-201)
+
+Screen blank, flickering lines, or colour artefacts:
+
+1. Press the power button twice rapidly to force a display reset.
+2. Check brightness — it may be set to minimum.
+3. Connect to an external display via the video output port (if available).
+4. If the external display works but the built-in screen does not, the internal panel needs replacement.
+5. DISP-201 with a working external display requires internal panel replacement service.
+
+## Battery degradation (Error: BAT-401)
+
+Fast battery drain and BAT-401 indicate cell degradation:
+
+1. Check Settings > Battery > Health — readings below 80% trigger BAT-401.
+2. Under 18 months old: eligible for warranty battery replacement.
+3. Out of warranty: refer to the paid battery replacement programme.
+4. Temporary workarounds: reduce brightness, disable background refresh, avoid simultaneous charging and heavy use.
+
+## Firmware update failures (Error: FW-501)
+
+Stuck or failed firmware updates:
+
+1. Do not power off mid-update — wait at least 20 minutes before intervening.
+2. If progress is stuck, use the recovery tool (downloadable from the support portal) to flash firmware manually.
+3. Connect to a PC, launch the recovery tool, and follow the on-screen instructions.
+4. If the recovery tool also fails, a factory reflash by the service team is required — escalate with code FW-501.
+
+## Return and replacement policy
+
+- Standard defect returns: 30 days from delivery.
+- Defective unit (hardware fault): 90 days from delivery.
+- HW-900 fault: 90-day window, extended to end of warranty for Pro/Premium.
+- Always confirm eligibility via the order management tools before promising a replacement.

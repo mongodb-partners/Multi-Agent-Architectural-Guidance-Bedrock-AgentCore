@@ -1,0 +1,18 @@
+{
+  "tools": [
+    {
+      "name": "fixture_ping",
+      "description": "Fixture HTTP tool for unit tests",
+      "method": "POST",
+      "url": "https://allowed.example.test/ping",
+      "parameters": [
+        {
+          "name": "x",
+          "type": "string",
+          "description": "test",
+          "required": true
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,106 @@
+<mxfile host="app.diagrams.net" agent="Claude Code" version="24.0.0">
+  <diagram id="lambda-tools" name="05 · Lambda MCP Tools">
+    <mxGraphModel dx="1300" dy="900" grid="1" gridSize="10" page="1" pageScale="1" pageWidth="1169" pageHeight="827" math="0" shadow="1">
+      <root>
+        <mxCell id="0"/><mxCell id="1" parent="0"/>
+
+        <mxCell id="title" value="Lambda MCP — How specialists access MongoDB" style="text;html=1;align=center;fontSize=20;fontStyle=1;strokeColor=none;fillColor=none;" vertex="1" parent="1">
+          <mxGeometry x="40" y="15" width="1080" height="30" as="geometry"/>
+        </mxCell>
+        <mxCell id="sub" value="The Lambda function is the ONLY component that ever talks to MongoDB. Specialist runtimes call it via lambda:InvokeFunction." style="text;html=1;align=center;fontSize=11;strokeColor=none;fillColor=none;fontColor=#666666;" vertex="1" parent="1">
+          <mxGeometry x="40" y="48" width="1080" height="18" as="geometry"/>
+        </mxCell>
+
+        <!-- Caller side -->
+        <mxCell id="spec" value="Specialist Runtime&#xa;(any of the 3)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=12;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="40" y="200" width="160" height="70" as="geometry"/>
+        </mxCell>
+        <mxCell id="spec-note" value="Bedrock returns a tool_use block.&#xa;The specialist serializes it to JSON and&#xa;sends it as the Lambda event payload." style="text;html=1;align=left;fontSize=10;strokeColor=none;fillColor=none;" vertex="1" parent="1">
+          <mxGeometry x="30" y="280" width="200" height="60" as="geometry"/>
+        </mxCell>
+
+        <!-- Arrow to Lambda -->
+        <mxCell id="call" value="lambda:InvokeFunction&#xa;{toolName, toolArguments}  →  JSON payload" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#d79b00;strokeWidth=2;fontSize=10;" edge="1" parent="1" source="spec" target="lam-box">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <!-- Lambda box -->
+        <mxCell id="lam-box" value="⚡ Lambda Function: bedrock-ma-use1-mongodb-mcp-dev&#xa;Runtime: nodejs20.x · Memory: 512 MB · Timeout: 60s · VPC: private subnets" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;strokeWidth=2;fontSize=12;fontStyle=1;verticalAlign=top;align=left;" vertex="1" parent="1">
+          <mxGeometry x="260" y="130" width="680" height="400" as="geometry"/>
+        </mxCell>
+
+        <!-- Event parser -->
+        <mxCell id="parse" value="1. Parse event&#xa;Accept: {toolName, args} or {tool_name, parameters} or {tool, args}&#xa;(handles multiple calling conventions)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#d79b00;fontSize=10;align=left;" vertex="1" parent="1">
+          <mxGeometry x="280" y="175" width="400" height="60" as="geometry"/>
+        </mxCell>
+
+        <!-- Tools -->
+        <mxCell id="t1-box" value="Tool: mongodb_query" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=12;fontStyle=1;verticalAlign=top;align=left;" vertex="1" parent="1">
+          <mxGeometry x="280" y="260" width="200" height="220" as="geometry"/>
+        </mxCell>
+        <mxCell id="t1-args" value="Args: collection, operation,&#xa;filter, projection, sort, limit,&#xa;pipeline, update, document&#xa;&#xa;Operations:&#xa;  find → returns array&#xa;  findOne → returns object&#xa;  aggregate → pipeline&#xa;  insertOne → new ID&#xa;  updateOne → modified count" style="text;html=1;align=left;fontSize=10;strokeColor=none;fillColor=none;" vertex="1" parent="1">
+          <mxGeometry x="285" y="280" width="190" height="190" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="t2-box" value="Tool: mongodb_vector_search" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=12;fontStyle=1;verticalAlign=top;align=left;" vertex="1" parent="1">
+          <mxGeometry x="500" y="260" width="200" height="220" as="geometry"/>
+        </mxCell>
+        <mxCell id="t2-args" value="Args: collection, index,&#xa;queryVector, path,&#xa;numCandidates, limit, filter&#xa;&#xa;Runs $vectorSearch&#xa;aggregation pipeline.&#xa;Returns docs with _score.&#xa;&#xa;Used for: product catalog&#xa;semantic search, RAG queries." style="text;html=1;align=left;fontSize=10;strokeColor=none;fillColor=none;" vertex="1" parent="1">
+          <mxGeometry x="505" y="280" width="190" height="190" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="t3-box" value="Tool: mongodb_aggregate" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=12;fontStyle=1;verticalAlign=top;align=left;" vertex="1" parent="1">
+          <mxGeometry x="720" y="260" width="200" height="220" as="geometry"/>
+        </mxCell>
+        <mxCell id="t3-args" value="Args: collection, pipeline&#xa;&#xa;Runs any aggregation pipeline.&#xa;&#xa;Used for: complex reports,&#xa;group-by, sort, project,&#xa;multi-stage data transforms.&#xa;&#xa;Returns: {count, documents}" style="text;html=1;align=left;fontSize=10;strokeColor=none;fillColor=none;" vertex="1" parent="1">
+          <mxGeometry x="725" y="280" width="190" height="190" as="geometry"/>
+        </mxCell>
+
+        <!-- MongoDB connection inside Lambda -->
+        <mxCell id="conn" value="MongoClient (reused across warm invocations)&#xa;MONGODB_URI = direct PrivateLink URI (not SRV)&#xa;Format: mongodb://ip1:1024,ip2:1025,ip3:1026/?ssl=true&amp;authSource=admin" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#27ae60;fontSize=10;align=left;" vertex="1" parent="1">
+          <mxGeometry x="280" y="495" width="620" height="60" as="geometry"/>
+        </mxCell>
+
+        <!-- Atlas -->
+        <mxCell id="atlas" value="🍃 MongoDB Atlas M10&#xa;Database: bedrock_agents&#xa;Collections: orders · products · customers · troubleshooting_docs · agent_memory" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5f5e3;strokeColor=#27ae60;fontSize=12;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="260" y="590" width="680" height="70" as="geometry"/>
+        </mxCell>
+
+        <!-- Arrows inside Lambda -->
+        <mxCell id="i1" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#d6b656;strokeWidth=1;" edge="1" parent="1" source="parse" target="t1-box">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="i2" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#d6b656;strokeWidth=1;" edge="1" parent="1" source="parse" target="t2-box">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="i3" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#d6b656;strokeWidth=1;" edge="1" parent="1" source="parse" target="t3-box">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="i4" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#27ae60;strokeWidth=1;" edge="1" parent="1" source="t1-box" target="conn">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="i5" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#27ae60;strokeWidth=1;" edge="1" parent="1" source="t2-box" target="conn">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="i6" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#27ae60;strokeWidth=1;" edge="1" parent="1" source="t3-box" target="conn">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="i7" value="TCP 1024-1026 via PrivateLink" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#27ae60;strokeWidth=2;fontSize=10;" edge="1" parent="1" source="conn" target="atlas">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+
+        <!-- Return arrow -->
+        <mxCell id="ret" value="{count, documents} back to specialist runtime" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#d79b00;strokeWidth=1;dashed=1;fontSize=10;endArrow=open;" edge="1" parent="1" source="lam-box" target="spec">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="260" y="450" as="sourcePoint"/>
+          </mxGeometry>
+        </mxCell>
+
+        <!-- Why not Gateway note -->
+        <mxCell id="gw-note" value="Why not AgentCore Gateway? The Gateway was provisioned (bedrock-ma-use1-gw-dev-jslrisrr8k) but is bypassed. Direct Lambda invoke is simpler: no MCP token exchange, no extra hop, same tool API. The Gateway resource is kept for future use if needed." style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontSize=10;align=left;" vertex="1" parent="1">
+          <mxGeometry x="40" y="700" width="1080" height="50" as="geometry"/>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

@@ -1,0 +1,202 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "NetworkingAndCompute",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:*",
+        "elasticloadbalancing:*",
+        "autoscaling:*",
+        "route53:*",
+        "route53resolver:*"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "ContainersAndServerless",
+      "Effect": "Allow",
+      "Action": [
+        "ecr:*",
+        "ecs:*",
+        "lambda:*"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "IamRolesAndPolicies",
+      "Effect": "Allow",
+      "Action": [
+        "iam:CreateRole",
+        "iam:DeleteRole",
+        "iam:GetRole",
+        "iam:ListRoles",
+        "iam:UpdateRole",
+        "iam:UpdateRoleDescription",
+        "iam:UpdateAssumeRolePolicy",
+        "iam:TagRole",
+        "iam:UntagRole",
+        "iam:ListRoleTags",
+        "iam:PutRolePolicy",
+        "iam:DeleteRolePolicy",
+        "iam:GetRolePolicy",
+        "iam:ListRolePolicies",
+        "iam:AttachRolePolicy",
+        "iam:DetachRolePolicy",
+        "iam:ListAttachedRolePolicies",
+        "iam:CreatePolicy",
+        "iam:DeletePolicy",
+        "iam:GetPolicy",
+        "iam:ListPolicies",
+        "iam:TagPolicy",
+        "iam:UntagPolicy",
+        "iam:ListPolicyTags",
+        "iam:CreatePolicyVersion",
+        "iam:DeletePolicyVersion",
+        "iam:GetPolicyVersion",
+        "iam:ListPolicyVersions",
+        "iam:SetDefaultPolicyVersion",
+        "iam:ListEntitiesForPolicy",
+        "iam:CreateInstanceProfile",
+        "iam:DeleteInstanceProfile",
+        "iam:GetInstanceProfile",
+        "iam:ListInstanceProfiles",
+        "iam:ListInstanceProfilesForRole",
+        "iam:ListInstanceProfileTags",
+        "iam:AddRoleToInstanceProfile",
+        "iam:RemoveRoleFromInstanceProfile",
+        "iam:TagInstanceProfile",
+        "iam:UntagInstanceProfile",
+        "iam:CreateServiceLinkedRole",
+        "iam:DeleteServiceLinkedRole",
+        "iam:GetServiceLinkedRoleDeletionStatus",
+        "iam:SimulatePrincipalPolicy"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "IdentityAndSecrets",
+      "Effect": "Allow",
+      "Action": [
+        "sts:GetCallerIdentity",
+        "sts:GetSessionToken",
+        "sts:AssumeRole",
+        "cognito-idp:*",
+        "cognito-identity:*",
+        "secretsmanager:*",
+        "kms:Decrypt",
+        "kms:DescribeKey",
+        "kms:Encrypt",
+        "kms:GenerateDataKey",
+        "kms:CreateGrant",
+        "kms:ListAliases",
+        "kms:ListKeys"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "StorageAndState",
+      "Effect": "Allow",
+      "Action": [
+        "s3:*",
+        "s3-object-lambda:*",
+        "dynamodb:*"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "BedrockAndAgentCore",
+      "Effect": "Allow",
+      "Action": [
+        "bedrock:*",
+        "bedrock-agentcore:*"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "SageMakerAndMarketplace",
+      "Effect": "Allow",
+      "Action": [
+        "sagemaker:*",
+        "application-autoscaling:*",
+        "aws-marketplace:*",
+        "aws-marketplace-management:*",
+        "license-manager:*",
+        "discovery:*"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "ResourceTaggingAndGroups",
+      "Effect": "Allow",
+      "Action": [
+        "tag:*",
+        "resource-groups:*",
+        "resource-explorer-2:*"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "OrganizationsReadOnly",
+      "Effect": "Allow",
+      "Action": [
+        "organizations:Describe*",
+        "organizations:List*"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "ApiGatewayAndAppRunner",
+      "Effect": "Allow",
+      "Action": [
+        "apigateway:*",
+        "execute-api:*"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "ObservabilityAndDelivery",
+      "Effect": "Allow",
+      "Action": [
+        "logs:*",
+        "cloudwatch:*",
+        "events:*",
+        "scheduler:*",
+        "cloudfront:*"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "SystemsManager",
+      "Effect": "Allow",
+      "Action": [
+        "ssm:*",
+        "ssmmessages:*",
+        "ec2messages:*"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "PassRoleToAwsServices",
+      "Effect": "Allow",
+      "Action": "iam:PassRole",
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "iam:PassedToService": [
+            "ec2.amazonaws.com",
+            "lambda.amazonaws.com",
+            "ecs-tasks.amazonaws.com",
+            "bedrock.amazonaws.com",
+            "bedrock-agentcore.amazonaws.com",
+            "sagemaker.amazonaws.com",
+            "application-autoscaling.amazonaws.com",
+            "scheduler.amazonaws.com",
+            "events.amazonaws.com",
+            "apigateway.amazonaws.com"
+          ]
+        }
+      }
+    }
+  ]
+}

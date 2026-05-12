@@ -1,0 +1,31 @@
+# Product Support Guide: Wi-Fi and Bluetooth Connectivity
+
+## Intermittent Wi-Fi drops (Error: NET-204)
+
+NET-204 indicates repeated network disconnects. Resolution steps:
+
+1. Move the device within 5 metres of the router for initial reconnection.
+2. Temporarily disable any VPN or firewall software — these can block device traffic.
+3. Ensure the router broadcasts on 2.4GHz; the device defaults to 2.4GHz for stability.
+4. Check for a firmware update in Settings > Updates — NET-204 was patched in several releases.
+5. Perform a network settings reset: hold the Network Reset button (pin-hole on base) for 5 seconds until the LED blinks amber three times.
+6. If NET-204 returns within 24 hours after a factory reset, the Wi-Fi module is defective and the device needs replacement.
+
+## Bluetooth pairing fails (Error: BT-301)
+
+Bluetooth pairing failures are usually caused by stale pairing records or firmware issues:
+
+1. Delete the existing pairing record on your phone: go to Bluetooth settings and forget the device.
+2. Reset the device's Bluetooth stack: hold the Bluetooth button for 8 seconds until the LED blinks white.
+3. Ensure no more than 3 devices are simultaneously paired (firmware limit).
+4. Keep the device within 1 metre during pairing.
+5. Update the device firmware — BT-301 was resolved in firmware version 2.3.1 and later.
+6. If pairing fails on multiple phones after a stack reset, the Bluetooth module needs replacement.
+
+## Smart home hub not detected in app (SKU-5 only)
+
+1. Confirm the phone and hub are on the same Wi-Fi SSID — not a guest network.
+2. Force-close and reopen the companion app.
+3. Unplug the hub for 30 seconds and reconnect.
+4. Revoke and re-grant the app's local network permission in phone settings.
+5. Delete the hub and re-add as a new device.

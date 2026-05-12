@@ -1,0 +1,21 @@
+{
+  "security": {
+    "allowedHosts": ["allowed.example.test"]
+  },
+  "tools": [
+    {
+      "name": "fixture_http_ping",
+      "description": "Test tool for unit tests",
+      "method": "POST",
+      "url": "https://allowed.example.test/hook",
+      "parameters": [
+        {
+          "name": "x",
+          "type": "string",
+          "description": "test field",
+          "required": true
+        }
+      ]
+    }
+  ]
+}

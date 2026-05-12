@@ -1,0 +1,411 @@
+import { createHash } from "node:crypto";
+import { Agent, Message, TextBlock } from "@strands-agents/sdk";
+import { resolveModel } from "../adapters/resolve-model.ts";
+import { toolsForAgent } from "./base-tools.ts";
+import type { ChatStreamPart } from "./chat-stream-types.ts";
+import { getAgent, loadAgentPersona } from "./config-scan.ts";
+import { buildSystemPrompt } from "./prompt.ts";
+import { SkillRegistry } from "./skill-loader.ts";
+import type { ChatMessage } from "./session-store.ts";
+import { logger } from "./logger.ts";
+import { chatMode } from "./runtime-defaults.ts";
+import { currentTrace } from "./trace-context.ts";
+import { attributeHandoff } from "./handoff-attribution.ts";
+import { isDevMockBackends } from "../adapters/dev-mock-env.ts";
+
+export type { ChatStreamPart };
+
+/**
+ * Agents whose skills are always pre-activated (they are specialists — they
+ * always need their domain instructions). The orchestrator is NOT in this set;
+ * it gets discovery-only and lets the model call `activate_skill` if needed.
+ */
+const ALWAYS_ACTIVATE_SKILLS = true; // flip to false to force lazy even for specialists
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+function stubParts(agentName: string, agentId: string, userMessage: string): ChatStreamPart[] {
+  const preview = userMessage.length > 200 ? `${userMessage.slice(0, 200)}…` : userMessage;
+  const text =
+    `[stub] **${agentName}** (\`${agentId}\`) received: "${preview}"\n\n` +
+    `\`CHAT_MODE=stub\` is set. Unset it (or set \`CHAT_MODE=live\`) and provide AWS credentials + Bedrock model access, or set \`DEV_MOCK_BACKENDS=1\`, to run the real Strands loop.`;
+  const parts: ChatStreamPart[] = [];
+  for (const chunk of text.split(/(\s+)/)) {
+    if (chunk.length > 0) parts.push({ type: "token", text: chunk });
+  }
+  return parts;
+}
+
+function strandsHistory(priorTurns: ChatMessage[] | undefined): Message[] | undefined {
+  if (!priorTurns?.length) return undefined;
+  return priorTurns.map(
+    (m) =>
+      new Message({
+        role: m.role,
+        content: [new TextBlock(m.content)],
+      }),
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Main streaming function
+// ---------------------------------------------------------------------------
+
+export async function* runChatStream(params: {
+  agentId: string;
+  userMessage: string;
+  /** Messages before the current user turn (excludes the latest user message). */
+  priorTurns?: ChatMessage[];
+  /** Long-term memory context injected into the system prompt (Phase 5). */
+  memoryContext?: string;
+}): AsyncGenerator<ChatStreamPart> {
+  const agentConfig = getAgent(params.agentId);
+  if (!agentConfig) {
+    yield { type: "token", text: `Error: unknown agent '${params.agentId}'.` };
+    return;
+  }
+
+  // -------------------------------------------------------------------------
+  // Phase 1 — Build SkillRegistry (discovery index only at this point)
+  // -------------------------------------------------------------------------
+  const registry = new SkillRegistry(agentConfig.skills);
+
+  // -------------------------------------------------------------------------
+  // Phase 2 — Pre-activate skills for specialist agents
+  //
+  // Orchestrator: skills: [] → nothing to activate; gets discovery section only
+  //   if it ever has skills listed.
+  // Specialists: activate all allowed skills up front so the model has full
+  //   instructions immediately (they are domain-specific, so the cost is worth it).
+  //   The model can still call activate_skill for any skill it was not pre-loaded.
+  // -------------------------------------------------------------------------
+  const isOrchestrator = params.agentId === "orchestrator";
+
+  if (!isOrchestrator && ALWAYS_ACTIVATE_SKILLS && agentConfig.skills.length > 0) {
+    registry.activateAll();
+    for (const block of registry.activatedBlocks) {
+      yield { type: "skill_loaded", skillName: block.name };
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Build initial system prompt
+  // Phase 1 discovery section + Phase 2 activated blocks (if any)
+  // -------------------------------------------------------------------------
+  const persona = loadAgentPersona(params.agentId) ?? "";
+  const systemPrompt = buildSystemPrompt(
+    persona,
+    registry.discoveries,
+    registry.activatedBlocks,
+    params.memoryContext,
+  );
+
+  const trace = currentTrace();
+  if (trace) {
+    trace.event("prompt.assembled", {
+      personaBytes: Buffer.byteLength(persona, "utf8"),
+      discoveryBytes: registry.discoveries.length,
+      memoryContextBytes: params.memoryContext ? Buffer.byteLength(params.memoryContext, "utf8") : 0,
+      activatedSkills: registry.activatedBlocks.map((b) => ({
+        name: b.name,
+        bytes: Buffer.byteLength(b.body, "utf8"),
+        injectedVia: "system_prompt" as const,
+      })),
+      totalBytes: Buffer.byteLength(systemPrompt, "utf8"),
+      body: systemPrompt,
+    });
+    for (const b of registry.activatedBlocks) {
+      trace.event("skill.activated", {
+        name: b.name,
+        source: "pre_activate",
+        injectedVia: "system_prompt",
+        bytes: Buffer.byteLength(b.body, "utf8"),
+        allowed: true,
+      });
+    }
+  }
+
+  const live = chatMode() === "live";
+
+  if (!live) {
+    for (const p of stubParts(agentConfig.name, agentConfig.id, params.userMessage)) {
+      yield p;
+    }
+    return;
+  }
+
+  // -------------------------------------------------------------------------
+  // Live path — Strands Agent with tools + seeded history
+  // -------------------------------------------------------------------------
+  try {
+    const model = resolveModel(agentConfig);
+    const tools = toolsForAgent(agentConfig.tools, registry);
+    const seed = strandsHistory(params.priorTurns);
+
+    const strandsAgent = new Agent({
+      model,
+      systemPrompt,
+      name: agentConfig.name,
+      id: agentConfig.id,
+      printer: false,
+      tools,
+      messages: seed,
+    });
+
+    let hasYieldedText = false;
+    let hasYieldedStructuredMessage = false;
+
+    // ── Tracing scratch state ────────────────────────────────────────────────
+    const turnStartTs = Date.now();
+    const modelId = agentConfig.model?.trim() ?? "unknown";
+    let modelSpanId: string | undefined;
+    if (trace) {
+      modelSpanId = trace.start("model.request", {
+        modelId,
+        region: process.env.AWS_REGION,
+        systemPromptHash: createHash("sha256").update(systemPrompt).digest("hex").slice(0, 16),
+        systemPromptBytes: Buffer.byteLength(systemPrompt, "utf8"),
+        priorTurnsCount: params.priorTurns?.length ?? 0,
+        userMessage: params.userMessage,
+        backend: isDevMockBackends() ? "mock" : "bedrock",
+      });
+    }
+
+    const toolSpans = new Map<string, string>(); // toolUseId -> spanId
+    const completedToolCalls: Array<{ name: string; toolUseId?: string; durationMs?: number }> = [];
+    let priorHandoffCount = 0;
+
+    // Text-delta batching — flush a model.text_delta_batch every ~250 ms.
+    let textBatch = "";
+    let textBatchStart = 0;
+    const FLUSH_MS = 250;
+    function flushTextBatch(): void {
+      if (!trace || !textBatch) return;
+      trace.event("model.text_delta_batch", {
+        text: textBatch,
+        bytes: Buffer.byteLength(textBatch, "utf8"),
+        windowMs: Date.now() - textBatchStart,
+      });
+      textBatch = "";
+      textBatchStart = 0;
+    }
+    function pushTextDelta(t: string): void {
+      if (!trace) return;
+      trace.appendPendingText(t);
+      if (!textBatch) textBatchStart = Date.now();
+      textBatch += t;
+      if (Date.now() - textBatchStart > FLUSH_MS) flushTextBatch();
+    }
+
+    function cleanStructuredMessage(text: string): string {
+      return text
+        .replace(/<thinking>[\s\S]*?<\/thinking>/g, "")
+        .replace(/<strands_structured_output>[\s\S]*?<\/strands_structured_output>/g, "")
+        .replace(/<\/?response>/g, "")
+        .trim();
+    }
+
+    for await (const ev of strandsAgent.stream(params.userMessage)) {
+      if (ev.type === "modelStreamUpdateEvent") {
+        const inner = ev.event;
+        if (inner.type === "modelContentBlockDeltaEvent") {
+          if (inner.delta.type === "textDelta") {
+            const t = inner.delta.text;
+            if (t) {
+              hasYieldedText = true;
+              pushTextDelta(t);
+              yield { type: "token", text: t };
+            }
+          } else if (inner.delta.type === "reasoningContentDelta" && inner.delta.text) {
+            // Stream-level thinking deltas; ContentBlockEvent emits the assembled block.
+            if (trace) {
+              trace.event("model.thinking_block", {
+                text: inner.delta.text,
+                bytes: Buffer.byteLength(inner.delta.text, "utf8"),
+              });
+            }
+          }
+        } else if (inner.type === "modelMetadataEvent" && inner.usage) {
+          flushTextBatch();
+          if (trace) {
+            trace.event("model.usage", {
+              modelId,
+              inputTokens: inner.usage.inputTokens,
+              outputTokens: inner.usage.outputTokens,
+              totalTokens: inner.usage.totalTokens,
+              cacheReadInputTokens: inner.usage.cacheReadInputTokens,
+              cacheWriteInputTokens: inner.usage.cacheWriteInputTokens,
+              latencyMs: inner.metrics?.latencyMs,
+              timeToFirstByteMs: inner.metrics?.timeToFirstByteMs,
+            });
+          }
+        }
+      } else if (ev.type === "afterModelCallEvent") {
+        flushTextBatch();
+        const stopReason = ev.stopData?.stopReason;
+        if (trace && stopReason) {
+          trace.event("model.stop", { stopReason });
+        }
+      } else if (ev.type === "contentBlockEvent") {
+        const block = ev.contentBlock as { type?: string; text?: string };
+        // Assembled ReasoningBlock — full thinking text.
+        if (block.type === "reasoning" && block.text && trace) {
+          trace.event("model.thinking_block", {
+            text: block.text,
+            bytes: Buffer.byteLength(block.text, "utf8"),
+          });
+        }
+      } else if (ev.type === "beforeToolsEvent") {
+        const msg = ev.message as { content?: unknown[] };
+        if (trace) {
+          trace.event("tools.batch", { toolCount: msg.content?.length ?? 0 });
+        }
+      } else if (ev.type === "beforeToolCallEvent") {
+        flushTextBatch();
+        const toolName = ev.toolUse.name;
+        const toolUseId = ev.toolUse.toolUseId;
+        yield { type: "tool_call", tool: toolName, status: "started" };
+
+        const reasoningSnapshot = trace?.snapshotPendingText() ?? "";
+        if (trace) {
+          const spanId = trace.start("tool.call", {
+            toolName,
+            toolUseId,
+            input: ev.toolUse.input,
+          });
+          toolSpans.set(toolUseId, spanId);
+        }
+        // Reset pending text after we've snapshotted it for handoff attribution.
+        trace?.resetPendingText();
+
+        // Orchestrator routing in single-agent mode:
+        // emit an explicit handoff when structured output selects a specialist.
+        if (toolName === "strands_structured_output") {
+          const input = ev.toolUse.input as { agentId?: string; message?: string };
+          if (params.agentId === "orchestrator" && input.agentId) {
+            if (trace) {
+              const orchestratorAgent = getAgent("orchestrator");
+              const handoffs = orchestratorAgent?.handoffs ?? [];
+              const matched = handoffs.find((h) => h.agent === input.agentId);
+              const targetMeta = getAgent(input.agentId);
+              const attribution = attributeHandoff({
+                userMessage: params.userMessage,
+                orchestratorReasoning: reasoningSnapshot,
+                chosenAgentId: input.agentId,
+                orchestratorHandoffs: handoffs,
+                agentMeta: (id) => {
+                  const a = getAgent(id);
+                  return a ? { description: a.description, skills: a.skills } : undefined;
+                },
+              });
+              priorHandoffCount += 1;
+              trace.event("handoff.decision", {
+                fromAgentId: "orchestrator",
+                toAgentId: input.agentId,
+                toAgentName: targetMeta?.name,
+                toAgentDescription: targetMeta?.description,
+                userMessage: params.userMessage,
+                orchestratorReasoning: reasoningSnapshot,
+                structuredOutput: input,
+                reason: input.message,
+                matchedHandoffEntry: matched,
+                triggerSpans: attribution.triggerSpans,
+                alternativesConsidered: attribution.alternativesConsidered,
+                chosenScore: attribution.chosenScore,
+                confidence: attribution.confidence,
+                priorToolCalls: completedToolCalls.slice(),
+                priorHandoffCount: priorHandoffCount - 1,
+                conversationContextTurns:
+                  (params.priorTurns ?? []).slice(-4).map((m) => ({
+                    role: m.role,
+                    preview: m.content.length > 200 ? `${m.content.slice(0, 200)}…` : m.content,
+                  })),
+                latencyToDecisionMs: Date.now() - turnStartTs,
+                tokensBeforeDecision: 0, // populated post-hoc by summary aggregation; UI can compute
+                routingSource: isDevMockBackends() ? "devmock_regex" : "llm",
+              });
+            }
+            yield { type: "handoff", from: "orchestrator", to: input.agentId, label: "" };
+            return;
+          }
+        }
+
+        // Phase 2 activation event — emit skill_loaded when activate_skill is called
+        if (toolName === "activate_skill") {
+          const skillName = (ev.toolUse.input as { skillName?: string }).skillName;
+          if (skillName) {
+            if (trace) {
+              trace.event("skill.activated", {
+                name: skillName,
+                source: "model_tool_call",
+                injectedVia: "tool_result",
+                bytes: 0,
+                allowed: true,
+              });
+            }
+            yield { type: "skill_loaded", skillName };
+          }
+        }
+      } else if (ev.type === "afterToolCallEvent") {
+        const toolUseId = ev.toolUse.toolUseId;
+        const spanId = toolSpans.get(toolUseId);
+        if (trace && spanId) {
+          const endPayload: Record<string, unknown> = {
+            toolName: ev.toolUse.name,
+            toolUseId,
+            result: ev.result,
+          };
+          if (ev.error) {
+            endPayload.error = { class: ev.error.name, message: ev.error.message };
+            trace.event("error", {
+              class: ev.error.name,
+              message: ev.error.message,
+              stack: ev.error.stack,
+              source: "tool.call",
+            });
+          }
+          trace.end(spanId, endPayload);
+          toolSpans.delete(toolUseId);
+          // Track for handoff payload `priorToolCalls`.
+          completedToolCalls.push({ name: ev.toolUse.name, toolUseId });
+        }
+        yield { type: "tool_call", tool: ev.toolUse.name, status: "completed" };
+        // Some models answer through strands_structured_output.message without
+        // streaming normal text deltas. Emit that as fallback so specialist
+        // responses are never blank.
+        if (ev.toolUse.name === "strands_structured_output") {
+          const input = ev.toolUse.input as { agentId?: string; message?: string };
+          const terminalMessage = !input.agentId && input.message;
+          if (terminalMessage && !hasYieldedText && !hasYieldedStructuredMessage) {
+            const cleaned = cleanStructuredMessage(input.message!);
+            if (cleaned) {
+              hasYieldedStructuredMessage = true;
+              yield { type: "token", text: cleaned };
+            }
+          }
+        }
+      } else if (ev.type === "messageAddedEvent") {
+        const msg = ev.message as { role?: string; content?: unknown[] };
+        if (trace) {
+          trace.event("conversation.message_added", {
+            role: (msg.role as "user" | "assistant" | "system" | "tool") ?? "assistant",
+            blockCount: msg.content?.length ?? 0,
+            bytes: Buffer.byteLength(JSON.stringify(msg.content ?? []), "utf8"),
+          });
+        }
+      }
+    }
+    flushTextBatch();
+    if (trace && modelSpanId) trace.end(modelSpanId);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logger.error("[chat-stream] agent stream failed", { agentId: params.agentId, error: msg });
+    yield {
+      type: "stream_error",
+      code: "CHAT_STREAM_FAILED",
+      message: `${msg}\n\nFall back with CHAT_MODE=stub, set DEV_MOCK_BACKENDS=1 for a local Strands loop without AWS, or fix AWS region/credentials and Bedrock access.`,
+    };
+  }
+}

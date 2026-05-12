@@ -1,0 +1,13 @@
+{
+  "name": "mongodb-mcp-lambda",
+  "version": "1.0.0",
+  "description": "AgentCore Gateway Lambda target exposing MongoDB Atlas tools (query, vector_search, aggregate).",
+  "main": "index.mjs",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "mongodb": "^6.10.0"
+  }
+}

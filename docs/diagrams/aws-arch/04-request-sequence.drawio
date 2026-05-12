@@ -1,0 +1,208 @@
+<mxfile host="app.diagrams.net" agent="Claude Code" version="24.0.0">
+  <diagram id="req-seq" name="04 · Request Sequence">
+    <mxGraphModel dx="1500" dy="1000" grid="1" gridSize="10" page="1" pageScale="1" pageWidth="1654" pageHeight="1169" math="0" shadow="1">
+      <root>
+        <mxCell id="0"/><mxCell id="1" parent="0"/>
+
+        <mxCell id="title" value='Request Sequence — "Where is my order ORD-1234?" end to end' style="text;html=1;align=center;fontSize=20;fontStyle=1;strokeColor=none;fillColor=none;" vertex="1" parent="1">
+          <mxGeometry x="40" y="15" width="1560" height="30" as="geometry"/>
+        </mxCell>
+        <mxCell id="sub" value="Each numbered step is a real API call or data operation. Read top to bottom." style="text;html=1;align=center;fontSize=11;strokeColor=none;fillColor=none;fontColor=#666666;" vertex="1" parent="1">
+          <mxGeometry x="40" y="48" width="1560" height="18" as="geometry"/>
+        </mxCell>
+
+        <!-- Participant headers -->
+        <mxCell id="h1" value="👤 User" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="40" y="80" width="120" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="h2" value="🖥 Hono API&#xa;(EC2)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=12;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="230" y="80" width="140" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="h3" value="🧠 AgentCore&#xa;Memory" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=12;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="450" y="80" width="140" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="h4" value="🎯 Orchestrator&#xa;Runtime" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="670" y="80" width="160" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="h5" value="📦 order-mgmt&#xa;Runtime" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=12;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="910" y="80" width="160" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="h6" value="🤖 Bedrock&#xa;Claude Sonnet" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5f5e3;strokeColor=#27ae60;fontSize=12;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="1150" y="80" width="160" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="h7" value="⚡ Lambda&#xa;MCP" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=12;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="1390" y="80" width="120" height="50" as="geometry"/>
+        </mxCell>
+
+        <!-- Lifelines (vertical dashes) -->
+        <mxCell id="l1" style="edgeStyle=none;html=1;strokeColor=#6c8ebf;strokeWidth=1;dashed=1;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="100" y="130" as="sourcePoint"/><mxPoint x="100" y="1100" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="l2" style="edgeStyle=none;html=1;strokeColor=#d6b656;strokeWidth=1;dashed=1;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="300" y="130" as="sourcePoint"/><mxPoint x="300" y="1100" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="l3" style="edgeStyle=none;html=1;strokeColor=#9673a6;strokeWidth=1;dashed=1;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="520" y="130" as="sourcePoint"/><mxPoint x="520" y="1100" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="l4" style="edgeStyle=none;html=1;strokeColor=#6c8ebf;strokeWidth=1;dashed=1;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="750" y="130" as="sourcePoint"/><mxPoint x="750" y="1100" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="l5" style="edgeStyle=none;html=1;strokeColor=#82b366;strokeWidth=1;dashed=1;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="990" y="130" as="sourcePoint"/><mxPoint x="990" y="1100" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="l6" style="edgeStyle=none;html=1;strokeColor=#27ae60;strokeWidth=1;dashed=1;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="1230" y="130" as="sourcePoint"/><mxPoint x="1230" y="1100" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="l7" style="edgeStyle=none;html=1;strokeColor=#d79b00;strokeWidth=1;dashed=1;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="1450" y="130" as="sourcePoint"/><mxPoint x="1450" y="1100" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+
+        <!-- Step row helper macro: y positions 170,240,310,380,450,520,590,660,730,800,870,940,1010 -->
+
+        <!-- Step 1 -->
+        <mxCell id="step1-lbl" value="① POST /chat  {message, sessionId}" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#0066CC;strokeWidth=2;fontSize=10;entryX=0;entryY=0.5;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="100" y="180" as="sourcePoint"/><mxPoint x="300" y="180" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+
+        <!-- Step 2 -->
+        <mxCell id="step2-lbl" value="② appendUserMessage() · getSession() → priorTurns" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#d6b656;strokeWidth=1;dashed=1;fontSize=10;endArrow=none;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="300" y="220" as="sourcePoint"/><mxPoint x="300" y="250" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="step2-note" value="(internal — session store)" style="text;html=1;fontSize=9;strokeColor=none;fillColor=none;fontColor=#999999;align=left;" vertex="1" parent="1">
+          <mxGeometry x="310" y="210" width="180" height="20" as="geometry"/>
+        </mxCell>
+
+        <!-- Step 3 -->
+        <mxCell id="step3" value="③ ListEvents(userId, agentId)  →  last 5 turns" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#9673a6;strokeWidth=2;fontSize=10;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="300" y="270" as="sourcePoint"/><mxPoint x="520" y="270" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="step3r" value="memoryContext (text blob of prior turns)" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#9673a6;strokeWidth=1;dashed=1;fontSize=10;endArrow=open;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="520" y="300" as="sourcePoint"/><mxPoint x="300" y="300" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+
+        <!-- Step 4 -->
+        <mxCell id="step4" value="④ InvokeAgentRuntime(orchestratorArn)  {message, priorTurns, memoryContext}" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#6c8ebf;strokeWidth=2;fontSize=10;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="300" y="340" as="sourcePoint"/><mxPoint x="750" y="340" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+
+        <!-- Step 5 -->
+        <mxCell id="step5" value="⑤ InvokeModel (classify question)" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#27ae60;strokeWidth=2;fontSize=10;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="750" y="385" as="sourcePoint"/><mxPoint x="1230" y="385" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="step5r" value='decision: handoff → "order-management"' style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#27ae60;strokeWidth=1;dashed=1;fontSize=10;endArrow=open;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="1230" y="415" as="sourcePoint"/><mxPoint x="750" y="415" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+
+        <!-- Step 6 -->
+        <mxCell id="step6" value="⑥ InvokeAgentRuntime(orderMgmtArn)  {full context}" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#82b366;strokeWidth=2;fontSize=10;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="750" y="460" as="sourcePoint"/><mxPoint x="990" y="460" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+
+        <!-- Step 7 -->
+        <mxCell id="step7" value="⑦ InvokeModel (reason — what data do I need?)" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#27ae60;strokeWidth=2;fontSize=10;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="990" y="510" as="sourcePoint"/><mxPoint x="1230" y="510" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="step7r" value='tool_use: mongodb_query  {collection: "orders", filter: {orderId: "ORD-1234"}}' style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#27ae60;strokeWidth=1;dashed=1;fontSize=10;endArrow=open;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="1230" y="540" as="sourcePoint"/><mxPoint x="990" y="540" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+
+        <!-- Step 8 -->
+        <mxCell id="step8" value="⑧ lambda:InvokeFunction  {tool, args}" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#d79b00;strokeWidth=2;fontSize=10;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="990" y="585" as="sourcePoint"/><mxPoint x="1450" y="585" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="step8-note" value="Lambda queries Atlas via PrivateLink, returns result" style="text;html=1;fontSize=9;strokeColor=none;fillColor=none;fontColor=#d79b00;" vertex="1" parent="1">
+          <mxGeometry x="1070" y="590" width="280" height="18" as="geometry"/>
+        </mxCell>
+        <mxCell id="step8r" value='{count: 1, documents: [{orderId, status: "in_transit", tracking: "..."}]}' style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#d79b00;strokeWidth=1;dashed=1;fontSize=10;endArrow=open;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="1450" y="620" as="sourcePoint"/><mxPoint x="990" y="620" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+
+        <!-- Step 9 -->
+        <mxCell id="step9" value="⑨ InvokeModel (compose answer with tool result)" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#27ae60;strokeWidth=2;fontSize=10;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="990" y="665" as="sourcePoint"/><mxPoint x="1230" y="665" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="step9r" value='"Your order ORD-1234 is in transit, expected 2026-05-04..."' style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#27ae60;strokeWidth=1;dashed=1;fontSize=10;endArrow=open;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="1230" y="695" as="sourcePoint"/><mxPoint x="990" y="695" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+
+        <!-- Step 10 -->
+        <mxCell id="step10" value="⑩ {response, agentId: order-management}" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#82b366;strokeWidth=1;dashed=1;fontSize=10;endArrow=open;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="990" y="740" as="sourcePoint"/><mxPoint x="750" y="740" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+
+        <!-- Step 11 -->
+        <mxCell id="step11" value="⑪ {response, handoffs: [order-management]}" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#6c8ebf;strokeWidth=1;dashed=1;fontSize=10;endArrow=open;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="750" y="780" as="sourcePoint"/><mxPoint x="300" y="780" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+
+        <!-- Step 12 -->
+        <mxCell id="step12" value="⑫ CreateEvent(USER + ASSISTANT pair)" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#9673a6;strokeWidth=2;fontSize=10;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="300" y="820" as="sourcePoint"/><mxPoint x="520" y="820" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+
+        <!-- Step 13 -->
+        <mxCell id="step13" value="⑬ SSE stream: agent_info → token → handoff → done" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#0066CC;strokeWidth=2;fontSize=10;endArrow=open;" edge="1" parent="1">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="300" y="860" as="sourcePoint"/><mxPoint x="100" y="860" as="targetPoint"/>
+          </mxGeometry>
+        </mxCell>
+
+        <!-- Key notes -->
+        <mxCell id="note1" value="NOTE: InvokeAgentRuntime is synchronous (request/response). The full reply comes back in step 11 as one JSON blob.&#xa;The API wraps it as a single SSE token event so the UI client doesn't need to change." style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=10;align=left;" vertex="1" parent="1">
+          <mxGeometry x="40" y="940" width="700" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="note2" value="NOTE: The orchestrator never returns final text to the user. It only routes to a specialist and relays that specialist's response." style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=10;align=left;" vertex="1" parent="1">
+          <mxGeometry x="760" y="940" width="600" height="50" as="geometry"/>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

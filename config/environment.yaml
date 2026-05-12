@@ -1,0 +1,7 @@
+# Environment defaults for local development (override via process env in production)
+# Loaded by the API when PORT / API_PORT / CORS_ORIGINS are unset — see api/src/lib/environment-config.ts
+api:
+  port: 3000
+  corsOrigins:
+    - http://localhost:8501
+    - http://127.0.0.1:8501

@@ -1,0 +1,54 @@
+# Warranty and Support Tier Guide
+
+## Product warranty periods
+
+| Product line | Warranty period | Notes |
+|---|---|---|
+| Standard widgets (SKU-1, SKU-3, SKU-6, SKU-9) | 12 months | From date of purchase |
+| Pro series (SKU-2, SKU-4, SKU-5, SKU-7, SKU-8) | 24 months | From date of purchase |
+| Premium-tier customers (all SKUs) | 36 months | Requires Premium subscription active at time of claim |
+
+## Support response SLAs
+
+| Priority | Trigger | Initial response | Resolution target |
+|---|---|---|---|
+| High | HW-900, BAT-401, DISP-201, THERM-101 (3+) | 4 business hours | 2 business days |
+| Medium | BT-301, FW-501, BOOT-010 (persistent) | 1 business day | 5 business days |
+| Low | NET-204, PWR-001, RET-010, general queries | 2 business days | 10 business days |
+
+## Escalation triggers — when to open a ticket immediately
+
+- Any HW-900 error code (do not attempt further DIY steps)
+- Battery health below 80% on device under 18 months old
+- DISP-201 with working external display
+- Three or more THERM-101 shutdowns in one week
+- NET-204 returning within 24 hours of a factory reset
+- FW-501 where the recovery tool also fails
+- Any issue on a device with a Premium-tier customer (priority queue)
+
+## What to collect before opening a ticket
+
+Required for high-priority hardware faults:
+- Serial number (underside label or Settings > About)
+- Proof of purchase date (order ID or receipt)
+- Error code(s) displayed
+- Steps already attempted
+
+Optional but helpful for all tickets:
+- Firmware version (Settings > About > Software version)
+- Companion app version
+- Brief description of when the issue first appeared
+- Frequency (constant, intermittent, on specific actions)
+
+## Factory reset procedure
+
+Always confirm the customer has backed up data before a factory reset:
+1. Cloud sync: Settings > Backup > Sync now
+2. Navigate to Settings > System > Factory Reset > Confirm
+3. The device reboots and shows a progress bar — do not power off (takes 3-8 minutes)
+4. After reset, device boots to initial setup screen
+5. If the factory reset fails or loops, use hardware recovery mode:
+   - Power off
+   - Hold Power + Volume-Up for 10 seconds until the recovery menu appears
+   - Select "Wipe data / factory reset"
+6. If recovery mode is inaccessible, escalate — eMMC storage may be failing

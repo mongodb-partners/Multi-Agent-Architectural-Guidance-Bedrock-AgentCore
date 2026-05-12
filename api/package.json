@@ -1,0 +1,37 @@
+{
+  "name": "multi-agent-api",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "dev": "bun run --watch src/index.ts",
+    "start": "bun run src/index.ts",
+    "typecheck": "tsc --noEmit",
+    "build:agentcore-code": "esbuild src/agent-runtime-code.ts --bundle --platform=node --target=node22 --format=cjs --outfile=dist/agent-runtime-code.js",
+    "validate:bun": "bun run scripts/validate-bun-compat.ts",
+    "validate:agentcore": "bun run scripts/validate-agentcore-memory.ts",
+    "test": "bun test tests/unit",
+    "test:integration": "bun test tests/integration",
+    "test:all": "bun test tests/unit tests/integration"
+  },
+  "dependencies": {
+    "@aws-sdk/client-bedrock-agent-runtime": "^3.1016.0",
+    "@aws-sdk/client-bedrock-agentcore": "^3.1016.0",
+    "@aws-sdk/client-bedrock-runtime": "^3.758.0",
+    "@aws-sdk/client-cognito-identity-provider": "^3.1041.0",
+    "@aws-sdk/client-lambda": "^3.1040.0",
+    "@aws-sdk/client-sagemaker-runtime": "^3.1026.0",
+    "@modelcontextprotocol/sdk": "^1.27.1",
+    "@strands-agents/sdk": "^0.7.0",
+    "gray-matter": "^4.0.3",
+    "hono": "^4.7.5",
+    "jose": "^6.2.2",
+    "mongodb": "^6.12.0",
+    "yaml": "^2.8.3",
+    "zod": "^4.1.12"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "esbuild": "^0.28.0",
+    "typescript": "^5.7.3"
+  }
+}

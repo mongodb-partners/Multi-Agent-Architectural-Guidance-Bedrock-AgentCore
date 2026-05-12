@@ -1,0 +1,2022 @@
+<!doctype html>
+<html lang="en" data-theme="auto">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MongoDB + AWS Bedrock Multi-Agent Framework: A Code Walkthrough</title>
+  <meta name="generator" content="Showless HTMLRenderer">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&family=Newsreader:ital,wght@0,400;0,500;0,600;1,400&display=swap" rel="stylesheet">
+  <style>
+:root {
+  color-scheme: light;
+  --bg-page: #f7f4ec;
+  --bg-card: #ffffff;
+  --bg-soft: #efeadd;
+  --bg-terminal: #1c1f26;
+  --bg-hero: linear-gradient(140deg, #fff8e8 0%, #fde2c2 35%, #f6c79a 100%);
+  --hero-glow: radial-gradient(circle at 20% 20%, rgba(217, 119, 6, 0.35), transparent 55%),
+               radial-gradient(circle at 80% 80%, rgba(120, 53, 15, 0.25), transparent 55%);
+  --ink: #1f1d1a;
+  --ink-strong: #0f0d0a;
+  --ink-muted: #5a544c;
+  --ink-faint: #8b8378;
+  --ink-on-terminal: #e7e5dd;
+  --accent: #c2410c;
+  --accent-strong: #9a3412;
+  --accent-soft: #fde2c4;
+  --border: #e6dfd0;
+  --border-strong: #d6cdb6;
+  --shadow-card: 0 1px 2px rgba(53, 38, 12, 0.06), 0 12px 30px rgba(53, 38, 12, 0.08);
+  --shadow-soft: 0 1px 0 rgba(53, 38, 12, 0.04);
+  --radius: 14px;
+  --radius-sm: 8px;
+  --code-fg: #2c2924;
+  --code-keyword: #b91c1c;
+  --code-string: #166534;
+  --code-number: #c2410c;
+  --code-comment: #9b8f7e;
+  --code-function: #1d4ed8;
+  --code-type: #7c2d12;
+  --code-variable: #6b21a8;
+  --code-meta: #92400e;
+  --code-tag: #b91c1c;
+  --code-attr: #1d4ed8;
+  --max-content: 760px;
+  --toc-width: 260px;
+  --gutter: 64px;
+  --font-sans: 'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --font-display: 'Newsreader', 'Inter', Georgia, serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root[data-theme="auto"] {
+    color-scheme: dark;
+    --bg-page: #0d0f14;
+    --bg-card: #14171f;
+    --bg-soft: #1a1d27;
+    --bg-terminal: #07090d;
+    --bg-hero: linear-gradient(140deg, #15171f 0%, #1f1a14 50%, #2a1f10 100%);
+    --hero-glow: radial-gradient(circle at 20% 20%, rgba(251, 191, 36, 0.22), transparent 55%),
+                 radial-gradient(circle at 80% 80%, rgba(217, 119, 6, 0.18), transparent 55%);
+    --ink: #e7e9ee;
+    --ink-strong: #f7f8fb;
+    --ink-muted: #a4a8b3;
+    --ink-faint: #6c7180;
+    --ink-on-terminal: #e7e9ee;
+    --accent: #fbbf24;
+    --accent-strong: #fcd34d;
+    --accent-soft: #3b2a08;
+    --border: #252934;
+    --border-strong: #353a47;
+    --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.4), 0 18px 40px rgba(0, 0, 0, 0.35);
+    --shadow-soft: 0 1px 0 rgba(0, 0, 0, 0.4);
+    --code-fg: #d6d8de;
+    --code-keyword: #ff7b72;
+    --code-string: #a5d6ff;
+    --code-number: #79c0ff;
+    --code-comment: #6c7180;
+    --code-function: #d2a8ff;
+    --code-type: #ffa657;
+    --code-variable: #ffa657;
+    --code-meta: #c9d1d9;
+    --code-tag: #7ee787;
+    --code-attr: #d2a8ff;
+  }
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg-page: #0d0f14;
+  --bg-card: #14171f;
+  --bg-soft: #1a1d27;
+  --bg-terminal: #07090d;
+  --bg-hero: linear-gradient(140deg, #15171f 0%, #1f1a14 50%, #2a1f10 100%);
+  --hero-glow: radial-gradient(circle at 20% 20%, rgba(251, 191, 36, 0.22), transparent 55%),
+               radial-gradient(circle at 80% 80%, rgba(217, 119, 6, 0.18), transparent 55%);
+  --ink: #e7e9ee;
+  --ink-strong: #f7f8fb;
+  --ink-muted: #a4a8b3;
+  --ink-faint: #6c7180;
+  --ink-on-terminal: #e7e9ee;
+  --accent: #fbbf24;
+  --accent-strong: #fcd34d;
+  --accent-soft: #3b2a08;
+  --border: #252934;
+  --border-strong: #353a47;
+  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.4), 0 18px 40px rgba(0, 0, 0, 0.35);
+  --shadow-soft: 0 1px 0 rgba(0, 0, 0, 0.4);
+  --code-fg: #d6d8de;
+  --code-keyword: #ff7b72;
+  --code-string: #a5d6ff;
+  --code-number: #79c0ff;
+  --code-comment: #6c7180;
+  --code-function: #d2a8ff;
+  --code-type: #ffa657;
+  --code-variable: #ffa657;
+  --code-meta: #c9d1d9;
+  --code-tag: #7ee787;
+  --code-attr: #d2a8ff;
+}
+
+* { box-sizing: border-box; }
+
+html { scroll-behavior: smooth; scroll-padding-top: 96px; }
+
+body {
+  margin: 0;
+  font-family: var(--font-sans);
+  font-size: 17px;
+  line-height: 1.7;
+  color: var(--ink);
+  background: var(--bg-page);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  font-feature-settings: 'kern', 'liga', 'cv11';
+  text-rendering: optimizeLegibility;
+}
+
+::selection { background: var(--accent-soft); color: var(--ink-strong); }
+
+a { color: var(--accent); text-decoration: none; border-bottom: 1px solid transparent; transition: border-color .15s ease; }
+a:hover { border-bottom-color: var(--accent); }
+
+p { margin: 0 0 1.1em; }
+
+/* Reading progress bar */
+.reading-progress {
+  position: fixed; top: 0; left: 0; right: 0; height: 3px;
+  background: transparent; z-index: 100; pointer-events: none;
+}
+.reading-progress-fill {
+  height: 100%; width: 100%;
+  background: linear-gradient(90deg, var(--accent), var(--accent-strong));
+  transform-origin: left; transform: scaleX(0);
+  transition: transform .1s linear;
+}
+
+/* Hero */
+.hero {
+  position: relative;
+  padding: 96px 24px 72px;
+  background: var(--bg-hero);
+  border-bottom: 1px solid var(--border);
+  overflow: hidden;
+}
+.hero-glow {
+  position: absolute; inset: -20%;
+  background: var(--hero-glow);
+  filter: blur(40px);
+  pointer-events: none;
+  opacity: .8;
+}
+.hero-inner {
+  position: relative;
+  max-width: 880px;
+  margin: 0 auto;
+  text-align: center;
+}
+.hero-meta {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+  margin: 6px 0 0;
+}
+.hero-title {
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: clamp(2.2rem, 5vw, 3.6rem);
+  line-height: 1.08;
+  letter-spacing: -0.02em;
+  margin: 0 0 14px;
+  color: var(--ink-strong);
+  background: linear-gradient(135deg, var(--ink-strong) 0%, var(--accent-strong) 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+.hero-subtitle {
+  font-size: 1.05rem;
+  color: var(--ink-muted);
+  margin: 0;
+  font-style: italic;
+}
+.hero-stats {
+  display: inline-flex;
+  gap: 16px;
+  padding: 6px 16px;
+  background: rgba(255, 255, 255, 0.5);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  margin: 10px 0 18px;
+}
+:root[data-theme="dark"] .hero-stats,
+:root[data-theme="auto"] .hero-stats { background: rgba(20, 23, 31, 0.55); }
+@media (prefers-color-scheme: dark) {
+  :root[data-theme="auto"] .hero-stats { background: rgba(20, 23, 31, 0.55); }
+}
+.stat { display: flex; flex-direction: row; align-items: baseline; gap: 4px; }
+.stat-value {
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: 1.1rem;
+  color: var(--ink-strong);
+  line-height: 1;
+}
+.stat-label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: .15em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+}
+
+/* Page controls */
+.page-controls {
+  position: fixed;
+  top: 18px;
+  right: 18px;
+  z-index: 50;
+  display: flex;
+  gap: 8px;
+}
+.theme-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  border-radius: 999px;
+  background: var(--bg-card);
+  color: var(--ink);
+  border: 1px solid var(--border);
+  font-family: var(--font-sans);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  box-shadow: var(--shadow-soft);
+  transition: transform .12s ease, border-color .15s ease;
+}
+.theme-toggle:hover { border-color: var(--accent); transform: translateY(-1px); }
+.theme-icon { font-size: 14px; line-height: 1; }
+
+/* Layout */
+.layout {
+  max-width: 1240px;
+  margin: 0 auto;
+  padding: 60px 32px 80px;
+  display: grid;
+  grid-template-columns: var(--toc-width) minmax(0, 1fr);
+  gap: var(--gutter);
+}
+.layout.no-toc { grid-template-columns: minmax(0, 1fr); max-width: var(--max-content); }
+
+/* Table of contents */
+.toc { font-size: 13.5px; }
+.toc-inner {
+  position: sticky;
+  top: 32px;
+  max-height: calc(100vh - 48px);
+  overflow-y: auto;
+  padding-right: 8px;
+}
+.toc-title {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: .15em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+  margin-bottom: 14px;
+}
+.toc-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  border-left: 1px solid var(--border);
+}
+.toc-item { line-height: 1.45; }
+.toc-item a {
+  display: block;
+  padding: 7px 14px;
+  color: var(--ink-muted);
+  border-bottom: none;
+  border-left: 2px solid transparent;
+  margin-left: -1px;
+  transition: color .12s ease, border-color .12s ease, background .12s ease;
+}
+.toc-item a:hover { color: var(--ink-strong); }
+.toc-item a.active {
+  color: var(--accent);
+  border-left-color: var(--accent);
+  background: linear-gradient(90deg, var(--accent-soft) 0%, transparent 80%);
+  font-weight: 500;
+}
+.toc-level-3 a { padding-left: 28px; font-size: 12.5px; color: var(--ink-faint); }
+.toc-level-3 a.active { color: var(--accent); }
+
+.toc-inner::-webkit-scrollbar { width: 6px; }
+.toc-inner::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+/* Content */
+.content {
+  max-width: var(--max-content);
+  width: 100%;
+  min-width: 0;
+}
+.content > p:first-of-type::first-letter {
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: 3.4em;
+  float: left;
+  line-height: .9;
+  margin: 8px 10px 0 0;
+  color: var(--accent);
+}
+
+.content h2,
+.content h3,
+.content h4 {
+  font-family: var(--font-display);
+  color: var(--ink-strong);
+  letter-spacing: -0.01em;
+  scroll-margin-top: 96px;
+  position: relative;
+}
+.content h2 {
+  font-size: 1.95rem;
+  font-weight: 600;
+  margin: 64px 0 12px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--border);
+}
+.content h3 {
+  font-size: 1.35rem;
+  font-weight: 600;
+  margin: 44px 0 10px;
+}
+.content h4 {
+  font-size: 1.05rem;
+  font-weight: 600;
+  margin: 32px 0 8px;
+}
+.content h2:first-child,
+.content h3:first-child { margin-top: 0; }
+
+.section-heading .heading-text { display: inline; }
+.section-heading .chapter-number {
+  position: absolute;
+  right: calc(100% + 18px);
+  top: 50%;
+  transform: translateY(-50%);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: .12em;
+  color: var(--ink-faint);
+  white-space: nowrap;
+}
+.section-heading.level-3 .chapter-number { display: none; }
+.section-heading .anchor-link {
+  margin-left: 10px;
+  color: var(--ink-faint);
+  border-bottom: none;
+  opacity: 0;
+  transition: opacity .12s ease, color .12s ease;
+  font-weight: 400;
+}
+.section-heading:hover .anchor-link { opacity: 1; }
+.section-heading .anchor-link:hover { color: var(--accent); }
+
+.content ul, .content ol { margin: 0 0 1.2em; padding-left: 1.4em; }
+.content li { margin-bottom: 6px; }
+.content li::marker { color: var(--accent); }
+
+.content blockquote {
+  margin: 1.2em 0;
+  padding: 16px 22px;
+  background: var(--accent-soft);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius-sm);
+  color: var(--ink-strong);
+  font-style: italic;
+}
+.content blockquote p:last-child { margin-bottom: 0; }
+
+.content code:not([class*="language-"]):not(.hljs) {
+  font-family: var(--font-mono);
+  font-size: 0.88em;
+  padding: 2px 6px;
+  background: var(--bg-soft);
+  color: var(--accent-strong);
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  white-space: nowrap;
+}
+
+/* Block cards */
+.showless-block {
+  margin: 28px 0;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-card);
+  overflow: hidden;
+  min-width: 0;
+  max-width: 100%;
+}
+.showless-block + .showless-block { margin-top: 18px; }
+
+.block-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 16px;
+  background: var(--bg-soft);
+  border-bottom: 1px solid var(--border);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: .08em;
+  color: var(--ink-muted);
+}
+.block-label {
+  text-transform: uppercase;
+  font-weight: 600;
+  letter-spacing: .15em;
+  color: var(--ink-faint);
+}
+.block-language {
+  color: var(--accent);
+  font-weight: 500;
+}
+.copy-btn {
+  margin-left: auto;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: transparent;
+  border: 1px solid var(--border-strong);
+  color: var(--ink-muted);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: color .12s ease, border-color .12s ease, background .12s ease;
+}
+.copy-btn:hover { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
+.copy-btn.copied { color: var(--accent-strong); border-color: var(--accent); }
+
+.showless-block pre {
+  margin: 0;
+  padding: 18px 20px;
+  font-family: var(--font-mono);
+  font-size: 13.5px;
+  line-height: 1.6;
+  color: var(--code-fg);
+  background: var(--bg-card);
+  /* Default: wrap long lines so nothing is clipped or invisibly off-screen.
+     Source excerpts override this below to preserve exact formatting. */
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+  overflow-x: auto;     /* Safety net if wrapping ever fails. */
+  max-width: 100%;
+}
+.showless-block pre code {
+  display: block;
+  background: transparent;
+  padding: 0;
+  border: 0;
+  white-space: inherit;
+  word-break: inherit;
+  overflow-wrap: inherit;
+  max-width: 100%;
+}
+
+.code-block.shell pre code::before {
+  content: '$ ';
+  color: var(--accent);
+  font-weight: 600;
+  margin-right: 6px;
+}
+
+/* Output / terminal */
+.output-block { background: var(--bg-terminal); border-color: transparent; }
+.output-block .terminal-header {
+  background: rgba(255, 255, 255, 0.04);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  color: rgba(231, 233, 238, 0.6);
+}
+.output-block .terminal-header .block-label { color: rgba(231, 233, 238, 0.5); }
+.output-block .copy-btn.terminal-copy {
+  margin-left: auto;
+  border-color: rgba(231, 233, 238, 0.18);
+  color: rgba(231, 233, 238, 0.7);
+  background: rgba(255, 255, 255, 0.04);
+}
+.output-block .copy-btn.terminal-copy:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: rgba(251, 191, 36, 0.12);
+}
+.output-block .copy-btn.terminal-copy.copied {
+  color: #28c840;
+  border-color: #28c840;
+  background: rgba(40, 200, 64, 0.12);
+}
+.output-block pre {
+  background: var(--bg-terminal);
+  color: var(--ink-on-terminal);
+  font-size: 13px;
+  padding: 18px 22px 22px;
+  white-space: normal;          /* lines are explicit <span> blocks */
+  overflow-x: hidden;
+}
+.output-block pre code.output-content {
+  display: block;
+  color: inherit;
+  background: transparent;
+  padding: 0;
+  border: 0;
+  width: 100%;
+  max-width: 100%;
+}
+.output-block .output-line {
+  display: block;
+  width: 100%;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+  font-variant-ligatures: none;
+}
+
+/* Highlight.js colours scoped to output blocks. The terminal background is
+   dark in both page themes, so we always use the GitHub-dark-style palette
+   here regardless of the global --code-* variables. */
+.output-block .hljs,
+.output-block .output-line .hljs { color: var(--ink-on-terminal); }
+.output-block .hljs-keyword,
+.output-block .hljs-selector-tag,
+.output-block .hljs-built_in,
+.output-block .hljs-name,
+.output-block .hljs-doctag { color: #ff7b72; font-weight: 500; }
+.output-block .hljs-string,
+.output-block .hljs-attr,
+.output-block .hljs-symbol,
+.output-block .hljs-bullet,
+.output-block .hljs-addition { color: #a5d6ff; }
+.output-block .hljs-number,
+.output-block .hljs-literal,
+.output-block .hljs-quote { color: #79c0ff; }
+.output-block .hljs-comment { color: #8b949e; font-style: italic; }
+.output-block .hljs-function,
+.output-block .hljs-title,
+.output-block .hljs-title.function_,
+.output-block .hljs-section { color: #d2a8ff; font-weight: 500; }
+.output-block .hljs-type,
+.output-block .hljs-class .hljs-title,
+.output-block .hljs-title.class_ { color: #ffa657; }
+.output-block .hljs-variable,
+.output-block .hljs-attribute,
+.output-block .hljs-template-variable { color: #ffa657; }
+.output-block .hljs-meta,
+.output-block .hljs-meta-keyword { color: #c9d1d9; }
+.output-block .hljs-tag { color: #7ee787; }
+.output-block .hljs-deletion { color: #ff7b72; }
+.output-block .hljs-emphasis { font-style: italic; }
+.output-block .hljs-strong { font-weight: bold; }
+
+/* Source excerpts — preserve exact source formatting; horizontal scroll. */
+.source-excerpt { border-color: var(--border-strong); }
+.source-excerpt pre {
+  white-space: pre;
+  word-break: normal;
+  overflow-wrap: normal;
+  overflow-x: auto;
+}
+.source-excerpt pre code {
+  white-space: inherit;
+  word-break: inherit;
+  overflow-wrap: inherit;
+}
+.source-excerpt .excerpt-header {
+  background: linear-gradient(90deg, var(--accent-soft) 0%, var(--bg-soft) 100%);
+  flex-wrap: wrap;
+}
+.excerpt-icon {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--accent);
+  letter-spacing: 0;
+  background: var(--bg-card);
+  padding: 2px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+}
+.excerpt-path {
+  font-family: var(--font-mono);
+  color: var(--ink-strong);
+  font-size: 12.5px;
+  font-weight: 500;
+  letter-spacing: 0;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.excerpt-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0;
+}
+.excerpt-lang { color: var(--accent); font-weight: 500; }
+.excerpt-lines {
+  background: var(--bg-card);
+  color: var(--ink-muted);
+  padding: 2px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+}
+.excerpt-hash { color: var(--ink-faint); }
+
+/* Diagram */
+.mermaid-block .mermaid-container {
+  padding: 28px 24px;
+  background: var(--bg-card);
+  display: flex;
+  justify-content: center;
+}
+.mermaid-block .mermaid {
+  margin: 0;
+  background: transparent;
+  font-family: var(--font-sans);
+  text-align: center;
+  width: 100%;
+  overflow-x: auto;
+}
+.mermaid svg { max-width: 100%; height: auto; }
+
+/* Mermaid error fallback */
+.mermaid-error {
+  width: 100%;
+  border: 1px solid #ef4444;
+  background: rgba(239, 68, 68, 0.08);
+  border-radius: var(--radius-sm);
+  padding: 16px 18px;
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  color: var(--ink);
+  text-align: left;
+}
+.mermaid-error-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+  color: #b91c1c;
+  margin-bottom: 8px;
+  letter-spacing: .05em;
+  text-transform: uppercase;
+  font-size: 11px;
+}
+.mermaid-error-title::before {
+  content: '⚠';
+  font-size: 14px;
+}
+.mermaid-error-message {
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin: 0 0 12px;
+  color: #991b1b;
+}
+.mermaid-error-source {
+  margin: 0;
+  padding: 12px 14px;
+  background: var(--bg-soft);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  white-space: pre;
+  overflow-x: auto;
+  color: var(--ink-muted);
+}
+:root[data-theme="dark"] .mermaid-error,
+:root[data-theme="auto"] .mermaid-error {
+  background: rgba(239, 68, 68, 0.12);
+}
+:root[data-theme="dark"] .mermaid-error-title,
+:root[data-theme="auto"] .mermaid-error-title { color: #fca5a5; }
+:root[data-theme="dark"] .mermaid-error-message,
+:root[data-theme="auto"] .mermaid-error-message { color: #fecaca; }
+
+/* Image */
+.image-block { padding: 16px; background: var(--bg-card); text-align: center; }
+.image-block img { max-width: 100%; height: auto; border-radius: var(--radius-sm); border: 1px solid var(--border); }
+.image-block figcaption {
+  margin-top: 10px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+}
+
+/* Image-invocation (the bash block that creates the image) */
+.image-invocation { opacity: .85; }
+
+/* Syntax highlighting (custom hljs theme tied to our CSS variables) */
+.hljs { color: var(--code-fg); background: transparent; }
+.hljs-keyword,
+.hljs-selector-tag,
+.hljs-built_in,
+.hljs-name,
+.hljs-doctag { color: var(--code-keyword); font-weight: 500; }
+.hljs-string,
+.hljs-attr,
+.hljs-symbol,
+.hljs-bullet,
+.hljs-addition { color: var(--code-string); }
+.hljs-number,
+.hljs-literal,
+.hljs-quote { color: var(--code-number); }
+.hljs-comment { color: var(--code-comment); font-style: italic; }
+.hljs-function,
+.hljs-title,
+.hljs-title.function_,
+.hljs-section { color: var(--code-function); font-weight: 500; }
+.hljs-type,
+.hljs-class .hljs-title,
+.hljs-title.class_ { color: var(--code-type); }
+.hljs-variable,
+.hljs-attribute,
+.hljs-template-variable { color: var(--code-variable); }
+.hljs-meta,
+.hljs-meta-keyword { color: var(--code-meta); }
+.hljs-tag { color: var(--code-tag); }
+.hljs-deletion { color: #b91c1c; }
+.hljs-emphasis { font-style: italic; }
+.hljs-strong { font-weight: bold; }
+
+/* Footer */
+.site-footer {
+  max-width: 1240px;
+  margin: 0 auto;
+  padding: 32px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 16px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--ink-faint);
+}
+.site-footer .brand { color: var(--accent); font-weight: 600; }
+.footer-id code { font-size: 11px; padding: 2px 6px; background: var(--bg-soft); border: 1px solid var(--border); border-radius: 4px; }
+
+/* Back to top */
+.back-to-top {
+  position: fixed;
+  bottom: 28px;
+  right: 28px;
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  background: var(--bg-card);
+  color: var(--ink);
+  font-size: 18px;
+  cursor: pointer;
+  box-shadow: var(--shadow-card);
+  opacity: 0;
+  transform: translateY(8px);
+  pointer-events: none;
+  transition: opacity .2s ease, transform .2s ease, color .12s ease, border-color .12s ease;
+  z-index: 50;
+}
+.back-to-top.visible { opacity: 1; transform: translateY(0); pointer-events: auto; }
+.back-to-top:hover { color: var(--accent); border-color: var(--accent); }
+
+/* Section reveal */
+.section-heading,
+.showless-block,
+.content > p,
+.content > ul,
+.content > ol,
+.content > blockquote {
+  opacity: 0;
+  transform: translateY(8px);
+  transition: opacity .5s ease, transform .5s ease;
+}
+.section-heading.visible,
+.showless-block.visible,
+.content > p.visible,
+.content > ul.visible,
+.content > ol.visible,
+.content > blockquote.visible {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+/* Responsive */
+@media (max-width: 960px) {
+  .layout { grid-template-columns: 1fr; padding: 40px 22px 60px; }
+  .toc { display: none; }
+  .hero { padding: 72px 24px 56px; }
+  .section-heading .chapter-number { position: static; transform: none; display: inline-block; margin-right: 10px; }
+  .content > p:first-of-type::first-letter { font-size: 2.6em; }
+}
+
+@media (max-width: 540px) {
+  body { font-size: 16px; }
+  .showless-block pre { font-size: 12.5px; padding: 16px; }
+  .hero-stats { flex-wrap: wrap; gap: 10px; padding: 5px 12px; }
+  .stat-value { font-size: 1rem; }
+  .back-to-top { right: 18px; bottom: 18px; }
+}
+
+@media print {
+  .toc, .page-controls, .reading-progress, .back-to-top, .copy-btn { display: none !important; }
+  .layout { grid-template-columns: 1fr; padding: 0; max-width: 100%; }
+  .showless-block { break-inside: avoid; box-shadow: none; }
+  .hero { padding: 32px; }
+}
+  </style>
+</head>
+<body>
+  <div class="reading-progress" aria-hidden="true"><div class="reading-progress-fill"></div></div>
+
+  <header class="hero">
+    <div class="hero-inner">
+      <h1 class="hero-title">MongoDB + AWS Bedrock Multi-Agent Framework: A Code Walkthrough</h1>
+      <div class="hero-stats">
+  <div class="stat"><span class="stat-value">13</span><span class="stat-label">sections</span></div>
+  <div class="stat"><span class="stat-value">84</span><span class="stat-label">code blocks</span></div>
+  <div class="stat"><span class="stat-value">55</span><span class="stat-label">headings</span></div>
+</div>
+      <p class="hero-subtitle">A configuration-driven reference architecture on Strands + Bedrock + MongoDB Atlas</p>
+      <p class="hero-meta">2026-05-04T13:16:41Z · Showless dev</p>
+    </div>
+    <div class="hero-glow" aria-hidden="true"></div>
+  </header>
+
+  <div class="page-controls">
+    <button type="button" class="theme-toggle" aria-label="Cycle color theme" title="Cycle theme">
+      <span class="theme-icon" data-icon="auto" aria-hidden="true">◐</span>
+      <span class="theme-text">Theme</span>
+    </button>
+  </div>
+
+  <div class="layout with-toc">
+    <aside class="toc" aria-label="Table of contents">
+  <div class="toc-inner">
+    <div class="toc-title">Contents</div>
+    <ol class="toc-list"><li class="toc-item toc-level-2"><a href="#repository-shape">Repository shape</a></li><li class="toc-item toc-level-3"><a href="#top-level-layout">Top-level layout</a></li><li class="toc-item toc-level-3"><a href="#source-size">Source size</a></li><li class="toc-item toc-level-3"><a href="#configuration-tree">Configuration tree</a></li><li class="toc-item toc-level-2"><a href="#1-configuration-as-data-config-agents-agent-md-and-config-scan-ts">1. Configuration as Data — config/agents/*.agent.md and config-scan.ts</a></li><li class="toc-item toc-level-3"><a href="#what-an-agent-file-contains">What an agent file contains</a></li><li class="toc-item toc-level-3"><a href="#a-typed-schema-not-just-yaml">A typed schema, not just YAML</a></li><li class="toc-item toc-level-3"><a href="#hot-reload-without-a-watcher">Hot-reload without a watcher</a></li><li class="toc-item toc-level-3"><a href="#persona-vs-detail-two-caches-one-file">Persona vs detail, two caches one file</a></li><li class="toc-item toc-level-2"><a href="#2-skills-and-progressive-disclosure-skill-loader-ts">2. Skills and Progressive Disclosure — skill-loader.ts</a></li><li class="toc-item toc-level-3"><a href="#phase-1-discovery-cheap">Phase 1 — discovery (cheap)</a></li><li class="toc-item toc-level-3"><a href="#phase-2-activation-real-cost">Phase 2 — activation (real cost)</a></li><li class="toc-item toc-level-3"><a href="#phase-3-on-demand-resources">Phase 3 — on-demand resources</a></li><li class="toc-item toc-level-3"><a href="#pre-activation-for-specialists">Pre-activation for specialists</a></li><li class="toc-item toc-level-2"><a href="#3-building-the-system-prompt-prompt-ts">3. Building the System Prompt — prompt.ts</a></li><li class="toc-item toc-level-3"><a href="#the-combined-builder">The combined builder</a></li><li class="toc-item toc-level-3"><a href="#discovery-section-format">Discovery section format</a></li><li class="toc-item toc-level-3"><a href="#memory-comes-first">Memory comes first</a></li><li class="toc-item toc-level-2"><a href="#4-tools-base-tools-ts-and-http-tools-runtime-ts">4. Tools — base-tools.ts and http-tools-runtime.ts</a></li><li class="toc-item toc-level-3"><a href="#the-static-tool-registry">The static tool registry</a></li><li class="toc-item toc-level-3"><a href="#per-turn-factories-activate-skill">Per-turn factories: activate_skill</a></li><li class="toc-item toc-level-3"><a href="#composing-tools-for-an-agent">Composing tools for an agent</a></li><li class="toc-item toc-level-3"><a href="#skill-scoped-http-tools-with-ssrf-gates">Skill-scoped HTTP tools with SSRF gates</a></li><li class="toc-item toc-level-2"><a href="#5-choosing-a-model-resolve-model-ts-and-dev-mock-model-ts">5. Choosing a Model — resolve-model.ts and dev-mock-model.ts</a></li><li class="toc-item toc-level-3"><a href="#one-env-var-picks-the-implementation">One env var picks the implementation</a></li><li class="toc-item toc-level-3"><a href="#the-mock-model-exists-to-be-deterministic">The mock model exists to be deterministic</a></li><li class="toc-item toc-level-3"><a href="#routing-inside-the-mock">Routing inside the mock</a></li><li class="toc-item toc-level-2"><a href="#6-the-chat-endpoint-routes-chat-ts">6. The Chat Endpoint — routes/chat.ts</a></li><li class="toc-item toc-level-3"><a href="#a-small-zod-request-schema">A small Zod request schema</a></li><li class="toc-item toc-level-3"><a href="#user-identity-from-a-jwt-claim">User identity from a JWT claim</a></li><li class="toc-item toc-level-3"><a href="#sse-forwarding-loop">SSE forwarding loop</a></li><li class="toc-item toc-level-2"><a href="#7-the-single-agent-stream-run-chat-stream-ts">7. The Single-Agent Stream — run-chat-stream.ts</a></li><li class="toc-item toc-level-3"><a href="#stub-mode-for-fast-iteration">Stub mode for fast iteration</a></li><li class="toc-item toc-level-3"><a href="#specialist-pre-activation">Specialist pre-activation</a></li><li class="toc-item toc-level-3"><a href="#translating-strands-events">Translating Strands events</a></li><li class="toc-item toc-level-3"><a href="#failure-becomes-a-typed-error-event">Failure becomes a typed error event</a></li><li class="toc-item toc-level-2"><a href="#8-swarm-mode-swarm-chat-stream-ts">8. Swarm Mode — swarm-chat-stream.ts</a></li><li class="toc-item toc-level-3"><a href="#building-the-roster-from-disk">Building the roster from disk</a></li><li class="toc-item toc-level-3"><a href="#a-turn-through-the-swarm">A turn through the swarm</a></li><li class="toc-item toc-level-3"><a href="#routing-inner-events">Routing inner events</a></li><li class="toc-item toc-level-3"><a href="#capping-the-loop">Capping the loop</a></li><li class="toc-item toc-level-2"><a href="#9-sessions-and-long-term-memory-session-store-ts-and-long-term-memory-ts">9. Sessions and Long-Term Memory — session-store.ts and long-term-memory.ts</a></li><li class="toc-item toc-level-3"><a href="#sessions-in-memory-by-default">Sessions: in-memory by default</a></li><li class="toc-item toc-level-3"><a href="#long-term-memory-keyed-by-user-and-agent">Long-term memory: keyed by user and agent</a></li><li class="toc-item toc-level-3"><a href="#ttl-index-auto-managed">TTL index, auto-managed</a></li><li class="toc-item toc-level-2"><a href="#10-authentication-middleware-auth-ts">10. Authentication — middleware/auth.ts</a></li><li class="toc-item toc-level-3"><a href="#three-modes-two-env-vars">Three modes, two env vars</a></li><li class="toc-item toc-level-3"><a href="#bearer-extraction-with-no-jwks">Bearer extraction with no JWKS</a></li><li class="toc-item toc-level-3"><a href="#full-jwt-verification-with-jose">Full JWT verification with jose</a></li><li class="toc-item toc-level-2"><a href="#11-the-streamlit-ui-ui-app-py-chat-panel-py-api-client-py">11. The Streamlit UI — ui/app.py, chat_panel.py, api_client.py</a></li><li class="toc-item toc-level-3"><a href="#app-entry-forty-five-lines">App entry: forty-five lines</a></li><li class="toc-item toc-level-3"><a href="#typed-sse-events">Typed SSE events</a></li><li class="toc-item toc-level-3"><a href="#streaming-a-token-at-a-time">Streaming a token at a time</a></li><li class="toc-item toc-level-3"><a href="#robust-sse-parsing">Robust SSE parsing</a></li><li class="toc-item toc-level-2"><a href="#12-the-whole-picture">12. The Whole Picture</a></li></ol>
+  </div>
+</aside>
+    <main class="content">
+<p>This is a configuration-driven multi-agent framework that runs on AWS Bedrock through the Strands Agents SDK and stores its memory in MongoDB Atlas. About <strong>5,000 lines</strong> of TypeScript and Python carry roughly <strong>45 source files</strong> across three deployable artifacts: a Hono-based Bun API, a Streamlit chat UI, and Terraform for the AWS side. The whole point is to add a new specialist agent — say, &quot;billing&quot; or &quot;warranty&quot; — by <strong>dropping in two markdown files</strong> instead of forking the runtime. The orchestrator routes every customer message to the right specialist; each specialist loads its own <em>skill</em> (a markdown package of instructions, references, and small <code>.mjs</code> policy scripts) and uses generic data tools (<code>mongodb_query</code>, <code>bedrock_kb_retrieve</code>, optional Lambda HTTP tools) to answer.</p>
+<p>Two design decisions define the codebase. First, <strong>agents are configuration, not code</strong>: <code>config/agents/*.agent.md</code> files are parsed on every request with mtime-based caching, so editing an <code>.agent.md</code> hot-reloads without restarting the API. Second, <strong>skills load progressively</strong>: a skill&#39;s name and description cost ~100 tokens at startup, the full <code>SKILL.md</code> only loads when the agent activates it, and reference files inside the skill are read lazily through <code>read_skill_resource</code>.</p>
+<p>Key features:</p>
+<ul>
+  <li>One markdown file per agent (<code>.agent.md</code>), one folder per skill (<code>SKILL.md</code> + <code>references/</code> + <code>scripts/</code>).</li>
+  <li>Streaming responses over Server-Sent Events: tokens, tool calls, skill loads, agent handoffs.</li>
+  <li>Single-agent and multi-agent <strong>Swarm</strong> orchestration modes from the same Hono route.</li>
+  <li>Local dev loop with <strong>zero AWS dependencies</strong>: a <code>DevMockModel</code> plus MongoDB-shaped fixtures.</li>
+  <li>Optional <strong>JWT/JWKS auth</strong> (Cognito-friendly) that scopes sessions and long-term memory to a user.</li>
+  <li><strong>Long-term memory</strong> in a MongoDB <code>agent_memory</code> collection with an auto-managed TTL index.</li>
+  <li>Skill-scoped HTTP tools so a skill can call a Lambda Function URL with no TypeScript change.</li>
+</ul>
+<figure class="showless-block diagram-block mermaid-block">
+  <header class="block-header">
+    <span class="block-label">diagram</span>
+    <span class="block-language">mermaid</span>
+  </header>
+  <div class="mermaid-container">
+    <pre class="mermaid">graph LR
+  Streamlit[&quot;Streamlit UI&lt;br/&gt;(ui/app.py)&quot;] -- &quot;POST chat SSE&quot; --&gt; Hono[&quot;Hono API&lt;br/&gt;(api/src/app.ts)&quot;]
+  Hono --&gt; Auth[&quot;authMiddleware&lt;br/&gt;(JWT/JWKS)&quot;]
+  Auth --&gt; ChatRoute[&quot;routes/chat.ts&quot;]
+  ChatRoute --&gt; RunChat[&quot;run-chat-stream.ts&quot;]
+  ChatRoute --&gt; Swarm[&quot;swarm-chat-stream.ts&quot;]
+  ChatRoute --&gt; Sessions[&quot;session-store.ts&quot;]
+  ChatRoute --&gt; Memory[&quot;long-term-memory.ts&quot;]
+  RunChat --&gt; Strands[&quot;Strands Agent&lt;br/&gt;(create-strands-agent.ts)&quot;]
+  Swarm --&gt; Strands
+  Strands --&gt; Model[&quot;resolve-model.ts&lt;br/&gt;BedrockModel | DevMockModel&quot;]
+  Strands --&gt; Tools[&quot;base-tools.ts&lt;br/&gt;+ http-tools-runtime.ts&quot;]
+  Strands --&gt; Skills[&quot;skill-loader.ts&lt;br/&gt;(SkillRegistry)&quot;]
+  Tools --&gt; Mongo[(&quot;MongoDB Atlas&lt;br/&gt;orders / products / agent_memory&quot;)]
+  Tools --&gt; Bedrock[(&quot;AWS Bedrock KB&lt;br/&gt;+ Lambda URLs&quot;)]
+  Memory --&gt; Mongo
+  Sessions --&gt; Mongo
+</pre>
+  </div>
+</figure><p>The <strong>Streamlit UI</strong> is a thin SSE client; everything intelligent happens in the Hono API. Inside the API, <code>routes/chat.ts</code> is the fork point — it reads the agent&#39;s frontmatter, decides between single-agent (<code>run-chat-stream.ts</code>) and multi-agent (<code>swarm-chat-stream.ts</code>), and bolts on optional long-term memory injection. Both streamers call <code>create-strands-agent.ts</code>, which builds a <code>SkillRegistry</code>, resolves a model (real Bedrock or <code>DevMockModel</code>), wires up <code>base-tools.ts</code>, and hands a fully configured <code>Strands Agent</code> back. <strong>MongoDB Atlas</strong> appears on the right edge three times: as the data layer for the <code>mongodb_query</code> and <code>mongodb_vector_search</code> tools, as the optional persistent backing store for sessions, and as the home of the <code>agent_memory</code> collection.</p>
+<h2 id="repository-shape" class="section-heading level-2"><span class="heading-text">Repository shape</span><a href="#repository-shape" class="anchor-link" aria-label="Link to section">¶</a></h2>
+<p>The repository ships three deployable artifacts and a configuration tree that the API reads at runtime.</p>
+<h3 id="top-level-layout" class="section-heading level-3"><span class="heading-text">Top-level layout</span><a href="#top-level-layout" class="anchor-link" aria-label="Link to section">¶</a></h3>
+<p>A <code>find</code> over the root, with build artifacts and dependencies pruned, gives a feel for what is hand-written and what isn&#39;t.</p>
+<figure class="showless-block code-block shell">
+  <header class="block-header">
+    <span class="block-label">command</span>
+    <span class="block-language">shell</span>
+    <button type="button" class="copy-btn" aria-label="Copy to clipboard">Copy</button>
+  </header>
+  <pre><code class="language-bash hljs">find . -maxdepth 2 -type d \
+  -not -path &#39;*/node_modules*&#39; -not -path &#39;*/.git*&#39; \
+  -not -path &#39;*/.terraform*&#39; -not -path &#39;*/__pycache__*&#39; \
+  -not -path &#39;*/.pytest_cache*&#39; -not -path &#39;*/dist*&#39; \
+  | sort
+</code></pre>
+</figure><figure class="showless-block output-block">
+  <header class="block-header terminal-header">
+    <span class="block-label">output</span>
+    <button type="button" class="copy-btn terminal-copy" aria-label="Copy output to clipboard">Copy</button>
+  </header>
+  <pre><code class="output-content"><span class="output-line">.</span><span class="output-line">./.cursor</span><span class="output-line">./api</span><span class="output-line">./api/scripts</span><span class="output-line">./api/src</span><span class="output-line">./api/tests</span><span class="output-line">./config</span><span class="output-line">./config/agents</span><span class="output-line">./config/skills</span><span class="output-line">./db-seeding</span><span class="output-line">./deploy</span><span class="output-line">./deploy/kb-docs</span><span class="output-line">./deploy/scripts</span><span class="output-line">./deploy/terraform</span><span class="output-line">./docs</span><span class="output-line">./docs/client</span><span class="output-line">./e2e</span><span class="output-line">./e2e/test-results</span><span class="output-line">./e2e/tests</span><span class="output-line">./lambda</span><span class="output-line">./lambda/base-tools</span><span class="output-line">./ui</span><span class="output-line">./ui/lib</span><span class="output-line">./ui/pages</span><span class="output-line">./ui/tests</span></code></pre>
+</figure><p>The shape is unsurprising: <code>api/</code> is the runtime, <code>ui/</code> is the chat client, <code>config/</code> is the markdown that defines agent and skill behavior, <code>deploy/</code> carries Terraform plus Docker scripts, and <code>db-seeding/</code> is a small set of TypeScript scripts that load fixtures into Atlas. The <code>lambda/</code> folder is a placeholder for future serverless tools — the API itself doesn&#39;t depend on it.</p>
+<h3 id="source-size" class="section-heading level-3"><span class="heading-text">Source size</span><a href="#source-size" class="anchor-link" aria-label="Link to section">¶</a></h3>
+<p>The TypeScript footprint inside <code>api/src/</code> is the heart of the project. Here are the lines per file, sorted ascending so the largest files float to the bottom.</p>
+<figure class="showless-block code-block shell">
+  <header class="block-header">
+    <span class="block-label">command</span>
+    <span class="block-language">shell</span>
+    <button type="button" class="copy-btn" aria-label="Copy to clipboard">Copy</button>
+  </header>
+  <pre><code class="language-bash hljs">find api/src -type f -name &#39;*.ts&#39; | xargs wc -l | sort -n | tail -20
+</code></pre>
+</figure><figure class="showless-block output-block">
+  <header class="block-header terminal-header">
+    <span class="block-label">output</span>
+    <button type="button" class="copy-btn terminal-copy" aria-label="Copy output to clipboard">Copy</button>
+  </header>
+  <pre><code class="output-content"><span class="output-line">      69 api/src/lib/tools/troubleshooting-tools.ts</span><span class="output-line">      90 api/src/lib/jwt-verify.ts</span><span class="output-line">      93 api/src/lib/environment-config.ts</span><span class="output-line">     100 api/src/lib/prompt.ts</span><span class="output-line">     124 api/src/lib/health-status.ts</span><span class="output-line">     125 api/src/lib/http-tools-load.ts</span><span class="output-line">     155 api/src/lib/long-term-memory.ts</span><span class="output-line">     158 api/src/lib/run-chat-stream.ts</span><span class="output-line">     159 api/src/adapters/mock-retrieval.ts</span><span class="output-line">     164 api/src/lib/swarm-chat-stream.ts</span><span class="output-line">     179 api/src/routes/chat.ts</span><span class="output-line">     180 api/src/lib/skill-http-tools-load.ts</span><span class="output-line">     188 api/src/lib/config-scan.ts</span><span class="output-line">     190 api/src/adapters/mongo-data.ts</span><span class="output-line">     215 api/src/lib/skill-loader.ts</span><span class="output-line">     247 api/src/lib/session-store.ts</span><span class="output-line">     260 api/src/lib/http-tools-runtime.ts</span><span class="output-line">     355 api/src/lib/base-tools.ts</span><span class="output-line">     383 api/src/adapters/dev-mock-model.ts</span><span class="output-line">    4238 total</span></code></pre>
+</figure><p>The biggest file — by a wide margin — is <code>dev-mock-model.ts</code> at <strong>383 lines</strong>. That is significant: the <em>test fixture</em> model is larger than any production module. It exists so a contributor can run the full agent loop with <code>DEV_MOCK_BACKENDS=1</code> and never touch AWS. After the mock model, the largest production files cluster around the boundary between agents and the world: <code>base-tools.ts</code> (355), <code>http-tools-runtime.ts</code> (260), <code>session-store.ts</code> (247), and <code>skill-loader.ts</code> (215). The pure pipeline files — <code>run-chat-stream.ts</code>, <code>swarm-chat-stream.ts</code>, <code>prompt.ts</code> — are all under 165 lines, which tells you the architecture leans hard on configuration loaders and tool wiring rather than on a thick orchestration core.</p>
+<h3 id="configuration-tree" class="section-heading level-3"><span class="heading-text">Configuration tree</span><a href="#configuration-tree" class="anchor-link" aria-label="Link to section">¶</a></h3>
+<p>Behavior lives in markdown. Everything under <code>config/</code> is what a customer would edit to add a new agent or domain.</p>
+<figure class="showless-block code-block shell">
+  <header class="block-header">
+    <span class="block-label">command</span>
+    <span class="block-language">shell</span>
+    <button type="button" class="copy-btn" aria-label="Copy to clipboard">Copy</button>
+  </header>
+  <pre><code class="language-bash hljs">find config -type f | sort
+</code></pre>
+</figure><figure class="showless-block output-block">
+  <header class="block-header terminal-header">
+    <span class="block-label">output</span>
+    <button type="button" class="copy-btn terminal-copy" aria-label="Copy output to clipboard">Copy</button>
+  </header>
+  <pre><code class="output-content"><span class="output-line">config/agents/orchestrator.agent.md</span><span class="output-line">config/agents/order-management.agent.md</span><span class="output-line">config/agents/product-recommendation.agent.md</span><span class="output-line">config/agents/troubleshooting.agent.md</span><span class="output-line">config/environment.yaml</span><span class="output-line">config/http-tools.example.json</span><span class="output-line">config/http-tools.json</span><span class="output-line">config/skills/order-management/SKILL.md</span><span class="output-line">config/skills/order-management/http-tools.example.json</span><span class="output-line">config/skills/order-management/http-tools.json</span><span class="output-line">config/skills/order-management/references/order-schema.md</span><span class="output-line">config/skills/order-management/scripts/validate-return.mjs</span><span class="output-line">config/skills/product-recommendation/SKILL.md</span><span class="output-line">config/skills/product-recommendation/references/catalog-overview.md</span><span class="output-line">config/skills/product-recommendation/references/search-patterns.md</span><span class="output-line">config/skills/troubleshooting/SKILL.md</span><span class="output-line">config/skills/troubleshooting/references/common-issues.md</span><span class="output-line">config/skills/troubleshooting/references/error-codes.md</span><span class="output-line">config/skills/troubleshooting/scripts/build-ticket.mjs</span><span class="output-line">config/skills/troubleshooting/scripts/escalation-checklist.md</span></code></pre>
+</figure><p>There are exactly <strong>four <code>.agent.md</code> files</strong> and <strong>three skill folders</strong> — that is the entire production behavior of the system. Two <code>.mjs</code> scripts (<code>validate-return.mjs</code> and <code>build-ticket.mjs</code>) live inside skills as executable policies that the agent calls through <code>run_skill_script</code>; they&#39;re plain ECMAScript modules, not part of the API build. Skill HTTP tools surface as <code><em>/http-tools.json</code> files that the runtime loads on demand. The <code></em>.example.json</code> files exist so customers can copy them, fill in real Lambda URLs, and avoid committing secrets.</p>
+<p>With the shape settled, the rest of this walkthrough follows the path of a single chat message: from the markdown that defines an agent, through the skill loader and prompt builder, into the Strands stream, and back out as SSE events the Streamlit UI renders one token at a time.</p>
+<h2 id="1-configuration-as-data-config-agents-agent-md-and-config-scan-ts" class="section-heading level-2"><span class="chapter-number">1</span><span class="heading-text">Configuration as Data — <code>config/agents/*.agent.md</code> and <code>config-scan.ts</code></span><a href="#1-configuration-as-data-config-agents-agent-md-and-config-scan-ts" class="anchor-link" aria-label="Link to section">¶</a></h2>
+<p>The most important design choice in the codebase is hidden in <code>config-scan.ts</code>: agents are not registered in a Map, they are <em>files on disk</em>, scanned and parsed every request. This chapter shows what an agent looks like, how the scanner reads it without exploding under load, and why this enables hot-reload without a watcher.</p>
+<h3 id="what-an-agent-file-contains" class="section-heading level-3"><span class="heading-text">What an agent file contains</span><a href="#what-an-agent-file-contains" class="anchor-link" aria-label="Link to section">¶</a></h3>
+<p>The orchestrator is the simplest agent — no skills, no tools, all behavior expressed as a system prompt and a list of <code>handoffs</code>.</p>
+<figure class="showless-block code-block shell">
+  <header class="block-header">
+    <span class="block-label">command</span>
+    <span class="block-language">shell</span>
+    <button type="button" class="copy-btn" aria-label="Copy to clipboard">Copy</button>
+  </header>
+  <pre><code class="language-bash hljs">sed -n &#39;1,26p&#39; config/agents/orchestrator.agent.md
+</code></pre>
+</figure><figure class="showless-block output-block">
+  <header class="block-header terminal-header">
+    <span class="block-label">output</span>
+    <button type="button" class="copy-btn terminal-copy" aria-label="Copy output to clipboard">Copy</button>
+  </header>
+  <pre><code class="output-content language-markdown hljs"><span class="output-line">---</span><span class="output-line">name: Orchestrator</span><span class="output-line">description: Routes customer messages to the appropriate specialist agent.</span><span class="output-line">id: orchestrator</span><span class="output-line">skills: []</span><span class="output-line">tools: []</span><span class="output-line">model: us.anthropic.claude-3-7-sonnet-20250219-v1:0</span><span class="output-line">maxTokens: 4096</span><span class="output-line">temperature: 0.3</span><span class="output-line">handoffs:</span><span class="output-line">  - label: Order question</span><span class="output-line">    agent: order-management</span><span class="output-line">    prompt: &gt;-</span><span class="output-line">      Order domain: status, tracking, delivery, cancellation, return, or replacement.</span><span class="output-line">      Pass any order IDs (e.g. ORD-…), SKUs, or customer email the user mentioned verbatim.</span><span class="output-line">  - label: Product recommendation</span><span class="output-line">    agent: product-recommendation</span><span class="output-line">    prompt: &gt;-</span><span class="output-line">      Product domain: recommendations, comparisons, “which should I buy”, upgrades, or</span><span class="output-line">      replacements after an order issue. Include budget, room size, or use case if given.</span><span class="output-line">  - label: Troubleshooting</span><span class="output-line">    agent: troubleshooting</span><span class="output-line">    prompt: &gt;-</span><span class="output-line">      Product diagnosis: errors, won’t power on, connectivity, hardware symptoms, or</span><span class="output-line">      error codes. Include device model, SKU, or order ID if the customer provided them.</span><span class="output-line">---</span></code></pre>
+</figure><p>The frontmatter is everything the runtime needs to construct a Strands <code>Agent</code>: a Bedrock <code>model</code> ID, sampling parameters, an empty <code>skills:</code> list (orchestrators don&#39;t need domain knowledge), and a <code>handoffs:</code> block that doubles as the routing rubric. The markdown body that follows the closing <code>---</code> becomes the system prompt. A specialist like <code>order-management.agent.md</code> looks the same shape but adds <code>skills: [&#39;order-management&#39;]</code> and a <code>tools:</code> array of generic capabilities (<code>mongodb_query</code>, <code>read_skill_resource</code>, …). Adding a fifth specialist means a fifth file with the same shape — no TypeScript edit.</p>
+<h3 id="a-typed-schema-not-just-yaml" class="section-heading level-3"><span class="heading-text">A typed schema, not just YAML</span><a href="#a-typed-schema-not-just-yaml" class="anchor-link" aria-label="Link to section">¶</a></h3>
+<p>The shape is enforced by a small Zod schema in <code>api/src/lib/schemas.ts</code>. Notice the defaults: <code>skills</code> and <code>tools</code> default to empty arrays, <code>temperature</code> defaults to <code>0.7</code>, and the optional <code>memory</code> block is parsed but not required.</p>
+<figure class="showless-block code-block shell">
+  <header class="block-header">
+    <span class="block-label">command</span>
+    <span class="block-language">shell</span>
+    <button type="button" class="copy-btn" aria-label="Copy to clipboard">Copy</button>
+  </header>
+  <pre><code class="language-bash hljs">sed -n &#39;9,28p&#39; api/src/lib/schemas.ts
+</code></pre>
+</figure><figure class="showless-block output-block">
+  <header class="block-header terminal-header">
+    <span class="block-label">output</span>
+    <button type="button" class="copy-btn terminal-copy" aria-label="Copy output to clipboard">Copy</button>
+  </header>
+  <pre><code class="output-content language-typescript hljs"><span class="output-line">/** Frontmatter for config agents: `.agent.md` files (subset enforced at runtime). */</span><span class="output-line">export const agentFrontmatterSchema = z.object({</span><span class="output-line">  name: z.string().min(1),</span><span class="output-line">  description: z.string(),</span><span class="output-line">  id: z.string().min(1),</span><span class="output-line">  skills: z.array(z.string()).default([]),</span><span class="output-line">  tools: z.array(z.string()).default([]),</span><span class="output-line">  model: z.string().optional(),</span><span class="output-line">  maxTokens: z.coerce.number().int().positive().default(4096),</span><span class="output-line">  temperature: z.coerce.number().min(0).max(2).default(0.7),</span><span class="output-line">  memory: z</span><span class="output-line">    .object({</span><span class="output-line">      shortTerm: z.boolean().optional(),</span><span class="output-line">      longTerm: z.boolean().optional(),</span><span class="output-line">      longTermCollection: z.string().optional(),</span><span class="output-line">    })</span><span class="output-line">    .optional(),</span><span class="output-line">  handoffs: z.array(agentHandoffSchema).default([]),</span><span class="output-line">});</span><span class="output-line">​</span></code></pre>
+</figure><p>A bad frontmatter never reaches the model. <code>parseAgentDetail</code> calls <code>safeParse</code>, logs the validation issues through the structured logger, and returns <code>null</code> so the agent simply doesn&#39;t appear in <code>listAgents()</code>. The user gets a clean <code>AGENT_NOT_FOUND</code> from the route instead of a runtime crash deep inside the Strands SDK.</p>
+<h3 id="hot-reload-without-a-watcher" class="section-heading level-3"><span class="heading-text">Hot-reload without a watcher</span><a href="#hot-reload-without-a-watcher" class="anchor-link" aria-label="Link to section">¶</a></h3>
+<p>Reading every <code>.agent.md</code> on every request would be slow under load. <code>config-scan.ts</code> solves this with <strong>mtime-based caches</strong> — one for the directory listing and one for each parsed file. The cache invalidates the moment the file&#39;s modification time changes.</p>
+<figure class="showless-block code-block shell">
+  <header class="block-header">
+    <span class="block-label">command</span>
+    <span class="block-language">shell</span>
+    <button type="button" class="copy-btn" aria-label="Copy to clipboard">Copy</button>
+  </header>
+  <pre><code class="language-bash hljs">sed -n &#39;123,143p&#39; api/src/lib/config-scan.ts
+</code></pre>
+</figure><figure class="showless-block output-block">
+  <header class="block-header terminal-header">
+    <span class="block-label">output</span>
+    <button type="button" class="copy-btn terminal-copy" aria-label="Copy output to clipboard">Copy</button>
+  </header>
+  <pre><code class="output-content language-typescript hljs"><span class="output-line">export function listAgents(): AgentListItem[] {</span><span class="output-line">  const dir = agentsDir();</span><span class="output-line">  if (!fs.existsSync(dir)) return [];</span><span class="output-line">​</span><span class="output-line">  const currentMtime = dirMtimeMs(dir);</span><span class="output-line">  if (agentListCache &amp;&amp; agentListCache.mtimeMs === currentMtime) {</span><span class="output-line">    return agentListCache.value;</span><span class="output-line">  }</span><span class="output-line">​</span><span class="output-line">  const files = fs.readdirSync(dir).filter((f) =&gt; f.endsWith(&quot;.agent.md&quot;));</span><span class="output-line">  const out: AgentListItem[] = [];</span><span class="output-line">  for (const file of files) {</span><span class="output-line">    const full = path.join(dir, file);</span><span class="output-line">    const detail = parseAgentDetail(full);</span><span class="output-line">    if (detail) out.push({ id: detail.id, name: detail.name, description: detail.description });</span><span class="output-line">  }</span><span class="output-line">  const sorted = out.sort((a, b) =&gt; a.id.localeCompare(b.id));</span><span class="output-line">  agentListCache = { value: sorted, mtimeMs: currentMtime };</span><span class="output-line">  logger.debug(&quot;[agents] list cache refreshed&quot;, { count: sorted.length });</span><span class="output-line">  return sorted;</span><span class="output-line">}</span></code></pre>
+</figure><p>The trick is comparing the <em>directory&#39;s</em> mtime, not the contents. Adding or removing a file bumps the directory mtime; editing a single agent file bumps the file&#39;s mtime, which <code>getAgent</code> checks separately. This means a new <code>.agent.md</code> shows up on the next request without the API restarting and without the kernel filesystem watchers a long-running daemon would need. The cache is intentionally not flushed on a timer — it&#39;s correct because mtime is the source of truth.</p>
+<h3 id="persona-vs-detail-two-caches-one-file" class="section-heading level-3"><span class="heading-text">Persona vs detail, two caches one file</span><a href="#persona-vs-detail-two-caches-one-file" class="anchor-link" aria-label="Link to section">¶</a></h3>
+<p>A subtle detail: <code>loadAgentPersona</code> and <code>getAgent</code> parse the same file but cache different slices.</p>
+<figure class="showless-block code-block shell">
+  <header class="block-header">
+    <span class="block-label">command</span>
+    <span class="block-language">shell</span>
+    <button type="button" class="copy-btn" aria-label="Copy to clipboard">Copy</button>
+  </header>
+  <pre><code class="language-bash hljs">sed -n &#39;162,177p&#39; api/src/lib/config-scan.ts
+</code></pre>
+</figure><figure class="showless-block output-block">
+  <header class="block-header terminal-header">
+    <span class="block-label">output</span>
+    <button type="button" class="copy-btn terminal-copy" aria-label="Copy output to clipboard">Copy</button>
+  </header>
+  <pre><code class="output-content language-typescript hljs"><span class="output-line">export function loadAgentPersona(agentId: string): string | undefined {</span><span class="output-line">  const target = resolveAgentFile(agentId);</span><span class="output-line">  if (!target) return undefined;</span><span class="output-line">​</span><span class="output-line">  const currentMtime = fileMtimeMs(target);</span><span class="output-line">  const cached = agentPersonaCache.get(target);</span><span class="output-line">  if (cached &amp;&amp; cached.mtimeMs === currentMtime) {</span><span class="output-line">    return cached.value;</span><span class="output-line">  }</span><span class="output-line">​</span><span class="output-line">  const raw = fs.readFileSync(target, &quot;utf8&quot;);</span><span class="output-line">  const { content } = matter(raw);</span><span class="output-line">  const persona = content.trim() || undefined;</span><span class="output-line">  agentPersonaCache.set(target, { value: persona, mtimeMs: currentMtime });</span><span class="output-line">  return persona;</span><span class="output-line">}</span></code></pre>
+</figure><p><code>gray-matter</code> returns both <code>data</code> (the YAML frontmatter, used by <code>parseAgentDetail</code>) and <code>content</code> (the markdown body, used here as the persona). They&#39;re cached as separate values on separate <code>Map</code>s, both keyed by absolute path and invalidated by the same mtime. The result: editing the markdown body of an <code>.agent.md</code> invalidates the persona cache without re-running the schema validator, and editing the frontmatter invalidates the detail cache without re-reading the body. Both paths return in microseconds for a hot file.</p>
+<h2 id="2-skills-and-progressive-disclosure-skill-loader-ts" class="section-heading level-2"><span class="chapter-number">2</span><span class="heading-text">Skills and Progressive Disclosure — <code>skill-loader.ts</code></span><a href="#2-skills-and-progressive-disclosure-skill-loader-ts" class="anchor-link" aria-label="Link to section">¶</a></h2>
+<p>A skill is a folder of markdown that turns a generic agent into a domain expert. The trick is that a skill costs almost nothing to <em>advertise</em> and is only <em>fully loaded</em> when needed. <code>skill-loader.ts</code> implements three load phases and a per-turn <code>SkillRegistry</code> that the runtime mutates as the model decides what it needs.</p>
+<h3 id="phase-1-discovery-cheap" class="section-heading level-3"><span class="heading-text">Phase 1 — discovery (cheap)</span><a href="#phase-1-discovery-cheap" class="anchor-link" aria-label="Link to section">¶</a></h3>
+<p>The discovery phase reads only the YAML frontmatter from each <code>SKILL.md</code> so the orchestrator can list every skill in its system prompt without paying the cost of the body.</p>
+<figure class="showless-block code-block shell">
+  <header class="block-header">
+    <span class="block-label">command</span>
+    <span class="block-language">shell</span>
+    <button type="button" class="copy-btn" aria-label="Copy to clipboard">Copy</button>
+  </header>
+  <pre><code class="language-bash hljs">sed -n &#39;59,78p&#39; api/src/lib/skill-loader.ts
+</code></pre>
+</figure><figure class="showless-block output-block">
+  <header class="block-header terminal-header">
+    <span class="block-label">output</span>
+    <button type="button" class="copy-btn terminal-copy" aria-label="Copy output to clipboard">Copy</button>
+  </header>
+  <pre><code class="output-content language-typescript hljs"><span class="output-line">export function listSkillDiscovery(): SkillDiscovery[] {</span><span class="output-line">  const root = skillsRoot();</span><span class="output-line">  if (!fs.existsSync(root)) return [];</span><span class="output-line">​</span><span class="output-line">  let dirMtime = -1;</span><span class="output-line">  try { dirMtime = fs.statSync(root).mtimeMs; } catch { /* */ }</span><span class="output-line">  if (skillDiscoveryCache &amp;&amp; skillDiscoveryCache.mtimeMs === dirMtime) {</span><span class="output-line">    return skillDiscoveryCache.value;</span><span class="output-line">  }</span><span class="output-line">​</span><span class="output-line">  const dirs = fs.readdirSync(root, { withFileTypes: true }).filter((d) =&gt; d.isDirectory());</span><span class="output-line">  const out: SkillDiscovery[] = [];</span><span class="output-line">  for (const d of dirs) {</span><span class="output-line">    const fm = parseSkillFrontmatter(path.join(root, d.name, &quot;SKILL.md&quot;), d.name);</span><span class="output-line">    if (fm) out.push(fm);</span><span class="output-line">  }</span><span class="output-line">  const sorted = out.sort((a, b) =&gt; a.name.localeCompare(b.name));</span><span class="output-line">  skillDiscoveryCache = { value: sorted, mtimeMs: dirMtime };</span><span class="output-line">  return sorted;</span><span class="output-line">}</span></code></pre>
+</figure><p>Each discovery record is just <code>{ name, description, version }</code> — about a hundred tokens once formatted. The orchestrator&#39;s system prompt embeds these as <code>- <strong>order-management</strong>: Query and manage customer orders…</code>. The model uses the description to decide which skill to activate; the body is invisible until then. With a dozen skills the discovery section is still under 1.5 KB.</p>
+<h3 id="phase-2-activation-real-cost" class="section-heading level-3"><span class="heading-text">Phase 2 — activation (real cost)</span><a href="#phase-2-activation-real-cost" class="anchor-link" aria-label="Link to section">¶</a></h3>
+<p>When an agent needs to actually answer a domain question, it activates a skill, which loads the full markdown body of <code>SKILL.md</code>.</p>
+<figure class="showless-block code-block shell">
+  <header class="block-header">
+    <span class="block-label">command</span>
+    <span class="block-language">shell</span>
+    <button type="button" class="copy-btn" aria-label="Copy to clipboard">Copy</button>
+  </header>
+  <pre><code class="language-bash hljs">sed -n &#39;178,193p&#39; api/src/lib/skill-loader.ts
+</code></pre>
+</figure><figure class="showless-block output-block">
+  <header class="block-header terminal-header">
+    <span class="block-label">output</span>
+    <button type="button" class="copy-btn terminal-copy" aria-label="Copy output to clipboard">Copy</button>
+  </header>
+  <pre><code class="output-content language-typescript hljs"><span class="output-line">  /** Activate a skill: load its full SKILL.md body (idempotent). */</span><span class="output-line">  activate(skillName: string): { ok: true; body: string } | { ok: false; error: string } {</span><span class="output-line">    if (!this.allowedSkills.has(skillName)) {</span><span class="output-line">      return { ok: false, error: `skill &#39;${skillName}&#39; is not in this agent&#39;s skills list` };</span><span class="output-line">    }</span><span class="output-line">    if (this._activated.has(skillName)) {</span><span class="output-line">      return { ok: true, body: this._activated.get(skillName)! };</span><span class="output-line">    }</span><span class="output-line">    const body = loadSkillInstructions(skillName);</span><span class="output-line">    if (!body) {</span><span class="output-line">      return { ok: false, error: `SKILL.md not found or empty for &#39;${skillName}&#39;` };</span><span class="output-line">    }</span><span class="output-line">    this._activated.set(skillName, body);</span><span class="output-line">    return { ok: true, body };</span><span class="output-line">  }</span><span class="output-line">​</span></code></pre>
+</figure><p>Notice the <strong>two security gates</strong> baked into a single function. First, <code>allowedSkills</code> — the agent&#39;s <code>skills:</code> array from frontmatter — is the <em>only</em> set of skills this agent can ever see. A malicious prompt asking the model to &quot;activate the credit-card skill&quot; cannot escape the allowlist. Second, activation is idempotent: calling <code>activate(&quot;order-management&quot;)</code> twice returns the cached body, not a second filesystem read. <code>SkillRegistry</code> is constructed fresh per turn, so different concurrent users never share activated state.</p>
+<h3 id="phase-3-on-demand-resources" class="section-heading level-3"><span class="heading-text">Phase 3 — on-demand resources</span><a href="#phase-3-on-demand-resources" class="anchor-link" aria-label="Link to section">¶</a></h3>
+<p>A skill folder can carry references and policy scripts the agent reads only when the conversation needs them. The path resolver below is the choke point that keeps a Strands tool from escaping the skill directory.</p>
+<figure class="showless-block code-block shell">
+  <header class="block-header">
+    <span class="block-label">command</span>
+    <span class="block-language">shell</span>
+    <button type="button" class="copy-btn" aria-label="Copy to clipboard">Copy</button>
+  </header>
+  <pre><code class="language-bash hljs">sed -n &#39;101,119p&#39; api/src/lib/skill-loader.ts
+</code></pre>
+</figure><figure class="showless-block output-block">
+  <header class="block-header terminal-header">
+    <span class="block-label">output</span>
+    <button type="button" class="copy-btn terminal-copy" aria-label="Copy output to clipboard">Copy</button>
+  </header>
+  <pre><code class="output-content language-typescript hljs"><span class="output-line">export function resolveSkillResourcePath(</span><span class="output-line">  skillName: string,</span><span class="output-line">  resourcePath: string,</span><span class="output-line">): { ok: true; absolutePath: string } | { ok: false; error: string } {</span><span class="output-line">  if (!skillName.trim() || resourcePath.includes(&quot;\0&quot;)) {</span><span class="output-line">    return { ok: false, error: &quot;invalid_input&quot; };</span><span class="output-line">  }</span><span class="output-line">  const resolvedRoot = path.resolve(skillsRoot(), skillName);</span><span class="output-line">  const normalized = resourcePath.replace(/^[/\\]+/, &quot;&quot;);</span><span class="output-line">  const resolvedFile = path.resolve(resolvedRoot, normalized);</span><span class="output-line">  const rel = path.relative(resolvedRoot, resolvedFile);</span><span class="output-line">  if (rel.startsWith(&quot;..&quot;) || path.isAbsolute(rel)) {</span><span class="output-line">    return { ok: false, error: &quot;path_not_under_skill_directory&quot; };</span><span class="output-line">  }</span><span class="output-line">  if (!fs.existsSync(resolvedFile) || !fs.statSync(resolvedFile).isFile()) {</span><span class="output-line">    return { ok: false, error: &quot;not_found&quot; };</span><span class="output-line">  }</span><span class="output-line">  return { ok: true, absolutePath: resolvedFile };</span><span class="output-line">}</span></code></pre>
+</figure><p>This is classic path-traversal protection: resolve to absolute, then check that the relative path back to the skill root does not start with <code>..</code> or become absolute. Null bytes are rejected up front. The same gate covers both <code>read_skill_resource</code> (which reads markdown like <code>references/order-schema.md</code>) and <code>run_skill_script</code> (which dynamic-imports <code>.mjs</code> policy files). Without this, a hostile prompt could ask the agent to read <code>../../etc/passwd</code> through the legitimate skill resource tool.</p>
+<h3 id="pre-activation-for-specialists" class="section-heading level-3"><span class="heading-text">Pre-activation for specialists</span><a href="#pre-activation-for-specialists" class="anchor-link" aria-label="Link to section">¶</a></h3>
+<p>Specialist agents always need their skill, so the runtime pre-activates everything in their <code>skills:</code> list at turn start. The orchestrator does the opposite — it ships only the discovery index and trusts the model to call <code>activate_skill</code> (it actually doesn&#39;t, because the orchestrator&#39;s <code>skills:</code> list is empty).</p>
+<figure class="showless-block code-block shell">
+  <header class="block-header">
+    <span class="block-label">command</span>
+    <span class="block-language">shell</span>
+    <button type="button" class="copy-btn" aria-label="Copy to clipboard">Copy</button>
+  </header>
+  <pre><code class="language-bash hljs">sed -n &#39;209,215p&#39; api/src/lib/skill-loader.ts
+</code></pre>
+</figure><figure class="showless-block output-block">
+  <header class="block-header terminal-header">
+    <span class="block-label">output</span>
+    <button type="button" class="copy-btn terminal-copy" aria-label="Copy output to clipboard">Copy</button>
+  </header>
+  <pre><code class="output-content language-typescript hljs"><span class="output-line">  /** Pre-activate all allowed skills (used for specialist agents that always need their skill). */</span><span class="output-line">  activateAll(): void {</span><span class="output-line">    for (const name of this.allowedSkills) {</span><span class="output-line">      this.activate(name);</span><span class="output-line">    }</span><span class="output-line">  }</span><span class="output-line">}</span></code></pre>
+</figure><p>Six lines, but they&#39;re load-bearing. Specialists pay the full token cost of their skill body up front so the model has the full instructions in context from token zero. Calling <code>activateAll()</code> for an orchestrator with <code>skills: []</code> is a no-op — no special-casing needed in the route handler.</p>
+<h2 id="3-building-the-system-prompt-prompt-ts" class="section-heading level-2"><span class="chapter-number">3</span><span class="heading-text">Building the System Prompt — <code>prompt.ts</code></span><a href="#3-building-the-system-prompt-prompt-ts" class="anchor-link" aria-label="Link to section">¶</a></h2>
+<p><code>prompt.ts</code> is one hundred lines of pure assembly: persona + memory + skill discovery + activated skill bodies, in that exact order, joined by predictable headings. There is no template engine and no reflection — the prompt is built from typed inputs and a few <code>\n\n</code> joins. That&#39;s a feature: a contributor reading the file knows exactly what the model will see.</p>
+<h3 id="the-combined-builder" class="section-heading level-3"><span class="heading-text">The combined builder</span><a href="#the-combined-builder" class="anchor-link" aria-label="Link to section">¶</a></h3>
+<p><code>buildSystemPrompt</code> is the single entry point. The order matters: long-term memory comes before skills so the agent reads &quot;what we&#39;ve discussed&quot; before &quot;how to do your job.&quot;</p>
+<figure class="showless-block code-block shell">
+  <header class="block-header">
+    <span class="block-label">command</span>
+    <span class="block-language">shell</span>
+    <button type="button" class="copy-btn" aria-label="Copy to clipboard">Copy</button>
+  </header>
+  <pre><code class="language-bash hljs">sed -n &#39;82,100p&#39; api/src/lib/prompt.ts
+</code></pre>
+</figure><figure class="showless-block output-block">
+  <header class="block-header terminal-header">
+    <span class="block-label">output</span>
+    <button type="button" class="copy-btn terminal-copy" aria-label="Copy output to clipboard">Copy</button>
+  </header>
+  <pre><code class="output-content language-typescript hljs"><span class="output-line">export function buildSystemPrompt(</span><span class="output-line">  persona: string,</span><span class="output-line">  discoveries: SkillDiscovery[],</span><span class="output-line">  activated: { name: string; body: string }[],</span><span class="output-line">  memoryContext?: string,</span><span class="output-line">): string {</span><span class="output-line">  const base = persona.trim() || &quot;You are a helpful assistant.&quot;;</span><span class="output-line">  let prompt = base;</span><span class="output-line">  if (memoryContext?.trim()) {</span><span class="output-line">    prompt = withLongTermMemory(prompt, memoryContext);</span><span class="output-line">  }</span><span class="output-line">  if (discoveries.length &gt; 0) {</span><span class="output-line">    prompt = withSkillDiscoverySection(prompt, discoveries);</span><span class="output-line">  }</span><span class="output-line">  if (activated.length &gt; 0) {</span><span class="output-line">    prompt = withActivatedSkills(prompt, activated);</span><span class="output-line">  }</span><span class="output-line">  return prompt;</span><span class="output-line">}</span></code></pre>
+</figure><p>The fallback <code>&quot;You are a helpful assistant.&quot;</code> saves the runtime when an <code>.agent.md</code> body is empty or stripped to nothing — defense in depth so a misconfigured agent still gets a sensible system prompt instead of an empty string. Each helper is a small append; nothing in this file mutates state. The result is a deterministic prompt that diffs cleanly when you change a persona or activate a different skill.</p>
+<h3 id="discovery-section-format" class="section-heading level-3"><span class="heading-text">Discovery section format</span><a href="#discovery-section-format" class="anchor-link" aria-label="Link to section">¶</a></h3>
+<p>Each helper is one boring template, on purpose. The discovery section is a markdown bulleted list, prefixed with a sentence telling the model how to act on it.</p>
+<figure class="showless-block code-block shell">
+  <header class="block-header">
+    <span class="block-label">command</span>
+    <span class="block-language">shell</span>
+    <button type="button" class="copy-btn" aria-label="Copy to clipboard">Copy</button>
+  </header>
+  <pre><code class="language-bash hljs">sed -n &#39;12,26p&#39; api/src/lib/prompt.ts
+</code></pre>
+</figure><figure class="showless-block output-block">
+  <header class="block-header terminal-header">
+    <span class="block-label">output</span>
+    <button type="button" class="copy-btn terminal-copy" aria-label="Copy output to clipboard">Copy</button>
+  </header>
+  <pre><code class="output-content language-typescript hljs"><span class="output-line">export function withSkillDiscoverySection(</span><span class="output-line">  basePrompt: string,</span><span class="output-line">  discoveries: SkillDiscovery[],</span><span class="output-line">): string {</span><span class="output-line">  if (discoveries.length === 0) return basePrompt;</span><span class="output-line">  const lines = discoveries</span><span class="output-line">    .map((d) =&gt; `- **${d.name}**: ${d.description}`)</span><span class="output-line">    .join(&quot;\n&quot;);</span><span class="output-line">  return (</span><span class="output-line">    `${basePrompt}\n\n` +</span><span class="output-line">    `## Available skills (discovery index)\n\n` +</span><span class="output-line">    `Use \`activate_skill\` to load full instructions before answering domain questions.\n\n` +</span><span class="output-line">    `${lines}`</span><span class="output-line">  );</span><span class="output-line">}</span></code></pre>
+</figure><p>The discovery index is the contract between the orchestrator and the world: &quot;here are the skills that exist, and here is the tool name to call to load any of them.&quot; When the orchestrator decides a customer message is about returns, it only needs the discovery line for <code>order-management</code> to know that handing off there is the right move. The discovery section is intentionally bare so a 12-skill deployment fits in a few hundred tokens.</p>
+<h3 id="memory-comes-first" class="section-heading level-3"><span class="heading-text">Memory comes first</span><a href="#memory-comes-first" class="anchor-link" aria-label="Link to section">¶</a></h3>
+<p>Long-term memory is rendered with a header that doubles as instructions to the model.</p>
+<figure class="showless-block code-block shell">
+  <header class="block-header">
+    <span class="block-label">command</span>
+    <span class="block-language">shell</span>
+    <button type="button" class="copy-btn" aria-label="Copy to clipboard">Copy</button>
+  </header>
+  <pre><code class="language-bash hljs">sed -n &#39;59,68p&#39; api/src/lib/prompt.ts
+</code></pre>
+</figure><figure class="showless-block output-block">
+  <header class="block-header terminal-header">
+    <span class="block-label">output</span>
+    <button type="button" class="copy-btn terminal-copy" aria-label="Copy output to clipboard">Copy</button>
+  </header>
+  <pre><code class="output-content language-typescript hljs"><span class="output-line">export function withLongTermMemory(basePrompt: string, memoryContext: string): string {</span><span class="output-line">  if (!memoryContext.trim()) return basePrompt;</span><span class="output-line">  return (</span><span class="output-line">    `${basePrompt}\n\n` +</span><span class="output-line">    `## Context from previous sessions (long-term memory)\n\n` +</span><span class="output-line">    `The following are summaries of recent past conversations with this user. ` +</span><span class="output-line">    `Use them to personalize your response and avoid asking for information already provided.\n\n` +</span><span class="output-line">    `${memoryContext.trim()}`</span><span class="output-line">  );</span><span class="output-line">}</span></code></pre>
+</figure><p>The header text is a soft instruction: &quot;use them to personalize your response and avoid asking for information already provided.&quot; The model isn&#39;t forced to use the memory — but the header makes it weird <em>not</em> to. Empty memory short-circuits with the original prompt unchanged, which means a brand-new user gets exactly the same prompt structure as a returning user with zero past turns, just shorter.</p>
+<h2 id="4-tools-base-tools-ts-and-http-tools-runtime-ts" class="section-heading level-2"><span class="chapter-number">4</span><span class="heading-text">Tools — <code>base-tools.ts</code> and <code>http-tools-runtime.ts</code></span><a href="#4-tools-base-tools-ts-and-http-tools-runtime-ts" class="anchor-link" aria-label="Link to section">¶</a></h2>
+<p>The agent&#39;s hands are its tools. Some are static (any agent can use <code>mongodb_query</code>), some are factories that close over the per-turn <code>SkillRegistry</code> (<code>activate_skill</code>), and some are loaded from JSON at boot (HTTP/Lambda tools). <code>base-tools.ts</code> is the assembly point; this chapter walks the wiring.</p>
+<h3 id="the-static-tool-registry" class="section-heading level-3"><span class="heading-text">The static tool registry</span><a href="#the-static-tool-registry" class="anchor-link" aria-label="Link to section">¶</a></h3>
+<p>Four tools are global and stateless. They appear in any agent&#39;s <code>tools:</code> array by name.</p>
+<figure class="showless-block code-block shell">
+  <header class="block-header">
+    <span class="block-label">command</span>
+    <span class="block-language">shell</span>
+    <button type="button" class="copy-btn" aria-label="Copy to clipboard">Copy</button>
+  </header>
+  <pre><code class="language-bash hljs">sed -n &#39;282,287p&#39; api/src/lib/base-tools.ts
+</code></pre>
+</figure><figure class="showless-block output-block">
+  <header class="block-header terminal-header">
+    <span class="block-label">output</span>
+    <button type="button" class="copy-btn terminal-copy" aria-label="Copy output to clipboard">Copy</button>
+  </header>
+  <pre><code class="output-content language-typescript hljs"><span class="output-line">const staticToolByName: Record&lt;string, Tool&gt; = {</span><span class="output-line">  mongodb_query: mongodbQueryTool,</span><span class="output-line">  mongodb_vector_search: mongodbVectorSearchTool,</span><span class="output-line">  bedrock_kb_retrieve: bedrockKbRetrieveTool,</span><span class="output-line">  generate_embedding: generateEmbeddingTool,</span><span class="output-line">};</span></code></pre>
+</figure><p>This is the entire data-access surface for the agents: structured MongoDB queries, Atlas vector search, Bedrock Knowledge Base retrieval, and a Bedrock embedding helper. Each tool returns a <code>not_configured</code> JSON value when the corresponding env var is missing — no exceptions thrown, no half-initialized clients. The model sees the hint and routes around the missing dependency, which means the same agent definition works against an unconfigured local stack and against full Atlas + Bedrock without code changes.</p>
+<h3 id="per-turn-factories-activate-skill" class="section-heading level-3"><span class="heading-text">Per-turn factories: <code>activate_skill</code></span><a href="#per-turn-factories-activate-skill" class="anchor-link" aria-label="Link to section">¶</a></h3>
+<p>Some tools must close over per-turn state. <code>activate_skill</code> is the canonical example — it must mutate the current request&#39;s <code>SkillRegistry</code>, not some global store.</p>
+<figure class="showless-block code-block shell">
+  <header class="block-header">
+    <span class="block-label">command</span>
+    <span class="block-language">shell</span>
+    <button type="button" class="copy-btn" aria-label="Copy to clipboard">Copy</button>
+  </header>
+  <pre><code class="language-bash hljs">sed -n &#39;250,277p&#39; api/src/lib/base-tools.ts
+</code></pre>
+</figure><figure class="showless-block output-block">
+  <header class="block-header terminal-header">
+    <span class="block-label">output</span>
+    <button type="button" class="copy-btn terminal-copy" aria-label="Copy output to clipboard">Copy</button>
+  </header>
+  <pre><code class="output-content language-typescript hljs"><span class="output-line">export function makeActivateSkillTool(registry: SkillRegistry): Tool {</span><span class="output-line">  return tool({</span><span class="output-line">    name: &quot;activate_skill&quot;,</span><span class="output-line">    description:</span><span class="output-line">      &quot;Load the full instructions for a domain skill. Call this before answering questions in that domain. &quot; +</span><span class="output-line">      &quot;Available skills are listed in the system prompt discovery index.&quot;,</span><span class="output-line">    inputSchema: z.object({</span><span class="output-line">      skillName: z</span><span class="output-line">        .string()</span><span class="output-line">        .min(1)</span><span class="output-line">        .describe(&quot;Skill name from the discovery index (e.g. order-management)&quot;),</span><span class="output-line">    }),</span><span class="output-line">    callback: async (input): Promise&lt;JSONValue&gt; =&gt; {</span><span class="output-line">      const result = registry.activate(input.skillName);</span><span class="output-line">      if (!result.ok) {</span><span class="output-line">        return { ok: false, error: result.error, skillName: input.skillName };</span><span class="output-line">      }</span><span class="output-line">      return {</span><span class="output-line">        ok: true,</span><span class="output-line">        skillName: input.skillName,</span><span class="output-line">        instructions: result.body,</span><span class="output-line">        message:</span><span class="output-line">          &quot;Skill instructions loaded. Use them to answer the user&#39;s question accurately.&quot;,</span><span class="output-line">      };</span><span class="output-line">    },</span><span class="output-line">  });</span><span class="output-line">}</span><span class="output-line">​</span></code></pre>
+</figure><p>The factory is called once per turn from <code>toolsForAgent</code>. Every concurrent <code>POST /chat</code> gets its own bound <code>activate_skill</code> tool, its own <code>SkillRegistry</code>, and therefore its own activated bodies — no cross-tenant leakage. The tool returns the loaded instructions <em>as the tool result</em>, which means even though Strands does not allow mid-stream mutation of the system prompt, the model still sees the activated body in the very next inference step (because tool results become user messages in the loop).</p>
+<h3 id="composing-tools-for-an-agent" class="section-heading level-3"><span class="heading-text">Composing tools for an agent</span><a href="#composing-tools-for-an-agent" class="anchor-link" aria-label="Link to section">¶</a></h3>
+<p><code>toolsForAgent</code> walks the agent&#39;s <code>tools:</code> array and resolves each name. Three indirections live here: factory tools, skill-scoped HTTP tools, and global HTTP tools.</p>
+<figure class="showless-block code-block shell">
+  <header class="block-header">
+    <span class="block-label">command</span>
+    <span class="block-language">shell</span>
+    <button type="button" class="copy-btn" aria-label="Copy to clipboard">Copy</button>
+  </header>
+  <pre><code class="language-bash hljs">sed -n &#39;302,328p&#39; api/src/lib/base-tools.ts
+</code></pre>
+</figure><figure class="showless-block output-block">
+  <header class="block-header terminal-header">
+    <span class="block-label">output</span>
+    <button type="button" class="copy-btn terminal-copy" aria-label="Copy output to clipboard">Copy</button>
+  </header>
+  <pre><code class="output-content language-typescript hljs"><span class="output-line">export function toolsForAgent(toolNames: string[], registry: SkillRegistry): Tool[] {</span><span class="output-line">  const out: Tool[] = [makeActivateSkillTool(registry)];</span><span class="output-line">  const seen = new Set&lt;string&gt;([&quot;activate_skill&quot;]);</span><span class="output-line">  const httpTools = getHttpToolsMap();</span><span class="output-line">  for (const raw of toolNames) {</span><span class="output-line">    const name = raw.trim();</span><span class="output-line">    if (seen.has(name)) continue;</span><span class="output-line">    seen.add(name);</span><span class="output-line">    if (name === &quot;read_skill_resource&quot;) {</span><span class="output-line">      out.push(makeReadSkillResourceTool(registry));</span><span class="output-line">      continue;</span><span class="output-line">    }</span><span class="output-line">    if (name === &quot;run_skill_script&quot;) {</span><span class="output-line">      out.push(makeRunSkillScriptTool(registry));</span><span class="output-line">      continue;</span><span class="output-line">    }</span><span class="output-line">    const scoped = parseSkillScopedHttpToolName(name, registry.allowedSkills);</span><span class="output-line">    if (scoped) {</span><span class="output-line">      const def = findSkillHttpToolDefinition(scoped.skillName, scoped.localToolName);</span><span class="output-line">      if (def) {</span><span class="output-line">        out.push(makeSkillHttpConfigTool(name, scoped.skillName, def, registry));</span><span class="output-line">        continue;</span><span class="output-line">      }</span><span class="output-line">      logger.warn(&quot;[tools] skill HTTP tool definition missing&quot;, {</span><span class="output-line">        skill: scoped.skillName,</span><span class="output-line">        tool: scoped.localToolName,</span><span class="output-line">        agentEntry: name,</span></code></pre>
+</figure><p>The resolution order is the trick: factory tools first (<code>read_skill_resource</code>, <code>run_skill_script</code>), then skill-scoped HTTP tools (<code>order-management/notify_customer</code>), then global HTTP tools, then static tools. Unknown names log a warning and are dropped — the agent simply doesn&#39;t have that tool, no crash. <code>activate_skill</code> is unconditional and always first in the list, because the discovery section in the system prompt promises it exists.</p>
+<h3 id="skill-scoped-http-tools-with-ssrf-gates" class="section-heading level-3"><span class="heading-text">Skill-scoped HTTP tools with SSRF gates</span><a href="#skill-scoped-http-tools-with-ssrf-gates" class="anchor-link" aria-label="Link to section">¶</a></h3>
+<p>A skill can declare HTTP tools in <code>http-tools.json</code>, and the agent calls them as <code>skillName/toolName</code>. The runtime enforces the same activation gate as <code>read_skill_resource</code> <em>and</em> a host allowlist so the model can&#39;t be coaxed into hitting an internal URL.</p>
+<figure class="showless-block code-block shell">
+  <header class="block-header">
+    <span class="block-label">command</span>
+    <span class="block-language">shell</span>
+    <button type="button" class="copy-btn" aria-label="Copy to clipboard">Copy</button>
+  </header>
+  <pre><code class="language-bash hljs">sed -n &#39;52,66p&#39; api/src/lib/http-tools-runtime.ts
+</code></pre>
+</figure><figure class="showless-block output-block">
+  <header class="block-header terminal-header">
+    <span class="block-label">output</span>
+    <button type="button" class="copy-btn terminal-copy" aria-label="Copy output to clipboard">Copy</button>
+  </header>
+  <pre><code class="output-content language-typescript hljs"><span class="output-line">function assertUrlAllowed(urlStr: string, file: HttpToolsFile): void {</span><span class="output-line">  const sec = file.security;</span><span class="output-line">  if (!sec?.allowedHostSuffixes?.length &amp;&amp; !sec?.allowedHosts?.length) return;</span><span class="output-line">  let host: string;</span><span class="output-line">  try {</span><span class="output-line">    host = new URL(urlStr).hostname;</span><span class="output-line">  } catch {</span><span class="output-line">    throw new Error(&quot;invalid_url&quot;);</span><span class="output-line">  }</span><span class="output-line">  const exact = sec.allowedHosts ?? [];</span><span class="output-line">  if (exact.some((h) =&gt; h === host)) return;</span><span class="output-line">  const suf = sec.allowedHostSuffixes ?? [];</span><span class="output-line">  if (suf.some((s) =&gt; host === s || host.endsWith(s))) return;</span><span class="output-line">  throw new Error(`host_not_allowed:${host}`);</span><span class="output-line">}</span></code></pre>
+</figure><p>The host allowlist lives in <code>config/http-tools.json</code> at the <em>repository root</em> — not inside the skill folder — so a single security policy covers every skill&#39;s HTTP tools. The convention is <code>lambda-url.us-east-1.on.aws</code> as a suffix, which lets every Lambda Function URL in that region pass through. A misspelled URL or a coerced URL produces <code>ssrf_blocked</code> as a JSON tool result; the agent sees the failure and adapts its reply, but the network call never leaves the process.</p>
+<h2 id="5-choosing-a-model-resolve-model-ts-and-dev-mock-model-ts" class="section-heading level-2"><span class="chapter-number">5</span><span class="heading-text">Choosing a Model — <code>resolve-model.ts</code> and <code>dev-mock-model.ts</code></span><a href="#5-choosing-a-model-resolve-model-ts-and-dev-mock-model-ts" class="anchor-link" aria-label="Link to section">¶</a></h2>
+<p>A Strands <code>Agent</code> needs a <code>Model</code>. The interesting part is that the runtime supports two: the production <code>BedrockModel</code> from the SDK, and a hand-rolled <code>DevMockModel</code> that produces deterministic Strands stream events without any AWS account. The choice happens in one tiny file.</p>
+<h3 id="one-env-var-picks-the-implementation" class="section-heading level-3"><span class="heading-text">One env var picks the implementation</span><a href="#one-env-var-picks-the-implementation" class="anchor-link" aria-label="Link to section">¶</a></h3>
+<p><code>resolveModel</code> is 25 lines of decision-making. The model ID always comes from the agent&#39;s frontmatter; the implementation is gated on <code>DEV_MOCK_BACKENDS=1</code>.</p>
+<figure class="showless-block code-block shell">
+  <header class="block-header">
+    <span class="block-label">command</span>
+    <span class="block-language">shell</span>
+    <button type="button" class="copy-btn" aria-label="Copy to clipboard">Copy</button>
+  </header>
+  <pre><code class="language-bash hljs">sed -n &#39;7,31p&#39; api/src/adapters/resolve-model.ts
+</code></pre>
+</figure><figure class="showless-block output-block">
+  <header class="block-header terminal-header">
+    <span class="block-label">output</span>
+    <button type="button" class="copy-btn terminal-copy" aria-label="Copy output to clipboard">Copy</button>
+  </header>
+  <pre><code class="output-content language-typescript hljs"><span class="output-line">export function resolveModel(agentConfig: AgentDetail): Model {</span><span class="output-line">  const modelId = agentConfig.model?.trim();</span><span class="output-line">  if (!modelId) {</span><span class="output-line">    throw new Error(</span><span class="output-line">      `Agent &#39;${agentConfig.id}&#39; has no model configured. Add a &#39;model:&#39; field to ${agentConfig.id}.agent.md.`,</span><span class="output-line">    );</span><span class="output-line">  }</span><span class="output-line">​</span><span class="output-line">  if (isDevMockBackends()) {</span><span class="output-line">    return new DevMockModel({</span><span class="output-line">      modelId,</span><span class="output-line">      maxTokens: agentConfig.maxTokens,</span><span class="output-line">      temperature: agentConfig.temperature,</span><span class="output-line">      agentId: agentConfig.id,</span><span class="output-line">    });</span><span class="output-line">  }</span><span class="output-line">​</span><span class="output-line">  const region = process.env.AWS_REGION?.trim();</span><span class="output-line">  return new BedrockModel({</span><span class="output-line">    modelId,</span><span class="output-line">    maxTokens: agentConfig.maxTokens,</span><span class="output-line">    temperature: agentConfig.temperature,</span><span class="output-line">    ...(region ? { region } : {}),</span><span class="output-line">  });</span><span class="output-line">}</span></code></pre>
+</figure><p>Notice that <code>DevMockModel</code> is given the <code>agentId</code> — the mock needs to know whether it&#39;s playing the orchestrator or a specialist so it can produce realistic handoff payloads. The Bedrock path forwards <code>region</code> only when set, letting the AWS SDK fall back to its standard credential/region resolution chain. The function throws on a missing <code>model:</code> field, which is intentional — failing loudly at agent construction time is much better than streaming a confusing error mid-turn.</p>
+<h3 id="the-mock-model-exists-to-be-deterministic" class="section-heading level-3"><span class="heading-text">The mock model exists to be deterministic</span><a href="#the-mock-model-exists-to-be-deterministic" class="anchor-link" aria-label="Link to section">¶</a></h3>
+<p><code>DevMockModel</code> is the largest source file in the repo for a reason: it implements enough of the Strands streaming protocol to drive the full agent loop, including tool calls and Swarm structured outputs.</p>
+<figure class="showless-block code-block shell">
+  <header class="block-header">
+    <span class="block-label">command</span>
+    <span class="block-language">shell</span>
+    <button type="button" class="copy-btn" aria-label="Copy to clipboard">Copy</button>
+  </header>
+  <pre><code class="language-bash hljs">sed -n &#39;146,156p&#39; api/src/adapters/dev-mock-model.ts
+</code></pre>
+</figure><figure class="showless-block output-block">
+  <header class="block-header terminal-header">
+    <span class="block-label">output</span>
+    <button type="button" class="copy-btn terminal-copy" aria-label="Copy output to clipboard">Copy</button>
+  </header>
+  <pre><code class="output-content language-typescript hljs"><span class="output-line">function* emitTextStream(text: string, stopReason: &quot;endTurn&quot; | &quot;toolUse&quot; = &quot;endTurn&quot;): Generator&lt;ModelStreamEvent&gt; {</span><span class="output-line">  yield { type: &quot;modelMessageStartEvent&quot;, role: &quot;assistant&quot; };</span><span class="output-line">  yield { type: &quot;modelContentBlockStartEvent&quot; };</span><span class="output-line">  yield {</span><span class="output-line">    type: &quot;modelContentBlockDeltaEvent&quot;,</span><span class="output-line">    delta: { type: &quot;textDelta&quot;, text },</span><span class="output-line">  };</span><span class="output-line">  yield { type: &quot;modelContentBlockStopEvent&quot; };</span><span class="output-line">  yield { type: &quot;modelMessageStopEvent&quot;, stopReason };</span><span class="output-line">}</span><span class="output-line">​</span></code></pre>
+</figure><p>That five-event sequence — <code>messageStart</code>, <code>contentBlockStart</code>, <code>contentBlockDelta</code>, <code>contentBlockStop</code>, <code>messageStop</code> — is the same shape Bedrock would emit. The mock generator yields the entire reply as one delta, but downstream code can&#39;t tell the difference. The same <code>runChatStream</code> pipeline parses both with no branching for the mock case.</p>
+<h3 id="routing-inside-the-mock" class="section-heading level-3"><span class="heading-text">Routing inside the mock</span><a href="#routing-inside-the-mock" class="anchor-link" aria-label="Link to section">¶</a></h3>
+<p>The mock has just enough knowledge of the four agents to be useful for end-to-end testing. When the orchestrator sees a message about an order, the mock emits a Strands <code>strands_structured_output</code> tool use that hands off to <code>order-management</code>.</p>
+<figure class="showless-block code-block shell">
+  <header class="block-header">
+    <span class="block-label">command</span>
+    <span class="block-language">shell</span>
+    <button type="button" class="copy-btn" aria-label="Copy to clipboard">Copy</button>
+  </header>
+  <pre><code class="language-bash hljs">sed -n &#39;105,130p&#39; api/src/adapters/dev-mock-model.ts
+</code></pre>
+</figure><figure class="showless-block output-block">
+  <header class="block-header terminal-header">
+    <span class="block-label">output</span>
+    <button type="button" class="copy-btn terminal-copy" aria-label="Copy output to clipboard">Copy</button>
+  </header>
+  <pre><code class="output-content language-typescript hljs"><span class="output-line">function routeOrchestratorHandoff(userText: string): { agentId?: string; message: string } {</span><span class="output-line">  const t = userText.toLowerCase();</span><span class="output-line">  if (/\b(order|orders|ord-|tracking|shipment|delivery)\b/i.test(userText)) {</span><span class="output-line">    return {</span><span class="output-line">      agentId: &quot;order-management&quot;,</span><span class="output-line">      message: `Hand off: customer order question. User said: ${userText.slice(0, 500)}`,</span><span class="output-line">    };</span><span class="output-line">  }</span><span class="output-line">  if (/\b(product|recommend|compare|which\s+one|buy)\b/i.test(t)) {</span><span class="output-line">    return {</span><span class="output-line">      agentId: &quot;product-recommendation&quot;,</span><span class="output-line">      message: `Hand off: product guidance. User said: ${userText.slice(0, 500)}`,</span><span class="output-line">    };</span><span class="output-line">  }</span><span class="output-line">  if (/\b(fix|broken|error|issue|troubleshoot|not working|help)\b/i.test(t)) {</span><span class="output-line">    return {</span><span class="output-line">      agentId: &quot;troubleshooting&quot;,</span><span class="output-line">      message: `Hand off: troubleshooting. User said: ${userText.slice(0, 500)}`,</span><span class="output-line">    };</span><span class="output-line">  }</span><span class="output-line">  return {</span><span class="output-line">    message:</span><span class="output-line">      &quot;Thanks — I can help with orders, product recommendations, or troubleshooting. &quot; +</span><span class="output-line">      &quot;Tell me which you need, or share an order id (e.g. ORD-1001).&quot;,</span><span class="output-line">  };</span><span class="output-line">}</span></code></pre>
+</figure><p>Three regexes do the routing a real Claude-3.7 would do with reasoning. The fallback message is itself a useful integration test: a deterministic CI run can assert that an orchestrator with no recognizable intent always replies with the help text. The same structure powers <code>wantsMongoOrderQuery</code>, <code>wantsProductRecommend</code>, and <code>wantsTroubleshootingQuery</code> further up the file — together they let the mock generate plausible tool calls (<code>mongodb_query</code> for <code>ORD-1001</code>, <code>mongodb_vector_search</code> for product asks) and feed real fixture data through the loop.</p>
+<h2 id="6-the-chat-endpoint-routes-chat-ts" class="section-heading level-2"><span class="chapter-number">6</span><span class="heading-text">The Chat Endpoint — <code>routes/chat.ts</code></span><a href="#6-the-chat-endpoint-routes-chat-ts" class="anchor-link" aria-label="Link to section">¶</a></h2>
+<p><code>POST /chat</code> is where the world meets the agent loop. It validates input, decides single-agent vs Swarm, fetches long-term memory, opens an SSE response, and translates Strands events into typed JSON the UI can render. Every other API route is much simpler than this one.</p>
+<h3 id="a-small-zod-request-schema" class="section-heading level-3"><span class="heading-text">A small Zod request schema</span><a href="#a-small-zod-request-schema" class="anchor-link" aria-label="Link to section">¶</a></h3>
+<p>The request body is exactly three fields. Validation happens with Zod and the failure path returns a <code>400 INVALID_REQUEST</code> with the same envelope every other error uses.</p>
+<figure class="showless-block code-block shell">
+  <header class="block-header">
+    <span class="block-label">command</span>
+    <span class="block-language">shell</span>
+    <button type="button" class="copy-btn" aria-label="Copy to clipboard">Copy</button>
+  </header>
+  <pre><code class="language-bash hljs">sed -n &#39;16,21p&#39; api/src/routes/chat.ts
+</code></pre>
+</figure><figure class="showless-block output-block">
+  <header class="block-header terminal-header">
+    <span class="block-label">output</span>
+    <button type="button" class="copy-btn terminal-copy" aria-label="Copy output to clipboard">Copy</button>
+  </header>
+  <pre><code class="output-content language-typescript hljs"><span class="output-line">const bodySchema = z.object({</span><span class="output-line">  message: z.string().min(1),</span><span class="output-line">  sessionId: z.string().min(1),</span><span class="output-line">  agentId: z.string().optional(),</span><span class="output-line">});</span><span class="output-line">​</span></code></pre>
+</figure><p>The optional <code>agentId</code> defaults to <code>&quot;orchestrator&quot;</code> further down — letting the UI ask the orchestrator to route, or pin a conversation to a specific specialist. The UI uses the latter for its agent picker. The schema lives in the route file rather than a shared module because no other endpoint accepts the same shape.</p>
+<h3 id="user-identity-from-a-jwt-claim" class="section-heading level-3"><span class="heading-text">User identity from a JWT claim</span><a href="#user-identity-from-a-jwt-claim" class="anchor-link" aria-label="Link to section">¶</a></h3>
+<p>Every protected route exposes <code>c.get(&quot;jwtPayload&quot;)</code> — set by <code>authMiddleware</code> after <code>jose</code> verifies the bearer token against the JWKS. The chat route extracts the <code>sub</code> claim and uses it to scope sessions and memory.</p>
+<figure class="showless-block code-block shell">
+  <header class="block-header">
+    <span class="block-label">command</span>
+    <span class="block-language">shell</span>
+    <button type="button" class="copy-btn" aria-label="Copy to clipboard">Copy</button>
+  </header>
+  <pre><code class="language-bash hljs">sed -n &#39;57,72p&#39; api/src/routes/chat.ts
+</code></pre>
+</figure><figure class="showless-block output-block">
+  <header class="block-header terminal-header">
+    <span class="block-label">output</span>
+    <button type="button" class="copy-btn terminal-copy" aria-label="Copy output to clipboard">Copy</button>
+  </header>
+  <pre><code class="output-content language-typescript hljs"><span class="output-line">  // Extract userId from JWT sub claim (available when REQUIRE_AUTH + JWKS is configured).</span><span class="output-line">  const userId = c.get(&quot;jwtPayload&quot;)?.sub;</span><span class="output-line">​</span><span class="output-line">  await appendUserMessage(body.sessionId, body.message, userId);</span><span class="output-line">  const session = await getSession(body.sessionId);</span><span class="output-line">  const priorTurns = session ? session.messages.slice(0, -1) : [];</span><span class="output-line">​</span><span class="output-line">  // Fetch long-term memory when the agent opts in (memory.longTerm: true).</span><span class="output-line">  let memoryContext: string | undefined;</span><span class="output-line">  if (agent.memory?.longTerm &amp;&amp; userId) {</span><span class="output-line">    const ctx = await readLongTermMemory(userId, agentId);</span><span class="output-line">    if (ctx) {</span><span class="output-line">      memoryContext = ctx;</span><span class="output-line">      logger.debug(&quot;[chat] injecting long-term memory&quot;, { userId, agentId });</span><span class="output-line">    }</span><span class="output-line">  }</span></code></pre>
+</figure><p>The double gate on memory injection — <code>agent.memory?.longTerm &amp;&amp; userId</code> — is deliberate. Memory is opt-in per agent (the <code>orchestrator</code> doesn&#39;t need it; the <code>order-management</code> specialist does), and it requires an authenticated user; otherwise the runtime has no key to look up. <code>priorTurns</code> slices off the just-appended user message, because the Strands <code>Agent</code> will receive that message as the <code>stream()</code> argument, not as part of the seeded history.</p>
+<h3 id="sse-forwarding-loop" class="section-heading level-3"><span class="heading-text">SSE forwarding loop</span><a href="#sse-forwarding-loop" class="anchor-link" aria-label="Link to section">¶</a></h3>
+<p>The handler returns <code>streamSSE(c, …)</code> and converts every Strands-shaped event into a typed SSE event. The <code>agent_info</code> event fires first so the UI can label the assistant bubble before any tokens arrive.</p>
+<figure class="showless-block code-block shell">
+  <header class="block-header">
+    <span class="block-label">command</span>
+    <span class="block-language">shell</span>
+    <button type="button" class="copy-btn" aria-label="Copy to clipboard">Copy</button>
+  </header>
+  <pre><code class="language-bash hljs">sed -n &#39;99,128p&#39; api/src/routes/chat.ts
+</code></pre>
+</figure><figure class="showless-block output-block">
+  <header class="block-header terminal-header">
+    <span class="block-label">output</span>
+    <button type="button" class="copy-btn terminal-copy" aria-label="Copy output to clipboard">Copy</button>
+  </header>
+  <pre><code class="output-content language-typescript hljs"><span class="output-line">    try {</span><span class="output-line">      for await (const part of streamGen) {</span><span class="output-line">        if (part.type === &quot;stream_error&quot;) {</span><span class="output-line">          streamFailed = { code: part.code, message: part.message };</span><span class="output-line">          await stream.writeSSE({</span><span class="output-line">            event: &quot;error&quot;,</span><span class="output-line">            data: JSON.stringify({</span><span class="output-line">              code: part.code,</span><span class="output-line">              message: part.message,</span><span class="output-line">              requestId,</span><span class="output-line">            }),</span><span class="output-line">          });</span><span class="output-line">          break;</span><span class="output-line">        }</span><span class="output-line">        if (part.type === &quot;token&quot;) {</span><span class="output-line">          fullReply += part.text;</span><span class="output-line">          await stream.writeSSE({</span><span class="output-line">            event: &quot;token&quot;,</span><span class="output-line">            data: JSON.stringify({ text: part.text }),</span><span class="output-line">          });</span><span class="output-line">        } else if (part.type === &quot;skill_loaded&quot;) {</span><span class="output-line">          await stream.writeSSE({</span><span class="output-line">            event: &quot;skill_loaded&quot;,</span><span class="output-line">            data: JSON.stringify({ skillName: part.skillName }),</span><span class="output-line">          });</span><span class="output-line">        } else if (part.type === &quot;tool_call&quot;) {</span><span class="output-line">          await stream.writeSSE({</span><span class="output-line">            event: &quot;tool_call&quot;,</span><span class="output-line">            data: JSON.stringify({ tool: part.tool, status: part.status }),</span><span class="output-line">          });</span></code></pre>
+</figure><p>Each branch flattens a typed <code>ChatStreamPart</code> into a JSON payload tagged with an SSE <code>event:</code> name. The UI consumes those names verbatim — <code>token</code>, <code>skill_loaded</code>, <code>tool_call</code>, <code>agent_active</code>, <code>handoff</code>, <code>done</code> — and renders icons or assistant-bubble text accordingly. <code>fullReply</code> accumulates only the textual tokens; tool calls and skill loads do not pollute what later gets persisted as the assistant message. After the loop, a successful turn appends the assistant message and writes long-term memory; a failed turn skips both so a half-formed reply never makes it into history.</p>
+<h2 id="7-the-single-agent-stream-run-chat-stream-ts" class="section-heading level-2"><span class="chapter-number">7</span><span class="heading-text">The Single-Agent Stream — <code>run-chat-stream.ts</code></span><a href="#7-the-single-agent-stream-run-chat-stream-ts" class="anchor-link" aria-label="Link to section">¶</a></h2>
+<p>When the request targets a specific agent (orchestrator or a specialist), <code>routes/chat.ts</code> calls <code>runChatStream</code>. The function is an async generator that yields the typed <code>ChatStreamPart</code> events the route forwards. It handles three distinct paths inside one function: stub mode, live mode, and error fallback.</p>
+<h3 id="stub-mode-for-fast-iteration" class="section-heading level-3"><span class="heading-text">Stub mode for fast iteration</span><a href="#stub-mode-for-fast-iteration" class="anchor-link" aria-label="Link to section">¶</a></h3>
+<p>When <code>CHAT_MODE</code> is anything other than <code>&quot;live&quot;</code>, the stream produces a tokenized echo of the user&#39;s message. This is what powers the default local dev loop and CI smoke tests — no AWS, no MongoDB, no model server.</p>
+<figure class="showless-block code-block shell">
+  <header class="block-header">
+    <span class="block-label">command</span>
+    <span class="block-language">shell</span>
+    <button type="button" class="copy-btn" aria-label="Copy to clipboard">Copy</button>
+  </header>
+  <pre><code class="language-bash hljs">sed -n &#39;24,34p&#39; api/src/lib/run-chat-stream.ts
+</code></pre>
+</figure><figure class="showless-block output-block">
+  <header class="block-header terminal-header">
+    <span class="block-label">output</span>
+    <button type="button" class="copy-btn terminal-copy" aria-label="Copy output to clipboard">Copy</button>
+  </header>
+  <pre><code class="output-content language-typescript hljs"><span class="output-line">function stubParts(agentName: string, agentId: string, userMessage: string): ChatStreamPart[] {</span><span class="output-line">  const preview = userMessage.length &gt; 200 ? `${userMessage.slice(0, 200)}…` : userMessage;</span><span class="output-line">  const text =</span><span class="output-line">    `[stub] **${agentName}** (\`${agentId}\`) received: &quot;${preview}&quot;\n\n` +</span><span class="output-line">    `Set \`CHAT_MODE=live\` and configure AWS credentials + Bedrock model access to stream from Strands + Amazon Bedrock.`;</span><span class="output-line">  const parts: ChatStreamPart[] = [];</span><span class="output-line">  for (const chunk of text.split(/(\s+)/)) {</span><span class="output-line">    if (chunk.length &gt; 0) parts.push({ type: &quot;token&quot;, text: chunk });</span><span class="output-line">  }</span><span class="output-line">  return parts;</span><span class="output-line">}</span></code></pre>
+</figure><p>The reply is split on whitespace so the UI sees a stream of tokens, not a single dump — the streaming experience matches live mode even though no model is involved. The stub also names the agent and includes the env hint, which is the first instruction a developer reads when they wonder why the agent is being so terse.</p>
+<h3 id="specialist-pre-activation" class="section-heading level-3"><span class="heading-text">Specialist pre-activation</span><a href="#specialist-pre-activation" class="anchor-link" aria-label="Link to section">¶</a></h3>
+<p>The orchestrator gets only the discovery index; specialists pre-activate every skill on their list. The check in <code>runChatStream</code> is one branch.</p>
+<figure class="showless-block code-block shell">
+  <header class="block-header">
+    <span class="block-label">command</span>
+    <span class="block-language">shell</span>
+    <button type="button" class="copy-btn" aria-label="Copy to clipboard">Copy</button>
+  </header>
+  <pre><code class="language-bash hljs">sed -n &#39;79,87p&#39; api/src/lib/run-chat-stream.ts
+</code></pre>
+</figure><figure class="showless-block output-block">
+  <header class="block-header terminal-header">
+    <span class="block-label">output</span>
+    <button type="button" class="copy-btn terminal-copy" aria-label="Copy output to clipboard">Copy</button>
+  </header>
+  <pre><code class="output-content language-typescript hljs"><span class="output-line">  const isOrchestrator = params.agentId === &quot;orchestrator&quot;;</span><span class="output-line">​</span><span class="output-line">  if (!isOrchestrator &amp;&amp; ALWAYS_ACTIVATE_SKILLS &amp;&amp; agentConfig.skills.length &gt; 0) {</span><span class="output-line">    registry.activateAll();</span><span class="output-line">    for (const block of registry.activatedBlocks) {</span><span class="output-line">      yield { type: &quot;skill_loaded&quot;, skillName: block.name };</span><span class="output-line">    }</span><span class="output-line">  }</span><span class="output-line">​</span></code></pre>
+</figure><p>After pre-activation, the generator yields a <code>skill_loaded</code> event for each loaded skill. The UI uses these to render a &quot;Skill loaded: order-management&quot; badge, so the user can see — <em>before</em> the first token — that the right domain knowledge is in scope. The orchestrator&#39;s <code>skills:</code> array is empty in production, so this branch becomes a no-op for that agent.</p>
+<h3 id="translating-strands-events" class="section-heading level-3"><span class="heading-text">Translating Strands events</span><a href="#translating-strands-events" class="anchor-link" aria-label="Link to section">¶</a></h3>
+<p>The most repetitive part of the file is the <code>for await</code> over <code>strandsAgent.stream(...)</code>. Strands emits typed events; the function maps the ones we care about into <code>ChatStreamPart</code> and drops the rest.</p>
+<figure class="showless-block code-block shell">
+  <header class="block-header">
+    <span class="block-label">command</span>
+    <span class="block-language">shell</span>
+    <button type="button" class="copy-btn" aria-label="Copy to clipboard">Copy</button>
+  </header>
+  <pre><code class="language-bash hljs">sed -n &#39;127,148p&#39; api/src/lib/run-chat-stream.ts
+</code></pre>
+</figure><figure class="showless-block output-block">
+  <header class="block-header terminal-header">
+    <span class="block-label">output</span>
+    <button type="button" class="copy-btn terminal-copy" aria-label="Copy output to clipboard">Copy</button>
+  </header>
+  <pre><code class="output-content language-typescript hljs"><span class="output-line">    for await (const ev of strandsAgent.stream(params.userMessage)) {</span><span class="output-line">      if (ev.type === &quot;modelStreamUpdateEvent&quot;) {</span><span class="output-line">        const inner = ev.event;</span><span class="output-line">        if (inner.type === &quot;modelContentBlockDeltaEvent&quot; &amp;&amp; inner.delta.type === &quot;textDelta&quot;) {</span><span class="output-line">          const t = inner.delta.text;</span><span class="output-line">          if (t) yield { type: &quot;token&quot;, text: t };</span><span class="output-line">        }</span><span class="output-line">      } else if (ev.type === &quot;beforeToolCallEvent&quot;) {</span><span class="output-line">        const toolName = ev.toolUse.name;</span><span class="output-line">        yield { type: &quot;tool_call&quot;, tool: toolName, status: &quot;started&quot; };</span><span class="output-line">​</span><span class="output-line">        // Phase 2 activation event — emit skill_loaded when activate_skill is called</span><span class="output-line">        if (toolName === &quot;activate_skill&quot;) {</span><span class="output-line">          const skillName = (ev.toolUse.input as { skillName?: string }).skillName;</span><span class="output-line">          if (skillName) {</span><span class="output-line">            yield { type: &quot;skill_loaded&quot;, skillName };</span><span class="output-line">          }</span><span class="output-line">        }</span><span class="output-line">      } else if (ev.type === &quot;afterToolCallEvent&quot;) {</span><span class="output-line">        yield { type: &quot;tool_call&quot;, tool: ev.toolUse.name, status: &quot;completed&quot; };</span><span class="output-line">      }</span><span class="output-line">    }</span></code></pre>
+</figure><p>Three event types matter: text deltas become <code>token</code>, <code>beforeToolCallEvent</code> becomes <code>tool_call/started</code>, and <code>afterToolCallEvent</code> becomes <code>tool_call/completed</code>. The clever bit is the <code>activate_skill</code> interception — when the model calls that tool, the runtime <em>also</em> emits a <code>skill_loaded</code> event so the UI doesn&#39;t have to guess what the activation tool actually did. Everything else from Strands (token usage, message-stop reasons, etc.) is intentionally dropped because the UI doesn&#39;t render it.</p>
+<h3 id="failure-becomes-a-typed-error-event" class="section-heading level-3"><span class="heading-text">Failure becomes a typed error event</span><a href="#failure-becomes-a-typed-error-event" class="anchor-link" aria-label="Link to section">¶</a></h3>
+<p>Catching the exception and yielding <code>stream_error</code> — instead of letting it bubble — is what allows the route to send <code>event: error</code> over SSE and still close the connection cleanly with a <code>done</code> event.</p>
+<figure class="showless-block code-block shell">
+  <header class="block-header">
+    <span class="block-label">command</span>
+    <span class="block-language">shell</span>
+    <button type="button" class="copy-btn" aria-label="Copy to clipboard">Copy</button>
+  </header>
+  <pre><code class="language-bash hljs">sed -n &#39;149,158p&#39; api/src/lib/run-chat-stream.ts
+</code></pre>
+</figure><figure class="showless-block output-block">
+  <header class="block-header terminal-header">
+    <span class="block-label">output</span>
+    <button type="button" class="copy-btn terminal-copy" aria-label="Copy output to clipboard">Copy</button>
+  </header>
+  <pre><code class="output-content language-typescript hljs"><span class="output-line">  } catch (err) {</span><span class="output-line">    const msg = err instanceof Error ? err.message : String(err);</span><span class="output-line">    logger.error(&quot;[chat-stream] agent stream failed&quot;, { agentId: params.agentId, error: msg });</span><span class="output-line">    yield {</span><span class="output-line">      type: &quot;stream_error&quot;,</span><span class="output-line">      code: &quot;CHAT_STREAM_FAILED&quot;,</span><span class="output-line">      message: `${msg}\n\nFall back with CHAT_MODE=stub, set DEV_MOCK_BACKENDS=1 for a local Strands loop without AWS, or fix AWS region/credentials and Bedrock access.`,</span><span class="output-line">    };</span><span class="output-line">  }</span><span class="output-line">}</span></code></pre>
+</figure><p>The error message itself is documentation: the three things a developer should try are listed inline. By the time it reaches the user, this becomes the exact text in the UI&#39;s error toast — saving a trip to the runbook for the most common cause (missing AWS credentials).</p>
+<h2 id="8-swarm-mode-swarm-chat-stream-ts" class="section-heading level-2"><span class="chapter-number">8</span><span class="heading-text">Swarm Mode — <code>swarm-chat-stream.ts</code></span><a href="#8-swarm-mode-swarm-chat-stream-ts" class="anchor-link" aria-label="Link to section">¶</a></h2>
+<p>When the request targets <code>orchestrator</code> and <code>ORCHESTRATOR_MODE=swarm</code>, the route uses Strands&#39; <code>Swarm</code> primitive instead of a single <code>Agent</code>. The swarm hands the message off between specialist agents — each fully configured with its own skills and tools — until one of them decides the conversation is done.</p>
+<h3 id="building-the-roster-from-disk" class="section-heading level-3"><span class="heading-text">Building the roster from disk</span><a href="#building-the-roster-from-disk" class="anchor-link" aria-label="Link to section">¶</a></h3>
+<p>The swarm&#39;s roster is <strong>not</strong> hardcoded. It&#39;s rebuilt from <code>listAgents()</code> every call so dropping in a new <code>.agent.md</code> joins the swarm on the next request.</p>
+<figure class="showless-block code-block shell">
+  <header class="block-header">
+    <span class="block-label">command</span>
+    <span class="block-language">shell</span>
+    <button type="button" class="copy-btn" aria-label="Copy to clipboard">Copy</button>
+  </header>
+  <pre><code class="language-bash hljs">sed -n &#39;18,24p&#39; api/src/lib/swarm-chat-stream.ts
+</code></pre>
+</figure><figure class="showless-block output-block">
+  <header class="block-header terminal-header">
+    <span class="block-label">output</span>
+    <button type="button" class="copy-btn terminal-copy" aria-label="Copy output to clipboard">Copy</button>
+  </header>
+  <pre><code class="output-content language-typescript hljs"><span class="output-line">function buildSwarmAgentIds(): string[] {</span><span class="output-line">  const all = listAgents().map((a) =&gt; a.id);</span><span class="output-line">  if (all.length === 0) return [&quot;orchestrator&quot;];</span><span class="output-line">  const specialists = all.filter((id) =&gt; id !== &quot;orchestrator&quot;).sort();</span><span class="output-line">  const hasOrch = all.includes(&quot;orchestrator&quot;);</span><span class="output-line">  return hasOrch ? [&quot;orchestrator&quot;, ...specialists] : all.sort();</span><span class="output-line">}</span></code></pre>
+</figure><p>The orchestrator always leads (it&#39;s the only agent that can route), and specialists follow alphabetically. The fallback to <code>[&quot;orchestrator&quot;]</code> when no agents exist on disk is what keeps a freshly cloned repo from crashing on the first request — <code>getAgent(&quot;orchestrator&quot;)</code> will return <code>undefined</code>, the route emits <code>AGENT_NOT_FOUND</code>, and the user sees a clear error instead of a panic.</p>
+<h3 id="a-turn-through-the-swarm" class="section-heading level-3"><span class="heading-text">A turn through the swarm</span><a href="#a-turn-through-the-swarm" class="anchor-link" aria-label="Link to section">¶</a></h3>
+<p>The swarm wires every agent together by passing each one&#39;s <code>Strands Agent</code> into a <code>Swarm</code> instance and starting at the orchestrator. The flow looks like this.</p>
+<figure class="showless-block diagram-block mermaid-block">
+  <header class="block-header">
+    <span class="block-label">diagram</span>
+    <span class="block-language">mermaid</span>
+  </header>
+  <div class="mermaid-container">
+    <pre class="mermaid">sequenceDiagram
+  participant UI as Streamlit UI
+  participant Chat as routes/chat.ts
+  participant Swarm as Strands Swarm
+  participant Orch as Orchestrator Agent
+  participant Spec as Specialist Agent
+  participant Tool as mongodb_query / KB
+  UI-&gt;&gt;Chat: POST /chat (message, sessionId)
+  Chat-&gt;&gt;Swarm: stream(packed conversation)
+  Swarm-&gt;&gt;Orch: nodeStreamUpdateEvent (start)
+  Orch-&gt;&gt;Swarm: strands_structured_output { agentId: &quot;order-management&quot; }
+  Swarm--&gt;&gt;Chat: multiAgentHandoffEvent
+  Chat--&gt;&gt;UI: event: handoff
+  Swarm-&gt;&gt;Spec: nodeStreamUpdateEvent (start)
+  Chat--&gt;&gt;UI: event: agent_active
+  Spec-&gt;&gt;Tool: tool_call: mongodb_query
+  Tool--&gt;&gt;Spec: order document
+  Spec--&gt;&gt;Chat: text deltas
+  Chat--&gt;&gt;UI: event: token (stream)
+  Chat--&gt;&gt;UI: event: done
+</pre>
+  </div>
+</figure><p>The orchestrator never streams a textual answer to the customer — it produces a single <code>strands_structured_output</code> tool use whose <code>agentId</code> field tells the swarm where to hand off. When the specialist takes over, its tokens stream straight to the UI, with <code>tool_call</code> and <code>agent_active</code> SSE events interleaved so the badges appear as the work happens. A swarm turn that involves a Mongo query takes roughly four &quot;rounds&quot; of model calls (orchestrator route, specialist plan, specialist after tool result, swarm wrap-up), each visible to the UI as discrete events.</p>
+<h3 id="routing-inner-events" class="section-heading level-3"><span class="heading-text">Routing inner events</span><a href="#routing-inner-events" class="anchor-link" aria-label="Link to section">¶</a></h3>
+<p>The handler distinguishes three Strands event kinds and reacts differently to each. Type guards keep the <code>unknown</code>-typed <code>for await</code> honest.</p>
+<figure class="showless-block code-block shell">
+  <header class="block-header">
+    <span class="block-label">command</span>
+    <span class="block-language">shell</span>
+    <button type="button" class="copy-btn" aria-label="Copy to clipboard">Copy</button>
+  </header>
+  <pre><code class="language-bash hljs">sed -n &#39;101,118p&#39; api/src/lib/swarm-chat-stream.ts
+</code></pre>
+</figure><figure class="showless-block output-block">
+  <header class="block-header terminal-header">
+    <span class="block-label">output</span>
+    <button type="button" class="copy-btn terminal-copy" aria-label="Copy output to clipboard">Copy</button>
+  </header>
+  <pre><code class="output-content language-typescript hljs"><span class="output-line">      if (isBeforeNode(ev)) {</span><span class="output-line">        currentNodeId = ev.nodeId;</span><span class="output-line">        currentNodeTokenCount = 0;</span><span class="output-line">        const meta = getAgent(ev.nodeId);</span><span class="output-line">        yield {</span><span class="output-line">          type: &quot;agent_active&quot;,</span><span class="output-line">          agentId: ev.nodeId,</span><span class="output-line">          agentName: meta?.name ?? ev.nodeId,</span><span class="output-line">        };</span><span class="output-line">      } else if (isHandoff(ev)) {</span><span class="output-line">        const to = ev.targets[0] ?? &quot;&quot;;</span><span class="output-line">        yield {</span><span class="output-line">          type: &quot;handoff&quot;,</span><span class="output-line">          from: ev.source,</span><span class="output-line">          to,</span><span class="output-line">          label: &quot;&quot;,</span><span class="output-line">        };</span><span class="output-line">      } else if (isNodeStreamUpdate(ev)) {</span></code></pre>
+</figure><p><code>beforeNodeCallEvent</code> resets <code>currentNodeTokenCount</code> so the next handler can detect &quot;this specialist never streamed text, only a structured output&quot; and surface the structured output&#39;s <code>message</code> field as the final reply. Without that count, certain swarm turns would end without sending any tokens to the UI and the assistant bubble would be empty. The empty <code>label</code> on the handoff is a TODO worth noting — the route preserves the field so a future contributor can wire labels through from <code>.agent.md</code> <code>handoffs:</code> declarations without changing the event shape.</p>
+<h3 id="capping-the-loop" class="section-heading level-3"><span class="heading-text">Capping the loop</span><a href="#capping-the-loop" class="anchor-link" aria-label="Link to section">¶</a></h3>
+<p>A swarm with bad routing could ping-pong forever. The runtime caps it at twelve steps maximum, configurable down via env var.</p>
+<figure class="showless-block code-block shell">
+  <header class="block-header">
+    <span class="block-label">command</span>
+    <span class="block-language">shell</span>
+    <button type="button" class="copy-btn" aria-label="Copy to clipboard">Copy</button>
+  </header>
+  <pre><code class="language-bash hljs">sed -n &#39;92,99p&#39; api/src/lib/swarm-chat-stream.ts
+</code></pre>
+</figure><figure class="showless-block output-block">
+  <header class="block-header terminal-header">
+    <span class="block-label">output</span>
+    <button type="button" class="copy-btn terminal-copy" aria-label="Copy output to clipboard">Copy</button>
+  </header>
+  <pre><code class="output-content language-typescript hljs"><span class="output-line">  try {</span><span class="output-line">    const startId = nodes.some((n) =&gt; n.id === &quot;orchestrator&quot;) ? &quot;orchestrator&quot; : nodes[0]!.id;</span><span class="output-line">    const swarm = new Swarm({</span><span class="output-line">      nodes,</span><span class="output-line">      start: startId,</span><span class="output-line">      maxSteps: Math.min(12, Number(process.env.SWARM_MAX_STEPS ?? 8)),</span><span class="output-line">    });</span><span class="output-line">​</span></code></pre>
+</figure><p><code>Math.min(12, Number(env ?? 8))</code> is belt-and-suspenders. The env var lets a developer raise the cap, but the hard ceiling of twelve protects production from a misconfigured cluster. With four agents in the roster, twelve steps is enough for two full handoff rounds plus tool calls — generous for any sensible conversation.</p>
+<h2 id="9-sessions-and-long-term-memory-session-store-ts-and-long-term-memory-ts" class="section-heading level-2"><span class="chapter-number">9</span><span class="heading-text">Sessions and Long-Term Memory — <code>session-store.ts</code> and <code>long-term-memory.ts</code></span><a href="#9-sessions-and-long-term-memory-session-store-ts-and-long-term-memory-ts" class="anchor-link" aria-label="Link to section">¶</a></h2>
+<p>The runtime carries two flavors of memory: short-term per-session history that gets replayed into Strands, and long-term per-user history that gets injected into the system prompt. They live in separate modules because they have different lifetimes, different keys, and different storage strategies.</p>
+<h3 id="sessions-in-memory-by-default" class="section-heading level-3"><span class="heading-text">Sessions: in-memory by default</span><a href="#sessions-in-memory-by-default" class="anchor-link" aria-label="Link to section">¶</a></h3>
+<p>Every session is keyed by <code>sessionId</code> and lives in a process-local <code>Map</code>. When <code>PERSIST_CHAT_SESSIONS=1</code> is set, the same session is mirrored to the <code>chat_sessions</code> MongoDB collection so it survives restarts.</p>
+<figure class="showless-block code-block shell">
+  <header class="block-header">
+    <span class="block-label">command</span>
+    <span class="block-language">shell</span>
+    <button type="button" class="copy-btn" aria-label="Copy to clipboard">Copy</button>
+  </header>
+  <pre><code class="language-bash hljs">sed -n &#39;108,123p&#39; api/src/lib/session-store.ts
+</code></pre>
+</figure><figure class="showless-block output-block">
+  <header class="block-header terminal-header">
+    <span class="block-label">output</span>
+    <button type="button" class="copy-btn terminal-copy" aria-label="Copy output to clipboard">Copy</button>
+  </header>
+  <pre><code class="output-content language-typescript hljs"><span class="output-line">export async function getOrCreateSession(sessionId: string, userId?: string): Promise&lt;SessionRecord&gt; {</span><span class="output-line">  let s = memory.get(sessionId);</span><span class="output-line">  if (!s &amp;&amp; usePersistentChatSessions()) {</span><span class="output-line">    s = await loadFromMongo(sessionId);</span><span class="output-line">  }</span><span class="output-line">  if (!s) {</span><span class="output-line">    const now = new Date().toISOString();</span><span class="output-line">    s = { sessionId, userId, createdAt: now, messages: [] };</span><span class="output-line">    memory.set(sessionId, s);</span><span class="output-line">    if (usePersistentChatSessions()) await saveToMongo(s);</span><span class="output-line">  } else if (userId &amp;&amp; !s.userId) {</span><span class="output-line">    s.userId = userId;</span><span class="output-line">    if (usePersistentChatSessions()) await saveToMongo(s);</span><span class="output-line">  }</span><span class="output-line">  return s;</span><span class="output-line">}</span></code></pre>
+</figure><p>The in-memory <code>Map</code> always acts as the L1 cache, even with persistence enabled — every read goes through <code>memory.get</code> first, only falling through to MongoDB on a miss. The &quot;promote unauthenticated session to authenticated&quot; branch (<code>else if (userId &amp;&amp; !s.userId)</code>) handles the upgrade path: a user starts chatting unauthenticated, then signs in, and from that point the session belongs to them and survives <code>DELETE /sessions</code> ownership checks.</p>
+<h3 id="long-term-memory-keyed-by-user-and-agent" class="section-heading level-3"><span class="heading-text">Long-term memory: keyed by user and agent</span><a href="#long-term-memory-keyed-by-user-and-agent" class="anchor-link" aria-label="Link to section">¶</a></h3>
+<p>Long-term memory lives in the <code>agent_memory</code> collection. The schema is intentionally tiny so it can grow to millions of rows without a custom shard strategy.</p>
+<figure class="showless-block code-block shell">
+  <header class="block-header">
+    <span class="block-label">command</span>
+    <span class="block-language">shell</span>
+    <button type="button" class="copy-btn" aria-label="Copy to clipboard">Copy</button>
+  </header>
+  <pre><code class="language-bash hljs">sed -n &#39;101,125p&#39; api/src/lib/long-term-memory.ts
+</code></pre>
+</figure><figure class="showless-block output-block">
+  <header class="block-header terminal-header">
+    <span class="block-label">output</span>
+    <button type="button" class="copy-btn terminal-copy" aria-label="Copy output to clipboard">Copy</button>
+  </header>
+  <pre><code class="output-content language-typescript hljs"><span class="output-line">export async function writeLongTermMemory(</span><span class="output-line">  userId: string,</span><span class="output-line">  agentId: string,</span><span class="output-line">  userMessage: string,</span><span class="output-line">  assistantReply: string,</span><span class="output-line">): Promise&lt;void&gt; {</span><span class="output-line">  if (!userId || !assistantReply.trim()) return;</span><span class="output-line">  const turn: MemoryTurn = {</span><span class="output-line">    userId,</span><span class="output-line">    agentId,</span><span class="output-line">    userMessage: userMessage.slice(0, 2000),</span><span class="output-line">    assistantReply: assistantReply.slice(0, 4000),</span><span class="output-line">    ts: new Date().toISOString(),</span><span class="output-line">  };</span><span class="output-line">  try {</span><span class="output-line">    await prodWrite(turn);</span><span class="output-line">    logger.debug(&quot;[memory] wrote long-term memory turn&quot;, { userId, agentId });</span><span class="output-line">  } catch (err) {</span><span class="output-line">    logger.warn(&quot;[memory] failed to write long-term memory&quot;, {</span><span class="output-line">      userId,</span><span class="output-line">      agentId,</span><span class="output-line">      error: err instanceof Error ? err.message : String(err),</span><span class="output-line">    });</span><span class="output-line">  }</span><span class="output-line">}</span></code></pre>
+</figure><p>Two hard caps protect the database: 2,000 characters for the user message, 4,000 for the assistant reply. A model that produces an essay-length response gets truncated at write time, not at read time, so the storage cost stays bounded. A failed write logs but doesn&#39;t propagate — losing one memory turn is not worth failing the user-visible request.</p>
+<h3 id="ttl-index-auto-managed" class="section-heading level-3"><span class="heading-text">TTL index, auto-managed</span><a href="#ttl-index-auto-managed" class="anchor-link" aria-label="Link to section">¶</a></h3>
+<p>The collection has a TTL index that expires entries after 90 days by default. The runtime ensures the index exists on the first production write and never tries again in the same process.</p>
+<figure class="showless-block code-block shell">
+  <header class="block-header">
+    <span class="block-label">command</span>
+    <span class="block-language">shell</span>
+    <button type="button" class="copy-btn" aria-label="Copy to clipboard">Copy</button>
+  </header>
+  <pre><code class="language-bash hljs">sed -n &#39;39,56p&#39; api/src/lib/long-term-memory.ts
+</code></pre>
+</figure><figure class="showless-block output-block">
+  <header class="block-header terminal-header">
+    <span class="block-label">output</span>
+    <button type="button" class="copy-btn terminal-copy" aria-label="Copy output to clipboard">Copy</button>
+  </header>
+  <pre><code class="output-content language-typescript hljs"><span class="output-line">async function ensureTtlIndex(db: Awaited&lt;ReturnType&lt;typeof getMongoDb&gt;&gt;): Promise&lt;void&gt; {</span><span class="output-line">  if (ttlIndexEnsured || !db) return;</span><span class="output-line">  ttlIndexEnsured = true; // optimistic — only attempt once per process lifetime</span><span class="output-line">  const ttlDays = Number(process.env.MEMORY_TTL_DAYS ?? 90);</span><span class="output-line">  const expireAfterSeconds = Math.max(1, Math.round(ttlDays * 86400));</span><span class="output-line">  try {</span><span class="output-line">    await db.collection(COLLECTION).createIndex(</span><span class="output-line">      { ts: 1 },</span><span class="output-line">      { expireAfterSeconds, background: true },</span><span class="output-line">    );</span><span class="output-line">    logger.info(&quot;[memory] TTL index ensured on agent_memory&quot;, { expireAfterSeconds });</span><span class="output-line">  } catch (err) {</span><span class="output-line">    // Index may already exist with a different TTL — log and continue.</span><span class="output-line">    logger.warn(&quot;[memory] could not create TTL index on agent_memory (may already exist)&quot;, {</span><span class="output-line">      error: err instanceof Error ? err.message : String(err),</span><span class="output-line">    });</span><span class="output-line">  }</span><span class="output-line">}</span></code></pre>
+</figure><p>Setting <code>ttlIndexEnsured</code> to <code>true</code> <em>before</em> the <code>createIndex</code> call is intentional: if it fails (e.g. an index with different options already exists), the runtime only logs and continues. The next process restart will retry once. This trades a small risk of a single retry-failure for the much bigger benefit of never spamming <code>createIndex</code> calls during normal operation. The 90-day default means a customer-service interaction from three months ago naturally falls out of the agent&#39;s &quot;memory&quot; without any cleanup job.</p>
+<h2 id="10-authentication-middleware-auth-ts" class="section-heading level-2"><span class="chapter-number">10</span><span class="heading-text">Authentication — <code>middleware/auth.ts</code></span><a href="#10-authentication-middleware-auth-ts" class="anchor-link" aria-label="Link to section">¶</a></h2>
+<p>The auth middleware is sixty lines and supports three operating modes selected by environment variables alone. Knowing which mode you&#39;re in is a recurring source of confusion, so this chapter walks each one explicitly.</p>
+<h3 id="three-modes-two-env-vars" class="section-heading level-3"><span class="heading-text">Three modes, two env vars</span><a href="#three-modes-two-env-vars" class="anchor-link" aria-label="Link to section">¶</a></h3>
+<p>The flow chart is short: open if not required, opaque-bearer if required without JWKS, fully verified JWT if JWKS is configured.</p>
+<figure class="showless-block code-block shell">
+  <header class="block-header">
+    <span class="block-label">command</span>
+    <span class="block-language">shell</span>
+    <button type="button" class="copy-btn" aria-label="Copy to clipboard">Copy</button>
+  </header>
+  <pre><code class="language-bash hljs">sed -n &#39;1,8p&#39; api/src/middleware/auth.ts
+</code></pre>
+</figure><figure class="showless-block output-block">
+  <header class="block-header terminal-header">
+    <span class="block-label">output</span>
+    <button type="button" class="copy-btn terminal-copy" aria-label="Copy output to clipboard">Copy</button>
+  </header>
+  <pre><code class="output-content language-typescript hljs"><span class="output-line">import type { MiddlewareHandler } from &quot;hono&quot;;</span><span class="output-line">import { isJwksAuthConfigured, verifyBearerJwt } from &quot;../lib/jwt-verify.ts&quot;;</span><span class="output-line">​</span><span class="output-line">const allowUnauthenticated = () =&gt;</span><span class="output-line">  process.env.ALLOW_UNAUTHENTICATED === &quot;true&quot; ||</span><span class="output-line">  process.env.ALLOW_UNAUTHENTICATED === &quot;1&quot; ||</span><span class="output-line">  process.env.REQUIRE_AUTH !== &quot;true&quot;;</span><span class="output-line">​</span></code></pre>
+</figure><p>The default is <strong>open</strong> — <code>REQUIRE_AUTH</code> is not <code>&quot;true&quot;</code>, so requests pass without a header. Setting <code>REQUIRE_AUTH=true</code> flips the gate. The <code>ALLOW_UNAUTHENTICATED</code> override exists for staging environments where some operators want to keep the gate closed in production but bypass it for smoke tests. Three lines that pack a lot of operational meaning.</p>
+<h3 id="bearer-extraction-with-no-jwks" class="section-heading level-3"><span class="heading-text">Bearer extraction with no JWKS</span><a href="#bearer-extraction-with-no-jwks" class="anchor-link" aria-label="Link to section">¶</a></h3>
+<p>When the gate is closed but no JWKS endpoint is configured, the runtime accepts any non-empty Bearer token. This is the local dev mode: a developer sends <code>Authorization: Bearer dev-user-1</code>, gets through the gate, and <em>gets no <code>userId</code></em> (because nothing parsed the token). For long-term memory testing, this is the recommended setup.</p>
+<figure class="showless-block code-block shell">
+  <header class="block-header">
+    <span class="block-label">command</span>
+    <span class="block-language">shell</span>
+    <button type="button" class="copy-btn" aria-label="Copy to clipboard">Copy</button>
+  </header>
+  <pre><code class="language-bash hljs">sed -n &#39;14,40p&#39; api/src/middleware/auth.ts
+</code></pre>
+</figure><figure class="showless-block output-block">
+  <header class="block-header terminal-header">
+    <span class="block-label">output</span>
+    <button type="button" class="copy-btn terminal-copy" aria-label="Copy output to clipboard">Copy</button>
+  </header>
+  <pre><code class="output-content language-typescript hljs"><span class="output-line">  const auth = c.req.header(&quot;Authorization&quot;);</span><span class="output-line">  if (!auth?.startsWith(&quot;Bearer &quot;) || auth.length &lt; 15) {</span><span class="output-line">    return c.json(</span><span class="output-line">      {</span><span class="output-line">        error: {</span><span class="output-line">          code: &quot;UNAUTHORIZED&quot;,</span><span class="output-line">          message: &quot;Missing or invalid Authorization header.&quot;,</span><span class="output-line">          requestId: c.get(&quot;requestId&quot;) ?? &quot;unknown&quot;,</span><span class="output-line">        },</span><span class="output-line">      },</span><span class="output-line">      401,</span><span class="output-line">    );</span><span class="output-line">  }</span><span class="output-line">  const token = auth.slice(7).trim();</span><span class="output-line">  if (!token) {</span><span class="output-line">    return c.json(</span><span class="output-line">      {</span><span class="output-line">        error: {</span><span class="output-line">          code: &quot;UNAUTHORIZED&quot;,</span><span class="output-line">          message: &quot;Missing or invalid Authorization header.&quot;,</span><span class="output-line">          requestId: c.get(&quot;requestId&quot;) ?? &quot;unknown&quot;,</span><span class="output-line">        },</span><span class="output-line">      },</span><span class="output-line">      401,</span><span class="output-line">    );</span><span class="output-line">  }</span><span class="output-line">​</span></code></pre>
+</figure><p>The minimum-length check (<code>auth.length &lt; 15</code>) is a cheap defense against <code>Authorization: Bearer </code> (literal trailing space) and similarly malformed headers — there&#39;s no real JWT shorter than that. Both rejection paths use the same <code>UNAUTHORIZED</code> envelope with a <code>requestId</code> correlation id, which lines up with the rest of the API&#39;s error shape.</p>
+<h3 id="full-jwt-verification-with-jose" class="section-heading level-3"><span class="heading-text">Full JWT verification with <code>jose</code></span><a href="#full-jwt-verification-with-jose" class="anchor-link" aria-label="Link to section">¶</a></h3>
+<p>When <code>AUTH_JWKS_URI</code> and <code>AUTH_ISSUER</code> are both set, <code>isJwksAuthConfigured()</code> returns true and the middleware actually verifies the signature, expiry, issuer, and audience.</p>
+<figure class="showless-block code-block shell">
+  <header class="block-header">
+    <span class="block-label">command</span>
+    <span class="block-language">shell</span>
+    <button type="button" class="copy-btn" aria-label="Copy to clipboard">Copy</button>
+  </header>
+  <pre><code class="language-bash hljs">sed -n &#39;41,57p&#39; api/src/middleware/auth.ts
+</code></pre>
+</figure><figure class="showless-block output-block">
+  <header class="block-header terminal-header">
+    <span class="block-label">output</span>
+    <button type="button" class="copy-btn terminal-copy" aria-label="Copy output to clipboard">Copy</button>
+  </header>
+  <pre><code class="output-content language-typescript hljs"><span class="output-line">  if (isJwksAuthConfigured()) {</span><span class="output-line">    try {</span><span class="output-line">      const payload = await verifyBearerJwt(token);</span><span class="output-line">      c.set(&quot;jwtPayload&quot;, payload);</span><span class="output-line">    } catch {</span><span class="output-line">      return c.json(</span><span class="output-line">        {</span><span class="output-line">          error: {</span><span class="output-line">            code: &quot;INVALID_TOKEN&quot;,</span><span class="output-line">            message: &quot;Invalid or expired token.&quot;,</span><span class="output-line">            requestId: c.get(&quot;requestId&quot;) ?? &quot;unknown&quot;,</span><span class="output-line">          },</span><span class="output-line">        },</span><span class="output-line">        401,</span><span class="output-line">      );</span><span class="output-line">    }</span><span class="output-line">  }</span></code></pre>
+</figure><p>The verified payload is stashed on the Hono context as <code>jwtPayload</code>, where every protected route reads it as <code>c.get(&quot;jwtPayload&quot;)?.sub</code>. Note the distinct error code: <code>UNAUTHORIZED</code> for &quot;no Bearer&quot;, <code>INVALID_TOKEN</code> for &quot;Bearer that doesn&#39;t verify&quot;. A monitoring dashboard can alarm on a sudden spike of <code>INVALID_TOKEN</code> (key rotation gone wrong) without drowning in baseline <code>UNAUTHORIZED</code> (logged-out users hitting protected URLs).</p>
+<h2 id="11-the-streamlit-ui-ui-app-py-chat-panel-py-api-client-py" class="section-heading level-2"><span class="chapter-number">11</span><span class="heading-text">The Streamlit UI — <code>ui/app.py</code>, <code>chat_panel.py</code>, <code>api_client.py</code></span><a href="#11-the-streamlit-ui-ui-app-py-chat-panel-py-api-client-py" class="anchor-link" aria-label="Link to section">¶</a></h2>
+<p>The UI is intentionally thin. <code>app.py</code> wires settings and renders the layout, <code>api_client.py</code> is a typed SSE parser, and <code>chat_panel.py</code> is a streaming view that updates an <code>st.empty()</code> placeholder for every token. There is no client-side state machine — Streamlit&#39;s session state plus the API&#39;s typed events are enough.</p>
+<h3 id="app-entry-forty-five-lines" class="section-heading level-3"><span class="heading-text">App entry: forty-five lines</span><a href="#app-entry-forty-five-lines" class="anchor-link" aria-label="Link to section">¶</a></h3>
+<p><code>app.py</code> is the most legible entry point in the project — every line is either layout, settings, or a delegated function call.</p>
+<figure class="showless-block code-block shell">
+  <header class="block-header">
+    <span class="block-label">command</span>
+    <span class="block-language">shell</span>
+    <button type="button" class="copy-btn" aria-label="Copy to clipboard">Copy</button>
+  </header>
+  <pre><code class="language-bash hljs">sed -n &#39;20,45p&#39; ui/app.py
+</code></pre>
+</figure><figure class="showless-block output-block">
+  <header class="block-header terminal-header">
+    <span class="block-label">output</span>
+    <button type="button" class="copy-btn terminal-copy" aria-label="Copy output to clipboard">Copy</button>
+  </header>
+  <pre><code class="output-content language-python hljs"><span class="output-line">st.set_page_config(page_title=&quot;Multi-Agent Chat&quot;, layout=&quot;wide&quot;)</span><span class="output-line">​</span><span class="output-line">settings = load_settings()</span><span class="output-line">api_token = ensure_api_bearer_token(settings)</span><span class="output-line">​</span><span class="output-line">st.title(&quot;Multi-agent chat&quot;)</span><span class="output-line">_auth_hint = (</span><span class="output-line">    &quot;API calls use **Cognito** access tokens (`STREAMLIT_COGNITO_*`). &quot;</span><span class="output-line">    if settings.cognito</span><span class="output-line">    else &quot;no UI auth — API is unauthenticated unless you set `STREAMLIT_COGNITO_*` &quot;</span><span class="output-line">    &quot;(then this app signs in via Cognito and sends `Authorization: Bearer`). &quot;</span><span class="output-line">    &quot;With `REQUIRE_AUTH=true`, configure the same pool on the API (`AUTH_JWKS_URI`, `AUTH_ISSUER`, …). &quot;</span><span class="output-line">)</span><span class="output-line">st.caption(</span><span class="output-line">    f&quot;API: `{settings.api_base}` — {_auth_hint}&quot;</span><span class="output-line">    &quot;Use **Sessions** in the sidebar for a full list.&quot;</span><span class="output-line">)</span><span class="output-line">​</span><span class="output-line">ensure_defaults()</span><span class="output-line">​</span><span class="output-line">with st.sidebar:</span><span class="output-line">    render_cognito_logout(settings)</span><span class="output-line">    agent_id = render_session_and_agent_sidebar(settings.api_base, api_token)</span><span class="output-line">​</span><span class="output-line">render_message_history()</span><span class="output-line">handle_chat_input(settings.api_base, api_token, agent_id)</span></code></pre>
+</figure><p><code>ensure_api_bearer_token</code> returns either a Cognito access token or <code>None</code>. The auth caption changes shape based on whether Cognito is configured, so a developer running locally sees one help text and a Cognito-deployed user sees a shorter one. The sidebar lets a user pick which agent to chat with — it can talk directly to the orchestrator or pin the conversation to a specialist. The two-line <code>render_message_history</code> + <code>handle_chat_input</code> at the bottom is the entire chat UI; everything else lives in the helpers.</p>
+<h3 id="typed-sse-events" class="section-heading level-3"><span class="heading-text">Typed SSE events</span><a href="#typed-sse-events" class="anchor-link" aria-label="Link to section">¶</a></h3>
+<p>The API client decodes the SSE stream into dataclasses, one per event kind. Streaming a token straight through Python without classes would work, but losing the typed envelope means <code>chat_panel.py</code> would need an <code>if event.startswith(...)</code> chain.</p>
+<figure class="showless-block code-block shell">
+  <header class="block-header">
+    <span class="block-label">command</span>
+    <span class="block-language">shell</span>
+    <button type="button" class="copy-btn" aria-label="Copy to clipboard">Copy</button>
+  </header>
+  <pre><code class="language-bash hljs">sed -n &#39;25,52p&#39; ui/lib/api_client.py
+</code></pre>
+</figure><figure class="showless-block output-block">
+  <header class="block-header terminal-header">
+    <span class="block-label">output</span>
+    <button type="button" class="copy-btn terminal-copy" aria-label="Copy output to clipboard">Copy</button>
+  </header>
+  <pre><code class="output-content language-python hljs"><span class="output-line">@dataclass</span><span class="output-line">class TokenEvent:</span><span class="output-line">    text: str</span><span class="output-line">​</span><span class="output-line">​</span><span class="output-line">@dataclass</span><span class="output-line">class AgentActiveEvent:</span><span class="output-line">    agent_id: str</span><span class="output-line">    agent_name: str</span><span class="output-line">​</span><span class="output-line">​</span><span class="output-line">@dataclass</span><span class="output-line">class HandoffEvent:</span><span class="output-line">    from_agent: str</span><span class="output-line">    to_agent: str</span><span class="output-line">​</span><span class="output-line">​</span><span class="output-line">@dataclass</span><span class="output-line">class ToolCallEvent:</span><span class="output-line">    tool: str</span><span class="output-line">    status: str  # &quot;started&quot; | &quot;completed&quot;</span><span class="output-line">​</span><span class="output-line">​</span><span class="output-line">@dataclass</span><span class="output-line">class SkillLoadedEvent:</span><span class="output-line">    skill_name: str</span><span class="output-line">​</span><span class="output-line">​</span></code></pre>
+</figure><p>Six dataclasses cover every event the API can emit. The union type at the bottom of the file, <code>ChatStreamEvent</code>, makes the generator&#39;s return type honest — a caller can <code>match</code> or <code>isinstance</code>-check exhaustively. This is the same shape as the API&#39;s <code>ChatStreamPart</code> discriminated union, just translated into Python idioms. Keeping the names identical (<code>tool</code>, <code>status</code>, <code>agent_name</code>) reduces friction when a contributor jumps between the two languages.</p>
+<h3 id="streaming-a-token-at-a-time" class="section-heading level-3"><span class="heading-text">Streaming a token at a time</span><a href="#streaming-a-token-at-a-time" class="anchor-link" aria-label="Link to section">¶</a></h3>
+<p><code>chat_panel.py</code> is the magic. It carries an <code>st.empty()</code> placeholder for the current agent&#39;s text and rewrites it on every <code>TokenEvent</code>, with a trailing <code>▌</code> cursor that disappears when the stream ends.</p>
+<figure class="showless-block code-block shell">
+  <header class="block-header">
+    <span class="block-label">command</span>
+    <span class="block-language">shell</span>
+    <button type="button" class="copy-btn" aria-label="Copy to clipboard">Copy</button>
+  </header>
+  <pre><code class="language-bash hljs">sed -n &#39;70,90p&#39; ui/lib/chat_panel.py
+</code></pre>
+</figure><figure class="showless-block output-block">
+  <header class="block-header terminal-header">
+    <span class="block-label">output</span>
+    <button type="button" class="copy-btn terminal-copy" aria-label="Copy output to clipboard">Copy</button>
+  </header>
+  <pre><code class="output-content language-python hljs"><span class="output-line">                if isinstance(ev, TokenEvent):</span><span class="output-line">                    full += ev.text</span><span class="output-line">                    current_text += ev.text</span><span class="output-line">                    text_placeholder.markdown(current_text + &quot;▌&quot;)</span><span class="output-line">​</span><span class="output-line">                elif isinstance(ev, AgentActiveEvent):</span><span class="output-line">                    if agent_seen:</span><span class="output-line">                        # New agent coming in — close previous block, open new one</span><span class="output-line">                        _new_agent_block()</span><span class="output-line">                    agent_seen = True</span><span class="output-line">                    badge = f&quot;{_AGENT_ICON} **{ev.agent_name}** active&quot;</span><span class="output-line">                    badges.append(badge)</span><span class="output-line">                    with status_container:</span><span class="output-line">                        st.caption(badge)</span><span class="output-line">​</span><span class="output-line">                elif isinstance(ev, HandoffEvent):</span><span class="output-line">                    badge = f&quot;{_HANDOFF_ICON} Handoff: `{ev.from_agent}` → `{ev.to_agent}`&quot;</span><span class="output-line">                    badges.append(badge)</span><span class="output-line">                    with status_container:</span><span class="output-line">                        st.caption(badge)</span><span class="output-line">​</span></code></pre>
+</figure><p>The double accumulator (<code>full</code> and <code>current_text</code>) lets the UI start a new text block when an <code>AgentActiveEvent</code> fires after the orchestrator has already sent something. The previous text gets finalized (cursor removed), a fresh placeholder opens, and the new agent&#39;s tokens stream into it. The result, visually, is a chat bubble that looks like a transcript of &quot;Orchestrator: Let me check… [handoff badge] Order Management: Your order ORD-1001 is in transit.&quot; Every <code>▌</code> you see in the bubble is the streaming cursor for the <em>current</em> agent block; the other blocks are already finalized.</p>
+<h3 id="robust-sse-parsing" class="section-heading level-3"><span class="heading-text">Robust SSE parsing</span><a href="#robust-sse-parsing" class="anchor-link" aria-label="Link to section">¶</a></h3>
+<p>The line parser ignores empty lines, resets <code>pending_event</code> between events, and silently drops any data that isn&#39;t valid JSON. This is deliberate: a misbehaving proxy or chunked-transfer hiccup shouldn&#39;t crash the chat.</p>
+<figure class="showless-block code-block shell">
+  <header class="block-header">
+    <span class="block-label">command</span>
+    <span class="block-language">shell</span>
+    <button type="button" class="copy-btn" aria-label="Copy to clipboard">Copy</button>
+  </header>
+  <pre><code class="language-bash hljs">sed -n &#39;103,125p&#39; ui/lib/api_client.py
+</code></pre>
+</figure><figure class="showless-block output-block">
+  <header class="block-header terminal-header">
+    <span class="block-label">output</span>
+    <button type="button" class="copy-btn terminal-copy" aria-label="Copy output to clipboard">Copy</button>
+  </header>
+  <pre><code class="output-content language-python hljs"><span class="output-line">        pending_event: str | None = None</span><span class="output-line">        for line in resp.iter_lines(decode_unicode=True):</span><span class="output-line">            if line is None:</span><span class="output-line">                continue</span><span class="output-line">            line = line.strip()</span><span class="output-line">            if not line:</span><span class="output-line">                pending_event = None</span><span class="output-line">                continue</span><span class="output-line">            if line.startswith(&quot;event:&quot;):</span><span class="output-line">                pending_event = line[6:].strip()</span><span class="output-line">                continue</span><span class="output-line">            if not line.startswith(&quot;data:&quot;):</span><span class="output-line">                continue</span><span class="output-line">            raw = line[5:].strip()</span><span class="output-line">            try:</span><span class="output-line">                data = json.loads(raw)</span><span class="output-line">            except json.JSONDecodeError:</span><span class="output-line">                continue</span><span class="output-line">            if not isinstance(data, dict):</span><span class="output-line">                continue</span><span class="output-line">            ev = pending_event or &quot;message&quot;</span><span class="output-line">            if ev == &quot;error&quot;:</span><span class="output-line">                code = str(data.get(&quot;code&quot;) or &quot;UNKNOWN&quot;)</span></code></pre>
+</figure><p>The parser implements just enough of the SSE spec for this app: <code>event:</code>/<code>data:</code> pairs separated by blank lines. A blank line clears the pending event, which means a malformed <code>data:</code> block in between two well-formed events doesn&#39;t poison the next event&#39;s typing. The <code>event == &quot;error&quot;</code> branch raises <code>ChatStreamError</code>, which <code>chat_panel.py</code> catches to render the error inside the assistant&#39;s bubble — no separate toast, no popup, just an in-line error message where the response would have been.</p>
+<h2 id="12-the-whole-picture" class="section-heading level-2"><span class="chapter-number">12</span><span class="heading-text">The Whole Picture</span><a href="#12-the-whole-picture" class="anchor-link" aria-label="Link to section">¶</a></h2>
+<p>A single chat message walks the entire system in under a second. The Streamlit UI (<code>ui/app.py</code>, <code>ui/lib/chat_panel.py</code>, <code>ui/lib/api_client.py</code>) opens a POST to <code>/chat</code>. The Hono app (<code>api/src/app.ts</code>) routes through three middleware (<code>request-id</code>, <code>access-log</code>, <code>cors</code>) and into <code>auth.ts</code>, which optionally verifies a JWT against a JWKS. The chat route (<code>api/src/routes/chat.ts</code>) reads the <code>agentId</code> from the body, asks <code>config-scan.ts</code> for the agent&#39;s frontmatter, and decides between <code>run-chat-stream.ts</code> and <code>swarm-chat-stream.ts</code> via <code>orchestrator-mode.ts</code>.</p>
+<p>Both stream functions ask <code>create-strands-agent.ts</code> for a fully wired Strands <code>Agent</code>. That involves four collaborators: <code>skill-loader.ts</code> builds a per-turn <code>SkillRegistry</code>, <code>prompt.ts</code> assembles the system prompt from persona + memory + skill bodies, <code>resolve-model.ts</code> picks <code>BedrockModel</code> or <code>DevMockModel</code> (defined in <code>dev-mock-model.ts</code>), and <code>base-tools.ts</code> constructs the tool list — combining static tools, factory tools that close over the registry, and HTTP tools loaded from <code>http-tools-runtime.ts</code> and <code>skill-http-tools-load.ts</code>. Long-term memory comes from <code>long-term-memory.ts</code> (which manages its own TTL index against the <code>agent_memory</code> MongoDB collection), and short-term history from <code>session-store.ts</code> (with optional persistence via <code>chat-sessions-collection.ts</code>).</p>
+<p>When the model needs data, it calls <code>mongodb_query</code> or <code>mongodb_vector_search</code>, both implemented in <code>adapters/mongo-data.ts</code> against the shared client in <code>lib/mongo-client.ts</code>. When it needs RAG, it calls <code>bedrock_kb_retrieve</code> from <code>adapters/mock-retrieval.ts</code>. When it needs a domain skill&#39;s reference markdown or to invoke a <code>.mjs</code> policy script, the per-turn <code>SkillRegistry</code> in <code>skill-loader.ts</code> enforces the allowlist + activation gates and <code>base-tools.ts</code> reads or imports the file. When it calls a Lambda Function URL, <code>http-tools-runtime.ts</code> runs the request through the SSRF allowlist defined in <code>config/http-tools.json</code>.</p>
+<p>Every domain decision is markdown. Every infrastructure decision is an env var. The TypeScript in between (<code>api/src/lib/</code>, <code>api/src/routes/</code>, <code>api/src/middleware/</code>, <code>api/src/adapters/</code>) is a thin, typed plumbing layer that makes the same agent loop work in three configurations: a fully mocked local dev loop, a half-real Atlas-backed integration test, and a production deploy on Bedrock with Cognito-secured users. Adding a fifth specialist agent — say, <code>warranty.agent.md</code> with a matching <code>config/skills/warranty/SKILL.md</code> — needs zero TypeScript changes. That is the system in one sentence.</p>
+
+    </main>
+  </div>
+
+  <footer class="site-footer">
+  <span>Rendered with <a href="https://github.com/" class="brand">Showless</a> · static, verifiable walkthroughs</span>
+  <span class="footer-id">id <code>36d75d07-8615-4783-971c-ee4646b07f4e</code></span>
+</footer>
+
+  <button type="button" class="back-to-top" aria-label="Back to top" title="Back to top">↑</button>
+
+  <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.min.js"></script>
+  <script>
+(function () {
+  'use strict';
+
+  var root = document.documentElement;
+  var THEME_KEY = 'showless-theme';
+  var ICONS = { auto: '◐', light: '☀', dark: '☾' };
+
+  function currentEffectiveTheme() {
+    var attr = root.getAttribute('data-theme') || 'auto';
+    if (attr === 'auto') {
+      return (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) ? 'dark' : 'light';
+    }
+    return attr;
+  }
+
+  function applyTheme(theme, opts) {
+    opts = opts || {};
+    root.setAttribute('data-theme', theme);
+    try { localStorage.setItem(THEME_KEY, theme); } catch (e) { /* private mode */ }
+    var icon = document.querySelector('.theme-icon');
+    if (icon) icon.textContent = ICONS[theme] || ICONS.auto;
+    if (opts.rerenderMermaid !== false) rerenderMermaid();
+  }
+
+  // Capture every mermaid source into dataset.source BEFORE we touch the DOM
+  // or kick off rendering. This avoids a race where mermaid replaces the
+  // <pre> textContent with rendered SVG before we've stored the original.
+  var mermaidContainers = [];
+  document.querySelectorAll('pre.mermaid').forEach(function (node) {
+    if (!node.dataset.source) node.dataset.source = node.textContent;
+    var container = node.parentElement;
+    if (container) mermaidContainers.push({ container: container, source: node.dataset.source });
+  });
+
+  var savedTheme = 'auto';
+  try { savedTheme = localStorage.getItem(THEME_KEY) || 'auto'; } catch (e) {}
+  // Apply the theme attribute without triggering a mermaid render — we'll
+  // do that explicitly once below.
+  applyTheme(savedTheme, { rerenderMermaid: false });
+
+  var toggle = document.querySelector('.theme-toggle');
+  if (toggle) {
+    toggle.addEventListener('click', function () {
+      var current = root.getAttribute('data-theme') || 'auto';
+      var next = current === 'light' ? 'dark' : current === 'dark' ? 'auto' : 'light';
+      applyTheme(next);
+    });
+  }
+
+  if (window.matchMedia) {
+    window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', function () {
+      if ((root.getAttribute('data-theme') || 'auto') === 'auto') {
+        rerenderMermaid();
+      }
+    });
+  }
+
+  // Reading progress
+  var progress = document.querySelector('.reading-progress-fill');
+  function updateProgress() {
+    if (!progress) return;
+    var scrollable = document.documentElement.scrollHeight - window.innerHeight;
+    var ratio = scrollable > 0 ? Math.min(1, Math.max(0, window.scrollY / scrollable)) : 0;
+    progress.style.transform = 'scaleX(' + ratio + ')';
+  }
+  document.addEventListener('scroll', updateProgress, { passive: true });
+  updateProgress();
+
+  // Back-to-top
+  var backToTop = document.querySelector('.back-to-top');
+  function updateBackToTop() {
+    if (!backToTop) return;
+    if (window.scrollY > 600) backToTop.classList.add('visible');
+    else backToTop.classList.remove('visible');
+  }
+  document.addEventListener('scroll', updateBackToTop, { passive: true });
+  if (backToTop) backToTop.addEventListener('click', function () { window.scrollTo({ top: 0, behavior: 'smooth' }); });
+  updateBackToTop();
+
+  // TOC active link via IntersectionObserver
+  var headings = document.querySelectorAll('.content h2, .content h3');
+  var tocLinks = Array.prototype.slice.call(document.querySelectorAll('.toc a'));
+  var linkMap = {};
+  tocLinks.forEach(function (a) {
+    var href = a.getAttribute('href') || '';
+    if (href.indexOf('#') === 0) linkMap[href.slice(1)] = a;
+  });
+
+  function setActive(id) {
+    tocLinks.forEach(function (a) { a.classList.remove('active'); });
+    var link = linkMap[id];
+    if (link) {
+      link.classList.add('active');
+      var inner = document.querySelector('.toc-inner');
+      if (inner) {
+        var top = link.offsetTop - inner.offsetTop;
+        if (top < inner.scrollTop || top + link.offsetHeight > inner.scrollTop + inner.clientHeight) {
+          inner.scrollTo({ top: top - 40, behavior: 'smooth' });
+        }
+      }
+    }
+  }
+
+  if ('IntersectionObserver' in window && headings.length) {
+    var visibleIds = [];
+    var observer = new IntersectionObserver(function (entries) {
+      entries.forEach(function (entry) {
+        if (entry.isIntersecting) {
+          if (visibleIds.indexOf(entry.target.id) === -1) visibleIds.push(entry.target.id);
+        } else {
+          var idx = visibleIds.indexOf(entry.target.id);
+          if (idx !== -1) visibleIds.splice(idx, 1);
+        }
+      });
+      if (visibleIds.length) {
+        // Pick the topmost visible heading.
+        var first = visibleIds[0];
+        var firstTop = Number.MAX_VALUE;
+        visibleIds.forEach(function (id) {
+          var el = document.getElementById(id);
+          if (el && el.getBoundingClientRect().top < firstTop) {
+            firstTop = el.getBoundingClientRect().top;
+            first = id;
+          }
+        });
+        setActive(first);
+      }
+    }, { rootMargin: '-30% 0px -55% 0px', threshold: 0 });
+    headings.forEach(function (h) { observer.observe(h); });
+  }
+
+  // Section reveal on scroll
+  if ('IntersectionObserver' in window) {
+    var revealTargets = document.querySelectorAll(
+      '.section-heading, .showless-block, .content > p, .content > ul, .content > ol, .content > blockquote'
+    );
+    var revealObserver = new IntersectionObserver(function (entries) {
+      entries.forEach(function (entry) {
+        if (entry.isIntersecting) {
+          entry.target.classList.add('visible');
+          revealObserver.unobserve(entry.target);
+        }
+      });
+    }, { rootMargin: '0px 0px -10% 0px', threshold: 0.05 });
+    revealTargets.forEach(function (el) { revealObserver.observe(el); });
+  } else {
+    document.querySelectorAll(
+      '.section-heading, .showless-block, .content > p, .content > ul, .content > ol, .content > blockquote'
+    ).forEach(function (el) { el.classList.add('visible'); });
+  }
+
+  // Copy buttons
+  document.querySelectorAll('.copy-btn').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var card = btn.closest('.showless-block');
+      if (!card) return;
+      var text;
+      var lineNodes = card.querySelectorAll('.output-line');
+      if (lineNodes.length) {
+        // Output blocks render each line in its own span; rebuild the
+        // newline-separated text and strip the zero-width-space placeholder
+        // we use to keep empty lines visible.
+        var parts = [];
+        lineNodes.forEach(function (n) {
+          var t = n.textContent.replace(/\u200B/g, '');
+          parts.push(t);
+        });
+        text = parts.join('\n');
+      } else {
+        var pre = card.querySelector('pre');
+        if (!pre) return;
+        text = pre.innerText;
+      }
+      var done = function () {
+        var original = btn.textContent;
+        btn.textContent = 'Copied';
+        btn.classList.add('copied');
+        setTimeout(function () {
+          btn.textContent = original;
+          btn.classList.remove('copied');
+        }, 1500);
+      };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(done).catch(function () {
+          legacyCopy(text); done();
+        });
+      } else {
+        legacyCopy(text); done();
+      }
+    });
+  });
+
+  function legacyCopy(text) {
+    var area = document.createElement('textarea');
+    area.value = text;
+    area.style.position = 'fixed';
+    area.style.left = '-9999px';
+    document.body.appendChild(area);
+    area.select();
+    try { document.execCommand('copy'); } catch (e) {}
+    document.body.removeChild(area);
+  }
+
+  // Highlight.js
+  if (window.hljs) {
+    // Standard code/source blocks: highlight in place.
+    document.querySelectorAll('.showless-block pre code[class*="language-"]:not(.output-content)').forEach(function (el) {
+      try { window.hljs.highlightElement(el); } catch (e) {}
+    });
+
+    // Output blocks: each captured line lives in its own <span class="output-line"> so
+    // line wrapping stays bullet-proof. Highlight per line using the inferred language
+    // (set server-side from a preceding `sed`/`cat`/`awk` command), or fall back to
+    // auto-detection when the relevance is high enough to avoid mis-highlighting plain
+    // status lines like "swift build ok".
+    document.querySelectorAll('.output-block code.output-content').forEach(function (code) {
+      var lines = code.querySelectorAll('.output-line');
+      if (!lines.length) return;
+
+      var texts = [];
+      lines.forEach(function (l) { texts.push(l.textContent.replace(/\u200B/g, '')); });
+      var fullText = texts.join('\n').trim();
+      if (fullText.length < 4) return;
+
+      var langMatch = code.className.match(/language-(\S+)/);
+      var lang = langMatch ? langMatch[1] : null;
+
+      if (!lang) {
+        try {
+          var detect = window.hljs.highlightAuto(fullText);
+          if (detect && detect.relevance >= 8 && detect.language) {
+            lang = detect.language;
+            code.classList.add('hljs', 'language-' + lang);
+          }
+        } catch (e) {}
+      }
+
+      if (!lang) return;
+
+      lines.forEach(function (line, i) {
+        var text = texts[i];
+        if (!text) return;
+        try {
+          var hl = window.hljs.highlight(text, { language: lang, ignoreIllegals: true });
+          if (hl && hl.value) line.innerHTML = hl.value;
+        } catch (e) {}
+      });
+    });
+  }
+
+  // Mermaid: render every captured diagram, replacing the <pre> in place.
+  // On any rendering error we substitute a friendly inline error block that
+  // shows the parser message together with the raw diagram source, so the
+  // page itself acts as the diagram validator.
+  function escapeHTML(s) {
+    return String(s)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  }
+
+  function makeErrorBlock(message, source) {
+    return '<div class="mermaid-error" role="alert">'
+      + '<div class="mermaid-error-title">Diagram failed to render</div>'
+      + '<p class="mermaid-error-message">' + escapeHTML(message) + '</p>'
+      + '<pre class="mermaid-error-source">' + escapeHTML(source) + '</pre>'
+      + '</div>';
+  }
+
+  function renderOneDiagram(container, source, idx) {
+    if (!window.mermaid) return Promise.resolve();
+    container.innerHTML = '<pre class="mermaid">' + escapeHTML(source) + '</pre>';
+    var node = container.querySelector('pre.mermaid');
+    node.removeAttribute('data-processed');
+    var renderId = 'showless-mermaid-' + idx + '-' + Date.now();
+    try {
+      var maybe = window.mermaid.run({ nodes: [node], suppressErrors: true });
+      if (maybe && typeof maybe.then === 'function') {
+        return maybe.catch(function (err) {
+          container.innerHTML = makeErrorBlock(
+            (err && (err.message || err.str)) || 'Unknown mermaid parse error.',
+            source
+          );
+        });
+      }
+      return Promise.resolve();
+    } catch (err) {
+      container.innerHTML = makeErrorBlock(
+        (err && (err.message || err.str)) || 'Unknown mermaid parse error.',
+        source
+      );
+      return Promise.resolve();
+    }
+  }
+
+  function rerenderMermaid() {
+    if (!window.mermaid) return;
+    var theme = currentEffectiveTheme();
+    try {
+      window.mermaid.initialize({
+        startOnLoad: false,
+        theme: theme === 'dark' ? 'dark' : 'default',
+        securityLevel: 'loose',
+        fontFamily: 'JetBrains Mono, ui-monospace, SF Mono, Menlo, monospace'
+      });
+    } catch (e) { /* swallow init errors; render call below will surface them */ }
+
+    // Render diagrams sequentially so errors are reported per-diagram and
+    // don't get lost in a race.
+    mermaidContainers.reduce(function (chain, entry, idx) {
+      return chain.then(function () { return renderOneDiagram(entry.container, entry.source, idx); });
+    }, Promise.resolve());
+  }
+
+  // Initial mermaid render after sources are captured + theme is applied.
+  rerenderMermaid();
+})();
+  </script>
+</body>
+</html>

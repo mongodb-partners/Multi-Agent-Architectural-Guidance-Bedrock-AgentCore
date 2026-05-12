@@ -1,0 +1,136 @@
+<mxfile host="app.diagrams.net" agent="Claude Code" version="24.0.0">
+  <diagram id="iam-security" name="07 · IAM &amp; Security">
+    <mxGraphModel dx="1300" dy="900" grid="1" gridSize="10" page="1" pageScale="1" pageWidth="1169" pageHeight="900" math="0" shadow="1">
+      <root>
+        <mxCell id="0"/><mxCell id="1" parent="0"/>
+
+        <mxCell id="title" value="IAM &amp; Security — Who can call what, and how auth works" style="text;html=1;align=center;fontSize=20;fontStyle=1;strokeColor=none;fillColor=none;" vertex="1" parent="1">
+          <mxGeometry x="40" y="15" width="1080" height="30" as="geometry"/>
+        </mxCell>
+        <mxCell id="sub" value="Every AWS service call is signed (SigV4). Every component has a minimal IAM role. No passwords in code — credentials come from instance profiles and service roles." style="text;html=1;align=center;fontSize=11;strokeColor=none;fillColor=none;fontColor=#666666;" vertex="1" parent="1">
+          <mxGeometry x="40" y="48" width="1080" height="18" as="geometry"/>
+        </mxCell>
+
+        <!-- Header row -->
+        <mxCell id="col1h" value="Component" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#1A3DCB;strokeColor=#1A3DCB;fontColor=#ffffff;fontSize=12;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="40" y="80" width="200" height="36" as="geometry"/>
+        </mxCell>
+        <mxCell id="col2h" value="IAM Role / Principal" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#1A3DCB;strokeColor=#1A3DCB;fontColor=#ffffff;fontSize=12;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="250" y="80" width="220" height="36" as="geometry"/>
+        </mxCell>
+        <mxCell id="col3h" value="Who can assume it (Trust)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#1A3DCB;strokeColor=#1A3DCB;fontColor=#ffffff;fontSize=12;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="480" y="80" width="240" height="36" as="geometry"/>
+        </mxCell>
+        <mxCell id="col4h" value="Key permissions" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#1A3DCB;strokeColor=#1A3DCB;fontColor=#ffffff;fontSize=12;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="730" y="80" width="380" height="36" as="geometry"/>
+        </mxCell>
+
+        <!-- Row 1: EC2 -->
+        <mxCell id="r1c1" value="🖥 EC2 t3.medium&#xa;(Hono API + UI)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;align=left;" vertex="1" parent="1">
+          <mxGeometry x="40" y="126" width="200" height="60" as="geometry"/>
+        </mxCell>
+        <mxCell id="r1c2" value="bedrock-ma-use1-ec2-role-dev&#xa;via instance profile&#xa;(automatic, no keys in code)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#d6b656;fontSize=10;align=left;" vertex="1" parent="1">
+          <mxGeometry x="250" y="126" width="220" height="60" as="geometry"/>
+        </mxCell>
+        <mxCell id="r1c3" value="ec2.amazonaws.com" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#d6b656;fontSize=10;align=left;" vertex="1" parent="1">
+          <mxGeometry x="480" y="126" width="240" height="60" as="geometry"/>
+        </mxCell>
+        <mxCell id="r1c4" value="bedrock:InvokeModel · bedrock-agentcore:InvokeAgentRuntime, CreateEvent, ListEvents, InvokeGateway · ecr:GetAuthorizationToken · secretsmanager:GetSecretValue · s3:GetObject · logs:PutLogEvents · AmazonSSMManagedInstanceCore" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#d6b656;fontSize=10;align=left;" vertex="1" parent="1">
+          <mxGeometry x="730" y="126" width="380" height="60" as="geometry"/>
+        </mxCell>
+
+        <!-- Row 2: AgentCore runtimes -->
+        <mxCell id="r2c1" value="🎯📦🛠⭐ AgentCore&#xa;Runtimes (×4)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=11;align=left;" vertex="1" parent="1">
+          <mxGeometry x="40" y="196" width="200" height="60" as="geometry"/>
+        </mxCell>
+        <mxCell id="r2c2" value="bedrock-ma-use1-{name}-dev-role&#xa;(one role per runtime)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#6c8ebf;fontSize=10;align=left;" vertex="1" parent="1">
+          <mxGeometry x="250" y="196" width="220" height="60" as="geometry"/>
+        </mxCell>
+        <mxCell id="r2c3" value="bedrock-agentcore.amazonaws.com&#xa;(scoped: aws:SourceAccount = 483874864688)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#6c8ebf;fontSize=10;align=left;" vertex="1" parent="1">
+          <mxGeometry x="480" y="196" width="240" height="60" as="geometry"/>
+        </mxCell>
+        <mxCell id="r2c4" value="bedrock:InvokeModel, InvokeModelWithResponseStream · bedrock-agentcore:InvokeAgentRuntime, CreateEvent, ListEvents, GetWorkloadAccessToken · lambda:InvokeFunction (Lambda MCP only) · s3:GetObject (artifact bucket) · logs:* (scoped to /aws/bedrock-agentcore/runtimes/*) · xray:PutTraceSegments · secretsmanager:GetSecretValue (Atlas creds)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#6c8ebf;fontSize=10;align=left;" vertex="1" parent="1">
+          <mxGeometry x="730" y="196" width="380" height="60" as="geometry"/>
+        </mxCell>
+
+        <!-- Row 3: Lambda -->
+        <mxCell id="r3c1" value="⚡ Lambda MCP&#xa;mongodb-mcp" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;fontSize=11;align=left;" vertex="1" parent="1">
+          <mxGeometry x="40" y="266" width="200" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="r3c2" value="bedrock-ma-use1-lambda-mcp-role-dev" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#d79b00;fontSize=10;align=left;" vertex="1" parent="1">
+          <mxGeometry x="250" y="266" width="220" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="r3c3" value="lambda.amazonaws.com" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#d79b00;fontSize=10;align=left;" vertex="1" parent="1">
+          <mxGeometry x="480" y="266" width="240" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="r3c4" value="AWSLambdaVPCAccessExecutionRole (network interface creation in VPC) · AWSLambdaBasicExecutionRole (CloudWatch logs)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#d79b00;fontSize=10;align=left;" vertex="1" parent="1">
+          <mxGeometry x="730" y="266" width="380" height="50" as="geometry"/>
+        </mxCell>
+
+        <!-- Row 4: Bedrock KB -->
+        <mxCell id="r4c1" value="📚 Bedrock KB&#xa;troubleshooting-kb" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#d5f5e3;strokeColor=#27ae60;fontSize=11;align=left;" vertex="1" parent="1">
+          <mxGeometry x="40" y="326" width="200" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="r4c2" value="bedrock-kb-ts-role" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#27ae60;fontSize=10;align=left;" vertex="1" parent="1">
+          <mxGeometry x="250" y="326" width="220" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="r4c3" value="bedrock.amazonaws.com" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#27ae60;fontSize=10;align=left;" vertex="1" parent="1">
+          <mxGeometry x="480" y="326" width="240" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="r4c4" value="s3:GetObject/ListBucket (KB docs in shared bucket) · bedrock:InvokeModel (Titan embeddings) · secretsmanager:GetSecretValue (Atlas creds)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#27ae60;fontSize=10;align=left;" vertex="1" parent="1">
+          <mxGeometry x="730" y="326" width="380" height="50" as="geometry"/>
+        </mxCell>
+
+        <!-- Row 5: Gateway -->
+        <mxCell id="r5c1" value="🔀 AgentCore Gateway&#xa;(provisioned)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontSize=11;align=left;" vertex="1" parent="1">
+          <mxGeometry x="40" y="386" width="200" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="r5c2" value="bedrock-ma-use1-gw-role-dev" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#666666;fontSize=10;align=left;" vertex="1" parent="1">
+          <mxGeometry x="250" y="386" width="220" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="r5c3" value="bedrock-agentcore.amazonaws.com" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#666666;fontSize=10;align=left;" vertex="1" parent="1">
+          <mxGeometry x="480" y="386" width="240" height="50" as="geometry"/>
+        </mxCell>
+        <mxCell id="r5c4" value="lambda:InvokeFunction (Lambda MCP ARN only)" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#666666;fontSize=10;align=left;" vertex="1" parent="1">
+          <mxGeometry x="730" y="386" width="380" height="50" as="geometry"/>
+        </mxCell>
+
+        <!-- Cognito JWT flow -->
+        <mxCell id="cog-title" value="User Authentication — Cognito JWT flow (optional, off by default in POC)" style="text;html=1;align=center;fontSize=14;fontStyle=1;strokeColor=none;fillColor=none;" vertex="1" parent="1">
+          <mxGeometry x="40" y="460" width="1080" height="24" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="cog1" value="User logs in&#xa;via Streamlit" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="40" y="500" width="140" height="70" as="geometry"/>
+        </mxCell>
+        <mxCell id="cog2" value="Cognito User Pool&#xa;us-east-1_giTk8MWzq&#xa;Returns JWT access token" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#DD344C;strokeColor=#DD344C;fontColor=#ffffff;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="230" y="500" width="200" height="70" as="geometry"/>
+        </mxCell>
+        <mxCell id="cog3" value="Authorization: Bearer &lt;JWT&gt;&#xa;sent on every POST /chat" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="480" y="500" width="200" height="70" as="geometry"/>
+        </mxCell>
+        <mxCell id="cog4" value="API verifies signature&#xa;against Cognito JWKS&#xa;Extracts sub → userId" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="730" y="500" width="200" height="70" as="geometry"/>
+        </mxCell>
+        <mxCell id="cog5" value="userId used for:&#xa;· session ownership&#xa;· long-term memory key&#xa;· scoped GET /sessions" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="980" y="500" width="160" height="70" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="ca1" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#DD344C;strokeWidth=2;" edge="1" parent="1" source="cog1" target="cog2"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="ca2" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#d6b656;strokeWidth=2;" edge="1" parent="1" source="cog2" target="cog3"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="ca3" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#d6b656;strokeWidth=2;" edge="1" parent="1" source="cog3" target="cog4"><mxGeometry relative="1" as="geometry"/></mxCell>
+        <mxCell id="ca4" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#82b366;strokeWidth=2;" edge="1" parent="1" source="cog4" target="cog5"><mxGeometry relative="1" as="geometry"/></mxCell>
+
+        <!-- S3 note -->
+        <mxCell id="s3-note" value="JWKS URI: https://cognito-idp.us-east-1.amazonaws.com/us-east-1_giTk8MWzq/.well-known/jwks.json (REQUIRE_AUTH=true + AUTH_JWKS_URI must be set. Auth is OFF by default in POC.)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontSize=10;align=left;" vertex="1" parent="1">
+          <mxGeometry x="40" y="595" width="1100" height="40" as="geometry"/>
+        </mxCell>
+
+        <!-- Atlas auth -->
+        <mxCell id="atlas-auth" value="MongoDB Atlas credentials (username: bedrock_agent, password stored in Secrets Manager bedrock-kb-atlas-creds-Vf0sS1). Never stored in code. EC2 runtime fetches via secretsmanager:GetSecretValue." style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5f5e3;strokeColor=#27ae60;fontSize=10;align=left;" vertex="1" parent="1">
+          <mxGeometry x="40" y="650" width="1100" height="40" as="geometry"/>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

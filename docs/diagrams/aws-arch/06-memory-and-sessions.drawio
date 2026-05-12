@@ -1,0 +1,108 @@
+<mxfile host="app.diagrams.net" agent="Claude Code" version="24.0.0">
+  <diagram id="memory-sessions" name="06 · Memory &amp; Sessions">
+    <mxGraphModel dx="1300" dy="900" grid="1" gridSize="10" page="1" pageScale="1" pageWidth="1169" pageHeight="827" math="0" shadow="1">
+      <root>
+        <mxCell id="0"/><mxCell id="1" parent="0"/>
+
+        <mxCell id="title" value="Memory &amp; Sessions — What the system remembers and where" style="text;html=1;align=center;fontSize=20;fontStyle=1;strokeColor=none;fillColor=none;" vertex="1" parent="1">
+          <mxGeometry x="40" y="15" width="1080" height="30" as="geometry"/>
+        </mxCell>
+        <mxCell id="sub" value="Short-term = messages in this conversation. Long-term = facts from all past conversations." style="text;html=1;align=center;fontSize=11;strokeColor=none;fillColor=none;fontColor=#666666;" vertex="1" parent="1">
+          <mxGeometry x="40" y="48" width="1080" height="18" as="geometry"/>
+        </mxCell>
+
+        <!-- Trigger -->
+        <mxCell id="req" value="POST /chat arrives" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=12;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="440" y="80" width="200" height="50" as="geometry"/>
+        </mxCell>
+
+        <!-- Short-term column -->
+        <mxCell id="st-title" value="SHORT-TERM  (within one chat session)" style="text;html=1;align=center;fontSize=14;fontStyle=1;strokeColor=none;fillColor=none;fontColor=#82b366;" vertex="1" parent="1">
+          <mxGeometry x="40" y="165" width="480" height="24" as="geometry"/>
+        </mxCell>
+
+        <!-- Long-term column -->
+        <mxCell id="lt-title" value="LONG-TERM  (across all sessions)" style="text;html=1;align=center;fontSize=14;fontStyle=1;strokeColor=none;fillColor=none;fontColor=#9673a6;" vertex="1" parent="1">
+          <mxGeometry x="580" y="165" width="480" height="24" as="geometry"/>
+        </mxCell>
+
+        <!-- Short-term read -->
+        <mxCell id="st-read" value="① Read: getSession(sessionId)&#xa;→ all prior messages in this session&#xa;→ sent as priorTurns[] in AgentCore payload" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=11;align=left;" vertex="1" parent="1">
+          <mxGeometry x="40" y="210" width="350" height="80" as="geometry"/>
+        </mxCell>
+
+        <!-- Short-term write -->
+        <mxCell id="st-write" value="② Write: appendUserMessage() before call&#xa;③ Write: appendAssistantMessage() after reply" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=11;align=left;" vertex="1" parent="1">
+          <mxGeometry x="40" y="310" width="350" height="60" as="geometry"/>
+        </mxCell>
+
+        <!-- Short-term backends -->
+        <mxCell id="st-be-title" value="Backends (switch via PERSIST_CHAT_SESSIONS)" style="text;html=1;align=center;fontSize=11;fontStyle=2;strokeColor=none;fillColor=none;" vertex="1" parent="1">
+          <mxGeometry x="40" y="395" width="480" height="20" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="st-mem" value="In-Memory Map (default)&#xa;&#xa;Map&lt;sessionId, SessionRecord&gt;&#xa;Lives in API process&#xa;LOST on API restart&#xa;No setup required" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#82b366;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="40" y="420" width="200" height="140" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="st-mg" value="MongoDB chat_sessions (opt-in)&#xa;&#xa;collection: chat_sessions&#xa;Set PERSIST_CHAT_SESSIONS=1&#xa;Survives API restart&#xa;Use when: multi-turn demos,&#xa;prod hardening" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#82b366;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="260" y="420" width="220" height="140" as="geometry"/>
+        </mxCell>
+
+        <!-- Long-term read -->
+        <mxCell id="lt-read" value="① Read: readLongTermMemory(userId, agentId)&#xa;→ last MEMORY_INJECT_TURNS turns (default: 5)&#xa;→ formatted as plain text&#xa;→ injected as memoryContext into payload&#xa;&#xa;Requires: REQUIRE_AUTH=true + valid JWT&#xa;(userId = JWT sub claim)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=11;align=left;" vertex="1" parent="1">
+          <mxGeometry x="580" y="210" width="380" height="120" as="geometry"/>
+        </mxCell>
+
+        <!-- Long-term write -->
+        <mxCell id="lt-write" value="② Write: writeLongTermMemory() after reply&#xa;Stores: userMessage + assistantReply as a pair&#xa;Only if: agent.memory.longTerm = true AND userId known" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=11;align=left;" vertex="1" parent="1">
+          <mxGeometry x="580" y="350" width="380" height="70" as="geometry"/>
+        </mxCell>
+
+        <!-- Long-term backends -->
+        <mxCell id="lt-be-title" value="Backends (switch via AGENTCORE_MEMORY_STORE_ID)" style="text;html=1;align=center;fontSize=11;fontStyle=2;strokeColor=none;fillColor=none;" vertex="1" parent="1">
+          <mxGeometry x="580" y="440" width="480" height="20" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="lt-ac" value="AgentCore Memory Store (default EC2)&#xa;&#xa;AWS managed · AGENTCORE_MEMORY_STORE_ID set&#xa;Commands: CreateEventCommand, ListEventsCommand&#xa;sessionId = userId::agentId (stable per user-agent)&#xa;actorId = userId&#xa;TTL: 30 days (configured at store level)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#9673a6;fontSize=11;align=left;" vertex="1" parent="1">
+          <mxGeometry x="580" y="466" width="330" height="130" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="lt-mg" value="MongoDB agent_memory&#xa;(local dev fallback)&#xa;&#xa;AGENTCORE_MEMORY_STORE_ID not set&#xa;TTL index: MEMORY_TTL_DAYS × 86400s&#xa;Default TTL: 90 days" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#9673a6;fontSize=11;align=left;" vertex="1" parent="1">
+          <mxGeometry x="920" y="466" width="240" height="130" as="geometry"/>
+        </mxCell>
+
+        <!-- Agent flags -->
+        <mxCell id="agent-flags" value="Which agents have memory enabled?" style="text;html=1;align=center;fontSize=13;fontStyle=1;strokeColor=none;fillColor=none;" vertex="1" parent="1">
+          <mxGeometry x="40" y="630" width="1080" height="24" as="geometry"/>
+        </mxCell>
+
+        <mxCell id="af1" value="🎯 orchestrator&#xa;memory.shortTerm: —&#xa;memory.longTerm: —&#xa;(no memory — only routes)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="40" y="665" width="200" height="100" as="geometry"/>
+        </mxCell>
+        <mxCell id="af2" value="🛠 troubleshooting&#xa;memory.shortTerm: true ✅&#xa;memory.longTerm: true ✅&#xa;Remembers past incidents" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="265" y="665" width="200" height="100" as="geometry"/>
+        </mxCell>
+        <mxCell id="af3" value="📦 order-management&#xa;memory.shortTerm: true ✅&#xa;memory.longTerm: true ✅&#xa;Remembers preferred address etc." style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="490" y="665" width="220" height="100" as="geometry"/>
+        </mxCell>
+        <mxCell id="af4" value="⭐ product-recommendation&#xa;memory.shortTerm: true ✅&#xa;memory.longTerm: true ✅&#xa;Remembers preferences" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="730" y="665" width="220" height="100" as="geometry"/>
+        </mxCell>
+
+        <!-- Constraint note -->
+        <mxCell id="auth-note" value="⚠️ CRITICAL CONSTRAINT: Long-term memory only fires when userId is known. userId comes from JWT sub claim. This means REQUIRE_AUTH=true + a valid Cognito JWT is required. Without auth, all long-term memory reads/writes are silently skipped." style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=11;align=left;" vertex="1" parent="1">
+          <mxGeometry x="40" y="790" width="1080" height="50" as="geometry"/>
+        </mxCell>
+
+        <!-- Arrows from req -->
+        <mxCell id="a1" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#82b366;strokeWidth=1;" edge="1" parent="1" source="req" target="st-read">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+        <mxCell id="a2" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#9673a6;strokeWidth=1;" edge="1" parent="1" source="req" target="lt-read">
+          <mxGeometry relative="1" as="geometry"/>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

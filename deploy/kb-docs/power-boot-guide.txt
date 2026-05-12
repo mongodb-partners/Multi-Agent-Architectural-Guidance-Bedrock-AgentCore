@@ -1,0 +1,29 @@
+# Product Support Guide: Power and Boot Issues
+
+## Device will not power on (Error: PWR-001)
+
+If your device shows no signs of power, follow these steps:
+
+1. Check the power cable — ensure it is firmly seated at both ends of the cable and the device.
+2. Try a different wall outlet — avoid power strips and extension cords for initial testing.
+3. Use a known-good USB-C cable that supports at least 5V/2A power delivery.
+4. Hold the power button for 10 seconds to force a hardware reset.
+5. If the companion app shows error code PWR-001, the power path has been interrupted.
+6. If two different cables and two different outlets do not resolve the issue, the device needs service.
+
+## Device restarts randomly or freezes (Error: BOOT-010)
+
+Random restarts and boot loops are typically caused by firmware corruption or memory issues:
+
+1. Update the device firmware using the companion app (Settings > Updates).
+2. Disable background sync and location services to reduce memory pressure.
+3. Calibrate the battery: fully discharge, then charge to 100% without interruption.
+4. If the device enters a boot loop (BOOT-010), hold Power and Volume-Down for 15 seconds.
+5. A factory reset resolves most BOOT-010 cases. Back up data first using cloud sync.
+6. Persistent boot loops after a clean firmware install require hardware service.
+
+## Warranty and service options
+
+Standard devices carry a 12-month hardware warranty. Pro series devices have a 24-month warranty.
+Premium-tier customers receive an extended 36-month warranty.
+For hardware faults under warranty, express replacement is available within 2 business days.

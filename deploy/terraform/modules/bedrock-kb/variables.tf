@@ -1,0 +1,107 @@
+variable "aws_region" {
+  type        = string
+  description = "AWS region"
+}
+
+variable "account_id" {
+  type        = string
+  description = "AWS account ID (from data.aws_caller_identity)"
+}
+
+variable "project_name" {
+  type        = string
+  description = "Resource name prefix"
+}
+
+variable "environment" {
+  type        = string
+  description = "Deployment environment (dev, staging, prod)"
+}
+
+# ── Atlas connection (used to build the Secrets Manager secret) ───────────────
+variable "atlas_project_id" {
+  type        = string
+  description = "MongoDB Atlas Project ID — required for the vector search index resource"
+}
+
+variable "atlas_cluster_name" {
+  type        = string
+  description = "Atlas cluster name — required for the vector search index resource"
+}
+
+variable "atlas_srv_host" {
+  type        = string
+  description = "Atlas SRV hostname without scheme, e.g. troubleshooting-demo.9mtgg.mongodb.net"
+}
+
+variable "atlas_db_user" {
+  type        = string
+  description = "Atlas database username"
+}
+
+variable "atlas_db_password" {
+  type        = string
+  sensitive   = true
+  description = "Atlas database password"
+}
+
+variable "atlas_db_name" {
+  type        = string
+  description = "MongoDB database name. Caller must supply; no default so multiple deployments don't collide on a shared Atlas project."
+}
+
+variable "atlas_collection" {
+  type        = string
+  default     = "troubleshooting_docs"
+  description = "MongoDB collection used as the KB vector store"
+}
+
+variable "atlas_vector_index" {
+  type        = string
+  default     = "troubleshooting-vector-index"
+  description = "Atlas Vector Search index name on the collection"
+}
+
+variable "embedding_dimensions" {
+  type        = number
+  default     = 1024
+  description = "Dimensions of the embedding model output. Titan Embed Text v2 = 1024."
+}
+
+# Path to the helper script that ensures the database/collection exist.
+# Must be a path relative to terraform CWD or absolute.
+variable "ensure_collection_script" {
+  type        = string
+  description = "Path to db-seeding/ensure-collection.ts"
+}
+
+# ── IAM ───────────────────────────────────────────────────────────────────────
+variable "kb_iam_role_name" {
+  type        = string
+  default     = ""
+  description = "Override for the Bedrock KB IAM role name. Leave empty (default) to auto-derive <project_name>-bedrock-kb-<environment>-role, which guarantees uniqueness across deployments in the same AWS account."
+}
+
+# ── Embedding ─────────────────────────────────────────────────────────────────
+variable "embed_model_id" {
+  type        = string
+  default     = "amazon.titan-embed-text-v2:0"
+  description = "Bedrock foundation model ID used for KB ingestion embeddings"
+}
+
+# ── Shared S3 bucket (created by deploy/terraform/bootstrap) ─────────────────
+variable "shared_bucket_name" {
+  type        = string
+  description = "Name of the shared S3 bucket. KB docs are uploaded to the kb-docs/docs/ prefix."
+}
+
+variable "shared_bucket_arn" {
+  type        = string
+  description = "ARN of the shared S3 bucket. Used in IAM policies and the Bedrock data source config."
+}
+
+# ── KB docs ───────────────────────────────────────────────────────────────────
+variable "kb_docs_path" {
+  type        = string
+  description = "Absolute or relative path to the directory containing KB source .txt files"
+}
