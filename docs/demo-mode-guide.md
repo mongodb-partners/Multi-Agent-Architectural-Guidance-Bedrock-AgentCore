@@ -19,10 +19,6 @@ high-priority signals for that turn:
 - **View full trace →** link (opens `/Trace_Viewer?traceId=…`).
 - A **Developer details** expander with the raw `TraceEvent` JSON.
 
-If the turn ran against `DEV_MOCK_BACKENDS=1`, a small mock-mode banner is
-shown above the card so the audience knows no real Bedrock or Atlas call
-took place.
-
 ### Trace Viewer page
 
 Same trace, expanded:
@@ -68,7 +64,6 @@ Trace Viewer at the latest assistant message's trace.
 | `MONGO_TRACE_EXPLAIN` | `0` | Capture `explain("executionStats")` for queries. |
 | `MONGO_TRACE_VECTOR_DEBUG` | `0` | Recall-without-filter comparison for vector search. |
 | `AGENTCORE_NESTED_TRACE_MAX_BYTES` | `200 000` | Cap nested events the runtime container ships back. |
-| `DEV_MOCK_BACKENDS` | unset | Skips real Bedrock/Atlas (mock banner shown in UI). |
 
 ## Adding a new demo prompt
 

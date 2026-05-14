@@ -62,9 +62,9 @@ variable "environment_variables" {
   sensitive   = true
 }
 
-variable "lambda_mcp_function_arn" {
+variable "voyage_sagemaker_endpoint_arn" {
   type        = string
-  description = "Optional Lambda MCP function ARN. When set, runtime role gets lambda:InvokeFunction."
+  description = "Optional Voyage AI SageMaker endpoint ARN. When set, runtime role gets sagemaker:InvokeEndpoint on that endpoint so `embedQueryText` (in `api/src/lib/embed-query.ts`) can use Voyage as the primary embedding provider for `mongodb_vector_search`. When empty (no Voyage endpoint deployed) the runtime falls back to Bedrock Titan via EMBEDDING_MODEL_ID — see `api/src/adapters/mongodb-mcp-client.ts` (VectorSearchEmbedTool)."
   default     = ""
 }
 
@@ -76,7 +76,7 @@ variable "kb_secret_name_prefix" {
 
 variable "network_mode" {
   type        = string
-  description = "PUBLIC (shared AWS infra, no VPC) or VPC. Use PUBLIC for POC — no NAT gateway needed."
+  description = "PUBLIC (shared AWS infra, no VPC) or VPC. Use PUBLIC for the LLM specialist runtimes (no NAT needed); use VPC for runtimes that must reach Atlas via PrivateLink (e.g. mongodb-mcp). VPC mode requires `vpc_subnet_ids` and `vpc_security_group_ids` to be set."
   default     = "PUBLIC"
 
   validation {
@@ -85,10 +85,39 @@ variable "network_mode" {
   }
 }
 
+variable "vpc_subnet_ids" {
+  type        = list(string)
+  description = "Required when network_mode=VPC: 1-16 private subnet IDs the runtime ENIs are placed in. Bedrock AgentCore uses the AWSServiceRoleForBedrockAgentCoreNetwork service-linked role to create ENIs in these subnets."
+  default     = []
+}
+
+variable "vpc_security_group_ids" {
+  type        = list(string)
+  description = "Required when network_mode=VPC: 1-16 security group IDs attached to the runtime ENIs. Must permit egress to whatever the runtime needs to reach (typically the Atlas Interface VPCE on TCP 27017)."
+  default     = []
+}
+
 variable "idle_timeout_seconds" {
   type        = number
   description = "Seconds of inactivity before a runtime session is terminated"
   default     = 900
+}
+
+variable "max_lifetime_seconds" {
+  type        = number
+  description = "Maximum runtime session lifetime in seconds. AgentCore defaults this to 28800; setting it explicitly avoids provider inconsistent-result errors on create."
+  default     = 28800
+}
+
+variable "server_protocol" {
+  type        = string
+  description = "AgentCore Runtime serverProtocol. HTTP (default) for traditional Strands agent runtimes that expose POST /invocations + GET /ping; MCP for runtimes that expose a Streamable-HTTP MCP server on POST /mcp (per the AgentCore MCP runtime contract). Use MCP for the mongodb-mcp host (mcp-runtimes/mongodb-mcp/) — see Phase 7 of CLIENT_REVIEW_TASKS.md."
+  default     = "HTTP"
+
+  validation {
+    condition     = contains(["HTTP", "MCP"], var.server_protocol)
+    error_message = "server_protocol must be HTTP or MCP"
+  }
 }
 
 variable "tags" {

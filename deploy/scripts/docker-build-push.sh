@@ -1,22 +1,27 @@
 #!/usr/bin/env bash
-# docker-build-push.sh — Build API + UI + agent-runtime Docker images and push to ECR.
+# docker-build-push.sh — Build API + UI + agent-runtime + mongodb-mcp-runtime
+# Docker images and push to ECR.
 #
 # Usage:
-#   ./deploy/scripts/docker-build-push.sh <api_repo_url> <ui_repo_url> <aws_region> [agent_runtime_repo_url]
+#   ./deploy/scripts/docker-build-push.sh \
+#       <api_repo_url> <ui_repo_url> <aws_region> \
+#       [agent_runtime_repo_url] [mongodb_mcp_runtime_repo_url]
 #
-# Called by deploy.sh (Phase 5.5) after ECR repos are created by Terraform.
+# Called by deploy.sh (Phase 6) after ECR repos are created by Terraform.
 # Images are tagged with both :latest and :sha-<git-short-sha>.
-# agent-runtime image is linux/arm64 (required by AgentCore Runtime).
+# Both AgentCore Runtime images (agent-runtime + mongodb-mcp-runtime) are
+# linux/arm64, as required by AgentCore Runtime.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
-API_REPO="${1:?Usage: $0 <api_repo_url> <ui_repo_url> <aws_region> [agent_runtime_repo_url]}"
+API_REPO="${1:?Usage: $0 <api_repo_url> <ui_repo_url> <aws_region> [agent_runtime_repo_url] [mongodb_mcp_runtime_repo_url]}"
 UI_REPO="${2:?}"
 AWS_REGION="${3:-us-east-1}"
 AGENT_RUNTIME_REPO="${4:-}"
+MONGODB_MCP_RUNTIME_REPO="${5:-}"
 
 log()  { echo "  [docker] $*"; }
 ok()   { echo "  [docker] ✓ $*"; }
@@ -71,6 +76,7 @@ log "Git SHA  : $GIT_SHA"
 log "API repo : $API_REPO"
 log "UI repo  : $UI_REPO"
 [[ -n "$AGENT_RUNTIME_REPO" ]] && log "Runtime  : $AGENT_RUNTIME_REPO (linux/arm64)"
+[[ -n "$MONGODB_MCP_RUNTIME_REPO" ]] && log "MCP rt   : $MONGODB_MCP_RUNTIME_REPO (linux/arm64)"
 log "Registry : $ECR_REGISTRY"
 echo ""
 
@@ -80,35 +86,30 @@ aws ecr get-login-password --region "$AWS_REGION" \
   | docker login --username AWS --password-stdin "$ECR_REGISTRY"
 ok "ECR login successful"
 
-# ── Build API image ───────────────────────────────────────────────────────────
-log "Building API image (context: repo root, Dockerfile: api/Dockerfile)..."
-docker build \
+# ── Build + push API image ────────────────────────────────────────────────────
+# buildx with --push is the only path that reliably cross-builds linux/amd64
+# from an Apple Silicon host (the legacy `docker build --platform` produces an
+# image colima/dockerd refuses to load with "does not provide the specified
+# platform"). On amd64 hosts it still works the same.
+log "Building + pushing API image (linux/amd64, context: repo root, Dockerfile: api/Dockerfile)..."
+docker buildx build \
   --platform linux/amd64 \
   -f "$REPO_ROOT/api/Dockerfile" \
   -t "$API_REPO:$API_TAG" \
   -t "$API_REPO:latest" \
+  --push \
   "$REPO_ROOT"
-ok "API image built: $API_REPO:$API_TAG"
+ok "API pushed: $API_REPO:$API_TAG"
 
-# ── Build UI image ────────────────────────────────────────────────────────────
-log "Building UI image (context: ui/, Dockerfile: ui/Dockerfile)..."
-docker build \
+# ── Build + push UI image ─────────────────────────────────────────────────────
+log "Building + pushing UI image (linux/amd64, context: ui/, Dockerfile: ui/Dockerfile)..."
+docker buildx build \
   --platform linux/amd64 \
   -f "$REPO_ROOT/ui/Dockerfile" \
   -t "$UI_REPO:$UI_TAG" \
   -t "$UI_REPO:latest" \
+  --push \
   "$REPO_ROOT/ui"
-ok "UI image built: $UI_REPO:$UI_TAG"
-
-# ── Push images ───────────────────────────────────────────────────────────────
-log "Pushing API image..."
-docker push "$API_REPO:$API_TAG"
-docker push "$API_REPO:latest"
-ok "API pushed: $API_REPO:$API_TAG"
-
-log "Pushing UI image..."
-docker push "$UI_REPO:$UI_TAG"
-docker push "$UI_REPO:latest"
 ok "UI pushed: $UI_REPO:$UI_TAG"
 
 # ── Build + push agent-runtime image (ARM64 — required by AgentCore Runtime) ──
@@ -124,6 +125,24 @@ if [[ -n "$AGENT_RUNTIME_REPO" ]]; then
   ok "agent-runtime pushed: $AGENT_RUNTIME_REPO:$RUNTIME_TAG"
 fi
 
+# ── Build + push mongodb-mcp-runtime image (ARM64 — AgentCore Runtime contract) ──
+# Hosts the Streamable-HTTP MCP server defined under mcp-runtimes/mongodb-mcp/
+# and consumed by the AgentCore Gateway as an `mcpServer` target. Build context
+# is the runtime directory itself; tool implementations live in
+# `mcp-runtimes/mongodb-mcp/src/vendor/` (canonical home after CLIENT_REVIEW
+# Phase 7e — the legacy `lambda/mongodb-mcp/` host has been deleted).
+if [[ -n "$MONGODB_MCP_RUNTIME_REPO" ]]; then
+  log "Building mongodb-mcp-runtime image (linux/arm64, Dockerfile: mcp-runtimes/mongodb-mcp/Dockerfile)..."
+  docker buildx build \
+    --platform linux/arm64 \
+    -f "$REPO_ROOT/mcp-runtimes/mongodb-mcp/Dockerfile" \
+    -t "$MONGODB_MCP_RUNTIME_REPO:$RUNTIME_TAG" \
+    -t "$MONGODB_MCP_RUNTIME_REPO:latest" \
+    --push \
+    "$REPO_ROOT/mcp-runtimes/mongodb-mcp"
+  ok "mongodb-mcp-runtime pushed: $MONGODB_MCP_RUNTIME_REPO:$RUNTIME_TAG"
+fi
+
 echo ""
 ok "Done. Images available in ECR:"
 echo "  API     : $API_REPO:latest  ($API_TAG)"
@@ -135,4 +154,7 @@ echo "  UI      : $UI_REPO:latest  ($UI_TAG)"
 # exits 0 on success.
 if [[ -n "$AGENT_RUNTIME_REPO" ]]; then
   echo "  Runtime : $AGENT_RUNTIME_REPO:latest  ($RUNTIME_TAG)"
+fi
+if [[ -n "$MONGODB_MCP_RUNTIME_REPO" ]]; then
+  echo "  MCP rt  : $MONGODB_MCP_RUNTIME_REPO:latest  ($RUNTIME_TAG)"
 fi

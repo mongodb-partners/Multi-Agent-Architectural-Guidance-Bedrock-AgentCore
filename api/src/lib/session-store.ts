@@ -107,7 +107,31 @@ async function deleteFromMongo(sessionId: string): Promise<void> {
 /** Re-export for health / docs. */
 export { usePersistentChatSessions };
 
-export async function getOrCreateSession(sessionId: string, userId?: string): Promise<SessionRecord> {
+/**
+ * Sentinel returned by ownership-checked accessors when the session exists but belongs to a
+ * different `userId`. Callers translate this to the same 404 the route returns when the
+ * session does not exist at all, so we never confirm or deny existence to the wrong user.
+ */
+export const FORBIDDEN_SESSION = Symbol("FORBIDDEN_SESSION");
+export type ForbiddenSession = typeof FORBIDDEN_SESSION;
+
+function ownsOrLegacy(record: SessionRecord, userId: string): boolean {
+  if (!record.userId) return true; // legacy session written before user scoping; treat as caller's
+  return record.userId === userId;
+}
+
+/**
+ * Return the existing session for `sessionId` if `userId` owns it (or it is a legacy
+ * session with no `userId`); create a new session bound to `userId` otherwise.
+ *
+ * Returns `FORBIDDEN_SESSION` when the session exists but is owned by a different user —
+ * the caller must NOT distinguish that case from "not found" externally.
+ */
+export async function getOrCreateSession(
+  sessionId: string,
+  userId: string,
+): Promise<SessionRecord | ForbiddenSession> {
+  if (!userId) throw new Error("getOrCreateSession: userId is required");
   let s = memory.get(sessionId);
   if (!s && usePersistentChatSessions()) {
     s = await loadFromMongo(sessionId);
@@ -117,26 +141,41 @@ export async function getOrCreateSession(sessionId: string, userId?: string): Pr
     s = { sessionId, userId, createdAt: now, messages: [] };
     memory.set(sessionId, s);
     if (usePersistentChatSessions()) await saveToMongo(s);
-  } else if (userId && !s.userId) {
+    return s;
+  }
+  if (!ownsOrLegacy(s, userId)) return FORBIDDEN_SESSION;
+  if (!s.userId) {
     s.userId = userId;
     if (usePersistentChatSessions()) await saveToMongo(s);
   }
   return s;
 }
 
-export async function getSession(sessionId: string): Promise<SessionRecord | undefined> {
-  const cached = memory.get(sessionId);
-  if (cached) return cached;
-  if (usePersistentChatSessions()) return loadFromMongo(sessionId);
-  return undefined;
+/**
+ * Look up an existing session for `userId`. Returns `undefined` when the session does not
+ * exist and `FORBIDDEN_SESSION` when it belongs to a different user.
+ */
+export async function getSession(
+  sessionId: string,
+  userId: string,
+): Promise<SessionRecord | undefined | ForbiddenSession> {
+  if (!userId) throw new Error("getSession: userId is required");
+  let cached = memory.get(sessionId);
+  if (!cached && usePersistentChatSessions()) {
+    cached = await loadFromMongo(sessionId);
+  }
+  if (!cached) return undefined;
+  if (!ownsOrLegacy(cached, userId)) return FORBIDDEN_SESSION;
+  return cached;
 }
 
 export async function appendUserMessage(
   sessionId: string,
   content: string,
-  userId?: string,
-): Promise<ChatMessage> {
+  userId: string,
+): Promise<ChatMessage | ForbiddenSession> {
   const s = await getOrCreateSession(sessionId, userId);
+  if (s === FORBIDDEN_SESSION) return FORBIDDEN_SESSION;
   const m: ChatMessage = {
     id: msgId(),
     role: "user",
@@ -153,8 +192,10 @@ export async function appendAssistantMessage(
   sessionId: string,
   content: string,
   agentId: string,
-): Promise<ChatMessage> {
-  const s = await getOrCreateSession(sessionId);
+  userId: string,
+): Promise<ChatMessage | ForbiddenSession> {
+  const s = await getOrCreateSession(sessionId, userId);
+  if (s === FORBIDDEN_SESSION) return FORBIDDEN_SESSION;
   const m: ChatMessage = {
     id: msgId(),
     role: "assistant",
@@ -168,22 +209,23 @@ export async function appendAssistantMessage(
   return m;
 }
 
-export async function deleteSession(sessionId: string, userId?: string): Promise<boolean> {
+export async function deleteSession(sessionId: string, userId: string): Promise<boolean> {
+  if (!userId) throw new Error("deleteSession: userId is required");
   let cur = memory.get(sessionId);
   if (!cur && usePersistentChatSessions()) {
     cur = await loadFromMongo(sessionId);
   }
   if (!cur) return false;
-  if (userId && cur.userId && cur.userId !== userId) return false;
+  if (!ownsOrLegacy(cur, userId)) return false;
   memory.delete(sessionId);
   if (usePersistentChatSessions()) await deleteFromMongo(sessionId);
   return true;
 }
 
-function listFromMemory(userId?: string): SessionSummary[] {
+function listFromMemory(userId: string): SessionSummary[] {
   const out: SessionSummary[] = [];
   for (const s of memory.values()) {
-    if (userId && s.userId && s.userId !== userId) continue;
+    if (s.userId !== userId) continue;
     const last = s.messages[s.messages.length - 1];
     const updatedAt = last?.timestamp ?? s.createdAt;
     out.push({
@@ -199,10 +241,18 @@ function listFromMemory(userId?: string): SessionSummary[] {
 }
 
 /**
- * All sessions, newest activity first.
- * When userId is provided, only sessions owned by that user are returned (plus sessions with no userId — same rules as in-memory).
+ * Sessions owned by `userId`, newest activity first.
+ *
+ * `userId` is required: callers always come through `GET /sessions`, which sits behind the
+ * mandatory JWT auth middleware, so `c.get("jwtPayload").sub` is always populated. Sessions
+ * with a missing or different `userId` are excluded — they are never returned to anyone but
+ * their owner, so a deployment with multiple Cognito users (or a leaked token) can never
+ * enumerate someone else's chats.
  */
-export async function listSessions(userId?: string): Promise<SessionSummary[]> {
+export async function listSessions(userId: string): Promise<SessionSummary[]> {
+  if (!userId) {
+    throw new Error("listSessions: userId is required (authenticated callers only)");
+  }
   if (!usePersistentChatSessions()) {
     return listFromMemory(userId);
   }
@@ -213,9 +263,7 @@ export async function listSessions(userId?: string): Promise<SessionSummary[]> {
   }
 
   try {
-    const filter: Filter<ChatSessionDoc> =
-      userId === undefined ? {} : { $or: [{ userId }, { userId: { $exists: false } }] };
-
+    const filter: Filter<ChatSessionDoc> = { userId };
     const docs = await coll
       .find(filter)
       .project({ sessionId: 1, userId: 1, createdAt: 1, updatedAt: 1, messages: 1 })

@@ -397,7 +397,7 @@ Runtime, Gateway (with Lambda tool targets), Memory, and Cognito-linked authoriz
 | IAM resource policy | Allow Gateway role to invoke Lambda function URLs |
 | `aws_secretsmanager_secret` | Memory namespace, Gateway endpoint URL |
 
-> **Provider note:** Some `aws_bedrockagentcore_*` resources may not yet exist in `hashicorp/aws`. Use `null_resource` + AWS CLI for gaps. Check the [provider changelog](https://github.com/hashicorp/terraform-provider-aws/blob/main/CHANGELOG.md) before implementation.
+> **Provider note:** As of `hashicorp/aws >= 6.27`, all four `aws_bedrockagentcore_*` resources used here (`memory`, `gateway`, `gateway_target`, `agent_runtime`) plus the native `aws_bedrockagent_knowledge_base` + `aws_bedrockagent_data_source` ship with full `MONGO_DB_ATLAS` storage support, so no `null_resource` shims are needed. The two remaining `null_resource` blocks in `deploy/terraform/modules/bedrock-kb/` only trigger actions (start ingestion job, bootstrap MongoDB collection) for which no native resource exists.
 
 **Key outputs:** `agentcore_runtime_arn`, `agentcore_gateway_url`, `agentcore_memory_arn`
 
@@ -490,19 +490,18 @@ Wired from module outputs → Secrets Manager → ECS task definition `secrets` 
 
 | Variable | Value / Source |
 |----------|---------------|
-| `CHAT_MODE` | `live` |
+| `AGENTCORE_ORCHESTRATOR_ARN` | AgentCore Runtime module output (asserted at API startup) |
+| `AGENTCORE_GATEWAY_URL` | AgentCore Gateway module output |
 | `MONGODB_URI` | Secrets Manager ← Atlas module |
 | `MONGODB_DB` | `<project>_<env>` (e.g. `mongodb_multiagent_dev`); project+env-derived (underscored) by `env.sh` |
 | `MONGODB_ALLOW_WRITE` | `true` |
 | `PERSIST_CHAT_SESSIONS` | `1` |
-| `REQUIRE_AUTH` | `true` |
-| `AUTH_JWKS_URI` | Cognito module output |
+| `AUTH_JWKS_URI` | Cognito module output (**required** — `assertJwksAuthConfigured()` boot guard) |
 | `AUTH_ISSUER` | Cognito module output |
 | `AUTH_APP_CLIENT_ID` | Cognito module output |
 | `BEDROCK_KB_ID` | Bedrock KB module output |
 | `EMBEDDING_MODEL_ID` | `amazon.titan-embed-text-v2:0` |
 | `AWS_REGION` | Terraform variable |
-| `TOOL_HOSTING_MODE` | `gateway` |
 | `AGENTCORE_MEMORY_ID` | AgentCore module output |
 | `LOG_LEVEL` | `info` |
 

@@ -219,16 +219,15 @@ Tools include **built-in** Strands tools (MongoDB, KB, embeddings, …), **skill
 | `run_skill_script` | Dynamically imports `scripts/*.mjs` for a **skillName** + args; same allowlist/activation as `read_skill_resource` | Live |
 | **`{skill}/{localName}`** | **Per-skill HTTP tool** — `POST`/`GET`/… to a URL (e.g. Lambda Function URL). Defined in `config/skills/<skill>/http-tools.json`. Listed in `tools:` as **`order-management/notify_fulfillment_lambda`**. Same **allowlist + activation** as `read_skill_resource`. SSRF allowlists live in root `config/http-tools.json` → `security`. | Live — see [Configuration Guide](configuration-guide.md#http-tools-lambda--api-gateway) |
 | **Short name** (no `/`) | **Global HTTP tool** from root `config/http-tools.json` → `tools` (optional). No skill activation gate. | Live |
-| `mongodb_query` | Runs find / findOne / aggregate / updateOne against MongoDB | Live — uses fixtures when `DEV_MOCK_BACKENDS=1`, real driver when `MONGODB_URI` set |
-| `mongodb_vector_search` | Performs semantic/vector search against a MongoDB Atlas collection | **Live** — real Atlas `$vectorSearch` when `MONGODB_URI` + `EMBEDDING_MODEL_ID` set; keyword-overlap mock when `DEV_MOCK_BACKENDS=1` |
-| `bedrock_kb_retrieve` | Retrieves passages from a Bedrock Knowledge Base | **Live** — real Bedrock KB when `BEDROCK_KB_ID` + AWS credentials set; canned mock chunks when `DEV_MOCK_BACKENDS=1` |
-| `generate_embedding` | Generates a text embedding via Amazon Bedrock (Titan / Cohere) | **Live** — real Bedrock embedding when `EMBEDDING_MODEL_ID` + AWS credentials set; deterministic mock when `DEV_MOCK_BACKENDS=1` |
+| `mongodb_query` | Runs find / findOne / aggregate / updateOne against MongoDB | Live — proxied through the dedicated MongoDB MCP AgentCore Runtime |
+| `mongodb_vector_search` | Performs semantic/vector search against a MongoDB Atlas collection | Live — Atlas `$vectorSearch` via the same MongoDB MCP runtime |
+| `bedrock_kb_retrieve` | Retrieves passages from a Bedrock Knowledge Base | Live — real Bedrock KB when `BEDROCK_KB_ID` + AWS credentials set |
+| `generate_embedding` | Generates a text embedding via Amazon Bedrock (Titan / Cohere) | Live — real Bedrock embedding when `EMBEDDING_MODEL_ID` + AWS credentials set |
 
 **Notes:**
 
 - `activate_skill` is registered for every agent automatically. You do not list it in `tools:`.
-- When `DEV_MOCK_BACKENDS=1`, tools use fixture data from `data/dev/mongo-fixtures.json` — no AWS or MongoDB connection required.
-- When `DEV_MOCK_BACKENDS` is unset and `MONGODB_URI` is set, `mongodb_query` uses the real MongoDB driver. `mongodb_vector_search` uses real Atlas `$vectorSearch` when `EMBEDDING_MODEL_ID` is also set. `bedrock_kb_retrieve` uses real Bedrock KB when `BEDROCK_KB_ID` is set. `generate_embedding` uses real Bedrock when `EMBEDDING_MODEL_ID` is set.
+- All Mongo-shaped tools resolve to MCP tool calls against the MongoDB MCP AgentCore Runtime (`MONGODB_MCP_RUNTIME_ARN` / `MONGODB_MCP_RUNTIME_ENDPOINT`). The agent runtime never opens a MongoDB connection itself.
 - **`HTTP_TOOLS_MOCK=1`** skips real outbound HTTP for all HTTP tools (skill + global); useful for demos without Lambda deployed. **`GET /http-tools`** lists configured tools (see [API Reference](api-reference.md#list-http-tools-lambda--api-config)).
 
 Only list tools that the agent's skills actually use. Giving an agent tools it has no instructions for does not add capability — it adds surface area for unexpected behavior.
@@ -386,14 +385,15 @@ Before deploying, validate an agent definition against a running local stack:
 ```bash
 cd api && bun run typecheck          # catches frontmatter type mismatches via Zod
 cd api && bun run validate:agentcore # smoke-tests BedrockAgentCoreClient on Bun (no network by default)
-bun run test:all                     # unit + integration tests (mock model + fixtures)
+bun test                             # unit + integration tests
 ```
 
-To test interactively with the full stack (`CHAT_MODE=live`, `DEV_MOCK_BACKENDS=1`):
+To test interactively against a deployed AgentCore Orchestrator runtime:
 
 ```bash
-cd api && bun run dev            # starts the local API
-cd ui && streamlit run app.py    # starts the Streamlit UI (separate terminal)
+source env.sh && source .env.live   # exports AGENTCORE_ORCHESTRATOR_ARN
+cd api && bun run dev               # starts the local API
+cd ui && streamlit run app.py       # starts the Streamlit UI (separate terminal)
 ```
 
 Or via Docker: `docker compose up --build` from the repo root.

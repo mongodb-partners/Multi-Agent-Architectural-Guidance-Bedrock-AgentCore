@@ -1,0 +1,18 @@
+# Root build context for `api/Dockerfile` (docker build -f api/Dockerfile .)
+.git
+.github
+.cursor
+api/node_modules
+api/tests
+ui
+docs
+**/__pycache__
+**/*.pyc
+*.py[cod]
+.env
+.env.*
+deploy/terraform/.terraform
+*.tfstate
+*.tfstate.*
+*.tfvars
+!**/.terraform.lock.hcl

@@ -40,19 +40,26 @@ output "cognito_jwks_uri" { value = module.cognito.jwks_uri }
 
 # ── Bedrock KB ────────────────────────────────────────────────────────────────
 output "kb_docs_bucket" { value = module.bedrock_kb.kb_docs_bucket_name }
-output "kb_state_file" { value = module.bedrock_kb.kb_state_file }
+output "knowledge_base_id" { value = module.bedrock_kb.knowledge_base_id }
+output "knowledge_base_arn" { value = module.bedrock_kb.knowledge_base_arn }
+output "kb_data_source_id" { value = module.bedrock_kb.data_source_id }
 output "atlas_secret_arn" { value = module.bedrock_kb.atlas_secret_arn }
 
-# ── Lambda MCP ───────────────────────────────────────────────────────────────
-output "lambda_mcp_arn" { value = module.lambda_mcp.function_arn }
-output "lambda_mcp_function_name" { value = module.lambda_mcp.function_name }
-output "lambda_mcp_artifact_bucket" { value = module.lambda_mcp.artifact_bucket_name }
-output "lambda_mcp_artifact_key" { value = module.lambda_mcp.artifact_key }
+output "bedrock_kb_privatelink_enabled" {
+  value       = var.enable_kb_privatelink
+  description = "True when CLIENT_REVIEW P1-6 Option A is active (NLB + VPC Endpoint Service in front of the Atlas VPCE)."
+}
+
+output "bedrock_kb_endpoint_service_name" {
+  value       = length(module.bedrock_kb_privatelink) > 0 ? module.bedrock_kb_privatelink[0].endpoint_service_name : ""
+  description = "Endpoint Service name forwarded into the Bedrock KB MongoDB Atlas configuration when PrivateLink is enabled. Empty otherwise."
+}
 
 # ── AgentCore ─────────────────────────────────────────────────────────────────
 output "agentcore_memory_id" { value = module.agentcore_memory.memory_id }
 output "agentcore_memory_arn" { value = module.agentcore_memory.memory_arn }
-# Gateway routes tool calls to Lambda MCP (ADR 0001 updated).
+# Gateway stays available for non-Mongo tool targets; MongoDB MCP is invoked
+# directly through the dedicated AgentCore Runtime endpoint.
 output "agentcore_gateway_id" { value = module.agentcore_gateway.gateway_id }
 output "agentcore_gateway_url" { value = module.agentcore_gateway.gateway_mcp_url }
 # Agent Runtimes — orchestrator + 3 specialists
@@ -72,6 +79,22 @@ output "agentcore_runtime_arn" { value = module.acr_orchestrator.runtime_arn }
 output "agentcore_runtime_id" { value = module.acr_orchestrator.runtime_id }
 output "agentcore_runtime_role_arn" { value = module.acr_orchestrator.runtime_role_arn }
 output "ecr_agent_runtime_repository_url" { value = length(aws_ecr_repository.agent_runtime) > 0 ? aws_ecr_repository.agent_runtime[0].repository_url : "" }
+
+# ── mongodb-mcp AgentCore Runtime (sole tool host after Phase 7e) ─────────────
+output "ecr_mongodb_mcp_runtime_repository_url" {
+  value       = aws_ecr_repository.mongodb_mcp_runtime.repository_url
+  description = "ECR repo URL for the mongodb-mcp AgentCore Runtime image (linux/arm64)."
+}
+
+output "mongodb_mcp_runtime_arn" {
+  value       = module.mongodb_mcp_runtime.runtime_arn
+  description = "AgentCore Runtime ARN of the mongodb-mcp MCP server."
+}
+
+output "mongodb_mcp_runtime_endpoint" {
+  value       = local.mongodb_mcp_runtime_endpoint
+  description = "Direct Streamable-HTTP MCP endpoint for the mongodb-mcp AgentCore Runtime."
+}
 
 # ── Voyage AI ─────────────────────────────────────────────────────────────────
 output "voyage_endpoint_name" {

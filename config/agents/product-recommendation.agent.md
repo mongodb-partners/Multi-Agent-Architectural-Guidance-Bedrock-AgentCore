@@ -41,11 +41,12 @@ If those concrete constraints are already present in the user's message (for exa
 
 Call `mongodb_vector_search` with:
 - `collection`: `products`
-- `indexName`: `products-vector-index`
 - `queryText`: the customer's exact description (e.g. "waterproof rugged outdoor IP67")
 - `limit`: 3
 
-Use the customer's actual words — do not paraphrase.
+The platform embeds `queryText` server-side (Voyage AI → Bedrock fallback) and
+runs `$vectorSearch` against `products-vector-index`. Do not pass `queryVector`
+or compute embeddings yourself. Use the customer's actual words — do not paraphrase.
 
 ### Auth-context personalization
 

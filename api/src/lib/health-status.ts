@@ -9,6 +9,7 @@ import {
   BedrockAgentCoreClient,
   ListSessionsCommand,
 } from "@aws-sdk/client-bedrock-agentcore";
+import { logger } from "./logger.ts";
 
 const PING_MS = 2500;
 
@@ -25,9 +26,8 @@ export type AgentcoreStatus =
   | "unreachable";    // configured but API call failed
 
 export type McpStatus =
-  | "not_configured"  // TOOL_HOSTING_MODE != "gateway"
-  | "connected"       // mongodb-mcp-server reachable
-  | "unreachable";    // configured but server not responding
+  | "connected"       // MongoDB MCP runtime / configured MCP endpoint reachable
+  | "unreachable";    // configured MCP endpoint handshake failed
 
 export type LongTermMemoryStatus =
   | "not_configured"   // MONGODB_URI not set
@@ -58,7 +58,23 @@ export function resolveBedrockKbDependencyStatus(): StubDependencyStatus {
   return "not_configured";
 }
 
-/** Probe AgentCore Memory Store reachability via ListSessions. */
+/**
+ * Probe AgentCore Memory Store reachability via `ListSessions` against a
+ * non-existent "health-probe" actor.
+ *
+ * Why a non-existent actor is correct (and surprising): the AgentCore data
+ * plane responds with `ResourceNotFoundException — Actor health-probe not
+ * found` when the API itself succeeded — DNS, TLS, SigV4, IAM, and the
+ * memory store all worked, the API just has no data for that actor. That is
+ * the cheapest "is this stack wired up correctly?" probe we can issue
+ * without first creating a real actor or pulling in the control-plane SDK.
+ *
+ * History: an earlier version of this probe treated *every* error as
+ * `unreachable`, which made `/health` perpetually report
+ * `agentcore: "unreachable"` against a fully-working stack. The four classes
+ * of error that actually mean "cannot reach AgentCore" are network/DNS,
+ * auth, throttling, and the memory store itself missing.
+ */
 export async function resolveAgentcoreDependencyStatus(): Promise<AgentcoreStatus> {
   const memoryStoreId = process.env.AGENTCORE_MEMORY_STORE_ID?.trim();
   if (!memoryStoreId) return "not_configured";
@@ -74,7 +90,29 @@ export async function resolveAgentcoreDependencyStatus(): Promise<AgentcoreStatu
       }),
     );
     return "connected";
-  } catch {
+  } catch (err) {
+    const name = err instanceof Error ? err.name : "Error";
+    const message = err instanceof Error ? err.message : String(err);
+
+    // The probe asked about a fake actor (`health-probe`). When the API
+    // responds with "Actor X not found", that is positive proof the request
+    // round-tripped successfully — it is the success signal we want, not a
+    // failure. We deliberately gate on "Actor" in the message rather than
+    // accepting all `ResourceNotFoundException`s, because a missing memory
+    // store also throws `ResourceNotFoundException` and that is a genuine
+    // unreachable.
+    if (name === "ResourceNotFoundException" && /actor/i.test(message)) {
+      return "connected";
+    }
+
+    // Anything else is a real connectivity / auth / throttle / mis-config
+    // problem. Log so the next regression doesn't get silently buried in a
+    // `catch {}`.
+    logger.warn("[health] agentcore probe failed", {
+      memoryStoreId,
+      error: name,
+      message,
+    });
     return "unreachable";
   }
 }
@@ -101,14 +139,11 @@ export async function resolveChatSessionsPersistenceStatus(
   return "mongodb";
 }
 
-/** Base tools: in-process, AgentCore Gateway, or direct Lambda MCP invocation. */
-export type ToolHostingMode = "direct" | "gateway" | "lambda";
+/** MongoDB MCP is direct AgentCore Runtime; Gateway remains for non-Mongo tools. */
+export type ToolHostingMode = "hybrid";
 
 export function resolveToolHostingMode(): ToolHostingMode {
-  const m = process.env.TOOL_HOSTING_MODE?.trim().toLowerCase();
-  if (m === "gateway") return "gateway";
-  if (m === "lambda") return "lambda";
-  return "direct";
+  return "hybrid";
 }
 
 /** Count agents that have `memory.longTerm: true` in their frontmatter. */

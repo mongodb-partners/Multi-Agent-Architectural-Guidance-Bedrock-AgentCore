@@ -18,16 +18,7 @@ COPY api/tsconfig.json ./
 COPY api/src ./src
 COPY config ./config
 
-# Shared MongoDB MCP guards — imported by api/src/adapters/mongo-data.ts via
-# `../../../lambda/mongodb-mcp/guards.mjs`. Going up 3 levels from
-# `/app/src/adapters/` lands at the filesystem ROOT (`/`), not `/app`, because
-# the source-tree layout assumes `api/` is one level under repo root but the
-# image flattens that. Copy to `/lambda/mongodb-mcp/` (outside /app) so the
-# relative path resolves the same way at runtime as it does in source.
-COPY lambda/mongodb-mcp/guards.mjs /lambda/mongodb-mcp/guards.mjs
-COPY lambda/mongodb-mcp/guards.d.mts /lambda/mongodb-mcp/guards.d.mts
-
-RUN chown -R bun:bun /app /lambda
+RUN chown -R bun:bun /app
 USER bun
 
 EXPOSE 3000

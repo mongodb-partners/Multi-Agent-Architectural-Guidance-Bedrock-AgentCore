@@ -1,27 +1,36 @@
 /**
- * Long-term memory: per-user, per-agent conversation history.
+ * Long-term memory: per-user, per-agent fact store.
  *
  * Backends and priority:
  *
  *   Primary: MongoDB facts store (`agent_memory_facts`) with TTL.
  *   Fallback: AgentCore Memory Store if MongoDB read/write is unavailable.
  *
- * This keeps long-term memory scoped to user profile/preferences/facts while
- * still providing resilience when one backend is temporarily unavailable.
+ * Public API: `writeLongTermMemory` / `readLongTermMemory` /
+ * `readSharedLongTermMemory`. Agents opt in via `memory.longTerm: true`
+ * in their `.agent.md` frontmatter.
  *
- * Public API stays: writeLongTermMemory / readLongTermMemory.
- * Agents in .agent.md activate this via `memory.longTerm: true`.
+ * Fact extraction always runs the LLM extractor (Bedrock Haiku via
+ * `extractFactsWithLlm`). When that call fails the write is skipped and a
+ * `memory.long_term_skip` event is emitted with `reason: "llm_extractor_failed"`
+ * — we deliberately do NOT fall back to a regex heuristic, because regex
+ * false-positives would silently store wrong "facts" on every Bedrock blip.
  */
 
 import {
   BedrockAgentCoreClient,
   CreateEventCommand,
   ListEventsCommand,
-  ListSessionsCommand,
 } from "@aws-sdk/client-bedrock-agentcore";
 import { getMongoDb } from "../lib/mongo-client.ts";
+import {
+  extractFactsWithLlm,
+  type FactCandidate,
+} from "./llm-fact-extractor.ts";
 import { logger } from "./logger.ts";
 import { currentTrace } from "./trace-context.ts";
+
+export type { FactCandidate } from "./llm-fact-extractor.ts";
 
 export type MemoryTurn = {
   userId: string;
@@ -117,7 +126,6 @@ async function agentcoreRead(userId: string, agentId: string, limit: number): Pr
 
   const events = out.events ?? [];
 
-  // Group consecutive USER+ASSISTANT pairs back into MemoryTurn objects.
   const turns: MemoryTurn[] = [];
   for (let i = 0; i < events.length - 1; i++) {
     const ev = events[i];
@@ -140,7 +148,7 @@ async function agentcoreRead(userId: string, agentId: string, limit: number): Pr
 }
 
 // ---------------------------------------------------------------------------
-// MongoDB backend (legacy / local fallback)
+// MongoDB backend
 // ---------------------------------------------------------------------------
 
 const FACTS_COLLECTION = "agent_memory_facts";
@@ -177,71 +185,54 @@ export function resetTtlIndexGuardForTests(): void {
   ttlIndexEnsured = false;
 }
 
-type FactCandidate = {
-  text: string;
-  matched: boolean;
-  matchedPatterns?: string[];
-  rejectedReason?: "too_short" | "too_long" | "no_pattern_match" | "duplicate";
-  length: number;
-};
+// ---------------------------------------------------------------------------
+// Fact extraction (LLM only)
+// ---------------------------------------------------------------------------
 
-const PATTERNS: Array<{ name: string; re: RegExp }> = [
-  {
-    name: "identity",
-    re: /\b(i am|i'm|my name is|my email is|i prefer|i like|i need|my order is|my serial|my device|for me)\b/i,
-  },
-  {
-    name: "topic",
-    re: /\b(email|order|serial|preference|budget|address|phone)\b/i,
-  },
-];
-
-export function extractFactCandidates(userMessage: string): {
+export type ExtractFactCandidatesResult = {
   accepted: string[];
   considered: FactCandidate[];
-} {
-  const src = userMessage
-    .replace(/\r/g, "")
-    .split("\n")
-    .map((s) => s.trim())
-    .filter(Boolean);
-  const considered: FactCandidate[] = [];
-  const accepted: string[] = [];
-  const seen = new Set<string>();
-  for (const line of src) {
-    const candidate: FactCandidate = { text: line, matched: false, length: line.length };
-    if (line.length < 8) {
-      candidate.rejectedReason = "too_short";
-      considered.push(candidate);
-      continue;
-    }
-    if (line.length > 220) {
-      candidate.rejectedReason = "too_long";
-      considered.push(candidate);
-      continue;
-    }
-    const matchedNames = PATTERNS.filter((p) => p.re.test(line)).map((p) => p.name);
-    if (matchedNames.length === 0) {
-      candidate.rejectedReason = "no_pattern_match";
-      considered.push(candidate);
-      continue;
-    }
-    const k = line.toLowerCase();
-    if (seen.has(k)) {
-      candidate.matched = true;
-      candidate.matchedPatterns = matchedNames;
-      candidate.rejectedReason = "duplicate";
-      considered.push(candidate);
-      continue;
-    }
-    seen.add(k);
-    candidate.matched = true;
-    candidate.matchedPatterns = matchedNames;
-    considered.push(candidate);
-    accepted.push(line);
-    if (accepted.length >= 6) break;
+  extractorModelId?: string;
+  extractorLatencyMs: number;
+  extractorInputTokens?: number;
+  extractorOutputTokens?: number;
+  /** Set when the Bedrock call failed; the caller treats this as a hard skip
+   *  (no regex fallback — see file header comment for rationale). */
+  extractorError?: string;
+};
+
+/**
+ * Run the LLM extractor and return its candidates. On Bedrock failure we
+ * return an empty result with `extractorError` set; the caller (`mongoWriteFacts`)
+ * treats that as a skip. Extractor never throws.
+ */
+export async function extractFactCandidates(
+  userMessage: string,
+): Promise<ExtractFactCandidatesResult> {
+  const t0 = Date.now();
+  try {
+    const llm = await extractFactsWithLlm(userMessage);
+    return {
+      accepted: llm.accepted,
+      considered: llm.considered,
+      extractorModelId: llm.modelId,
+      extractorLatencyMs: llm.latencyMs,
+      extractorInputTokens: llm.inputTokens,
+      extractorOutputTokens: llm.outputTokens,
+    };
+  } catch (err) {
+    const errMsg = err instanceof Error ? err.message : String(err);
+    logger.warn(
+      "[memory] LLM fact extractor failed; skipping long-term write",
+      { error: errMsg },
+    );
+    return {
+      accepted: [],
+      considered: [],
+      extractorLatencyMs: Date.now() - t0,
+      extractorError: errMsg,
+    };
   }
-  return { accepted, considered };
 }
 
 function memoryTraceValuesEnabled(): boolean {
@@ -249,9 +240,9 @@ function memoryTraceValuesEnabled(): boolean {
   return v === "1" || v === "true" || v === "yes";
 }
 
-async function mongoWriteFacts(turn: MemoryTurn): Promise<{
+type MongoWriteFactsResult = {
   outcome: "persisted" | "skipped" | "failed";
-  reason?: "mongodb_unavailable" | "no_fact_candidates";
+  reason?: "mongodb_unavailable" | "no_fact_candidates" | "llm_extractor_failed";
   accepted: string[];
   considered: FactCandidate[];
   inserted: number;
@@ -260,10 +251,39 @@ async function mongoWriteFacts(turn: MemoryTurn): Promise<{
   ttlExpiresAt: string;
   errorClass?: string;
   errorMessage?: string;
-}> {
+  extractorModelId?: string;
+  extractorLatencyMs: number;
+  extractorInputTokens?: number;
+  extractorOutputTokens?: number;
+  extractorError?: string;
+};
+
+async function mongoWriteFacts(turn: MemoryTurn): Promise<MongoWriteFactsResult> {
   const ttlDays = Number(process.env.MEMORY_TTL_DAYS ?? 90);
   const ttlExpiresAt = new Date(Date.now() + ttlDays * 86_400_000).toISOString();
-  const { accepted, considered } = extractFactCandidates(turn.userMessage);
+  const ext = await extractFactCandidates(turn.userMessage);
+  const { accepted, considered } = ext;
+  const extractorMeta = {
+    extractorModelId: ext.extractorModelId,
+    extractorLatencyMs: ext.extractorLatencyMs,
+    extractorInputTokens: ext.extractorInputTokens,
+    extractorOutputTokens: ext.extractorOutputTokens,
+    extractorError: ext.extractorError,
+  };
+
+  if (ext.extractorError) {
+    return {
+      outcome: "skipped",
+      reason: "llm_extractor_failed",
+      accepted: [],
+      considered: [],
+      inserted: 0,
+      priorEntryCount: null,
+      newEntryCount: null,
+      ttlExpiresAt,
+      ...extractorMeta,
+    };
+  }
 
   const db = await getMongoDb();
   if (!db) {
@@ -277,6 +297,7 @@ async function mongoWriteFacts(turn: MemoryTurn): Promise<{
       priorEntryCount: null,
       newEntryCount: null,
       ttlExpiresAt,
+      ...extractorMeta,
     };
   }
   await ensureTtlIndex(db);
@@ -290,6 +311,7 @@ async function mongoWriteFacts(turn: MemoryTurn): Promise<{
       priorEntryCount: null,
       newEntryCount: null,
       ttlExpiresAt,
+      ...extractorMeta,
     };
   }
   const docs: MemoryFact[] = accepted.map((fact) => ({
@@ -321,6 +343,7 @@ async function mongoWriteFacts(turn: MemoryTurn): Promise<{
       ttlExpiresAt,
       errorClass: err instanceof Error ? err.constructor.name : "Error",
       errorMessage: err instanceof Error ? err.message : String(err),
+      ...extractorMeta,
     };
   }
   try {
@@ -338,6 +361,7 @@ async function mongoWriteFacts(turn: MemoryTurn): Promise<{
     priorEntryCount,
     newEntryCount,
     ttlExpiresAt,
+    ...extractorMeta,
   };
 }
 
@@ -396,7 +420,6 @@ export async function writeLongTermMemory(
       reason: "no_user_id",
       agentId,
       userMessageExcerpt: userMessage.slice(0, 200),
-      wouldHaveStored: extractFactCandidates(userMessage).accepted.length > 0,
     });
     return;
   }
@@ -406,7 +429,6 @@ export async function writeLongTermMemory(
       userId,
       agentId,
       userMessageExcerpt: userMessage.slice(0, 200),
-      wouldHaveStored: extractFactCandidates(userMessage).accepted.length > 0,
     });
     return;
   }
@@ -437,17 +459,24 @@ export async function writeLongTermMemory(
       ttlExpiresAt: "",
       errorClass: err instanceof Error ? err.constructor.name : "Error",
       errorMessage: err instanceof Error ? err.message : String(err),
+      extractorLatencyMs: 0,
     };
   }
 
-  // Skip → emit memory.long_term_skip and exit.
   if (result.outcome === "skipped") {
+    const reason = result.reason ?? "no_fact_candidates";
     trace?.event("memory.long_term_skip", {
-      reason: result.reason ?? "no_fact_candidates",
+      reason,
       userId,
       agentId,
       userMessageExcerpt: userMessage.slice(0, 200),
-      wouldHaveStored: result.accepted.length > 0,
+      ...(reason === "llm_extractor_failed"
+        ? {
+            extractorModelId: result.extractorModelId,
+            extractorLatencyMs: result.extractorLatencyMs,
+            extractorError: result.extractorError,
+          }
+        : {}),
     });
     return;
   }
@@ -493,6 +522,8 @@ export async function writeLongTermMemory(
       matchedPatterns: c.matchedPatterns,
       rejectedReason: c.rejectedReason,
       length: c.length,
+      category: c.category,
+      note: c.note,
     })),
     factsExtracted: includeValues ? result.accepted : result.accepted.map(() => "<redacted>"),
     collection: "agent_memory_facts",
@@ -514,6 +545,10 @@ export async function writeLongTermMemory(
     newEntryCount: result.newEntryCount,
     ttlExpiresAt: result.ttlExpiresAt,
     latencyMs: Date.now() - t0,
+    extractorModelId: result.extractorModelId,
+    extractorLatencyMs: result.extractorLatencyMs,
+    extractorInputTokens: result.extractorInputTokens,
+    extractorOutputTokens: result.extractorOutputTokens,
   });
 }
 

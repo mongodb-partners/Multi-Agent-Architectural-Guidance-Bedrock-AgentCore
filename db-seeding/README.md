@@ -76,8 +76,6 @@ On a local/Community MongoDB server the script prints the JSON definition and sk
 }
 ```
 
-## Local dev (no Atlas)
+## When to run
 
-Use `DEV_MOCK_BACKENDS=1` — no MongoDB connection required.  
-The API uses `data/dev/mongo-fixtures.json` as a lightweight in-memory substitute.  
-These seed scripts are **only needed for a live Atlas deployment**.
+These seed scripts target the live Atlas deployment behind the AgentCore Gateway's MCP target Lambda. Run them once after `deploy/scripts/deploy.sh` provisions the cluster, and again whenever you change the `db-seeding/` fixtures.

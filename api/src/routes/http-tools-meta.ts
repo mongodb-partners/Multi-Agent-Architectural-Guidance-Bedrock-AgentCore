@@ -5,7 +5,7 @@ import { listAllSkillHttpToolDescriptors } from "../lib/skill-http-tools-load.ts
 export const httpToolsMetaRoutes = new Hono();
 
 /**
- * List config-defined HTTP tools (Lambda / API Gateway targets). No secrets returned.
+ * List config-defined HTTP tools (REST endpoints). No secrets returned.
  * Includes root `http-tools.json` and per-skill `config/skills/<skill>/http-tools.json`.
  */
 httpToolsMetaRoutes.get("/http-tools", (c) => {

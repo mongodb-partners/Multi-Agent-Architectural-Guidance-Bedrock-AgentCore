@@ -40,6 +40,22 @@ For an editable picture: [`diagrams/03-memory-architecture.drawio`](diagrams/03-
 | **In-memory map** | Always | Fast cache/fallback. Lost on API restart. |
 | **MongoDB `chat_sessions`** | `MONGODB_URI` set (default-on; opt out with `PERSIST_CHAT_SESSIONS=0`) | Write-through persistence for `session-store`. |
 
+### Decision tree (which backend serves a given turn)
+
+JWKS auth is **mandatory end-to-end** (see `assertJwksAuthConfigured()` in [`api/src/lib/jwt-verify.ts`](../api/src/lib/jwt-verify.ts)), so every authenticated turn has a real `userId = jwtPayload.sub`. The matrix below describes how the API selects a short-term backend per turn:
+
+| `SHORT_TERM_MEMORY_BACKEND` | `AGENTCORE_MEMORY_STORE_ID` | `MONGODB_URI` | Primary read | Persisted write | Notes |
+|---|---|---|---|---|---|
+| `agentcore` | set | set | **AgentCore events** (per `(memoryId, actorId=userId, sessionId)`) | AgentCore events **and** `chat_sessions` (write-through) | Production EC2 default; survives API restarts. |
+| `agentcore` | set | unset | **AgentCore events** | AgentCore events only | Cold-start replay needs AgentCore reachable; in-memory map is a transient cache. |
+| `agentcore` | **unset** | — | — | — | **API refuses to boot** — `assertShortTermBackendConfigured()` in [`api/src/lib/short-term-memory.ts`](../api/src/lib/short-term-memory.ts) throws so a misconfigured deploy never silently downgrades to the in-memory map. |
+| any other / unset | — | set | `chat_sessions` (write-through with in-memory cache) | `chat_sessions` only | Used when AgentCore is intentionally off; durable across API restarts via Mongo. |
+| any other / unset | — | unset | In-memory `Map` only | none | Ephemeral mode — only safe for tests / a single API process. |
+
+`PERSIST_CHAT_SESSIONS=0` opts out of the Mongo write-through even when `MONGODB_URI` is set; the in-memory `Map` then becomes the only short-term store for that process.
+
+The runtime never silently downgrades from AgentCore to the in-memory `Map`: if you opt into the AgentCore backend, you must wire the memory store id, otherwise the API refuses to start.
+
 ---
 
 ## 2. Long-Term Memory (cross-session personalization)
@@ -57,7 +73,7 @@ For an editable picture: [`diagrams/03-memory-architecture.drawio`](diagrams/03-
 
 ### What gets stored
 
-The API extracts fact-like lines from user messages and writes documents like:
+The API extracts fact-like snippets from each user message and writes documents like:
 
 ```javascript
 {
@@ -71,6 +87,25 @@ The API extracts fact-like lines from user messages and writes documents like:
 
 - Collection: `agent_memory_facts`
 - TTL index: `MEMORY_TTL_DAYS * 86400` seconds (EC2 deploy sets 30 days)
+
+### Fact extractor (LLM)
+
+Extraction lives in [`api/src/lib/long-term-memory.ts`](../api/src/lib/long-term-memory.ts):
+
+| Backend | Behavior |
+|---|---|
+| **LLM** ([`api/src/lib/llm-fact-extractor.ts`](../api/src/lib/llm-fact-extractor.ts)) | Calls Amazon Bedrock `ConverseCommand` with a tool-forced JSON schema (`record_facts`); model returns categorized facts + ignored snippets. This is the only extractor — there is no regex fallback. |
+
+**Bedrock runtime failure → skip the write.** When the LLM extractor throws (throttling, AccessDenied, network), the write is skipped and a `memory.long_term_skip` event is emitted with `reason: "llm_extractor_failed"` plus extractor diagnostics (`extractorModelId`, `extractorError`). Rationale: a regex fallback would produce false positives — e.g. "Can you check the status of order ORD-1234?" matches an `order` topic pattern — and silently storing wrong "facts" on every Bedrock blip is worse than skipping. The user can re-state the fact in a future turn.
+
+**Env vars**
+
+| Variable | Purpose | Default |
+|---|---|---|
+| `MEMORY_EXTRACTION_MODEL_ID` | Bedrock model id (or cross-region inference profile id) used by the LLM extractor. Must support tool use. | `us.anthropic.claude-haiku-4-5-20251001-v1:0` |
+| `MEMORY_EXTRACTION_MAX_FACTS` | Cap on facts persisted per turn | `6` |
+
+**Trace event** `memory.long_term_write` records `extractorModelId`, `extractorLatencyMs`, and per-candidate `category` + `note`, all visible in the trace UI.
 
 ### Read path injected into prompts
 
@@ -103,7 +138,7 @@ This drives identity-aware prompts like:
 
 - No vector-similarity recall over memory facts (recall is rule-based + recency-oriented).
 - No full memory summarization/consolidation pipeline.
-- No hard PII classifier before memory write (facts are heuristic-extracted text).
+- No hard PII classifier before memory write. The LLM extractor is prompt-instructed to skip ephemeral / non-personal text and label what it stores by category, but it is not a PII guard.
 
 ---
 
@@ -146,6 +181,7 @@ db.agent_memory_facts.find({ userId: "<userId>" }).sort({ ts: -1 }).limit(20)
 | [`api/src/lib/short-term-memory.ts`](../api/src/lib/short-term-memory.ts) | AgentCore short-term read/write |
 | [`api/src/lib/session-store.ts`](../api/src/lib/session-store.ts) | Fallback chat session cache + optional Mongo persistence |
 | [`api/src/lib/chat-sessions-collection.ts`](../api/src/lib/chat-sessions-collection.ts) | `chat_sessions` collection access |
-| [`api/src/lib/long-term-memory.ts`](../api/src/lib/long-term-memory.ts) | Long-term facts and fallback logic |
+| [`api/src/lib/long-term-memory.ts`](../api/src/lib/long-term-memory.ts) | Long-term facts read/write and storage fallback logic |
+| [`api/src/lib/llm-fact-extractor.ts`](../api/src/lib/llm-fact-extractor.ts) | Bedrock-backed LLM fact extractor (tool-forced JSON output) |
 | [`api/src/lib/auth-user-context.ts`](../api/src/lib/auth-user-context.ts) | Authenticated identity enrichment for prompts |
 | [`api/src/routes/chat.ts`](../api/src/routes/chat.ts) | End-to-end read/write hook integration |

@@ -43,7 +43,7 @@ api/
 │   │   └── http-tools-meta.ts← GET /http-tools — lists configured HTTP tool integrations
 │   │
 │   ├── middleware/           ← Request pipeline (runs before every route)
-│   │   ├── auth.ts           ← JWT validation via JWKS (Cognito-compatible); enforced when REQUIRE_AUTH=true
+│   │   ├── auth.ts           ← JWT validation via JWKS (Cognito-compatible); always required (assertJwksAuthConfigured at boot)
 │   │   ├── rate-limit.ts     ← Per-IP / per-token rate limiting
 │   │   ├── request-id.ts     ← Attaches a unique requestId to every request for log correlation
 │   │   └── access-log.ts     ← Structured JSON access log per request
@@ -70,21 +70,17 @@ api/
 │   │   ├── mongo-client.ts          ← Shared MongoDB Atlas client singleton
 │   │   ├── chat-sessions-collection.ts ← MongoDB collection for persistent chat sessions
 │   │   ├── health-status.ts         ← Builds the /health response object
-│   │   ├── json-safe.ts             ← Utility to safely serialize tool results
-│   │   └── tools/
-│   │       └── troubleshooting-tools.ts ← Domain-specific tool wiring for the troubleshooting agent
+│   │   └── json-safe.ts             ← Utility to safely serialize tool results
 │   │
 │   └── adapters/             ← Swappable backend integrations
-│       ├── resolve-model.ts       ← Switches between BedrockModel (live) and DevMockModel (dev)
-│       ├── mongo-data.ts          ← MongoDB queries + Atlas Vector Search; fixture fallback when DEV_MOCK_BACKENDS=1
+│       ├── resolve-model.ts       ← Builds the BedrockModel for an agent
+│       ├── agentcore-runtime.ts   ← invokeAgentRuntime + the AGENTCORE_ORCHESTRATOR_ARN startup guard
 │       ├── voyage-embedding.ts    ← SageMaker embedding adapter for Voyage AI multimodal-3
-│       ├── mock-retrieval.ts      ← Keyword-based mock retrieval for dev without Atlas
-│       ├── dev-mock-model.ts      ← Deterministic mock Bedrock model for unit/integration tests
-│       └── dev-mock-env.ts        ← In-memory mock data store used by dev-mock-model
+│       └── bedrock-retrieval.ts   ← Bedrock Knowledge Base retrieve + Bedrock embedding helpers
 │
 ├── tests/
 │   ├── unit/             ← Fast tests with no network calls (mock everything)
-│   ├── integration/      ← Tests that spin up the real API server with DEV_MOCK_BACKENDS=1
+│   ├── integration/      ← Tests that spin up the real API server with mocked AgentCore Runtime
 │   ├── system/           ← Tests that call live AWS + MongoDB (requires credentials)
 │   ├── fixtures/         ← Shared test data used across test suites
 │   └── helpers/          ← Test utilities (SSE parser, request helpers, etc.)
@@ -102,13 +98,14 @@ api/
 
 | Variable | Purpose |
 |---|---|
-| `CHAT_MODE` | `live` (real Bedrock + Atlas) or `mock` |
-| `DEV_MOCK_BACKENDS` | `1` = use in-memory fixtures instead of real AWS/MongoDB |
-| `ORCHESTRATOR_MODE` | `swarm` (multi-agent) or `single` |
-| `MONGODB_URI` | Atlas connection string |
-| `BEDROCK_KB_ID` | Bedrock Knowledge Base ID for RAG retrieval |
-| `REQUIRE_AUTH` | `true` = validate JWTs on every request |
-| `VOYAGE_SAGEMAKER_ENDPOINT` | SageMaker endpoint name for Voyage AI embeddings |
+| `AGENTCORE_ORCHESTRATOR_ARN` | **Required at startup.** ARN of the orchestrator AgentCore Runtime the API forwards every chat turn to. |
+| `MONGODB_MCP_RUNTIME_ARN` / `MONGODB_MCP_RUNTIME_ENDPOINT` | Direct MongoDB MCP AgentCore Runtime target. |
+| `AGENTCORE_GATEWAY_URL` / `MCP_SERVER_URL` | AgentCore Gateway MCP endpoint for non-Mongo Gateway tools. |
+| `ORCHESTRATOR_MODE` | `swarm` (default for the orchestrator runtime) or `single`. |
+| `MONGODB_URI` | Atlas connection string used by the API for chat session persistence and long-term memory writes. |
+| `BEDROCK_KB_ID` | Bedrock Knowledge Base ID for RAG retrieval. |
+| `AUTH_JWKS_URI` / `AUTH_ISSUER` | **Required at startup.** OIDC pool used to verify the Bearer JWT on every protected request (`assertJwksAuthConfigured()`). |
+| `VOYAGE_SAGEMAKER_ENDPOINT` | SageMaker endpoint name for Voyage AI embeddings. |
 
 ---
 
@@ -267,7 +264,7 @@ deploy/
         │
         ├── cognito/         ← Cognito User Pool + App Client + Hosted UI domain
         │                       Why: Provides OAuth 2.0 authentication. The API validates JWTs
-        │                       issued by this pool when REQUIRE_AUTH=true.
+        │                       issued by this pool on every request — JWKS auth is mandatory.
         │
         ├── ecr/             ← ECR repositories for the API and UI container images
         │                       Why: ECS pulls images from ECR. Repos must exist before docker push.
@@ -291,11 +288,12 @@ deploy/
         │                       behind the ALB without managing EC2 instances.
         │
         ├── bedrock-kb/      ← Bedrock Knowledge Base with MongoDB Atlas vector storage
-        │                       Uploads kb-docs/*.txt to S3, creates KB + data source via AWS CLI
-        │                       (null_resource), triggers ingestion job, writes KB ID to .kb-state.json
+        │                       Uploads kb-docs/*.txt to S3 and creates the KB + S3 data source
+        │                       via native aws_bedrockagent_knowledge_base + aws_bedrockagent_data_source
+        │                       (provider 6.27+, MONGO_DB_ATLAS storage supported). A small null_resource
+        │                       still triggers the ingestion job and bootstraps the Atlas collection — both
+        │                       are actions, not infrastructure, so no native resource exists for them.
         │                       Why: Provides RAG retrieval for the troubleshooting agent.
-        │                       The Terraform AWS provider doesn't yet support MongoDB Atlas storage
-        │                       natively, so CLI calls are used via null_resource provisioners.
         │
         ├── voyage-sagemaker/← SageMaker model + endpoint for Voyage AI multimodal-3 embeddings
         │                       Conditional: only deployed when voyage_model_package_arn is set
@@ -353,7 +351,7 @@ e2e/
 
 Placeholder directories for Lambda functions that will wrap the base tools when AgentCore Gateway mode is activated (Phase 4).
 
-**Why it exists:** Today, all agent tools (`mongodb_query`, `bedrock_kb_retrieve`, etc.) run in-process inside the Hono API. The target architecture routes tool calls through AWS AgentCore Gateway, which requires each tool to be a standalone Lambda function. These placeholders reserve the folder structure for that migration.
+**Why it exists:** MongoDB tool calls go through the dedicated MongoDB MCP AgentCore Runtime. Other agent tools (`bedrock_kb_retrieve`, embedding generation, per-skill HTTP tools) still run in-process inside the AgentCore Runtime container. These per-tool Lambda placeholders are reserved for a future migration where each tool becomes its own gateway target.
 
 ```
 lambda/
@@ -392,7 +390,7 @@ docs/
 └── workflows/
     └── ci.yml    ← GitHub Actions: runs on every push/PR
                      Steps: install deps → typecheck → unit tests → integration tests
-                     Uses DEV_MOCK_BACKENDS=1 so no AWS or Atlas credentials needed in CI
+                     Mocks the AgentCore Runtime invoker so no AWS credentials are needed in CI
 ```
 
 ---

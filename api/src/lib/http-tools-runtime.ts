@@ -50,20 +50,51 @@ function buildInputSchema(def: HttpToolDefinition): z.ZodObject<Record<string, z
   return z.object(shape);
 }
 
-function assertUrlAllowed(urlStr: string, file: HttpToolsFile): void {
+function hasAllowlist(file: HttpToolsFile): boolean {
   const sec = file.security;
-  if (!sec?.allowedHostSuffixes?.length && !sec?.allowedHosts?.length) return;
+  return Boolean((sec?.allowedHosts?.length ?? 0) + (sec?.allowedHostSuffixes?.length ?? 0));
+}
+
+/**
+ * SSRF guard. The caller is responsible for passing the loaded `http-tools.json` file so the
+ * security block (`allowedHosts` / `allowedHostSuffixes`) lives next to the tool definitions.
+ *
+ * **Required when any tool is registered.** When a tool is wired up but the file has no
+ * allowlist, the runtime refuses every call (no dev bypass) so a fresh deploy cannot
+ * accidentally ship with an open egress. `assertHttpToolsFileSecure()` rejects unguarded
+ * tool files at load time so the failure is loud and at boot, not on the first request.
+ */
+function assertUrlAllowed(urlStr: string, file: HttpToolsFile): void {
+  if (!hasAllowlist(file)) {
+    throw new Error("allowlist_missing");
+  }
   let host: string;
   try {
     host = new URL(urlStr).hostname;
   } catch {
     throw new Error("invalid_url");
   }
+  const sec = file.security!;
   const exact = sec.allowedHosts ?? [];
   if (exact.some((h) => h === host)) return;
   const suf = sec.allowedHostSuffixes ?? [];
   if (suf.some((s) => host === s || host.endsWith(s))) return;
   throw new Error(`host_not_allowed:${host}`);
+}
+
+/**
+ * Refuse to register HTTP tools if the file has tools but no allowlist. Called at
+ * registration time so a misconfigured deploy fails before the first request.
+ */
+export function assertHttpToolsFileSecure(file: HttpToolsFile, source: string): void {
+  if (file.tools.length === 0) return;
+  if (!hasAllowlist(file)) {
+    throw new Error(
+      `[http-tools] ${source} declares ${file.tools.length} tool(s) but no security ` +
+        `allowlist (allowedHosts / allowedHostSuffixes). SSRF guard refuses to register ` +
+        `unrestricted tools — add a security block to ${source}.`,
+    );
+  }
 }
 
 function redactHeaders(h: Headers): Record<string, string> {
@@ -123,10 +154,11 @@ async function runHttpCall(
     assertUrlAllowed(expandedUrl, file);
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
+    const blocked = msg === "allowlist_missing" ? "allowlist_missing" : "host_not_allowed";
     trace?.event("tool.http", {
       url: expandedUrl,
       method: def.method,
-      blocked: "host_not_allowed",
+      blocked,
       errorMessage: msg,
     });
     return {
@@ -134,7 +166,7 @@ async function runHttpCall(
       code: "ssrf_blocked",
       tool: toolLabel,
       message: msg,
-      hint: "Add hostname to security.allowedHosts or security.allowedHostSuffixes in config/http-tools.json (repo root).",
+      hint: "Add hostname to security.allowedHosts or security.allowedHostSuffixes in config/http-tools.json (repo root). The block is mandatory whenever any tool is registered — there is no dev bypass.",
     };
   }
 
@@ -252,6 +284,15 @@ export function makeSkillHttpConfigTool(
 ): Tool {
   const inputSchema = buildInputSchema(def);
   const securityFile = loadHttpToolsFile();
+  // Skill-scoped tools share the root http-tools.json security block. Refuse to register if
+  // the operator wired a skill HTTP tool but never added an allowlist (SSRF guard).
+  if (!hasAllowlist(securityFile)) {
+    throw new Error(
+      `[http-tools] Skill '${skillName}' tool '${def.name}' cannot be registered: ` +
+        `config/http-tools.json has no security.allowedHosts / allowedHostSuffixes. ` +
+        `Add the host to the root file's security block.`,
+    );
+  }
   return tool({
     name: strandsToolName,
     description: `[Skill: ${skillName}] ${def.description}`,
@@ -284,6 +325,7 @@ export function makeSkillHttpConfigTool(
 /** Map tool name → Strands Tool for all entries in http-tools.json. */
 export function buildHttpToolsMap(): Map<string, Tool> {
   const file = loadHttpToolsFile();
+  assertHttpToolsFileSecure(file, "config/http-tools.json");
   const map = new Map<string, Tool>();
   for (const def of file.tools) {
     map.set(def.name, makeHttpConfigTool(def, file));

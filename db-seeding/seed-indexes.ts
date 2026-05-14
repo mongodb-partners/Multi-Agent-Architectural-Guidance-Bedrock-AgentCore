@@ -38,8 +38,21 @@ const regularIndexes: { collection: string; spec: Record<string, 1 | -1>; option
   { collection: "products", spec: { tags: 1 } },
   // customers
   { collection: "customers", spec: { email: 1 }, options: { unique: true } },
-  // troubleshooting_docs
-  { collection: "troubleshooting_docs", spec: { docId: 1 }, options: { unique: true } },
+  // troubleshooting_docs — `docId` uniqueness is enforced ONLY for seed playbooks
+  // that actually carry a docId. Bedrock KB ingestion writes chunk documents into
+  // this same collection and they do not have a `docId` field; a plain
+  // `{ unique: true }` index would treat the missing field as `docId: null` and
+  // collide on the second chunk insert with E11000, surfacing inside Bedrock as
+  // the cryptic "Write failure with error code -3" (see memory.md). The partial
+  // filter scopes the unique constraint to documents that explicitly set docId.
+  {
+    collection: "troubleshooting_docs",
+    spec: { docId: 1 },
+    options: {
+      unique: true,
+      partialFilterExpression: { docId: { $exists: true, $type: "string" } },
+    },
+  },
   { collection: "troubleshooting_docs", spec: { errorCodes: 1 } },
   { collection: "troubleshooting_docs", spec: { affectedSkus: 1 } },
   // agent_memory — TTL index (90 days default; override via MEMORY_TTL_DAYS)
@@ -63,11 +76,27 @@ for (const { collection, spec, options } of regularIndexes) {
     regularOk++;
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    // "already exists" is fine
-    if (!msg.includes("already exists") && !msg.includes("IndexOptionsConflict")) {
-      console.warn(`  ⚠️  ${collection} ${JSON.stringify(spec)}: ${msg}`);
-    } else {
+    // IndexOptionsConflict means the same key exists with different options.
+    // Heal it by dropping + recreating with the requested options. This is what
+    // turns a stale plain-unique `docId_1` index into the partial-unique form so
+    // Bedrock KB ingestion can coexist with seed playbooks.
+    if (msg.includes("IndexOptionsConflict") || msg.includes("IndexKeySpecsConflict")) {
+      const keyName = Object.entries(spec)
+        .map(([k, v]) => `${k}_${v}`)
+        .join("_");
+      try {
+        await db.collection(collection).dropIndex(keyName);
+        await db.collection(collection).createIndex(spec, { background: true, ...options });
+        console.log(`  ↺  ${collection}.${keyName} re-created with new options`);
+        regularOk++;
+      } catch (recreateErr) {
+        const recreateMsg = recreateErr instanceof Error ? recreateErr.message : String(recreateErr);
+        console.warn(`  ⚠️  ${collection} ${JSON.stringify(spec)} reconcile failed: ${recreateMsg}`);
+      }
+    } else if (msg.includes("already exists")) {
       regularOk++;
+    } else {
+      console.warn(`  ⚠️  ${collection} ${JSON.stringify(spec)}: ${msg}`);
     }
   }
 }

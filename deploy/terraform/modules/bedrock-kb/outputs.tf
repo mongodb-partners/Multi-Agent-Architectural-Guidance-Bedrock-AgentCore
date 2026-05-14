@@ -18,9 +18,19 @@ output "atlas_secret_name" {
   description = "Secrets Manager secret name (project+env-scoped). Pass to consumers that need to scope secret ARN patterns in IAM policies."
 }
 
-output "kb_state_file" {
-  value       = local.kb_id_file
-  description = "Path to JSON file written by apply containing knowledge_base_id and data_source_id"
+output "knowledge_base_id" {
+  value       = aws_bedrockagent_knowledge_base.this.id
+  description = "Bedrock Knowledge Base ID"
+}
+
+output "knowledge_base_arn" {
+  value       = aws_bedrockagent_knowledge_base.this.arn
+  description = "Bedrock Knowledge Base ARN"
+}
+
+output "data_source_id" {
+  value       = aws_bedrockagent_data_source.s3.data_source_id
+  description = "Bedrock KB S3 data source ID"
 }
 
 output "kb_role_arn" {

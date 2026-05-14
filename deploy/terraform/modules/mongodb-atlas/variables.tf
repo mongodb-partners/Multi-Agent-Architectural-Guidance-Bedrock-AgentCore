@@ -30,3 +30,9 @@ variable "project_tag" {
   default     = "multiagent-mongodb-framework"
 }
 
+variable "privatelink_endpoint_id" {
+  type        = string
+  description = "Optional AWS VPCE id of the PrivateLink endpoint that the consumer VPC has into Atlas. When set, the `privatelink_connection_string` output emits the multi-host non-SRV PrivateLink URI for the matching endpoint (suitable for VPC-internal callers like Lambda MCP). When empty the output is \"\" and callers should fall back to the SRV `connection_string`."
+  default     = ""
+}
+

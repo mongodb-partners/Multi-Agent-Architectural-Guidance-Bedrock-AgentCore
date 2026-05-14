@@ -18,14 +18,23 @@ from lib.api_client import get_trace, list_recent_traces  # noqa: E402
 from lib.cognito_gate import ensure_api_bearer_token, render_cognito_logout  # noqa: E402
 from lib.config import load_settings  # noqa: E402
 from lib.demo_narratives import narrate  # noqa: E402
-from lib.replay_controller import render_replay_controls  # noqa: E402
 from lib.trace_css import inject_trace_css  # noqa: E402
+from lib.trace_navigation import (  # noqa: E402
+    SELECTED_TRACE_ID_KEY,
+    open_trace_viewer,
+    query_trace_id,
+    select_trace,
+)
 from lib.trace_view import (  # noqa: E402
     render_agentcore,
+    render_context,
     render_developer_details,
+    render_errors,
     render_memory,
+    render_model_activity,
     render_mock_banner,
     render_mongo_dashboard,
+    render_prompt_and_skills,
     render_routing,
     render_summary_header,
     render_timeline,
@@ -53,15 +62,25 @@ with st.sidebar:
         recent = []
     for r in recent:
         tid = r.get("traceId", "")
+        if not tid:
+            continue
         label = f"{tid[:8]}… · {r.get('agentId', '')}"
-        st.page_link(f"pages/2_Trace_Viewer.py?traceId={tid}", label=label)
+        if st.button(label, key=f"recent_trace_{tid}", use_container_width=True):
+            open_trace_viewer(tid)
 
 
 # ── Locate the trace from query params ──────────────────────────────────────
 qp = st.query_params
-trace_id = qp.get("traceId")
+trace_id = query_trace_id()
 session_id = qp.get("sessionId")
 message_id = qp.get("messageId")
+
+if trace_id:
+    select_trace(trace_id)
+elif not (session_id and message_id):
+    trace_id = st.session_state.get(SELECTED_TRACE_ID_KEY)
+    if trace_id:
+        select_trace(trace_id)
 
 st.title("Trace Viewer")
 
@@ -105,7 +124,6 @@ render_mock_banner(trace.get("events") or [])
 render_summary_header(trace)
 
 events = trace.get("events") or []
-render_replay_controls(events)
 narrative_lines = narrate(events)
 if narrative_lines:
     st.markdown('<div class="trace-section-title">What happened</div>', unsafe_allow_html=True)
@@ -114,9 +132,13 @@ if narrative_lines:
 
 st.divider()
 render_timeline(events)
+render_context(events)
+render_prompt_and_skills(events)
+render_model_activity(events)
 render_routing(events)
 render_mongo_dashboard(events)
 render_tool_calls(events)
 render_agentcore(events)
 render_memory(events)
+render_errors(events)
 render_developer_details(trace)

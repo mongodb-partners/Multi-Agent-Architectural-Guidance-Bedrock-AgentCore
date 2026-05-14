@@ -2,7 +2,8 @@
  * Seed: generate and store embeddings for products and troubleshooting_docs.
  *
  * Embedding provider (in priority order):
- *   1. Voyage AI via SageMaker  — when VOYAGE_SAGEMAKER_ENDPOINT is set (voyage-3.5-lite, 1024-d default)
+ *   1. Voyage AI via SageMaker  — when VOYAGE_SAGEMAKER_ENDPOINT is set
+ *      (default: voyage-multimodal-3, 1024-d, multimodal request envelope)
  *   2. Amazon Bedrock           — when EMBEDDING_MODEL_ID is set (Titan 1536-d / Cohere 1024-d)
  *
  * When switching providers (e.g. Titan → Voyage AI), run with REWIRE_EMBEDDINGS=1 to wipe
@@ -12,9 +13,10 @@
  *   - MONGODB_URI set and collections already seeded
  *   - AWS credentials in environment
  *   - VOYAGE_SAGEMAKER_ENDPOINT=<endpoint-name>  OR  EMBEDDING_MODEL_ID=<bedrock-model-id>
+ *   - VOYAGE_REQUEST_FORMAT=multimodal (default — voyage-multimodal-3) | legacy (voyage-3.5-lite)
  *
- * Run (Voyage AI):
- *   MONGODB_URI=... VOYAGE_SAGEMAKER_ENDPOINT=mongodb-multiagent3-voyage-3-dev \
+ * Run (Voyage AI multimodal-3):
+ *   MONGODB_URI=... VOYAGE_SAGEMAKER_ENDPOINT=mongodb-multiagent-voyage-multimodal-3-dev \
  *     REWIRE_EMBEDDINGS=1 node --experimental-strip-types db-seeding/seed-embeddings.ts
  *
  * Run (Bedrock / Titan):
@@ -49,23 +51,41 @@ if (REWIRE) console.log("REWIRE_EMBEDDINGS=1 — will wipe and regenerate all em
 // Embedding functions
 // ---------------------------------------------------------------------------
 
-// voyage-3.5-lite returns 2048-d by default; pin to 1024 to match the existing
-// Atlas vector index dimensions (and Titan v2 fallback). Override via env if you
-// rebuild the index for a different size.
+// voyage-multimodal-3 returns a fixed 1024-d vector (matches the Atlas index).
+// voyage-3.5-lite (legacy) returns 2048-d by default and accepts output_dimension —
+// keep VOYAGE_OUTPUT_DIM=1024 there too. Override via env if you rebuild the
+// index for a different size.
 const VOYAGE_OUTPUT_DIM = Number(process.env.VOYAGE_OUTPUT_DIM ?? 1024);
+const VOYAGE_REQUEST_FORMAT = (process.env.VOYAGE_REQUEST_FORMAT ?? "multimodal")
+  .trim()
+  .toLowerCase() === "legacy"
+  ? "legacy"
+  : "multimodal";
+
+function buildVoyageBody(text: string): string {
+  const truncated = text.slice(0, 32_000);
+  if (VOYAGE_REQUEST_FORMAT === "legacy") {
+    return JSON.stringify({
+      input: [truncated],
+      input_type: "document",
+      output_dimension: VOYAGE_OUTPUT_DIM,
+    });
+  }
+  return JSON.stringify({
+    inputs: [{ content: [{ type: "text", text: truncated }] }],
+    input_type: "document",
+    truncation: true,
+    output_encoding: null,
+  });
+}
 
 async function embedViaVoyage(text: string): Promise<number[]> {
   const client = new SageMakerRuntimeClient({ region });
-  const body = JSON.stringify({
-    input: [text.slice(0, 32000)],
-    input_type: "document",
-    output_dimension: VOYAGE_OUTPUT_DIM,
-  });
   const cmd = new InvokeEndpointCommand({
     EndpointName: VOYAGE_ENDPOINT!,
     ContentType: "application/json",
     Accept: "application/json",
-    Body: Buffer.from(body),
+    Body: Buffer.from(buildVoyageBody(text)),
   });
   const res = await client.send(cmd);
   const decoded = JSON.parse(new TextDecoder().decode(res.Body)) as {

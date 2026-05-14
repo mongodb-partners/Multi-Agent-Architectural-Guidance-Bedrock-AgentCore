@@ -47,11 +47,21 @@ list_existing_id() {
 import json, sys
 data = json.load(sys.stdin)
 items = data if isinstance(data, list) else data.get('results', [])
-matches = [e for e in items if e.get('regionName') == '${ATLAS_REGION}']
+
+def norm(value):
+    return str(value or '').replace('-', '_').upper()
+
+def endpoint_region(endpoint):
+    return endpoint.get('regionName') or endpoint.get('region') or endpoint.get('region_name') or ''
+
+def endpoint_id(endpoint):
+    return endpoint.get('id') or endpoint.get('privateLinkId') or endpoint.get('private_link_id') or ''
+
+matches = [e for e in items if norm(endpoint_region(e)) == '${ATLAS_REGION}']
 if len(matches) > 1:
     print('ERROR: multiple privatelink endpoint services found for region ${ATLAS_REGION} in project ${ATLAS_PROJECT_ID}', file=sys.stderr)
     sys.exit(1)
-print(matches[0]['id'] if matches else '')
+print(endpoint_id(matches[0]) if matches else '')
 "
 }
 
@@ -80,7 +90,12 @@ if [[ -z "$PL_ID" ]]; then
       ;;
     409)
       log "race detected (HTTP 409) — another deployment created the service first; re-listing"
-      PL_ID=$(list_existing_id)
+      for attempt in $(seq 1 30); do
+        PL_ID=$(list_existing_id)
+        [[ -n "$PL_ID" ]] && break
+        log "service not visible in Atlas list yet after 409; waiting 10s (${attempt}/30)"
+        sleep 10
+      done
       [[ -z "$PL_ID" ]] && {
         echo "[atlas-privatelink] ERROR: 409 on create but no service found on re-list" >&2
         exit 1

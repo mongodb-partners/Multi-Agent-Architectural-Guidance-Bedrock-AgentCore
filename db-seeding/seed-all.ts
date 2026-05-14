@@ -57,5 +57,5 @@ console.log("\nNext steps:");
 console.log("  1. Run seed-embeddings.ts once AWS credentials are available:");
 console.log("       AWS_REGION=us-east-1 MONGODB_URI=... bun db-seeding/seed-embeddings.ts");
 console.log("  2. Verify Atlas vector search indexes are ACTIVE in the Atlas UI (can take a few minutes).");
-console.log("  3. Set MONGODB_URI + CHAT_MODE=live in your API env and smoke-test with:");
+console.log("  3. Source env.sh + .env.live (so AGENTCORE_ORCHESTRATOR_ARN is set) and smoke-test the API with:");
 console.log("       curl -s http://localhost:3000/health | jq .dependencies");

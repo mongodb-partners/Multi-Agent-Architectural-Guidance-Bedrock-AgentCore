@@ -28,19 +28,22 @@ import type {
 
 // ---------------------------------------------------------------------------
 // Env knobs (kept here so callers don't have to remember the names)
+//
+// Note: these read `process.env` per-call rather than capturing it at module
+// load. Capturing it at load time made test isolation fragile — any test
+// file that did `process.env = { ...saved }` in afterEach replaced the env
+// object, and a captured reference would no longer see live mutations.
 // ---------------------------------------------------------------------------
 
-const ENV = process.env;
-
-function envInt(name: string, fallback: number): number {
-  const v = ENV[name];
+function envInt(name: string, fallback: number, env: NodeJS.ProcessEnv = process.env): number {
+  const v = env[name];
   if (!v) return fallback;
   const n = Number.parseInt(v, 10);
   return Number.isFinite(n) && n > 0 ? n : fallback;
 }
 
-function envBool(name: string, fallback: boolean): boolean {
-  const v = ENV[name]?.trim().toLowerCase();
+function envBool(name: string, fallback: boolean, env: NodeJS.ProcessEnv = process.env): boolean {
+  const v = env[name]?.trim().toLowerCase();
   if (v === undefined || v === "") return fallback;
   if (v === "0" || v === "false") return false;
   if (v === "1" || v === "true") return true;
@@ -70,6 +73,7 @@ const PROTECTED_TYPES: ReadonlySet<TraceEventType> = new Set<TraceEventType>([
   "mongo.intent",
   "mongo.query",
   "mongo.result",
+  "mongo.vector_search",
 ]);
 
 // ---------------------------------------------------------------------------
@@ -181,10 +185,10 @@ export class TraceCollector {
     this.userId = init.userId;
     this.requestId = init.requestId;
     this.startTs = nowMs();
-    const env = init.env ?? ENV;
-    this.maxEventBytes = envInt("TRACE_MAX_EVENT_BYTES", DEFAULT_MAX_EVENT_BYTES);
-    this.maxTurnBytes = envInt("TRACE_MAX_TURN_BYTES", DEFAULT_MAX_TURN_BYTES);
-    this.pendingTextCap = envInt("TRACE_PENDING_TEXT_BYTES", DEFAULT_PENDING_TEXT_BYTES);
+    const env = init.env ?? process.env;
+    this.maxEventBytes = envInt("TRACE_MAX_EVENT_BYTES", DEFAULT_MAX_EVENT_BYTES, env);
+    this.maxTurnBytes = envInt("TRACE_MAX_TURN_BYTES", DEFAULT_MAX_TURN_BYTES, env);
+    this.pendingTextCap = envInt("TRACE_PENDING_TEXT_BYTES", DEFAULT_PENDING_TEXT_BYTES, env);
     const v = env.TRACE_REDACT?.trim().toLowerCase();
     this.redact = v === "1" || v === "true";
   }
@@ -400,27 +404,49 @@ export class TraceCollector {
     const breakdown: Record<string, number> = {};
     let allKnown = true;
     let anyUsage = false;
+    let derivedToolCalls = 0;
+    let derivedMongoQueries = 0;
+    let derivedMongoDocsReturned = 0;
+    let derivedMcpCalls = 0;
+    let derivedAgentcoreHops = 0;
+    let derivedAgentcoreRuntimeMs = 0;
 
     for (const ev of this.events) {
-      if (ev.type !== "model.usage") continue;
-      anyUsage = true;
-      const u = ev.payload as ModelUsagePayload;
-      inputTokens += u.inputTokens ?? 0;
-      outputTokens += u.outputTokens ?? 0;
-      cacheReadInputTokens += u.cacheReadInputTokens ?? 0;
-      cacheWriteInputTokens += u.cacheWriteInputTokens ?? 0;
-      const c = costOfUsage({
-        modelId: u.modelId,
-        inputTokens: u.inputTokens ?? 0,
-        outputTokens: u.outputTokens ?? 0,
-        cacheReadInputTokens: u.cacheReadInputTokens,
-        cacheWriteInputTokens: u.cacheWriteInputTokens,
-      });
-      if (c === undefined) {
-        allKnown = false;
-      } else {
-        cost += c;
-        breakdown[u.modelId] = (breakdown[u.modelId] ?? 0) + c;
+      const payload = (ev.payload ?? {}) as Record<string, unknown>;
+      if (ev.type === "model.usage") {
+        anyUsage = true;
+        const u = ev.payload as ModelUsagePayload;
+        inputTokens += u.inputTokens ?? 0;
+        outputTokens += u.outputTokens ?? 0;
+        cacheReadInputTokens += u.cacheReadInputTokens ?? 0;
+        cacheWriteInputTokens += u.cacheWriteInputTokens ?? 0;
+        const c = costOfUsage({
+          modelId: u.modelId,
+          inputTokens: u.inputTokens ?? 0,
+          outputTokens: u.outputTokens ?? 0,
+          cacheReadInputTokens: u.cacheReadInputTokens,
+          cacheWriteInputTokens: u.cacheWriteInputTokens,
+        });
+        if (c === undefined) {
+          allKnown = false;
+        } else {
+          cost += c;
+          breakdown[u.modelId] = (breakdown[u.modelId] ?? 0) + c;
+        }
+      } else if (ev.type === "tool.call" && ev.durationMs !== undefined) {
+        derivedToolCalls += 1;
+      } else if (ev.type === "mongo.query") {
+        derivedMongoQueries += 1;
+      } else if (ev.type === "mongo.result") {
+        derivedMongoDocsReturned += Number(payload.docCount ?? 0) || 0;
+      } else if (ev.type === "mongo.vector_search") {
+        derivedMongoQueries += 1;
+        derivedMongoDocsReturned += Array.isArray(payload.scores) ? payload.scores.length : 0;
+      } else if (ev.type === "tool.mcp") {
+        derivedMcpCalls += 1;
+      } else if (ev.type === "agentcore.invoke" && ev.durationMs !== undefined) {
+        derivedAgentcoreHops += 1;
+        derivedAgentcoreRuntimeMs += Number(payload.latencyMs ?? ev.durationMs ?? 0) || 0;
       }
     }
 
@@ -430,12 +456,12 @@ export class TraceCollector {
       totalTokens: inputTokens + outputTokens,
       cacheReadInputTokens: cacheReadInputTokens || undefined,
       cacheWriteInputTokens: cacheWriteInputTokens || undefined,
-      toolCalls: this.toolCallCount,
-      mongoQueries: this.mongoQueryCount,
-      mongoDocsReturned: this.mongoDocsReturned,
-      mcpCalls: this.mcpCallCount,
-      agentcoreHops: this.agentcoreHops || undefined,
-      agentcoreRuntimeMs: this.agentcoreRuntimeMs || undefined,
+      toolCalls: Math.max(this.toolCallCount, derivedToolCalls),
+      mongoQueries: Math.max(this.mongoQueryCount, derivedMongoQueries),
+      mongoDocsReturned: Math.max(this.mongoDocsReturned, derivedMongoDocsReturned),
+      mcpCalls: Math.max(this.mcpCallCount, derivedMcpCalls),
+      agentcoreHops: Math.max(this.agentcoreHops, derivedAgentcoreHops) || undefined,
+      agentcoreRuntimeMs: Math.max(this.agentcoreRuntimeMs, derivedAgentcoreRuntimeMs) || undefined,
       bytesIn: this.bytesIn,
       bytesOut: this.bytesOut,
       finalAgentId: this.finalAgentId,
@@ -505,6 +531,63 @@ export class TraceCollector {
       ev.payload = payload as never;
       // Account for size and emit through the same byte-cap pipeline.
       this.emit(ev);
+      // Roll up tool / mongo / mcp counters from the nested collector.
+      //
+      // The runtime collector mixes two emission shapes:
+      //
+      // 1. Spans: Strands' in-process tool calls go through start(...)/end(...),
+      //    producing two events of the same type — start with no `durationMs`,
+      //    end with `durationMs` set. Counting only `durationMs != null` avoids
+      //    double-counting (matches what end(...) does on the parent collector).
+      //
+      // 2. One-off events: emitted via event(...). Used by:
+      //      * extractAndReplayMcpTraces (mongodb-mcp-client.ts) for every
+      //        mongo.* event the MongoDB MCP runtime ships back through the
+      //        MCP envelope.
+      //      * the McpClient.callTool wrapper for `tool.mcp` (one event per
+      //        gateway round-trip — see mongodb-mcp-client.ts).
+      //    These have no `durationMs` and need to be counted as one each.
+      //
+      // We count `mongo.query` and `tool.mcp` regardless of `durationMs`
+      // (they only ever come from one-off `event(...)`); `tool.call` only
+      // when `durationMs != null` (it always comes from a span pair).
+      //
+      // Without this, the trace summary always shows `toolCalls: 0` /
+      // `mongoQueries: 0` for AgentCore Runtime turns even though every
+      // mongo.* / tool.* event is present in the events list — exactly the
+      // observability gap that motivated the runtime trace splice.
+      if (ev.type === "tool.call") {
+        if (ev.durationMs != null) this.toolCallCount += 1;
+      } else if (ev.type === "mongo.query") {
+        this.mongoQueryCount += 1;
+      } else if (ev.type === "tool.mcp") {
+        this.mcpCallCount += 1;
+      } else if (ev.type === "agentcore.invoke") {
+        // Roll up the orchestrator → specialist hop (and any deeper hops in
+        // future) so `summary.agentcoreHops` reflects the real runtime
+        // topology, not just the Hono → orchestrator outer hop. Counters are
+        // ALWAYS span pairs from `start(...)/end(...)` for this type so we
+        // gate on `durationMs != null` to count completions only.
+        //
+        // We deliberately do NOT roll up `agentcoreRuntimeMs` from spliced
+        // events: the parent's own outer-hop duration is wall-clock and
+        // already includes the time the inner specialist hop spent
+        // executing. Summing nested durations on top would double-count and
+        // make `agentcoreRuntimeMs` exceed the actual turn latency.
+        if (ev.durationMs != null) this.agentcoreHops += 1;
+      }
+
+      // Roll up mongo docs returned. Each `mongo.result` event payload
+      // carries `docCount: <n>` (see lambda/mongodb-mcp/index.mjs →
+      // `tracing.mjs` and the `traceMongoResult` helper). Earlier in-process
+      // emitters used `count`, so accept both fields for backward compat.
+      if (ev.type === "mongo.result") {
+        const p = payload as { docCount?: unknown; count?: unknown };
+        const c = typeof p.docCount === "number" ? p.docCount
+                : typeof p.count === "number" ? p.count
+                : 0;
+        if (c > 0) this.mongoDocsReturned += c;
+      }
     }
     if (opts.nestedEventsDropped) {
       this.nestedEventsDropped += opts.nestedEventsDropped;

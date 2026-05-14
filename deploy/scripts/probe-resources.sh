@@ -82,7 +82,6 @@ EC2_ROLE_NAME="${PROJECT_NAME}-ec2-role-${ENVIRONMENT}"
 EC2_PROFILE_NAME="${PROJECT_NAME}-ec2-profile-${ENVIRONMENT}"
 SM_ROLE_NAME="${PROJECT_NAME}-sagemaker-voyage-exec-${ENVIRONMENT}"
 GW_ROLE_NAME="${PROJECT_NAME}-agentcore-gw-${ENVIRONMENT}"
-LAMBDA_ROLE_NAME="${PROJECT_NAME}-lambda-mcp-role-${ENVIRONMENT}"
 SECRET_NAME="${PROJECT_NAME}-bedrock-kb-creds-${ENVIRONMENT}"
 KB_NAME="${PROJECT_NAME}-troubleshooting-kb-${ENVIRONMENT}"
 CLUSTER_NAME="${PROJECT_NAME}-${ENVIRONMENT}"
@@ -94,7 +93,6 @@ LG_PREFIX="/${PROJECT_NAME}/${ENVIRONMENT}"
 SM_ENDPOINT="${PROJECT_NAME}-voyage-3-${ENVIRONMENT}"
 MEMORY_NAME="${PROJECT_NAME//-/_}_memory_${ENVIRONMENT}"
 GATEWAY_NAME="${PROJECT_NAME//-/_}_gw_${ENVIRONMENT}"
-LAMBDA_FN_NAME="${PROJECT_NAME}-mongodb-mcp-${ENVIRONMENT}"
 
 inf "names: bucket=$SHARED_BUCKET cluster=$CLUSTER_NAME"
 
@@ -143,7 +141,6 @@ EC2_TRUST='{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"
 BEDROCK_TRUST='{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"bedrock.amazonaws.com"},"Action":"sts:AssumeRole"}]}'
 SM_TRUST='{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"sagemaker.amazonaws.com"},"Action":"sts:AssumeRole"}]}'
 AGENTCORE_TRUST='{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"bedrock-agentcore.amazonaws.com"},"Action":"sts:AssumeRole"}]}'
-LAMBDA_TRUST='{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"lambda.amazonaws.com"},"Action":"sts:AssumeRole"}]}'
 
 # =============================================================================
 # 1. Bedrock — InvokeModel (Titan embed + Claude Sonnet)
@@ -209,7 +206,6 @@ crud_iam_role "$KB_ROLE_NAME"      "$BEDROCK_TRUST" "iam:role($KB_ROLE_NAME)"
 crud_iam_role "$EC2_ROLE_NAME"     "$EC2_TRUST"     "iam:role($EC2_ROLE_NAME)"
 crud_iam_role "$SM_ROLE_NAME"      "$SM_TRUST"      "iam:role($SM_ROLE_NAME)"
 crud_iam_role "$GW_ROLE_NAME"      "$AGENTCORE_TRUST" "iam:role($GW_ROLE_NAME)"
-crud_iam_role "$LAMBDA_ROLE_NAME"  "$LAMBDA_TRUST"  "iam:role($LAMBDA_ROLE_NAME)"
 
 # Instance profile (EC2 mode)
 C="-"; V="-"; D="-"
@@ -329,61 +325,9 @@ fi
 rec "cognito:user-pool($COGNITO_POOL)" "$C" "$V" "$D"
 
 # =============================================================================
-# 8. Lambda — function (EC2 mode, SCP-blocked in some accounts)
+# 8. (Reserved — the Lambda probe was removed in CLIENT_REVIEW Phase 7e once
+#    the mongodb-mcp host moved into an AgentCore Runtime.)
 # =============================================================================
-hdr "Lambda — $LAMBDA_FN_NAME"
-
-ERR=$(aws lambda list-functions --region "$AWS_REGION" --max-items 1 2>&1)
-if [[ $? -ne 0 ]]; then
-  no "Lambda API — $(echo "$ERR" | tail -1)"
-  rec "lambda:API(list)" "✗" "-" "n/a"
-  rec "lambda:function($LAMBDA_FN_NAME)" "✗(blocked)" "-" "n/a"
-else
-  ok "Lambda API reachable"; rec "lambda:API(list)" "(api-only)" "✓" "n/a"
-
-  # Create IAM role, wait for propagation, then create function
-  C="-"; V="-"; D="-"
-  _LR_ARN=$(aws iam create-role --role-name "$LAMBDA_ROLE_NAME" \
-    --assume-role-policy-document "$LAMBDA_TRUST" \
-    --query 'Role.Arn' --output text 2>/dev/null)
-  if [[ -n "$_LR_ARN" && "$_LR_ARN" == arn:* ]]; then
-    ok "create lambda IAM role"
-    inf "waiting 15s for IAM propagation..."
-    sleep 15
-    # Build minimal zip
-    python3 -c "
-import zipfile, io
-buf = io.BytesIO()
-with zipfile.ZipFile(buf, 'w') as z:
-    z.writestr('index.js', 'exports.handler=async()=>({statusCode:200})')
-open('/tmp/.lambda-probe.zip','wb').write(buf.getvalue())
-" 2>/dev/null
-    _FN=$(aws lambda create-function \
-      --function-name "$LAMBDA_FN_NAME" \
-      --runtime nodejs20.x --role "$_LR_ARN" \
-      --handler index.handler \
-      --zip-file fileb:///tmp/.lambda-probe.zip \
-      --region "$AWS_REGION" \
-      --query 'FunctionName' --output text 2>&1)
-    if [[ "$_FN" == "$LAMBDA_FN_NAME" ]]; then
-      ok "create lambda function"; C="✓"
-      aws lambda get-function --function-name "$LAMBDA_FN_NAME" --region "$AWS_REGION" >/dev/null 2>&1 \
-        && { ok "validate lambda"; V="✓"; }
-      aws lambda delete-function --function-name "$LAMBDA_FN_NAME" --region "$AWS_REGION" >/dev/null 2>&1 \
-        && { ok "delete lambda"; D="✓"; } || { no "delete lambda"; D="✗"; }
-    else
-      no "create lambda — $_FN"; C="✗"
-    fi
-    # Cleanup role
-    for P in $(aws iam list-role-policies --role-name "$LAMBDA_ROLE_NAME" --query 'PolicyNames[]' --output text 2>/dev/null); do
-      aws iam delete-role-policy --role-name "$LAMBDA_ROLE_NAME" --policy-name "$P" >/dev/null 2>&1 || true
-    done
-    aws iam delete-role --role-name "$LAMBDA_ROLE_NAME" >/dev/null 2>&1 || true
-  else
-    no "create lambda IAM role — $(aws iam create-role --role-name "$LAMBDA_ROLE_NAME" --assume-role-policy-document "$LAMBDA_TRUST" 2>&1 | tail -1)"; C="✗"
-  fi
-  rec "lambda:function($LAMBDA_FN_NAME)" "$C" "$V" "$D"
-fi
 
 # =============================================================================
 # 9. SageMaker — Voyage AI (EC2 optional mode)

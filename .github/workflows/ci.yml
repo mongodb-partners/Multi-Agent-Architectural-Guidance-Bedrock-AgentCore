@@ -1,0 +1,67 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  api:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: api
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - run: bun install --frozen-lockfile
+      - run: bun run typecheck
+      - run: bun run validate:bun
+      - run: bun run validate:agentcore
+      - run: bun run test:all
+
+  ui:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ui
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt
+      - run: python -m pytest tests/ -v
+
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - name: Install API dependencies
+        working-directory: api
+        run: bun install --frozen-lockfile
+      - name: Install Playwright + Chromium
+        working-directory: e2e
+        run: bun install --frozen-lockfile && bunx playwright install --with-deps chromium
+      - name: Run stub API tests
+        working-directory: e2e
+        env:
+          CI: true
+          CHAT_MODE: stub
+        run: bun run test
+
+  docker-images:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build API image
+        run: docker build -f api/Dockerfile -t multi-agent-api:ci .
+      - name: Build Streamlit image
+        run: docker build -f ui/Dockerfile -t multi-agent-streamlit:ci ui

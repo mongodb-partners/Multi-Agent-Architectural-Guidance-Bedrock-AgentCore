@@ -1,0 +1,26 @@
+{
+  "name": "mongodb-mcp-runtime",
+  "version": "1.0.0",
+  "description": "AgentCore Runtime MCP server exposing MongoDB Atlas tools (mongodb_query, mongodb_vector_search, mongodb_aggregate). Serves Streamable-HTTP MCP on 0.0.0.0:8000/mcp per the AgentCore runtime contract; consumed by AgentCore Gateway via an `mcpServer` target. Sole MongoDB MCP host after CLIENT_REVIEW Phase 7e (P1-1 / P1-2 satisfied).",
+  "main": "dist/index.js",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.24.0",
+    "express": "^5.1.0",
+    "mongodb": "^6.10.0",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.3",
+    "@types/node": "^22.0.0",
+    "typescript": "^5.5.0"
+  }
+}

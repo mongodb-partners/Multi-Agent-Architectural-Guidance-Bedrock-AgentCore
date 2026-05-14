@@ -130,9 +130,18 @@ export type MemoryLongTermWritePayload = {
   factCandidates: Array<{
     text: string;
     matched: boolean;
+    /** Single-element array containing the LLM-emitted category. */
     matchedPatterns?: string[];
-    rejectedReason?: "too_short" | "too_long" | "no_pattern_match" | "duplicate";
+    rejectedReason?:
+      | "too_short"
+      | "too_long"
+      | "duplicate"
+      | "llm_rejected";
     length: number;
+    /** LLM-emitted category. */
+    category?: string;
+    /** LLM-emitted short reason; either why a fact was kept or why it was ignored. */
+    note?: string;
   }>;
   factsExtracted: string[];
   collection: "agent_memory_facts";
@@ -154,6 +163,13 @@ export type MemoryLongTermWritePayload = {
   newEntryCount: number | null;
   ttlExpiresAt: string;
   latencyMs: number;
+  /** Bedrock model id used by the LLM fact extractor. */
+  extractorModelId?: string;
+  /** Latency of the extraction step itself (separate from the overall write `latencyMs`). */
+  extractorLatencyMs?: number;
+  /** Bedrock token usage for the extractor call. */
+  extractorInputTokens?: number;
+  extractorOutputTokens?: number;
 };
 
 export type MemoryLongTermSkipPayload = {
@@ -162,11 +178,15 @@ export type MemoryLongTermSkipPayload = {
     | "empty_assistant_reply"
     | "agent_memory_disabled"
     | "mongodb_unavailable"
-    | "no_fact_candidates";
+    | "no_fact_candidates"
+    | "llm_extractor_failed";
   userId?: string;
   agentId: string;
   userMessageExcerpt: string;
-  wouldHaveStored: boolean;
+  /** Diagnostic fields surfaced when reason === "llm_extractor_failed". */
+  extractorModelId?: string;
+  extractorLatencyMs?: number;
+  extractorError?: string;
 };
 
 export type PromptAssembledPayload = {
@@ -185,8 +205,6 @@ export type ModelRequestPayload = {
   systemPromptBytes: number;
   priorTurnsCount: number;
   userMessage: string;
-  /** Backend flag — "bedrock" or "mock" (dev mock model). */
-  backend: "bedrock" | "mock";
 };
 
 export type ModelUsagePayload = {
@@ -246,7 +264,6 @@ export type ToolHttpPayload = {
 
 export type ToolMcpPayload = {
   server: string;
-  transport: "stdio" | "http";
   toolName: string;
   args?: unknown;
   result?: unknown;
@@ -295,8 +312,6 @@ export type HandoffDecisionPayload = {
   conversationContextTurns: Array<{ role: string; preview: string }>;
   latencyToDecisionMs: number;
   tokensBeforeDecision: number;
-  /** Whether routing was decided by the LLM via structured output or by the DevMockModel's regex. */
-  routingSource?: "llm" | "devmock_regex";
 };
 
 export type AgentActivatePayload = {
@@ -317,7 +332,7 @@ export type MongoIntentPayload = {
 };
 
 export type MongoQueryPayload = {
-  mode: "direct" | "lambda" | "mcp";
+  mode: "mcp";
   database?: string;
   collection: string;
   op: "find" | "findOne" | "aggregate" | "updateOne" | "insertOne" | "vector_search" | string;
@@ -332,7 +347,7 @@ export type MongoQueryPayload = {
 };
 
 export type MongoPlanPayload = {
-  mode: "direct" | "lambda" | "mcp";
+  mode: "mcp";
   explainSupported: boolean;
   stage?: string;
   indexName?: string;
@@ -374,7 +389,7 @@ export type MongoDiagnosticPayload = {
 };
 
 export type MongoVectorSearchPayload = {
-  embeddingSource: "voyage" | "bedrock" | "mock" | string;
+  embeddingSource: "voyage" | "bedrock" | string;
   embeddingModelId?: string;
   queryText: string;
   queryVectorPreview?: { length: number; head: number[]; tail: number[] };

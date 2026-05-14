@@ -19,6 +19,11 @@ def _payload(ev: dict) -> dict:
     return p if isinstance(p, dict) else {}
 
 
+def _completed_span_count(events: list[dict]) -> int:
+    completed = [e for e in events if e.get("durationMs") is not None]
+    return len(completed) or len(events)
+
+
 def narrate(events: Iterable[dict]) -> list[str]:
     """Return a small list of HTML-safe narrative lines for the trace."""
     out: list[str] = []
@@ -78,10 +83,18 @@ def narrate(events: Iterable[dict]) -> list[str]:
     # 5. AgentCore.
     invokes = [e for e in events_list if e.get("type") == "agentcore.invoke"]
     if invokes:
-        out.append(
-            f"Crossed the AgentCore Runtime boundary <strong>{len(invokes)}</strong> time(s) — "
-            "nested trace events were spliced under the wrapper span(s)."
-        )
+        hop_count = _completed_span_count(invokes)
+        nested = [e for e in events_list if e.get("type") == "agentcore.nested_trace"]
+        if nested:
+            nested_count = sum(int(_payload(e).get("eventCount") or 0) for e in nested)
+            out.append(
+                f"Crossed the AgentCore Runtime boundary <strong>{hop_count}</strong> time(s) — "
+                f"<strong>{nested_count}</strong> nested event(s) were spliced under the wrapper span(s)."
+            )
+        else:
+            out.append(
+                f"Crossed the AgentCore Runtime boundary <strong>{hop_count}</strong> time(s)."
+            )
 
     # 6. Cost.
     usage = [e for e in events_list if e.get("type") == "model.usage"]

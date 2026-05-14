@@ -2,7 +2,7 @@ terraform {
   required_version = ">= 1.5.0"
 
   required_providers {
-    aws          = { source = "hashicorp/aws", version = "~> 5.0" }
+    aws          = { source = "hashicorp/aws", version = ">= 6.27, < 7.0" }
     mongodbatlas = { source = "mongodb/mongodbatlas", version = "~> 1.14" }
     null         = { source = "hashicorp/null", version = "~> 3.0" }
     random       = { source = "hashicorp/random", version = "~> 3.0" }

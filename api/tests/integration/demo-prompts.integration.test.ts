@@ -6,7 +6,6 @@ describe("GET /demo-prompts", () => {
 
   beforeAll(() => {
     process.env.RATE_LIMIT_DISABLED = "1";
-    delete process.env.REQUIRE_AUTH;
   });
 
   afterAll(() => {

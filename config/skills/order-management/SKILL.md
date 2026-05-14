@@ -17,7 +17,7 @@ Optional: `customers` collection — `findOne` on `email` to confirm a verified 
 
 **References** (on demand): the API only serves files for skills that are **allowed for this agent** and **already activated** (`activate_skill`, or pre-activation for specialists). Call **`read_skill_resource`** with **`skillName`** `order-management` and **`path`** (relative to that skill folder), e.g.:
 
-- `references/order-schema.md` — field expectations (dev fixtures may use a subset, e.g. `customerEmail`).
+- `references/order-schema.md` — field expectations (seeded dataset uses `customerEmail`).
 
 For the **order-management** specialist agent, this skill is **pre-activated** at turn start, so `read_skill_resource` works immediately. If you see `skill_not_activated`, run **`activate_skill`** with `order-management` first.
 

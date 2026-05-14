@@ -194,7 +194,12 @@ resource "aws_instance" "app" {
   key_name                    = var.key_pair_name != "" ? var.key_pair_name : null
   associate_public_ip_address = true
 
-  user_data = base64encode(templatefile("${path.module}/user_data.sh", {
+  # Use user_data_base64 (not user_data) when the value is already base64-
+  # encoded. Putting an encoded value in `user_data` causes Terraform to store
+  # the cleartext in state but recompute the encoded value on every plan,
+  # which makes user_data appear "different" on each run and forces the
+  # instance to be replaced — even when nothing in the script actually changed.
+  user_data_base64 = base64encode(templatefile("${path.module}/user_data.sh", {
     project_name  = var.project_name
     aws_region    = var.aws_region
     ecr_registry  = var.ecr_registry

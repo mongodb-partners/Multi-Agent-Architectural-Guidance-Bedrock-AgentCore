@@ -4,23 +4,28 @@ A **configuration-driven multi-agent reference architecture** built on **AWS Bed
 
 ---
 
-## Quick Start (local, no AWS)
+## Quick Start
+
+The Hono API is a thin proxy in front of an AgentCore Runtime, so it requires AWS credentials and a real `AGENTCORE_ORCHESTRATOR_ARN`. The fastest local loop is to deploy the EC2 stack, copy `.env.live` into your shell, and run the API + UI against the same runtime ARN.
 
 ```bash
+# 0. One-time: AWS creds + Atlas keys + a deployed AgentCore Runtime
+source env.sh && source .env.live   # exports AGENTCORE_ORCHESTRATOR_ARN, AWS creds, etc.
+
 # Terminal 1 — API
 export PATH="$HOME/.bun/bin:$PATH"   # if bun is not on PATH
 cd api && bun install
 bun run typecheck && bun run validate:bun && bun run validate:agentcore
-bun run dev                           # stub mode by default; add CHAT_MODE=live DEV_MOCK_BACKENDS=1 for full agent loop
+bun run dev
 
 # Terminal 2 — UI
 cd ui && pip install -r requirements.txt && streamlit run app.py
 
-# Or run both with Docker (no install required)
+# Or run both with Docker (still needs AGENTCORE_ORCHESTRATOR_ARN + AWS creds)
 docker compose up --build
 ```
 
-See [`DEV_STATUS.md`](DEV_STATUS.md) for the full runbook (live Bedrock, MongoDB, Swarm, auth, Docker).
+See [`DEV_STATUS.md`](DEV_STATUS.md) for the full runbook (deploy, MongoDB, Swarm, auth, Docker).
 
 ---
 
@@ -156,7 +161,7 @@ Full architecture rationale, module tree, and apply-order cheat sheet live in [`
 
 This framework gives MongoDB field, partner, and professional services teams a reusable foundation for deploying customer-specific multi-agent solutions. The core runtime is shared across all use cases. Domain-specific behavior is defined entirely in configuration files.
 
-A user interacts through a Streamlit chat interface. Their message is routed by an orchestrator to the right specialist agent. Each agent uses a combination of its **persona** (defined in an `.agent.md` file) and **domain knowledge** (defined in a `SKILL.md` file) to respond accurately and helpfully. The reference API uses **Strands** with **Bedrock** (or a local **dev mock**), **MongoDB-shaped tools** (fixtures or Atlas), and optional **JWT verification** when enabled. Longer-term plans include **AgentCore** memory/runtime and full production Atlas vector / Bedrock KB wiring (see [`DEV_STATUS.md`](DEV_STATUS.md)).
+A user interacts through a Streamlit chat interface. Their message is forwarded by the Hono API to an **AgentCore Runtime** that hosts the orchestrator; the orchestrator picks a specialist (also an AgentCore Runtime) using **Strands Swarm**. Each agent uses its **persona** (`.agent.md`) and **domain knowledge** (`SKILL.md`), runs against **AWS Bedrock**, and calls **MongoDB tools over MCP through the AgentCore Gateway**. JWT verification is required for long-term memory and for the gateway's tool authentication.
 
 ---
 
@@ -235,7 +240,7 @@ memory:
   longTermCollection: agent_memory
 ```
 
-**Step 2 — ensure the caller is authenticated.** Memory is keyed by the JWT `sub` claim (`userId`). Requires `REQUIRE_AUTH=true` + `AUTH_JWKS_URI` + `AUTH_ISSUER` (see [Authentication](docs/api-reference.md#authentication)). Without a known `userId`, the memory read/write is silently skipped.
+**Step 2 — ensure the caller is authenticated.** Memory is keyed by the JWT `sub` claim (`userId`). Auth is mandatory: the API refuses to boot without `AUTH_JWKS_URI` + `AUTH_ISSUER` (see [Authentication](docs/api-reference.md#authentication)) and every protected request must carry a valid Bearer JWT.
 
 **Step 3 — point at MongoDB** (production):
 
@@ -256,24 +261,6 @@ MEMORY_TTL_DAYS=30   # default: 90
 
 ```bash
 MEMORY_INJECT_TURNS=5   # how many past turns to prepend (default: 5)
-```
-
-#### Local / dev mode
-
-No MongoDB or auth required. With `DEV_MOCK_BACKENDS=1` the API uses an **in-process mock map** — memory writes and reads work within a single server run but do not persist across restarts. Useful for confirming the injection flow without any cloud setup.
-
-```bash
-export CHAT_MODE=live
-export DEV_MOCK_BACKENDS=1
-cd api && bun run dev
-```
-
-Set `REQUIRE_AUTH=true` with a stub Bearer token (any non-empty string when JWKS is not configured) to supply a `userId` and see memory inject:
-
-```bash
-curl -s http://127.0.0.1:3000/chat \
-  -H "Authorization: Bearer dev-user-1" \
-  -d '{"message":"hi","sessionId":"s1","agentId":"order-management"}'
 ```
 
 #### What gets stored
@@ -401,15 +388,15 @@ config/
   environment.yaml
 
 api/            ← Bun + Hono API server (SSE streaming, optional JWT/JWKS, rate limiting)
-  Dockerfile    ← production image (build from **repo root**; embeds `config/` + `data/dev/`)
+  Dockerfile    ← production image (build from **repo root**; embeds `config/`)
   src/
     lib/        ← skill loader, prompt builder, Strands agent factory, tools, jwt-verify,
     |             logger (LOG_LEVEL → JSON lines), long-term-memory (agent_memory read/write)
     routes/     ← chat, agents, skills, sessions, health, http-tools (metadata)
     middleware/ ← auth (Bearer + optional JWKS), rate-limit, request-id
-    adapters/   ← resolve-model (BedrockModel / DevMockModel), mongo-data, mock-retrieval
+    adapters/   ← resolve-model (BedrockModel), agentcore-runtime, bedrock-retrieval, mongodb-mcp-client
 
-compose.yaml    ← `docker compose up` — API + UI with defaults for dev-mock loop
+compose.yaml    ← `docker compose up` — API + UI (still needs AGENTCORE_ORCHESTRATOR_ARN + AWS creds)
 Makefile        ← `make docker-up` / `docker-build` (optional)
 
 ui/             ← Streamlit chat interface (Python)
@@ -417,9 +404,6 @@ ui/             ← Streamlit chat interface (Python)
   app.py        ← main **Chat** page
   pages/        ← multipage UI (e.g. **Sessions** — list, open in chat, delete)
   lib/          ← settings, API client, sidebar, chat panel
-
-data/dev/
-  mongo-fixtures.json   ← sample MongoDB-shaped docs for DEV_MOCK_BACKENDS local loop
 
 sample-env.sh   ← committed template; copy to `env.sh` (gitignored) and fill in secrets
 
@@ -448,10 +432,11 @@ deploy/
       ec2/                 ← EC2 instance profile + user-data (SSM-only, no SSH)
       ecr/                 ← private ECR repos for API + UI images
       cognito/             ← Cognito User Pool + App Client for JWT auth
-      bedrock-kb/          ← Bedrock Knowledge Base (null_resource + shell scripts)
-      lambda-mcp/          ← MongoDB MCP Lambda target for AgentCore Gateway
-      agentcore-memory/    ← AgentCore Memory Store (null_resource + shell scripts)
-      agentcore-gateway/   ← AgentCore Gateway + Lambda target registration
+      bedrock-kb/          ← Bedrock Knowledge Base (native aws_bedrockagent_knowledge_base + data_source)
+      lambda-mcp/          ← MongoDB MCP Lambda (rollback target — not the active tool path)
+      agentcore-memory/    ← AgentCore Memory Store (native aws_bedrockagentcore_memory)
+      agentcore-gateway/   ← AgentCore Gateway + mcp_server target → MongoDB MCP runtime (native aws_bedrockagentcore_gateway)
+      agentcore-agent-runtime/ ← AgentCore Runtime (native aws_bedrockagentcore_agent_runtime; 4 chat agents + 1 MongoDB MCP runtime)
       voyage-sagemaker/    ← optional Voyage AI SageMaker endpoint (embeddings)
       cloudwatch/          ← log groups for every service (/<project>/<env>/*)
   kb-docs/        ← versioned KB source documents (.txt) uploaded to S3 on apply
@@ -473,11 +458,11 @@ Each line: `{ "level": "info", "ts": "…", "msg": "…", ...ctx }`. Errors and 
 
 ### Session user-scoping
 
-When `REQUIRE_AUTH=true` and JWKS is configured, the JWT `sub` claim is attached to every `SessionRecord`. `GET /sessions` only returns the calling user's sessions. `DELETE /sessions/:id` enforces ownership. Unauthenticated sessions (no JWT) are visible to all callers of `GET /sessions` in dev mode.
+The JWT `sub` claim is attached to every `SessionRecord`. `GET /sessions` only returns the calling user's sessions; `DELETE /sessions/:id` enforces ownership; sessions belonging to other users are 404 from `GET /sessions/:id`.
 
-### API authentication (optional)
+### API authentication
 
-By default the API allows unauthenticated requests. Set **`REQUIRE_AUTH=true`** to require **`Authorization: Bearer <jwt>`**. For **signature verification** (e.g. Amazon Cognito or any OIDC provider with a JWKS URL), also set **`AUTH_JWKS_URI`** and **`AUTH_ISSUER`**; optional **`AUTH_APP_CLIENT_ID`** and **`AUTH_TOKEN_USE`** match Cognito ID vs access tokens. Copy [`.env.example`](.env.example) and see **[Authentication](docs/api-reference.md#authentication)** in the API reference.
+JWKS auth is **always required**. The API refuses to start without **`AUTH_JWKS_URI`** + **`AUTH_ISSUER`** (`assertJwksAuthConfigured()` in `api/src/lib/jwt-verify.ts`). Every protected route requires `Authorization: Bearer <jwt>` from the configured Cognito (or other OIDC) pool. Optional **`AUTH_APP_CLIENT_ID`** and **`AUTH_TOKEN_USE`** match Cognito ID vs access tokens. There is no `ALLOW_UNAUTHENTICATED` / `REQUIRE_AUTH=false` bypass — local dev uses the same security posture as the deploy. Copy [`.env.example`](.env.example) and see **[Authentication](docs/api-reference.md#authentication)** in the API reference.
 
 The Streamlit UI obtains API **`Authorization: Bearer`** tokens **only via Cognito** when **`STREAMLIT_COGNITO_*`** is set (`streamlit-cognito-auth`); there is no static UI token env var (see [`.env.example`](.env.example) and [`docs/configuration-guide.md`](docs/configuration-guide.md)).
 
@@ -490,9 +475,9 @@ docker compose up --build
 # or: make docker-up
 ```
 
-Serves the API at **http://localhost:3000** and Streamlit at **http://localhost:8501** with **`CHAT_MODE=live`** and **`DEV_MOCK_BACKENDS=1`** (fixture-backed tool loop; no Bedrock/MongoDB required). The API image **bakes in** [`config/`](config/) and [`data/dev/`](data/dev/) at build time; change agents/skills/fixtures and **rebuild** the API image to refresh the container.
+Serves the API at **http://localhost:3000** and Streamlit at **http://localhost:8501**. The API still requires **`AGENTCORE_ORCHESTRATOR_ARN`** and AWS credentials in your shell or `.env` file; without them the API refuses to start. The API image **bakes in** [`config/`](config/) at build time, so changing agents/skills means rebuilding the API image.
 
-See [`.env.docker.example`](.env.docker.example) for **`API_PORT`**, **`STREAMLIT_PORT`**, and optional **`MONGODB_URI`**, **AWS**, and **auth** overrides. For **Swarm** demos in Docker, add **`ORCHESTRATOR_MODE=swarm`** to the `api` service environment (compose override or edit `compose.yaml`).
+See [`.env.docker.example`](.env.docker.example) for **`API_PORT`**, **`STREAMLIT_PORT`**, and optional **`MONGODB_URI`**, **AWS**, and **auth** overrides.
 
 Full deploy commands (driven from your laptop — no CI):
 
@@ -528,7 +513,7 @@ All four deploy/destroy scripts source `env.sh` from the repo root — see the [
 
 ## Built With
 
-- [Strands Agents SDK](https://github.com/strands-agents/sdk-typescript) — agent orchestration (in-process in this reference API)
+- [Strands Agents SDK](https://github.com/strands-agents/sdk-typescript) — agent orchestration (runs inside the AgentCore Runtime container)
 - [Hono](https://hono.dev/) — HTTP API
 - [jose](https://github.com/panva/jose) — JWT verification when JWKS env vars are set
 - [MongoDB Atlas](https://www.mongodb.com/atlas) — data and (when wired) vector search / long-term memory

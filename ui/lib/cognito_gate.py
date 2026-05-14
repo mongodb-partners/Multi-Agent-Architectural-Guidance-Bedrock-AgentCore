@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import os
-
 import streamlit as st
 from streamlit_cognito_auth import CognitoAuthenticator, CognitoHostedUIAuthenticator
 
@@ -41,17 +39,14 @@ def _make_authenticator(cfg: CognitoUIConfig):
 
 def ensure_api_bearer_token(settings: UISettings) -> str | None:
     """
-    Return the Bearer token for API calls from Cognito, or ``None`` if Cognito is not configured.
+    Return the Bearer token for API calls from Cognito, or ``None`` if Cognito is not configured
+    on the UI side.
 
-    When ``STREAMLIT_COGNITO_POOL_ID`` + client id are set, shows login UI and calls ``st.stop()``
-    until the user is authenticated.
+    The API enforces JWKS auth unconditionally (api/src/lib/jwt-verify.ts
+    ``assertJwksAuthConfigured``), so in any real deployment the UI must point at the same
+    Cognito pool. When ``STREAMLIT_COGNITO_POOL_ID`` + client id are set, shows the login UI
+    and calls ``st.stop()`` until the user is authenticated.
     """
-    # If API auth is disabled, skip UI login gate even when Cognito vars exist.
-    require_auth = os.environ.get("REQUIRE_AUTH", "false").strip().lower() == "true"
-    if not require_auth:
-        st.session_state.pop("_streamlit_cognito_auth", None)
-        return None
-
     cfg = settings.cognito
     if not cfg:
         st.session_state.pop("_streamlit_cognito_auth", None)

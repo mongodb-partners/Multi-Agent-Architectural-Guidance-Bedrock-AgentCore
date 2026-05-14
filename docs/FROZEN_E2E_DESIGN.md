@@ -71,25 +71,22 @@ Observed handoff examples in live validation:
 
 ## 4) Tooling Path (Frozen Decision)
 
-### Current tool hosting mode
+### Current tool hosting
 
-- `TOOL_HOSTING_MODE=lambda`
+- AgentCore Gateway is the only MCP path. There is no `TOOL_HOSTING_MODE` switch.
 
 ### What this means
 
-- Specialist runtimes do **not** call AgentCore Gateway for MongoDB tools
-- Specialist runtimes call Lambda MCP directly via AWS SDK `InvokeFunction`
-- Lambda MCP executes:
-  - `mongodb_query`
-  - `mongodb_vector_search`
-  - `mongodb_aggregate`
-- Lambda reaches Atlas via VPC + PrivateLink routing configuration
+- Every runtime uses `MCP_SERVER_URL = AGENTCORE_GATEWAY_URL` (set by `deploy.sh`).
+- The Strands `Agent` calls MCP tools (`mongodb_query`, `mongodb_vector_search`, `mongodb_aggregate`) over StreamableHTTP against the Gateway.
+- The Gateway authenticates the caller's Cognito JWT (forwarded from the Hono API in the AgentCore Runtime invocation payload) and routes the MCP call to its target Lambda (`lambda/mongodb-mcp/index.mjs`).
+- That Lambda executes the MongoDB driver call against Atlas via VPC + PrivateLink.
 
 ### Why frozen this way
 
-- Removes Gateway auth/token coupling from the tool path
-- Keeps AgentCore runtime orchestration intact
-- Preserves MCP abstraction while improving reliability
+- Single auth surface (Cognito JWT) for all tool calls.
+- One audit trail (Gateway logs + Lambda logs) instead of per-runtime IAM `lambda:InvokeFunction` paths.
+- Bring-your-own-tool: new MCP targets can be added on the Gateway without changing runtime code.
 
 ---
 
@@ -101,16 +98,19 @@ sequenceDiagram
   participant API as Hono API
   participant ORCH as AgentCore Orchestrator Runtime
   participant SPEC as Specialist Runtime
-  participant L as Lambda MCP
+  participant GW as AgentCore Gateway (MCP)
+  participant L as Lambda MCP target
   participant DB as MongoDB Atlas
 
   UI->>API: POST /chat (sessionId, message)
-  API->>ORCH: InvokeAgentRuntime(orchestrator)
-  ORCH->>SPEC: InvokeAgentRuntime(target specialist)
-  SPEC->>L: InvokeFunction(tool, args)
+  API->>ORCH: InvokeAgentRuntime(orchestrator, userJwt)
+  ORCH->>SPEC: InvokeAgentRuntime(specialist, userJwt)
+  SPEC->>GW: MCP tool call (Authorization: Bearer userJwt)
+  GW->>L: Invoke MCP target Lambda
   L->>DB: Query / Vector Search
   DB-->>L: Result documents
-  L-->>SPEC: Tool result payload
+  L-->>GW: MCP tool result
+  GW-->>SPEC: Tool result payload
   SPEC-->>ORCH: Specialist response
   ORCH-->>API: response + handoffs[]
   API-->>UI: SSE token + handoff + done
@@ -168,20 +168,19 @@ Notes:
 
 Runtime-critical variables:
 
-- `AGENTCORE_ORCHESTRATOR_ARN`
+- `AGENTCORE_ORCHESTRATOR_ARN` (asserted at API startup)
 - `AGENTCORE_RUNTIME_ARN_TROUBLESHOOTING`
 - `AGENTCORE_RUNTIME_ARN_ORDER_MANAGEMENT`
 - `AGENTCORE_RUNTIME_ARN_PRODUCT_RECOMMENDATION`
-- `TOOL_HOSTING_MODE=lambda`
-- `LAMBDA_MCP_FUNCTION_NAME`
+- `AGENTCORE_GATEWAY_URL` and `MCP_SERVER_URL` (set by `deploy.sh`; gateway-only path)
+- `LAMBDA_MCP_FUNCTION_NAME` (used by `deploy.sh` to wire the Gateway target Lambda)
 - `AGENTCORE_MEMORY_STORE_ID`
 - `MONGODB_DB`
 - `AWS_REGION`
 
 API mode requirements:
 
-- `ORCHESTRATOR_MODE=runtime`
-- AgentCore ARN present
+- `AGENTCORE_ORCHESTRATOR_ARN` present (the API has no in-process Strands fallback)
 
 ---
 

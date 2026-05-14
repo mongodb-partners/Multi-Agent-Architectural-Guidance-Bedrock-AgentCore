@@ -17,16 +17,17 @@ flowchart LR
     User["User (Browser)"] -->|HTTPS| UI["Streamlit UI"]
     UI -->|"POST /chat (SSE)"| API["Hono/Bun API"]
 
-    API -->|"optional JWT/JWKS verify"| Auth["Auth middleware"]
+    API -->|"JWT/JWKS verify"| Auth["Auth middleware"]
     API -->|"append / load turns"| Sessions["session-store\nin-memory Map or Mongo chat_sessions"]
-    API -->|"runChatStream or runSwarmChatStream"| AgentRuntime["Strands agent runtime"]
+    API -->|"InvokeAgentRuntime(orchestrator, userJwt)"| Orch["AgentCore Orchestrator Runtime"]
 
-    AgentRuntime -->|"BedrockModel or DevMockModel"| Model["AWS Bedrock or DevMockModel"]
-    AgentRuntime -->|"tool calls"| Tools["In-process tools"]
-
-    Tools --> Atlas["MongoDB Atlas"]
-    Tools --> KB["Bedrock KB (optional)"]
-    API -->|"read / write long-term memory"| Memory["MongoDB agent_memory"]
+    Orch -->|"InvokeAgentRuntime(specialist, userJwt)"| Spec["AgentCore Specialist Runtime"]
+    Spec -->|"BedrockModel"| Bedrock["AWS Bedrock"]
+    Spec -->|"MCP via InvokeAgentRuntime"| MCPRT["MongoDB MCP AgentCore Runtime"]
+    MCPRT --> Atlas["MongoDB Atlas (PrivateLink)"]
+    Spec -.->|"non-Mongo MCP tools"| GW["AgentCore Gateway"]
+    Spec --> KB["Bedrock KB (optional)"]
+    API -->|"read / write long-term memory"| Memory["MongoDB agent_memory_facts"]
 ```
 
 ---
@@ -63,21 +64,19 @@ flowchart TD
     SkillMD -.-> SkillPhases
 ```
 
-When Swarm is disabled, the selected agent runs as a single Strands `Agent`; Swarm only activates when `agentId=orchestrator`, `CHAT_MODE=live`, and `ORCHESTRATOR_MODE=swarm`.
+Inside the orchestrator AgentCore runtime, Swarm activates when `ORCHESTRATOR_MODE=swarm`; otherwise the runtime falls back to single-agent routing (it picks one specialist and invokes its runtime ARN directly).
 
 ---
 
-### 2c. Target Production Extensions
+### 2c. Remaining Production Extensions
 
-These are SOW-aligned production extensions, not the default runtime path in the current codebase.
+The AgentCore Runtime path is already the default: MongoDB MCP runs in a dedicated AgentCore Runtime, and the AgentCore Gateway remains available for non-Mongo tools. Items still on the roadmap:
 
 ```mermaid
 flowchart TD
-    CurrentApp["Current app\nHono/Bun + Strands"] -->|"future deployment target"| AgentCoreRuntime["AgentCore Runtime"]
-    CurrentApp -->|"future tool hosting"| AgentCoreGateway["AgentCore Gateway"]
-    AgentCoreGateway --> LambdaAdapters["Lambda tool adapters"]
-    CurrentApp -->|"future sandboxed execution"| CodeInterpreter["AgentCore Code Interpreter"]
-    CurrentApp -->|"future hosting"| EcsTier["ECS Fargate + ALB / CloudFront"]
+    CurrentApp["Today: EC2 + Docker + systemd"] -->|"roadmap"| EcsTier["ECS Fargate + ALB / CloudFront"]
+    CurrentApp -->|"roadmap"| CodeInterpreter["AgentCore Code Interpreter\n(sandboxed scripts)"]
+    CurrentApp -->|"roadmap"| Voyage["Voyage AI on SageMaker\n(embeddings)"]
 ```
 
 ---
@@ -91,8 +90,8 @@ flowchart TD
         Products["products"]
         TroubleDocs["troubleshooting_docs"]
         Tickets["support_tickets"]
-        AgentMem["agent_memory"]
-        ChatSessions["chat_sessions (optional)"]
+        AgentMem["agent_memory_facts"]
+        ChatSessions["chat_sessions"]
     end
 
     subgraph RetrievalFeatures ["Optional retrieval features"]
@@ -123,7 +122,7 @@ flowchart TD
 | Area | Technology |
 |---|---|
 | **API runtime** | Bun (TypeScript, ES2022), Hono v4, Zod validation |
-| **Agent runtime** | Strands Agents SDK — `Agent`, `Swarm`, `BedrockModel`, `DevMockModel` |
+| **Agent runtime** | Strands Agents SDK — `Agent`, `Swarm`, `BedrockModel`, hosted on Bedrock AgentCore Runtime |
 | **UI** | Streamlit (Python 3.12), multipage (Chat + Sessions), SSE streaming, `streamlit-cognito-auth` |
 | **Data access** | MongoDB Atlas — `orders`, `products`, `troubleshooting_docs`, `support_tickets`, `agent_memory`, optional `chat_sessions` |
 | **Tools** | `mongodb_query`, `mongodb_vector_search`, `bedrock_kb_retrieve`, `generate_embedding`, `read_skill_resource`, `run_skill_script`, `create_support_ticket` |
@@ -138,7 +137,7 @@ flowchart TD
 | Area | Target architecture |
 |---|---|
 | **Cloud runtime** | Bedrock AgentCore Runtime |
-| **Tool hosting** | AgentCore Gateway + Lambda tool adapters |
+| **Tool hosting** | MongoDB MCP AgentCore Runtime + AgentCore Gateway for non-Mongo tools |
 | **Sandboxed execution** | AgentCore Code Interpreter |
 | **Hosting** | ECR -> ECS Fargate + ALB / CloudFront |
 | **Networking / ops** | VPC, PrivateLink, CloudWatch, broader Cognito integration |
@@ -154,28 +153,21 @@ flowchart TD
 2. **Agent creation** — the full `SKILL.md` body is appended to the system prompt when an agent activates that skill
 3. **On-demand** — `references/` docs and `scripts/` are fetched at runtime only when the agent explicitly needs them
 
-In code today, the selected agent runs directly unless `agentId=orchestrator`, `CHAT_MODE=live`, and `ORCHESTRATOR_MODE=swarm`, in which case the orchestrator starts a Strands `Swarm`.
+In code today, the Hono API always invokes the AgentCore Orchestrator Runtime via `InvokeAgentRuntimeCommand`. Inside that runtime, `ORCHESTRATOR_MODE=swarm` selects Strands Swarm; otherwise the runtime routes to a single specialist runtime ARN.
 
 ---
 
 ## 5. Request Data Flow
 
 1. `POST /chat` receives `{ message, sessionId, agentId? }`; when `agentId` is omitted the route defaults to `orchestrator`.
-2. Auth middleware optionally verifies a Bearer token and, when JWKS is configured, extracts `jwt.sub` as `userId`.
-3. The API appends the user turn to `session-store`, which uses an in-memory `Map` by default and optional Mongo `chat_sessions` persistence when enabled.
-4. If the selected agent has `memory.longTerm: true` and a `userId` is present, the route reads recent turns from Mongo `agent_memory` and passes that text into the prompt builder as `memoryContext`.
-5. Config loaders resolve the selected `.agent.md`, activate the specialist's `SKILL.md` content, and build the system prompt.
-6. `resolveModel()` selects `BedrockModel` for live Bedrock calls or `DevMockModel` when `DEV_MOCK_BACKENDS=1`.
-7. The route chooses execution mode:
-   - Single-agent path: `runChatStream()`
-   - Swarm path: `runSwarmChatStream()` only when `agentId=orchestrator`, `CHAT_MODE=live`, and `ORCHESTRATOR_MODE=swarm`
-8. The Strands runtime streams `token`, `tool_call`, `skill_loaded`, `agent_active`, and `handoff` events over SSE.
-9. Tool calls execute in-process:
-   - `mongodb_query` and `create_support_ticket` need MongoDB; writes additionally need `MONGODB_ALLOW_WRITE=1`
-   - `mongodb_vector_search` also needs embeddings and an Atlas vector index
-   - `bedrock_kb_retrieve` needs AWS credentials and `BEDROCK_KB_ID`
-10. On successful completion the API appends the assistant message to the session and, when eligible, writes the completed turn to `agent_memory`.
-11. The route emits a final SSE `done` event with `sessionId` and `messageId`.
+2. Auth middleware verifies the Bearer token against the Cognito JWKS and extracts `jwt.sub` as `userId`.
+3. The API appends the user turn to `session-store` (in-memory `Map`; mirrored to Mongo `chat_sessions` when `MONGODB_URI` is set).
+4. If the selected agent has `memory.longTerm: true` and a `userId` is present, the route reads facts from Mongo `agent_memory_facts` and passes them into the prompt builder as `memoryContext`.
+5. The route invokes the AgentCore Orchestrator Runtime via `InvokeAgentRuntimeCommand`, forwarding the user's JWT in the payload as `userJwt` plus session/agent metadata.
+6. Inside the orchestrator runtime: `ORCHESTRATOR_MODE=swarm` runs Strands Swarm; otherwise the runtime picks one specialist and invokes its runtime ARN directly via `InvokeAgentRuntime`.
+7. Specialist runtimes call MongoDB MCP tools directly against the MongoDB MCP AgentCore Runtime via `InvokeAgentRuntime`; that runtime executes the MongoDB driver call against Atlas via PrivateLink. Non-Mongo MCP tools remain Gateway-hosted.
+8. The orchestrator runtime returns the final assistant message + handoff metadata; the API wraps it as SSE `token` + `handoff` + `done` events for UI compatibility.
+9. On successful completion the API appends the assistant message to the session and, when eligible, writes the extracted facts to `agent_memory_facts` (LLM extractor; falls back to skipping the write on Bedrock failure).
 
 ---
 
@@ -183,10 +175,10 @@ In code today, the selected agent runs directly unless `agentId=orchestrator`, `
 
 | Tier | Mechanism | Storage | Scope |
 |---|---|---|---|
-| **Short-term** | Full turn history replayed each turn | In-memory `Map`; optional Mongo `chat_sessions` when `PERSIST_CHAT_SESSIONS=1` | Per session |
-| **Long-term** | Recent completed user/assistant turns injected as `## Context from previous sessions` | Mongo `agent_memory`, TTL 90 days, capped by `MEMORY_INJECT_TURNS` | Per `userId` × `agentId` |
+| **Short-term** | Per-turn chat transcript replayed each turn | AgentCore short-term events (primary, when authenticated); in-memory `Map` + Mongo `chat_sessions` (default-on when `MONGODB_URI` is set) as the cache/fallback | Per session |
+| **Long-term** | LLM-extracted user facts injected as `## Context from previous sessions` | Mongo `agent_memory_facts` (primary, TTL `MEMORY_TTL_DAYS`); AgentCore Memory store as fallback. Capped by `MEMORY_INJECT_TURNS` injected facts. | Per `userId` × `agentId` |
 
-In the current code, long-term memory is plain turn replay rather than an embedding-based vector recall system.
+Long-term recall is fact-based: the LLM extractor (`api/src/lib/llm-fact-extractor.ts`) reads the latest user/assistant turn and writes categorized fact strings via Bedrock `ConverseCommand`. Vector recall over those facts is on the roadmap; today recall is recency-ordered.
 
 ---
 
@@ -194,31 +186,30 @@ In the current code, long-term memory is plain turn replay rather than an embedd
 
 **Current repository path**
 
-- `docker compose up --build` starts the Streamlit UI and Bun API with `CHAT_MODE=live` and `DEV_MOCK_BACKENDS=1`.
-- Data-backed demos still need `MONGODB_URI`.
-- Swarm demos additionally need `ORCHESTRATOR_MODE=swarm`.
-- Vector-search demos need seeded embeddings, an Atlas vector index, and `EMBEDDING_MODEL_ID`.
-- Bedrock KB demos need AWS credentials and `BEDROCK_KB_ID`.
-- Ticket-creation demos need `MONGODB_ALLOW_WRITE=1`.
+- `deploy/scripts/deploy.sh` provisions the full AWS stack: VPC + PrivateLink, MongoDB MCP AgentCore Runtime, AgentCore Runtimes (orchestrator + 3 specialists), AgentCore Gateway, AgentCore Memory store, Bedrock KB, Cognito, and an EC2 host running the API + Streamlit UI under systemd.
+- `docker compose up --build` starts the API + Streamlit UI locally pointed at the deployed AgentCore Orchestrator runtime (`AGENTCORE_ORCHESTRATOR_ARN` is asserted at startup).
 
 **Infrastructure currently implemented in Terraform**
 
-- S3 state/bootstrap resources
-- IAM and Secrets Manager wiring for the Bedrock KB flow
-- Bedrock Knowledge Base lifecycle and S3 ingestion helpers
+- VPC, subnets, PrivateLink endpoints, EC2 host, security groups
+- MongoDB MCP AgentCore Runtime + log group
+- AgentCore Runtimes (4) + AgentCore Gateway + AgentCore Memory store
+- Bedrock KB + S3 docs + ingestion helpers
+- Cognito user pool + app client
+- IAM, Secrets Manager, CloudWatch log groups
 
-**Target production architecture**
+**Target production extensions**
 
-- ECS Fargate + ALB / CloudFront for the containerized UI and API
-- VPC / PrivateLink, Cognito, CloudWatch, and broader operational hardening
-- AgentCore Runtime / Gateway and Lambda-based tool hosting as future extensions
+- ECS Fargate + ALB / CloudFront for the containerized UI and API (currently EC2 + systemd)
+- AgentCore Code Interpreter for sandboxed script execution
+- Voyage AI on SageMaker for embeddings (currently Bedrock Titan v2)
 
 ---
 
 ## 8. Key Design Decisions
 
 - **Config-over-code:** Every agent persona, routing rule, skill body, and HTTP integration lives in version-controlled markdown. New domains ship with zero TypeScript changes and no Lambda deploys (unless new infra is needed).
-- **Direct in-process tools first:** The current runtime executes tools directly inside the API process. Gateway/Lambda hosting is a future production extension, not a prerequisite for the current PoC.
+- **AgentCore-hosted MCP tools:** MongoDB MCP runs in a dedicated AgentCore Runtime with IAM invocation; the AgentCore Gateway remains the path for non-Mongo MCP tools. No agent runtime opens a MongoDB driver directly.
 - **Unified Atlas data layer:** Operational queries, optional Atlas vector search, chat-session persistence, long-term agent memory, and support tickets can all sit in one Atlas deployment.
 - **Two memory horizons:** Short-term session replay and long-term `agent_memory` are intentionally separate, keeping the current implementation simple and inspectable.
 - **Optional advanced retrieval:** Vector search and Bedrock KB are both opt-in capabilities that only become active when their indexes and environment variables are provisioned.
@@ -230,7 +221,7 @@ In the current code, long-term memory is plain turn replay rather than an embedd
 
 The following scenarios are grounded in the seeded Atlas dataset under `db-seeding/` (customers: Alex Rivera, Blake Chen, Casey Morgan, Dana Patel; products: SKU-1 through SKU-9; orders: ORD-1001 through ORD-3002).
 
-To run them exactly as written today, use a seeded MongoDB Atlas instance, choose `agentId=orchestrator`, set `CHAT_MODE=live`, and enable `ORCHESTRATOR_MODE=swarm`. For ticket demos, also set `MONGODB_ALLOW_WRITE=1`. For vector-search demos, seed embeddings and create the Atlas vector indexes. For Bedrock KB supplementation, configure `BEDROCK_KB_ID` and AWS credentials. For long-term-memory recall, use authenticated requests so the API has a stable `userId`.
+To run them exactly as written today, use a seeded MongoDB Atlas instance, choose `agentId=orchestrator`, and ensure the deployed orchestrator runtime has `ORCHESTRATOR_MODE=swarm`. For ticket demos, also set `MONGODB_ALLOW_WRITE=1` on the Lambda MCP function. For vector-search demos, seed embeddings and create the Atlas vector indexes. For Bedrock KB supplementation, configure `BEDROCK_KB_ID` and AWS credentials. Long-term-memory recall always uses authenticated requests because JWKS auth is mandatory.
 
 ---
 

@@ -49,13 +49,6 @@ TRACE_CSS = """
 .trace-chip.warn { background: rgba(255, 165, 0, 0.15); color: orange; }
 .trace-chip.ok { background: rgba(60, 200, 100, 0.12); color: #4caf50; }
 .trace-chip.err { background: rgba(255, 80, 80, 0.15); color: #ef5350; }
-.trace-banner-mock {
-  background: rgba(255, 165, 0, 0.10);
-  border: 1px solid rgba(255, 165, 0, 0.35);
-  border-radius: 8px;
-  padding: 10px 14px;
-  margin-bottom: 12px;
-}
 .trace-section-title {
   font-size: 14px;
   font-weight: 600;
@@ -106,23 +99,13 @@ TRACE_CSS = """
   to   { transform: translateY(0);   opacity: 1; }
 }
 
-/* Replay overlay — toggled via [data-replay-active] on <body>, driven from
-   replay_controller.py. Highlights the currently active span, dims the rest. */
-body[data-replay-active="1"] .trace-tile { opacity: 0.35; transition: opacity 200ms; }
-body[data-replay-active="1"] .trace-tile.trace-replay-current {
-  opacity: 1;
-  box-shadow: 0 0 0 2px rgba(0,150,57,0.85);
-}
-
 @media print {
   /* Strip the demo polish so the printed PDF is purely the data. */
-  .trace-tile, .trace-banner-mock { box-shadow: none !important; border-color: #999 !important; }
+  .trace-tile { box-shadow: none !important; border-color: #999 !important; }
   .trace-brand-strip { display: none !important; }
   .trace-tile[data-just-loaded="1"] { animation: none !important; }
-  body[data-replay-active="1"] .trace-tile { opacity: 1 !important; box-shadow: none !important; }
-  /* Hide replay controls + the catch-all developer-details expander. */
+  /* Hide the catch-all developer-details expander. */
   [data-testid="stExpander"]:has(summary:contains("Developer details")) { display: none !important; }
-  .trace-replay-controls { display: none !important; }
   details { page-break-inside: avoid; }
 }
 </style>

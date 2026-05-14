@@ -127,6 +127,22 @@
       "Resource": "*"
     },
     {
+      "Sid": "ServiceQuotasForSageMakerAndVoyageSetup",
+      "Effect": "Allow",
+      "Action": [
+        "servicequotas:ListServices",
+        "servicequotas:ListServiceQuotas",
+        "servicequotas:ListAWSDefaultServiceQuotas",
+        "servicequotas:GetServiceQuota",
+        "servicequotas:GetAWSDefaultServiceQuota",
+        "servicequotas:ListRequestedServiceQuotaChangeHistory",
+        "servicequotas:ListRequestedServiceQuotaChangeHistoryByQuota",
+        "servicequotas:GetRequestedServiceQuotaChange",
+        "servicequotas:RequestServiceQuotaIncrease"
+      ],
+      "Resource": "*"
+    },
+    {
       "Sid": "ResourceTaggingAndGroups",
       "Effect": "Allow",
       "Action": [
@@ -200,3 +216,4 @@
     }
   ]
 }
+ 

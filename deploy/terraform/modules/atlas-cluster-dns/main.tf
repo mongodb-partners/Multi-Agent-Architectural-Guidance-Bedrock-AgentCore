@@ -2,7 +2,7 @@ terraform {
   required_providers {
     aws = {
       source  = "hashicorp/aws"
-      version = "~> 5.0"
+      version = ">= 6.27, < 7.0"
     }
   }
 }
@@ -17,6 +17,9 @@ terraform {
 #
 # Atlas SRV format: <cluster>.<id>.mongodb.net
 # Wildcard CNAME ensures all shard / mongos hostnames resolve via the VPCE.
+#
+# Full architectural rationale: docs/architecture.md §7.4 ("PrivateLink to
+# Atlas → atlas-cluster-dns per-cluster zone").
 # =============================================================================
 
 resource "aws_route53_zone" "atlas" {

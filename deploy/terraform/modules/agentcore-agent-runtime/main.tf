@@ -1,19 +1,13 @@
 terraform {
   required_providers {
-    aws   = { source = "hashicorp/aws", version = "~> 5.0" }
-    null  = { source = "hashicorp/null", version = "~> 3.0" }
-    local = { source = "hashicorp/local", version = "~> 2.0" }
+    aws = { source = "hashicorp/aws", version = ">= 6.27, < 7.0" }
   }
 }
 
 locals {
   # AgentCore runtime names must match [a-zA-Z][a-zA-Z0-9_]{0,47}.
   # Keep caller-provided uniqueness while normalizing unsupported characters.
-  runtime_name = substr(replace(var.runtime_name, "-", "_"), 0, 48)
-  # State file is keyed by runtime_name so each of the 4 instances has its own file
-  state_file      = "${path.module}/.runtime-state-${var.runtime_name}.json"
-  tags_csv        = join(",", [for k, v in var.tags : "${k}=${v}"])
-  env_json        = jsonencode(var.environment_variables)
+  runtime_name    = substr(replace(var.runtime_name, "-", "_"), 0, 48)
   deployment_mode = lower(trimspace(var.deployment_mode))
 }
 
@@ -109,14 +103,15 @@ resource "aws_iam_role_policy" "runtime_permissions" {
         Action   = ["secretsmanager:GetSecretValue"]
         Resource = "arn:aws:secretsmanager:${var.aws_region}:${var.account_id}:secret:${var.kb_secret_name_prefix}-*"
       }
-      ] : [], length(compact([var.lambda_mcp_function_arn])) > 0 ? [
+      ] : [], length(compact([var.voyage_sagemaker_endpoint_arn])) > 0 ? [
       {
-        Sid    = "LambdaMcpInvoke"
+        Sid    = "SageMakerInvoke"
         Effect = "Allow"
         Action = [
-          "lambda:InvokeFunction",
+          "sagemaker:InvokeEndpoint",
+          "sagemaker:InvokeEndpointWithResponseStream",
         ]
-        Resource = compact([var.lambda_mcp_function_arn])
+        Resource = compact([var.voyage_sagemaker_endpoint_arn])
       }
       ] : [], local.deployment_mode == "code" ? [
       {
@@ -137,55 +132,85 @@ resource "aws_iam_role_policy" "runtime_permissions" {
 }
 
 # =============================================================================
-# Runtime + Endpoint — provisioned via AWS CLI (not yet in TF provider)
+# AgentCore Agent Runtime — native resource (provider 6.17+).
+# Replaces the previous null_resource + create-runtime.sh shim. AgentCore
+# auto-creates the DEFAULT endpoint on the runtime, so we don't manage one
+# explicitly. Container vs S3-code artifact is dispatched by deployment_mode.
 # =============================================================================
 
-resource "null_resource" "runtime" {
-  triggers = {
-    runtime_name    = local.runtime_name
-    deployment_mode = local.deployment_mode
-    container_uri   = var.container_uri
-    code_bucket     = var.code_artifact_bucket
-    code_prefix     = var.code_artifact_prefix
-    code_version    = var.code_artifact_version_id
-    code_runtime    = var.code_runtime
-    code_entrypoint = jsonencode(var.code_entry_point)
-    role_arn        = aws_iam_role.runtime.arn
-    network_mode    = var.network_mode
-    idle_timeout    = var.idle_timeout_seconds
-    env_hash        = sha256(local.env_json)
-    aws_region      = var.aws_region
-  }
+resource "aws_bedrockagentcore_agent_runtime" "this" {
+  agent_runtime_name = local.runtime_name
+  role_arn           = aws_iam_role.runtime.arn
 
-  provisioner "local-exec" {
-    command = "${path.module}/scripts/create-runtime.sh"
-    environment = {
-      AWS_REGION      = var.aws_region
-      RUNTIME_NAME    = local.runtime_name
-      DEPLOYMENT_MODE = local.deployment_mode
-      CONTAINER_URI   = var.container_uri
-      CODE_BUCKET     = var.code_artifact_bucket
-      CODE_PREFIX     = var.code_artifact_prefix
-      CODE_VERSION    = var.code_artifact_version_id
-      CODE_RUNTIME    = var.code_runtime
-      CODE_ENTRYPOINT = jsonencode(var.code_entry_point)
-      ROLE_ARN        = aws_iam_role.runtime.arn
-      NETWORK_MODE    = var.network_mode
-      IDLE_TIMEOUT    = tostring(var.idle_timeout_seconds)
-      ENV_JSON        = local.env_json
-      RESOURCE_TAGS   = local.tags_csv
-      STATE_FILE      = local.state_file
+  agent_runtime_artifact {
+    dynamic "container_configuration" {
+      for_each = local.deployment_mode == "container" ? [1] : []
+      content {
+        container_uri = var.container_uri
+      }
+    }
+
+    dynamic "code_configuration" {
+      for_each = local.deployment_mode == "code" ? [1] : []
+      content {
+        entry_point = var.code_entry_point
+        runtime     = var.code_runtime
+        code {
+          s3 {
+            bucket     = var.code_artifact_bucket
+            prefix     = var.code_artifact_prefix
+            version_id = trimspace(var.code_artifact_version_id) == "" ? null : var.code_artifact_version_id
+          }
+        }
+      }
     }
   }
 
-  provisioner "local-exec" {
-    when    = destroy
-    command = "${path.module}/scripts/destroy-runtime.sh"
-    environment = {
-      AWS_REGION = self.triggers.aws_region
-      STATE_FILE = "${path.module}/.runtime-state-${self.triggers.runtime_name}.json"
+  network_configuration {
+    network_mode = var.network_mode
+
+    dynamic "network_mode_config" {
+      for_each = var.network_mode == "VPC" ? [1] : []
+      content {
+        subnets         = var.vpc_subnet_ids
+        security_groups = var.vpc_security_group_ids
+      }
+    }
+  }
+
+  protocol_configuration {
+    server_protocol = var.server_protocol
+  }
+
+  lifecycle_configuration {
+    idle_runtime_session_timeout = var.idle_timeout_seconds
+    max_lifetime                 = var.max_lifetime_seconds
+  }
+
+  environment_variables = var.environment_variables
+
+  tags = var.tags
+
+  lifecycle {
+    precondition {
+      condition     = var.network_mode != "VPC" || (length(var.vpc_subnet_ids) > 0 && length(var.vpc_security_group_ids) > 0)
+      error_message = "agentcore-agent-runtime: network_mode=VPC requires non-empty vpc_subnet_ids and vpc_security_group_ids."
+    }
+    precondition {
+      condition     = local.deployment_mode != "container" || length(trimspace(var.container_uri)) > 0
+      error_message = "agentcore-agent-runtime: deployment_mode=container requires a non-empty container_uri."
+    }
+    precondition {
+      condition     = local.deployment_mode != "code" || (length(trimspace(var.code_artifact_bucket)) > 0 && length(trimspace(var.code_artifact_prefix)) > 0)
+      error_message = "agentcore-agent-runtime: deployment_mode=code requires non-empty code_artifact_bucket and code_artifact_prefix."
     }
   }
 
   depends_on = [aws_iam_role_policy.runtime_permissions]
+
+  timeouts {
+    create = "30m"
+    update = "30m"
+    delete = "30m"
+  }
 }

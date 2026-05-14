@@ -12,6 +12,27 @@ export function isJwksAuthConfigured(): boolean {
   return Boolean(jwks && iss);
 }
 
+/**
+ * Boot-time guard: refuse to start the API if JWKS auth is not configured.
+ *
+ * Called from `api/src/index.ts` so the process exits before any HTTP listener binds when
+ * `AUTH_JWKS_URI` or `AUTH_ISSUER` is missing. There is no `ALLOW_UNAUTHENTICATED` /
+ * `REQUIRE_AUTH=false` escape hatch — every environment must point at a real OIDC pool.
+ */
+export function assertJwksAuthConfigured(): void {
+  if (isJwksAuthConfigured()) return;
+  const jwks = process.env.AUTH_JWKS_URI?.trim();
+  const iss = process.env.AUTH_ISSUER?.trim();
+  const missing: string[] = [];
+  if (!jwks) missing.push("AUTH_JWKS_URI");
+  if (!iss) missing.push("AUTH_ISSUER");
+  throw new Error(
+    `[boot] JWKS auth is not configured: missing ${missing.join(", ")}. ` +
+      `Every environment (including local dev) must set AUTH_JWKS_URI + AUTH_ISSUER ` +
+      `to a real Cognito (or other OIDC) pool. There is no unauthenticated mode.`,
+  );
+}
+
 function normalizeIssuer(iss: string): string {
   return iss.replace(/\/+$/, "");
 }
@@ -19,7 +40,18 @@ function normalizeIssuer(iss: string): string {
 let cachedJwksUri: string | null = null;
 let cachedRemoteJwks: JWTVerifyGetKey | null = null;
 
+/**
+ * Test-only override. When set, `verifyBearerJwt` skips `createRemoteJWKSet` and uses the
+ * supplied resolver instead. Production code never calls this; integration tests inject a
+ * local JWKS so they don't need a live Cognito pool.
+ */
+let testJwksResolver: JWTVerifyGetKey | null = null;
+export function _setJwksResolverForTests(resolver: JWTVerifyGetKey | null): void {
+  testJwksResolver = resolver;
+}
+
 function getRemoteJwks(jwksUri: string): JWTVerifyGetKey {
+  if (testJwksResolver) return testJwksResolver;
   if (cachedJwksUri === jwksUri && cachedRemoteJwks) return cachedRemoteJwks;
   cachedJwksUri = jwksUri;
   cachedRemoteJwks = createRemoteJWKSet(new URL(jwksUri));

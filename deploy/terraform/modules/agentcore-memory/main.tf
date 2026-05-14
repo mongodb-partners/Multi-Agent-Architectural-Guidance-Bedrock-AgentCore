@@ -1,47 +1,28 @@
 terraform {
   required_providers {
-    null  = { source = "hashicorp/null", version = "~> 3.0" }
-    local = { source = "hashicorp/local", version = "~> 2.0" }
+    aws = { source = "hashicorp/aws", version = ">= 6.27, < 7.0" }
   }
 }
 
 locals {
   memory_name = "${replace(var.project_name, "-", "_")}_memory_${var.environment}"
-  state_file  = "${path.module}/.memory-state.json"
-  # Serialize tags to "Key=Value,Key=Value" for AWS CLI shorthand.
-  # AgentCore is created via CLI (no TF provider) so default_tags doesn't apply.
-  tags_csv = join(",", [for k, v in var.tags : "${k}=${v}"])
 }
 
 # =============================================================================
-# AgentCore Memory Store — created via AWS CLI (not yet in AWS TF provider).
+# AgentCore Memory Store — primary **short-term conversation event store**
+# in production (per-turn replay keyed by (memoryId, actorId=userId, sessionId)),
+# selected when SHORT_TERM_MEMORY_BACKEND=agentcore + AGENTCORE_MEMORY_STORE_ID.
+# Also used as a best-effort **long-term fallback** when MongoDB writes to
+# `agent_memory_facts` fail. Authoritative long-term persistence still lives
+# in MongoDB Atlas — see docs/memory-architecture.md and the SoW.
+#
+# Native AWS provider resource — replaced the previous `null_resource` +
+# AWS CLI shim once `aws_bedrockagentcore_memory` shipped in provider v6.18.0.
 # =============================================================================
 
-resource "null_resource" "memory" {
-  triggers = {
-    memory_name       = local.memory_name
-    event_expiry_days = var.event_expiry_days
-    aws_region        = var.aws_region
-    tags_csv          = local.tags_csv
-  }
+resource "aws_bedrockagentcore_memory" "this" {
+  name                  = local.memory_name
+  event_expiry_duration = var.event_expiry_days
 
-  provisioner "local-exec" {
-    command = "${path.module}/scripts/create-memory.sh"
-    environment = {
-      AWS_REGION        = var.aws_region
-      MEMORY_NAME       = local.memory_name
-      EVENT_EXPIRY_DAYS = tostring(var.event_expiry_days)
-      STATE_FILE        = local.state_file
-      RESOURCE_TAGS     = local.tags_csv
-    }
-  }
-
-  provisioner "local-exec" {
-    when    = destroy
-    command = "${path.module}/scripts/destroy-memory.sh"
-    environment = {
-      AWS_REGION = self.triggers.aws_region
-      STATE_FILE = "${path.module}/.memory-state.json"
-    }
-  }
+  tags = var.tags
 }

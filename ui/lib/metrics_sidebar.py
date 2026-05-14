@@ -26,7 +26,6 @@ def render_metrics_block(api_base: str, token: str | None) -> None:
     total_cost = 0.0
     total_tokens = 0
     total_mongo = 0
-    mock_count = 0
     n = len(traces)
     avg_latency = 0
     for t in traces:
@@ -37,8 +36,6 @@ def render_metrics_block(api_base: str, token: str | None) -> None:
         total_tokens += int(summ.get("totalTokens") or 0)
         total_mongo += int(summ.get("mongoQueriesCount") or 0)
         avg_latency += int(summ.get("durationMs") or 0)
-        if summ.get("backendsUsed") == "mock":
-            mock_count += 1
     if n:
         avg_latency //= n
 
@@ -47,4 +44,4 @@ def render_metrics_block(api_base: str, token: str | None) -> None:
         st.metric("Total tokens", f"{total_tokens:,}")
         st.metric("Avg latency", f"{avg_latency / 1000:.2f}s")
         st.metric("Mongo ops", str(total_mongo))
-        st.caption(f"Cached for 10 s — refresh page to recompute.")
+        st.caption("Cached for 10 s — refresh page to recompute.")

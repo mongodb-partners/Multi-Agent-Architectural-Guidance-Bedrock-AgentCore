@@ -17,12 +17,19 @@ variable "voyage_model_package_arn" {
   type        = string
   description = <<EOT
 AWS Marketplace model package ARN for Voyage AI.
-Subscribe at: https://aws.amazon.com/marketplace/seller-profile?id=voyage-ai
-Then find the ARN in SageMaker > JumpStart or via:
-  aws sagemaker list-model-packages --model-package-group-name voyage-3
+Default target listing is voyage-multimodal-3 (SoW).
+Subscribe at: https://aws.amazon.com/marketplace/pp/prodview-hrid2zxusacxy
+Then find the region-specific ARN via:
+  aws sagemaker list-model-packages --model-package-group-name voyage-multimodal-3
 Typical ARN pattern:
-  arn:aws:sagemaker:us-east-1:865070037744:model-package/voyage-3-v1-<hash>
+  arn:aws:sagemaker:us-east-1:865070037744:model-package/voyage-multimodal-3-<hash>
 EOT
+}
+
+variable "endpoint_name_suffix" {
+  type        = string
+  description = "Suffix appended to the SageMaker endpoint name (e.g. \"voyage-multimodal-3\" or \"voyage-3-5-lite\"). Defaults to voyage-multimodal-3."
+  default     = "voyage-multimodal-3"
 }
 
 variable "instance_type" {

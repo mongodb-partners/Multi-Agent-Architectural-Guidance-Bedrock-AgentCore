@@ -4,7 +4,7 @@
  * - Loaded at runtime by the API (`run_skill_script` tool) via dynamic `import()`.
  * - Keep this file **pure** (no I/O): deterministic given an order document.
  *
- * Policy (demo / dev fixtures):
+ * Policy (matches the seeded demo dataset):
  * - `cancelled` / `returned` → not eligible.
  * - `delivered` + at least one line item with `returnEligible: true` → usually eligible,
  *   unless `notes` suggest a replacement path (then `needs_review` + `replacementSuggested`).

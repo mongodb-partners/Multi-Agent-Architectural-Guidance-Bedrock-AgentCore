@@ -10,8 +10,7 @@ FROM --platform=linux/arm64 oven/bun:1 AS runtime
 WORKDIR /app
 
 ENV NODE_ENV=production \
-    PORT=8080 \
-    CHAT_MODE=live
+    PORT=8080
 
 # Install dependencies
 COPY api/package.json api/bun.lock ./
@@ -30,4 +29,4 @@ EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
     CMD bun -e "fetch('http://127.0.0.1:8080/ping').then(r=>process.exit(r.ok?0:1))"
 
-CMD ["bun", "run", "src/agent-runtime-server.ts"]
+CMD ["bun", "run", "src/agent-runtime-code.ts"]

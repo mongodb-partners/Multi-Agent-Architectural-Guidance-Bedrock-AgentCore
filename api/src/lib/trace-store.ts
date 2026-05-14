@@ -16,7 +16,7 @@
 import type { Trace } from "./trace-types.ts";
 import { getMongoDb } from "./mongo-client.ts";
 import { logger } from "./logger.ts";
-import { persistChatSessions } from "./runtime-defaults.ts";
+import { persistChatSessions } from "./chat-sessions-collection.ts";
 
 // ---------------------------------------------------------------------------
 // Env knobs

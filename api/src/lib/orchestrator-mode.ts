@@ -1,19 +1,17 @@
-import { chatMode } from "./runtime-defaults.ts";
-
 /**
- * Whether POST /chat should run Strands Swarm (orchestrator + specialists).
- * Requires live mode; stub streaming stays single-path.
+ * Whether the orchestrator runtime should run Strands Swarm
+ * (orchestrator + specialists in one container) for this turn.
+ *
+ * Swarm is the default orchestrator behavior; set ORCHESTRATOR_MODE to
+ * anything other than "swarm" to fall back to single-agent routing
+ * (the orchestrator runtime then performs InvokeAgentRuntime against the
+ * specialist runtime ARN itself).
  */
 export function useOrchestratorSwarm(
   agentId: string,
   env: NodeJS.ProcessEnv = process.env,
 ): boolean {
-  // In AgentCore Runtime mode, orchestrator routing happens in-runtime (not swarm).
-  if (env.AGENTCORE_ORCHESTRATOR_ARN?.trim()) return false;
-
-  return (
-    agentId === "orchestrator" &&
-    env.ORCHESTRATOR_MODE === "swarm" &&
-    chatMode(env) === "live"
-  );
+  if (agentId !== "orchestrator") return false;
+  const mode = env.ORCHESTRATOR_MODE?.trim().toLowerCase();
+  return mode === undefined || mode === "" || mode === "swarm";
 }

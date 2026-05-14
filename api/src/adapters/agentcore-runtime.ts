@@ -1,14 +1,12 @@
 /**
  * AgentCore Runtime invocation adapter.
  *
- * When AGENTCORE_ORCHESTRATOR_ARN is set, the Hono API calls InvokeAgentRuntime
- * instead of running Strands in-process. The runtime container handles the
- * full agent loop (Strands Swarm / single agent) and returns a complete response.
+ * The Hono API always calls InvokeAgentRuntime against the orchestrator
+ * runtime ARN; the runtime container handles the full agent loop (Strands
+ * Swarm + specialist hand-off) and returns a complete response.
  *
  * Session management and long-term memory stay in the Hono API — the runtime
  * is stateless and receives full context (priorTurns, memoryContext) on each call.
- *
- * Falls back to Strands in-process when AGENTCORE_ORCHESTRATOR_ARN is not set.
  */
 
 import {
@@ -20,7 +18,6 @@ import type { ChatMessage } from "../lib/session-store.ts";
 import { currentTrace } from "../lib/trace-context.ts";
 import type { TraceEvent } from "../lib/trace-types.ts";
 
-// Singleton client — created on first use
 let _client: BedrockAgentCoreClient | null = null;
 
 function getClient(): BedrockAgentCoreClient {
@@ -33,14 +30,26 @@ function getClient(): BedrockAgentCoreClient {
 }
 
 export function agentcoreOrchestratorArn(): string | undefined {
-  // Backward compatible fallback for older .env.live files.
+  // Accept the legacy AGENTCORE_RUNTIME_ARN name for older .env.live files.
   return process.env.AGENTCORE_ORCHESTRATOR_ARN?.trim() ||
     process.env.AGENTCORE_RUNTIME_ARN?.trim() ||
     undefined;
 }
 
-export function useAgentcoreOrchestratorArn(): boolean {
-  return !!agentcoreOrchestratorArn();
+/**
+ * Throw if the orchestrator runtime ARN is not configured. Called once at
+ * startup (see `api/src/index.ts`) so the API never silently boots without
+ * a runtime to delegate chat turns to.
+ */
+export function assertAgentcoreOrchestratorArn(): string {
+  const arn = agentcoreOrchestratorArn();
+  if (!arn) {
+    throw new Error(
+      "AGENTCORE_ORCHESTRATOR_ARN is required. Set it (or the legacy " +
+        "AGENTCORE_RUNTIME_ARN) to the orchestrator AgentCore Runtime ARN.",
+    );
+  }
+  return arn;
 }
 
 export type RuntimeInvokeParams = {
@@ -51,9 +60,8 @@ export type RuntimeInvokeParams = {
   memoryContext?: string;
   /**
    * Caller's Cognito access token (raw `Bearer <jwt>` value, no prefix).
-   * Forwarded into the runtime invocation payload so the runtime can inject
-   * it as the Authorization header on outbound AgentCore Gateway MCP calls
-   * when `TOOL_HOSTING_MODE=gateway`. Lambda mode ignores it.
+   * Forwarded into the runtime invocation payload so the runtime injects it
+   * as the Authorization header on outbound AgentCore Gateway MCP calls.
    */
   userJwt?: string;
 };
@@ -77,8 +85,7 @@ export type RuntimeInvokeResult = {
 export async function invokeAgentRuntime(
   params: RuntimeInvokeParams,
 ): Promise<RuntimeInvokeResult> {
-  const arn = agentcoreOrchestratorArn();
-  if (!arn) throw new Error("AGENTCORE_ORCHESTRATOR_ARN not set");
+  const arn = assertAgentcoreOrchestratorArn();
 
   const runtimeSessionId = params.sessionId.length >= 33
     ? params.sessionId
@@ -216,4 +223,3 @@ export async function invokeAgentRuntime(
 
 // Backward-compatible aliases to avoid breaking imports while renaming.
 export const agentcoreRuntimeArn = agentcoreOrchestratorArn;
-export const useAgentcoreRuntime = useAgentcoreOrchestratorArn;

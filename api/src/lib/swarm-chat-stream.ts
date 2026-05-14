@@ -11,7 +11,6 @@ import type { ChatMessage } from "./session-store.ts";
 import { logger } from "./logger.ts";
 import { currentTrace } from "./trace-context.ts";
 import { attributeHandoff } from "./handoff-attribution.ts";
-import { isDevMockBackends } from "../adapters/dev-mock-env.ts";
 
 /**
  * Build the ordered agent ID list for the Swarm from config/agents/ at call time.
@@ -364,7 +363,6 @@ export async function* runSwarmChatStream(params: {
               })),
             latencyToDecisionMs: Date.now() - turnStartTs,
             tokensBeforeDecision: 0,
-            routingSource: isDevMockBackends() ? "devmock_regex" : "llm",
           });
         }
         // Always yield the handoff once a specialist is reached; suppress orch→orch self-loops

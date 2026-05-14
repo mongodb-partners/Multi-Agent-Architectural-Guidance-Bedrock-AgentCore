@@ -1,6 +1,10 @@
 import { test, expect } from "@playwright/test";
 
-test.describe("API (stub server)", () => {
+// Smoke tests against a live API (set API_URL). All stub-mode assumptions
+// have been removed — these tests rely on a real AgentCore Runtime, so
+// they only assert read-only public endpoints.
+
+test.describe("API smoke", () => {
   test("GET /health returns ok", async ({ request }) => {
     const res = await request.get("/health");
     expect(res.ok()).toBeTruthy();
@@ -8,7 +12,7 @@ test.describe("API (stub server)", () => {
     expect(body).toMatchObject({ status: expect.any(String) });
   });
 
-  test("GET /agents includes orchestrator", async ({ request }) => {
+  test("GET /agents includes orchestrator + bundled specialists", async ({ request }) => {
     const res = await request.get("/agents");
     expect(res.ok()).toBeTruthy();
     const body = await res.json();
@@ -27,50 +31,5 @@ test.describe("API (stub server)", () => {
     expect(Array.isArray(skills)).toBe(true);
     const names = skills.map((s) => s.name);
     expect(names).toContain("order-management");
-  });
-
-  test("POST /chat streams stub tokens and done", async ({ request }) => {
-    const sid = `e2e_${Date.now()}`;
-    const res = await request.post("/chat", {
-      headers: {
-        Accept: "text/event-stream",
-        "Content-Type": "application/json",
-      },
-      data: {
-        message: "hello e2e",
-        sessionId: sid,
-        agentId: "orchestrator",
-      },
-    });
-    expect(res.ok()).toBeTruthy();
-    const text = await res.text();
-    expect(text).toContain("event:");
-    expect(text).toContain("[stub]");
-    expect(text).toContain("event: done");
-  });
-
-  test("GET /sessions lists session after chat", async ({ request }) => {
-    const sid = `e2e_sess_${Date.now()}`;
-    const chat = await request.post("/chat", {
-      headers: {
-        Accept: "text/event-stream",
-        "Content-Type": "application/json",
-      },
-      data: {
-        message: "ping",
-        sessionId: sid,
-        agentId: "order-management",
-      },
-    });
-    expect(chat.ok()).toBeTruthy();
-    await chat.text();
-
-    const list = await request.get("/sessions");
-    expect(list.ok()).toBeTruthy();
-    const listBody = await list.json();
-    const rows = listBody.sessions as { sessionId: string }[];
-    expect(Array.isArray(rows)).toBe(true);
-    const found = rows.some((r) => r.sessionId === sid);
-    expect(found).toBe(true);
   });
 });

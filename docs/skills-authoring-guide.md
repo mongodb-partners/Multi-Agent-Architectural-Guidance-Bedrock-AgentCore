@@ -386,10 +386,7 @@ Validate skill files without a full deployment:
 # Type-check and schema-validate all config files (no model call)
 cd api && bun run typecheck && bun run validate:bun && bun run validate:agentcore
 
-# Start the API in stub mode — no Bedrock call, instant responses
-cd api && bun run dev
-
-# Smoke-test skill loading via the API
+# Smoke-test skill loading via the API (read-only — no Bedrock call)
 curl -s http://127.0.0.1:3000/skills
 curl -s http://127.0.0.1:3000/agents          # agents show their skills list
 curl -s http://127.0.0.1:3000/http-tools       # per-skill HTTP tools metadata
@@ -397,20 +394,10 @@ curl -s http://127.0.0.1:3000/http-tools       # per-skill HTTP tools metadata
 
 The **`GET /skills`** endpoint returns the discovery index (name + description) for all scanned skills. Config is loaded from disk **on each request**, so edits to `SKILL.md` are picked up immediately without a restart.
 
-To test with mock backends (no AWS required):
+To exercise a skill end-to-end, point the API at a deployed AgentCore Orchestrator runtime:
 
 ```bash
-export CHAT_MODE=live
-export DEV_MOCK_BACKENDS=1
-cd api && bun run dev
-```
-
-This uses `DevMockModel` (deterministic routing and tool calls) with fixture data from `data/dev/mongo-fixtures.json`.
-
-To test with a real Bedrock model (requires AWS credentials):
-
-```bash
-export CHAT_MODE=live
+source env.sh && source .env.live   # exports AGENTCORE_ORCHESTRATOR_ARN
 export AWS_REGION=us-east-1
 cd api && bun run dev
 ```

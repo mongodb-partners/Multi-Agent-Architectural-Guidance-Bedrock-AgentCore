@@ -14,6 +14,21 @@ function memoryId(): string | undefined {
   return process.env.AGENTCORE_MEMORY_STORE_ID?.trim() || undefined;
 }
 
+/**
+ * Boot-time guard. The deploy story (P1-3) is: when an operator opts into
+ * AgentCore short-term memory, AgentCore is the source of truth — there is
+ * no silent fallback to the in-memory `Map` if `AGENTCORE_MEMORY_STORE_ID`
+ * is missing. Refuse to boot in that misconfigured combination.
+ */
+export function assertShortTermBackendConfigured(): void {
+  if (shortTermBackend() === "agentcore" && !memoryId()) {
+    throw new Error(
+      "SHORT_TERM_MEMORY_BACKEND=agentcore requires AGENTCORE_MEMORY_STORE_ID to be set; " +
+        "refusing to boot rather than silently falling back to the in-memory map.",
+    );
+  }
+}
+
 export function useAgentcoreShortTermMemory(userId?: string): boolean {
   // Short-term memory in AgentCore requires a stable actor identity.
   if (!userId) return false;

@@ -12,9 +12,9 @@ Tier hierarchy:
 from __future__ import annotations
 
 import json
-from collections import defaultdict
 from typing import Any
 
+from collections import defaultdict
 import streamlit as st
 
 
@@ -25,6 +25,23 @@ import streamlit as st
 def _events_of(events: list[dict], *types: str) -> list[dict]:
     s = set(types)
     return [e for e in events if e.get("type") in s]
+
+
+def _payload(ev: dict) -> dict:
+    p = ev.get("payload") or {}
+    return p if isinstance(p, dict) else {}
+
+
+def _as_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value or default)
+    except (TypeError, ValueError):
+        return default
+
+
+def _completed_span_count(events: list[dict]) -> int:
+    completed = [e for e in events if e.get("durationMs") is not None]
+    return len(completed) or len(events)
 
 
 def _tile_html(label: str, value: str, hint: str | None = None) -> str:
@@ -38,27 +55,141 @@ def _tile_html(label: str, value: str, hint: str | None = None) -> str:
     )
 
 
+def _mock_markers(events: list[dict]) -> list[str]:
+    markers: set[str] = set()
+    source_fields = (
+        "backend",
+        "embeddingSource",
+        "provider",
+        "source",
+        "modelBackend",
+        "runtime",
+        "adapter",
+    )
+    for ev in events:
+        payload = _payload(ev)
+        event_type = str(ev.get("type") or "event")
+        for field in source_fields:
+            value = payload.get(field)
+            if isinstance(value, str) and any(token in value.lower() for token in ("mock", "stub", "fixture")):
+                markers.add(f"{event_type}: {value}")
+        if payload.get("devMock") is True or payload.get("mock") is True:
+            markers.add(event_type)
+    return sorted(markers)
+
+
+def render_mock_banner(events: list[dict]) -> None:
+    """Show when a trace includes mock/dev backend data."""
+    markers = _mock_markers(events)
+    if not markers:
+        return
+
+    shown = ", ".join(markers[:3])
+    suffix = f", +{len(markers) - 3} more" if len(markers) > 3 else ""
+    st.info(f"Mock/dev backend data detected in this trace: {shown}{suffix}")
+
+
 # ---------------------------------------------------------------------------
 # 1. Summary header
 # ---------------------------------------------------------------------------
 
-def render_summary_header(trace: dict) -> None:
+def summary_tiles(trace: dict) -> list[str]:
+    """Build the high-signal top tiles for a trace document."""
     summary = trace.get("summary") or {}
+    events = trace.get("events") or []
     tiles: list[str] = []
-    if summary.get("durationMs"):
-        tiles.append(_tile_html("Latency", f"{int(summary['durationMs']) / 1000:.2f}s"))
-    if summary.get("totalTokens"):
+
+    end_payloads = [_payload(e) for e in _events_of(events, "chat.turn.end")]
+    duration_ms = _as_int(summary.get("durationMs"))
+    if not duration_ms and end_payloads:
+        duration_ms = _as_int(end_payloads[-1].get("durationMs"))
+    if duration_ms:
+        tiles.append(_tile_html("Latency", f"{duration_ms / 1000:.2f}s"))
+
+    agentcore_invokes = _events_of(events, "agentcore.invoke")
+    agentcore_count = max(_as_int(summary.get("agentcoreHops")), _completed_span_count(agentcore_invokes))
+    if agentcore_count:
+        runtime_ms = _as_int(summary.get("agentcoreRuntimeMs"))
+        if not runtime_ms:
+            runtime_ms = sum(_as_int(_payload(e).get("latencyMs")) for e in agentcore_invokes)
+        hint = f"{runtime_ms / 1000:.1f}s runtime" if runtime_ms else None
         tiles.append(
             _tile_html(
-                "Tokens",
-                f"{int(summary['totalTokens']):,}",
-                hint=f"{summary.get('inputTokens', 0):,} in / {summary.get('outputTokens', 0):,} out",
+                "AgentCore",
+                f"{agentcore_count} hop{'s' if agentcore_count != 1 else ''}",
+                hint=hint,
             )
         )
+
+    writes = _events_of(events, "memory.long_term_write")
+    skips = _events_of(events, "memory.long_term_skip")
+    reads = _events_of(events, "memory.scoped_read", "memory.shared_read")
+    stored = sum(_as_int(_payload(e).get("docsInserted")) for e in writes)
+    if stored:
+        outcomes = [str(_payload(e).get("primaryOutcome") or "") for e in writes]
+        hint = ", ".join(x for x in outcomes if x) or None
+        tiles.append(_tile_html("Memory", f"{stored} stored", hint=hint))
+    elif skips:
+        reason = str(_payload(skips[-1]).get("reason") or "skipped")
+        tiles.append(_tile_html("Memory", "Skipped", hint=reason))
+    elif reads:
+        read_count = sum(_as_int(_payload(e).get("entryCount")) for e in reads)
+        if read_count:
+            tiles.append(_tile_html("Memory", f"{read_count} read"))
+
+    mongo_results = _events_of(events, "mongo.result")
+    vector_searches = _events_of(events, "mongo.vector_search")
+    mongo_count = (
+        _as_int(summary.get("mongoQueriesCount"))
+        or _as_int(summary.get("mongoQueries"))
+        or len(mongo_results) + len(vector_searches)
+    )
+    if mongo_count:
+        ok = sum(1 for e in mongo_results if _payload(e).get("status") != "error")
+        docs = _as_int(summary.get("mongoDocsReturned")) or sum(_as_int(_payload(e).get("docCount")) for e in mongo_results)
+        vector_hits = sum(len(_payload(e).get("scores") or []) for e in vector_searches)
+        if mongo_results:
+            value = f"{ok}/{mongo_count} ok"
+        elif vector_searches:
+            value = f"{len(vector_searches)} vector search{'es' if len(vector_searches) != 1 else ''}"
+        else:
+            value = str(mongo_count)
+        hints = []
+        if docs:
+            hints.append(f"{docs} doc(s)")
+        if vector_searches:
+            hints.append(f"{len(vector_searches)} vector · {vector_hits} hit(s)")
+        tiles.append(_tile_html("MongoDB", value, hint=", ".join(hints) or None))
+
+    tool_events = _events_of(events, "tool.call")
+    tool_count = max(_as_int(summary.get("toolCalls")), _completed_span_count(tool_events))
+    if tool_count:
+        tiles.append(_tile_html("Tools", f"{tool_count} call{'s' if tool_count != 1 else ''}"))
+
+    usage_events = _events_of(events, "model.usage")
+    total_tokens = _as_int(summary.get("totalTokens")) or sum(_as_int(_payload(e).get("totalTokens")) for e in usage_events)
+    input_tokens = _as_int(summary.get("inputTokens")) or sum(_as_int(_payload(e).get("inputTokens")) for e in usage_events)
+    output_tokens = _as_int(summary.get("outputTokens")) or sum(_as_int(_payload(e).get("outputTokens")) for e in usage_events)
+    if total_tokens:
+        tiles.append(_tile_html("Tokens", f"{total_tokens:,}", hint=f"{input_tokens:,} in / {output_tokens:,} out"))
+
     cost = summary.get("estimatedCostUsd")
     if cost is not None:
-        mark = "" if summary.get("costEstimateComplete") else "≈"
+        mark = "" if summary.get("costEstimateComplete", True) else "≈"
         tiles.append(_tile_html("Cost", f"{mark}${float(cost):.4f}"))
+
+    error_count = len(_events_of(events, "error"))
+    error_count += sum(1 for e in mongo_results if _payload(e).get("status") == "error")
+    error_count += sum(1 for e in agentcore_invokes if _payload(e).get("errorMessage"))
+    if error_count:
+        tiles.append(_tile_html("Errors", str(error_count), hint="See details below"))
+
+    return tiles
+
+
+def render_summary_header(trace: dict) -> None:
+    summary = trace.get("summary") or {}
+    tiles = summary_tiles(trace)
     if summary.get("modelIds"):
         models = summary["modelIds"]
         tiles.append(_tile_html("Model", models[0] if len(models) == 1 else f"{len(models)} models"))
@@ -70,8 +201,6 @@ def render_summary_header(trace: dict) -> None:
                 hint=", ".join(summary["toolsUsed"][:2]),
             )
         )
-    if summary.get("mongoQueriesCount"):
-        tiles.append(_tile_html("Mongo ops", str(summary["mongoQueriesCount"])))
     if tiles:
         st.markdown("".join(tiles), unsafe_allow_html=True)
     if summary.get("degraded"):
@@ -79,22 +208,7 @@ def render_summary_header(trace: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 2. Mock backend banner
-# ---------------------------------------------------------------------------
-
-def render_mock_banner(events: list[dict]) -> None:
-    req = _events_of(events, "model.request")
-    if any((e.get("payload") or {}).get("backend") == "mock" for e in req):
-        st.markdown(
-            '<div class="trace-banner-mock">🧪 <strong>Mock backend</strong> — '
-            "this turn ran against <code>DEV_MOCK_BACKENDS</code>; no real Bedrock/Atlas call was made."
-            "</div>",
-            unsafe_allow_html=True,
-        )
-
-
-# ---------------------------------------------------------------------------
-# 3. Timeline (Gantt-style, lightweight HTML)
+# 2. Timeline (Gantt-style, lightweight HTML)
 # ---------------------------------------------------------------------------
 
 def render_timeline(events: list[dict]) -> None:
@@ -129,6 +243,111 @@ def render_timeline(events: list[dict]) -> None:
 # 4. Routing / handoff attribution
 # ---------------------------------------------------------------------------
 
+def render_context(events: list[dict]) -> None:
+    """Show request enrichment that happened before the model ran."""
+    starts = _events_of(events, "chat.turn.start")
+    auth = _events_of(events, "auth.context_build")
+    if not (starts or auth):
+        return
+    st.markdown('<div class="trace-section-title">Request context</div>', unsafe_allow_html=True)
+    for s in starts[:1]:
+        sp = _payload(s)
+        st.caption(
+            f"Session `{sp.get('sessionId', '?')}` · message `{sp.get('messageId', '?')}` · "
+            f"user `{str(sp.get('userId') or 'anonymous')[:28]}`"
+        )
+    for a in auth:
+        ap = _payload(a)
+        st.markdown(
+            f"🔐 **Authenticated user context** — {ap.get('customersResolved', 0)} customer(s), "
+            f"{ap.get('ordersResolved', 0)} order(s) resolved from MongoDB"
+        )
+
+
+def render_prompt_and_skills(events: list[dict]) -> None:
+    prompts = _events_of(events, "prompt.assembled")
+    skills = _events_of(events, "skill.activated")
+    activations = _events_of(events, "agent.activate")
+    if not (prompts or skills or activations):
+        return
+    st.markdown('<div class="trace-section-title">Prompt, skills, and agents</div>', unsafe_allow_html=True)
+    for a in activations:
+        ap = _payload(a)
+        st.caption(
+            f"Agent active: `{ap.get('agentId')}`"
+            f"{' (specialist)' if ap.get('specialist') else ''}"
+            f"{' · suppressed from chat' if ap.get('suppressed') else ''}"
+        )
+    for p in prompts:
+        pp = _payload(p)
+        st.markdown(
+            f"🧩 **Prompt assembled** — {pp.get('totalBytes', 0)} B "
+            f"(persona {pp.get('personaBytes', 0)} B, discovery {pp.get('discoveryBytes', 0)} B, "
+            f"memory {pp.get('memoryContextBytes', 0)} B)"
+        )
+        activated = pp.get("activatedSkills") or []
+        if activated:
+            with st.expander(f"Prompt-injected skills ({len(activated)})", expanded=False):
+                st.json(activated)
+    if skills:
+        with st.expander(f"Skill activations ({len(skills)})", expanded=False):
+            for s in skills:
+                sp = _payload(s)
+                allowed = "allowed" if sp.get("allowed", True) else "blocked"
+                st.markdown(
+                    f"- `{sp.get('name')}` via `{sp.get('source')}` · "
+                    f"{sp.get('bytes', 0)} B · {allowed}"
+                )
+
+
+def render_model_activity(events: list[dict]) -> None:
+    requests = _events_of(events, "model.request")
+    usage = _events_of(events, "model.usage")
+    stops = _events_of(events, "model.stop")
+    thinking = _events_of(events, "model.thinking_block")
+    deltas = _events_of(events, "model.text_delta_batch")
+    batches = _events_of(events, "tools.batch")
+    conversation = _events_of(events, "conversation.message_added")
+    if not (requests or usage or stops or thinking or deltas or batches or conversation):
+        return
+    st.markdown('<div class="trace-section-title">Model activity</div>', unsafe_allow_html=True)
+    for i, req in enumerate(requests):
+        rp = _payload(req)
+        up = _payload(usage[i]) if i < len(usage) else {}
+        stop = _payload(stops[i]).get("stopReason") if i < len(stops) else None
+        with st.expander(
+            f"🤖 `{rp.get('modelId', '?')}` via `{rp.get('backend', '?')}`"
+            f" — {up.get('totalTokens', 0)} token(s)"
+            f"{f' · stop `{stop}`' if stop else ''}",
+            expanded=i == 0,
+        ):
+            st.caption(
+                f"System prompt {rp.get('systemPromptBytes', 0)} B · "
+                f"prior turns {rp.get('priorTurnsCount', 0)} · "
+                f"hash `{rp.get('systemPromptHash', '?')}`"
+            )
+            if up:
+                st.json(
+                    {
+                        "inputTokens": up.get("inputTokens", 0),
+                        "outputTokens": up.get("outputTokens", 0),
+                        "totalTokens": up.get("totalTokens", 0),
+                        "latencyMs": up.get("latencyMs"),
+                        "timeToFirstByteMs": up.get("timeToFirstByteMs"),
+                    }
+                )
+    if thinking:
+        with st.expander(f"Thinking blocks ({len(thinking)})", expanded=False):
+            for t in thinking:
+                tp = _payload(t)
+                st.code(str(tp.get("text") or "")[:2000], language=None)
+    if deltas or batches or conversation:
+        st.caption(
+            f"Streamed {len(deltas)} text batch(es), emitted {len(batches)} tool batch event(s), "
+            f"and recorded {len(conversation)} conversation message event(s)."
+        )
+
+
 def render_routing(events: list[dict]) -> None:
     decisions = _events_of(events, "handoff.decision")
     if not decisions:
@@ -137,9 +356,8 @@ def render_routing(events: list[dict]) -> None:
     for d in decisions:
         p = d.get("payload") or {}
         fr, to = p.get("fromAgentId"), p.get("toAgentId")
-        src = p.get("routingSource") or "llm"
         conf = p.get("confidence")
-        chips: list[str] = [f'<span class="trace-chip">{src}</span>']
+        chips: list[str] = []
         if conf is not None:
             chips.append(f'<span class="trace-chip">confidence {float(conf):.2f}</span>')
         triggers = p.get("triggerSpans") or []
@@ -162,15 +380,27 @@ def render_routing(events: list[dict]) -> None:
 # ---------------------------------------------------------------------------
 
 def render_mongo_dashboard(events: list[dict]) -> None:
+    intents = _events_of(events, "mongo.intent")
     queries = _events_of(events, "mongo.query")
     results = _events_of(events, "mongo.result")
     plans = _events_of(events, "mongo.plan")
     diags = _events_of(events, "mongo.diagnostic")
     schemas = _events_of(events, "mongo.schema")
     vectors = _events_of(events, "mongo.vector_search")
-    if not (queries or vectors or results):
+    if not (intents or queries or vectors or results):
         return
     st.markdown('<div class="trace-section-title">MongoDB</div>', unsafe_allow_html=True)
+    if intents:
+        with st.expander(f"Search intent ({len(intents)})", expanded=False):
+            for intent in intents:
+                ip = _payload(intent)
+                st.markdown(f"- Collection `{ip.get('collection', '?')}`")
+                if ip.get("triggeringUserMessage"):
+                    st.caption(f"User message: {ip.get('triggeringUserMessage')}")
+                if ip.get("thinkingSnippet"):
+                    st.caption(f"Thinking: {ip.get('thinkingSnippet')}")
+                if ip.get("skillInstructionSnippet"):
+                    st.caption(f"Skill instruction: {ip.get('skillInstructionSnippet')}")
     # Pair query+result by index — they're emitted in order.
     for i, q in enumerate(queries):
         qp = q.get("payload") or {}
@@ -212,11 +442,31 @@ def render_mongo_dashboard(events: list[dict]) -> None:
 
     for v in vectors:
         vp = v.get("payload") or {}
+        embed_src = vp.get("embeddingSource") or "?"
+        embed_model = vp.get("embeddingModelId")
+        embed_label = f"{embed_src}" + (f" ({embed_model})" if embed_model else "")
         with st.expander(
-            f"🧭 vector_search — embed via {vp.get('embeddingSource')} — {len(vp.get('scores') or [])} hit(s)",
+            f"🧭 vector_search — embed via {embed_label} — {len(vp.get('scores') or [])} hit(s)",
             expanded=False,
         ):
             st.caption(f"Query: {vp.get('queryText')}")
+            preview = vp.get("queryVectorPreview")
+            if preview:
+                head = preview.get("head") or []
+                tail = preview.get("tail") or []
+                head_str = ", ".join(f"{x:.4f}" for x in head)
+                tail_str = ", ".join(f"{x:.4f}" for x in tail)
+                preview_str = f"{head_str}, …, {tail_str}" if tail else head_str
+                st.caption(f"Vector ({preview.get('length')} dims): [{preview_str}]")
+            tune_bits = []
+            if vp.get("limit") is not None:
+                tune_bits.append(f"limit={vp['limit']}")
+            if vp.get("numCandidates") is not None:
+                tune_bits.append(f"numCandidates={vp['numCandidates']}")
+            if vp.get("filter"):
+                tune_bits.append(f"filter={json.dumps(vp['filter'], default=str)}")
+            if tune_bits:
+                st.caption(" · ".join(tune_bits))
             if vp.get("scoreSummary"):
                 ss = vp["scoreSummary"]
                 st.caption(f"Scores — min {ss.get('min', 0):.3f}, max {ss.get('max', 0):.3f}, avg {ss.get('avg', 0):.3f}")
@@ -243,22 +493,36 @@ def render_mongo_dashboard(events: list[dict]) -> None:
 # ---------------------------------------------------------------------------
 
 def render_tool_calls(events: list[dict]) -> None:
-    spans = defaultdict(dict)
+    spans: list[dict[str, Any]] = []
+    starts_by_id: dict[str, dict[str, Any]] = {}
+    starts_by_tool_use_id: dict[str, dict[str, Any]] = {}
     for e in _events_of(events, "tool.call"):
         p = e.get("payload") or {}
         name = str(p.get("toolName") or "?")
-        if p.get("phase") == "start":
-            spans[name]["start"] = p
-        elif p.get("phase") == "end":
-            spans[name]["end"] = p
+        if p.get("phase") == "start" or (e.get("durationMs") is None and ("input" in p or "toolUseId" in p)):
+            record = {"name": name, "start": p, "end": {}}
+            starts_by_id[str(e.get("id"))] = record
+            if p.get("toolUseId"):
+                starts_by_tool_use_id[str(p.get("toolUseId"))] = record
+        elif p.get("phase") == "end" or e.get("durationMs") is not None:
+            record = starts_by_id.get(str(e.get("parentId")))
+            if not record and p.get("toolUseId"):
+                record = starts_by_tool_use_id.get(str(p.get("toolUseId")))
+            if not record:
+                record = {"name": name, "start": {}, "end": {}}
+            record["end"] = p
+            record["durationMs"] = e.get("durationMs")
+            spans.append(record)
     https = _events_of(events, "tool.http")
     mcps = _events_of(events, "tool.mcp")
     if not (spans or https or mcps):
         return
     st.markdown('<div class="trace-section-title">Tool calls</div>', unsafe_allow_html=True)
-    for name, info in spans.items():
+    for info in spans:
+        name = info.get("name") or "?"
         end = info.get("end") or {}
-        with st.expander(f"🔧 `{name}` — {end.get('latencyMs', 0)} ms", expanded=False):
+        duration = end.get("latencyMs", info.get("durationMs", 0))
+        with st.expander(f"🔧 `{name}` — {duration or 0} ms", expanded=False):
             if (info.get("start") or {}).get("input"):
                 st.caption("Input")
                 st.json((info["start"] or {}).get("input"))
@@ -375,6 +639,17 @@ def render_memory(events: list[dict]) -> None:
             f"💾 **Write** — {wp.get('docsInserted', 0)} fact(s) · `{wp.get('primaryOutcome')}` "
             f"(prior {wp.get('priorEntryCount')}, now {wp.get('newEntryCount')})"
         )
+        if wp.get("extractorModelId") or wp.get("extractorLatencyMs") is not None:
+            extractor_bits = ["extractor `llm`"]
+            if wp.get("extractorModelId"):
+                extractor_bits.append(f"model `{wp['extractorModelId']}`")
+            if wp.get("extractorLatencyMs") is not None:
+                extractor_bits.append(f"{wp['extractorLatencyMs']} ms")
+            tok_in = wp.get("extractorInputTokens")
+            tok_out = wp.get("extractorOutputTokens")
+            if tok_in is not None or tok_out is not None:
+                extractor_bits.append(f"tokens in/out {tok_in or 0}/{tok_out or 0}")
+            st.caption(" · ".join(extractor_bits))
         if wp.get("factsExtracted"):
             with st.expander("Facts extracted", expanded=False):
                 for f in wp["factsExtracted"]:
@@ -382,17 +657,47 @@ def render_memory(events: list[dict]) -> None:
         if wp.get("factCandidates"):
             with st.expander("All candidates considered", expanded=False):
                 for c in wp["factCandidates"]:
+                    label_parts = c.get("matchedPatterns") or []
+                    if c.get("category") and c["category"] not in label_parts:
+                        label_parts = [c["category"], *label_parts]
+                    label = ", ".join(label_parts)
+                    note = c.get("note")
                     if c.get("matched"):
-                        st.markdown(f"- ✅ `{c.get('text')}` ({', '.join(c.get('matchedPatterns') or [])})")
+                        line = f"- ✅ `{c.get('text')}`"
+                        if label:
+                            line += f" ({label})"
+                        if note:
+                            line += f" — _{note}_"
+                        st.markdown(line)
                     else:
-                        st.markdown(f"- ✗ `{c.get('text')}` — {c.get('rejectedReason')}")
+                        line = f"- ✗ `{c.get('text')}` — {c.get('rejectedReason')}"
+                        if note:
+                            line += f" (_{note}_)"
+                        st.markdown(line)
     for s in skips:
         sp = s.get("payload") or {}
         st.caption(f"⏭ Write skipped — {sp.get('reason')}")
 
 
 # ---------------------------------------------------------------------------
-# 9. Developer details (raw events)
+# 9. Errors
+# ---------------------------------------------------------------------------
+
+def render_errors(events: list[dict]) -> None:
+    errors = _events_of(events, "error")
+    if not errors:
+        return
+    st.markdown('<div class="trace-section-title">Errors</div>', unsafe_allow_html=True)
+    for e in errors:
+        ep = _payload(e)
+        st.error(f"{ep.get('source') or 'trace'} — {ep.get('class') or 'Error'}: {ep.get('message')}")
+        if ep.get("stack"):
+            with st.expander("Stack trace", expanded=False):
+                st.code(ep["stack"], language=None)
+
+
+# ---------------------------------------------------------------------------
+# 10. Developer details (raw events)
 # ---------------------------------------------------------------------------
 
 def render_developer_details(trace: dict) -> None:

@@ -2,19 +2,14 @@ import { tool, type JSONValue, type Tool } from "@strands-agents/sdk";
 import { z } from "zod";
 import { logger } from "./logger.ts";
 import {
-  runMongoDataQuery,
-  runAtlasVectorSearch,
-} from "../adapters/mongo-data.ts";
-import {
   bedrockKbRetrieve,
   bedrockGenerateEmbedding,
-} from "../adapters/mock-retrieval.ts";
+} from "../adapters/bedrock-retrieval.ts";
 import {
   voyageGenerateEmbedding,
   isVoyageConfigured,
   getVoyageEndpoint,
 } from "../adapters/voyage-embedding.ts";
-import { createSupportTicketTool } from "./tools/troubleshooting-tools.ts";
 import { pathToFileURL } from "node:url";
 import { readSkillResourceFile, resolveSkillResourcePath, type SkillRegistry } from "./skill-loader.ts";
 import {
@@ -145,61 +140,6 @@ export function makeRunSkillScriptTool(registry: SkillRegistry): Tool {
   });
 }
 
-export const mongodbQueryTool = tool({
-  name: "mongodb_query",
-  description:
-    "Run find/findOne/aggregate/updateOne/insertOne against MongoDB. " +
-    "Requires MONGODB_URI. " +
-    "Aggregate supports $match, $sort, $project, $group, $unwind, $skip, $limit, $addFields, $count.",
-  inputSchema: z.object({
-    collection: z.string(),
-    operation: z.enum(["find", "findOne", "aggregate", "updateOne", "insertOne"]),
-    query: z.record(z.string(), z.unknown()).optional(),
-    projection: z.record(z.string(), z.unknown()).optional(),
-    sort: z.record(z.string(), z.unknown()).optional(),
-    limit: z.number().optional(),
-    pipeline: z.array(z.unknown()).optional().describe("Required for aggregate (MongoDB aggregation pipeline)."),
-    update: z.record(z.string(), z.unknown()).optional().describe("Required for updateOne ($set fields)."),
-    document: z.record(z.string(), z.unknown()).optional().describe("Required for insertOne — the document to insert."),
-  }),
-  callback: async (input): Promise<JSONValue> => {
-    return runMongoDataQuery({
-      collection: input.collection,
-      operation: input.operation,
-      query: input.query,
-      projection: input.projection,
-      sort: input.sort,
-      limit: input.limit,
-      pipeline: input.pipeline,
-      update: input.update,
-    });
-  },
-});
-
-export const mongodbVectorSearchTool = tool({
-  name: "mongodb_vector_search",
-  description:
-    "Semantic / vector search over a MongoDB Atlas collection. " +
-    "Requires MONGODB_URI + an Atlas Vector Search index on the `embedding` field. " +
-    "Set EMBEDDING_MODEL_ID to auto-embed the query text before searching.",
-  inputSchema: z.object({
-    collection: z.string(),
-    queryText: z.string(),
-    indexName: z.string(),
-    limit: z.number().optional(),
-    filter: z.record(z.string(), z.unknown()).optional(),
-  }),
-  callback: async (input): Promise<JSONValue> => {
-    return runAtlasVectorSearch({
-      collection: input.collection,
-      queryText: input.queryText,
-      indexName: input.indexName,
-      limit: input.limit,
-      filter: input.filter,
-    });
-  },
-});
-
 export const bedrockKbRetrieveTool = tool({
   name: "bedrock_kb_retrieve",
   description:
@@ -293,56 +233,40 @@ export function makeActivateSkillTool(registry: SkillRegistry): Tool {
 // Static tool registry + agent wiring
 // ---------------------------------------------------------------------------
 
+/**
+ * In-process tool factory by name. Mongo tools (`mongodb_query`,
+ * `mongodb_vector_search`, `mongodb_aggregate`) are NOT in this map: they
+ * are served from the AgentCore Gateway as MCP tools and attached in
+ * `createConfiguredStrandsAgent`. The agent never has an in-process Mongo
+ * driver — gateway is the only Mongo transport.
+ */
 const staticToolByName: Record<string, Tool> = {
-  mongodb_query: mongodbQueryTool,
-  mongodb_vector_search: mongodbVectorSearchTool,
   bedrock_kb_retrieve: bedrockKbRetrieveTool,
   generate_embedding: generateEmbeddingTool,
 };
 
-/**
- * In-process Mongo tools whose Gateway-mode equivalents are exposed through
- * the AgentCore Gateway MCP target. When `TOOL_HOSTING_MODE=gateway`,
- * `toolsForAgent` must drop these names so the agent only ever sees the MCP
- * versions (single Mongo tool source per mode — see ADR / plan: gateway and
- * lambda are mutually exclusive).
- */
-const MONGO_TOOL_NAMES_FOR_GATEWAY_MODE: ReadonlySet<string> = new Set([
+/** Mongo tool names that always come from the gateway MCP target, never from
+ * an in-process implementation. Names listed in an agent's `tools:` array
+ * that match these are silently dropped by `toolsForAgent` — the agent will
+ * still see them once `getMcpTools()` adds the gateway versions. */
+const GATEWAY_MONGO_TOOL_NAMES: ReadonlySet<string> = new Set([
   "mongodb_query",
   "mongodb_vector_search",
   "mongodb_aggregate",
 ]);
-
-/** Tools that are automatically injected when an agent has a given skill loaded. */
-const skillToolsBySkillName: Record<string, Tool[]> = {
-  troubleshooting: [createSupportTicketTool],
-};
-
-export type ToolsForAgentOptions = {
-  /**
-   * When true, drop the in-process Mongo tools (`mongodb_query`,
-   * `mongodb_vector_search`, `mongodb_aggregate`) from the returned list.
-   * Set by `createConfiguredStrandsAgent` when `TOOL_HOSTING_MODE=gateway`
-   * so the agent only has the MCP-sourced versions.
-   */
-  excludeMongoTools?: boolean;
-};
 
 /**
  * Build the Strands tool list for an agent.
  *
  * - Always includes `activate_skill` (bound to the per-turn registry).
  * - Adds static tools listed in the agent's `tools:` array.
- * - Auto-injects skill-specific tools for each skill the agent has loaded
- *   (e.g. troubleshooting skill → create_support_ticket).
- * - When `opts.excludeMongoTools` is true, silently drops Mongo tool names
- *   from the agent's `tools:` array. Skill-specific tools and HTTP tools
- *   are unaffected.
+ * - Silently drops Mongo tool names from the agent's `tools:` array; those
+ *   are attached separately as MCP tools by `createConfiguredStrandsAgent`
+ *   so the agent never has both an in-process and an MCP version.
  */
 export function toolsForAgent(
   toolNames: string[],
   registry: SkillRegistry,
-  opts: ToolsForAgentOptions = {},
 ): Tool[] {
   const out: Tool[] = [makeActivateSkillTool(registry)];
   const seen = new Set<string>(["activate_skill"]);
@@ -350,8 +274,8 @@ export function toolsForAgent(
   for (const raw of toolNames) {
     const name = raw.trim();
     if (seen.has(name)) continue;
-    if (opts.excludeMongoTools && MONGO_TOOL_NAMES_FOR_GATEWAY_MODE.has(name)) {
-      logger.debug("[tools] excluding in-process Mongo tool (gateway mode)", { tool: name });
+    if (GATEWAY_MONGO_TOOL_NAMES.has(name)) {
+      logger.debug("[tools] Mongo tool comes from gateway MCP, skipping in-process entry", { tool: name });
       continue;
     }
     seen.add(name);
@@ -386,17 +310,6 @@ export function toolsForAgent(
     const t = staticToolByName[name];
     if (t) out.push(t);
     else logger.warn("[tools] unknown tool in agent config, ignored", { tool: raw });
-  }
-
-  // Inject skill-specific tools for each skill this agent has
-  for (const skillName of registry.allowedSkills) {
-    const skillTools = skillToolsBySkillName[skillName] ?? [];
-    for (const t of skillTools) {
-      if (!seen.has(t.toolSpec.name)) {
-        seen.add(t.toolSpec.name);
-        out.push(t);
-      }
-    }
   }
 
   return out;

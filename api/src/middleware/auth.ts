@@ -1,16 +1,13 @@
 import type { MiddlewareHandler } from "hono";
-import { isJwksAuthConfigured, verifyBearerJwt } from "../lib/jwt-verify.ts";
+import { verifyBearerJwt } from "../lib/jwt-verify.ts";
 
-const allowUnauthenticated = () =>
-  process.env.ALLOW_UNAUTHENTICATED === "true" ||
-  process.env.ALLOW_UNAUTHENTICATED === "1" ||
-  process.env.REQUIRE_AUTH !== "true";
-
+/**
+ * Bearer-JWT auth gate. Boot-time `assertJwksAuthConfigured()` (in api/src/index.ts) guarantees
+ * `AUTH_JWKS_URI` + `AUTH_ISSUER` are set, so this middleware can require a verified payload
+ * unconditionally. There is no `ALLOW_UNAUTHENTICATED` or `REQUIRE_AUTH=false` bypass — every
+ * environment must present a valid Bearer token from the configured OIDC pool.
+ */
 export const authMiddleware: MiddlewareHandler = async (c, next) => {
-  if (allowUnauthenticated()) {
-    await next();
-    return;
-  }
   const auth = c.req.header("Authorization");
   if (!auth?.startsWith("Bearer ") || auth.length < 15) {
     return c.json(
@@ -38,23 +35,21 @@ export const authMiddleware: MiddlewareHandler = async (c, next) => {
     );
   }
 
-  if (isJwksAuthConfigured()) {
-    try {
-      const payload = await verifyBearerJwt(token);
-      c.set("jwtPayload", payload);
-      c.set("bearerToken", token);
-    } catch {
-      return c.json(
-        {
-          error: {
-            code: "INVALID_TOKEN",
-            message: "Invalid or expired token.",
-            requestId: c.get("requestId") ?? "unknown",
-          },
+  try {
+    const payload = await verifyBearerJwt(token);
+    c.set("jwtPayload", payload);
+    c.set("bearerToken", token);
+  } catch {
+    return c.json(
+      {
+        error: {
+          code: "INVALID_TOKEN",
+          message: "Invalid or expired token.",
+          requestId: c.get("requestId") ?? "unknown",
         },
-        401,
-      );
-    }
+      },
+      401,
+    );
   }
 
   await next();

@@ -30,9 +30,9 @@ st.title("Multi-agent chat")
 _auth_hint = (
     "API calls use **Cognito** access tokens (`STREAMLIT_COGNITO_*`). "
     if settings.cognito
-    else "no UI auth — API is unauthenticated unless you set `STREAMLIT_COGNITO_*` "
-    "(then this app signs in via Cognito and sends `Authorization: Bearer`). "
-    "With `REQUIRE_AUTH=true`, configure the same pool on the API (`AUTH_JWKS_URI`, `AUTH_ISSUER`, …). "
+    else "**Cognito is not configured on the UI** — set `STREAMLIT_COGNITO_POOL_ID` + "
+    "`STREAMLIT_COGNITO_CLIENT_ID` so the app can mint Bearer tokens for the API. "
+    "(The API itself refuses to boot without `AUTH_JWKS_URI` + `AUTH_ISSUER`.)"
 )
 st.caption(
     f"API: `{settings.api_base}` — {_auth_hint}"

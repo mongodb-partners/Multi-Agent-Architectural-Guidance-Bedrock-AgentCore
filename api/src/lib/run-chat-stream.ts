@@ -8,10 +8,9 @@ import { buildSystemPrompt } from "./prompt.ts";
 import { SkillRegistry } from "./skill-loader.ts";
 import type { ChatMessage } from "./session-store.ts";
 import { logger } from "./logger.ts";
-import { chatMode } from "./runtime-defaults.ts";
 import { currentTrace } from "./trace-context.ts";
 import { attributeHandoff } from "./handoff-attribution.ts";
-import { isDevMockBackends } from "../adapters/dev-mock-env.ts";
+import { getMcpTools } from "../adapters/mongodb-mcp-client.ts";
 
 export type { ChatStreamPart };
 
@@ -25,18 +24,6 @@ const ALWAYS_ACTIVATE_SKILLS = true; // flip to false to force lazy even for spe
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-function stubParts(agentName: string, agentId: string, userMessage: string): ChatStreamPart[] {
-  const preview = userMessage.length > 200 ? `${userMessage.slice(0, 200)}…` : userMessage;
-  const text =
-    `[stub] **${agentName}** (\`${agentId}\`) received: "${preview}"\n\n` +
-    `\`CHAT_MODE=stub\` is set. Unset it (or set \`CHAT_MODE=live\`) and provide AWS credentials + Bedrock model access, or set \`DEV_MOCK_BACKENDS=1\`, to run the real Strands loop.`;
-  const parts: ChatStreamPart[] = [];
-  for (const chunk of text.split(/(\s+)/)) {
-    if (chunk.length > 0) parts.push({ type: "token", text: chunk });
-  }
-  return parts;
-}
 
 function strandsHistory(priorTurns: ChatMessage[] | undefined): Message[] | undefined {
   if (!priorTurns?.length) return undefined;
@@ -127,21 +114,26 @@ export async function* runChatStream(params: {
     }
   }
 
-  const live = chatMode() === "live";
-
-  if (!live) {
-    for (const p of stubParts(agentConfig.name, agentConfig.id, params.userMessage)) {
-      yield p;
-    }
-    return;
-  }
-
   // -------------------------------------------------------------------------
-  // Live path — Strands Agent with tools + seeded history
+  // Strands Agent with tools + seeded history
   // -------------------------------------------------------------------------
   try {
     const model = resolveModel(agentConfig);
-    const tools = toolsForAgent(agentConfig.tools, registry);
+    // In-process tools (skill scripts, HTTP tools, KB retrieve, etc.) plus the
+    // gateway MCP tools (Mongo). Without the second list, Mongo tool names in
+    // the agent persona resolve to nothing and the model can only narrate that
+    // it would like to query — see `mongodb-mcp-client.ts` and the alias logic
+    // there for how the prefixed gateway tool names are exposed under the
+    // unprefixed names the persona references.
+    const inProcessTools = toolsForAgent(agentConfig.tools, registry);
+    const mcpTools = await getMcpTools();
+    if (mcpTools.length === 0) {
+      logger.warn(
+        "[chat-stream] no MCP tools loaded from gateway — Mongo tool calls will fail",
+        { agentId: params.agentId },
+      );
+    }
+    const tools = [...inProcessTools, ...mcpTools];
     const seed = strandsHistory(params.priorTurns);
 
     const strandsAgent = new Agent({
@@ -169,7 +161,6 @@ export async function* runChatStream(params: {
         systemPromptBytes: Buffer.byteLength(systemPrompt, "utf8"),
         priorTurnsCount: params.priorTurns?.length ?? 0,
         userMessage: params.userMessage,
-        backend: isDevMockBackends() ? "mock" : "bedrock",
       });
     }
 
@@ -324,7 +315,6 @@ export async function* runChatStream(params: {
                   })),
                 latencyToDecisionMs: Date.now() - turnStartTs,
                 tokensBeforeDecision: 0, // populated post-hoc by summary aggregation; UI can compute
-                routingSource: isDevMockBackends() ? "devmock_regex" : "llm",
               });
             }
             yield { type: "handoff", from: "orchestrator", to: input.agentId, label: "" };
@@ -405,7 +395,7 @@ export async function* runChatStream(params: {
     yield {
       type: "stream_error",
       code: "CHAT_STREAM_FAILED",
-      message: `${msg}\n\nFall back with CHAT_MODE=stub, set DEV_MOCK_BACKENDS=1 for a local Strands loop without AWS, or fix AWS region/credentials and Bedrock access.`,
+      message: `${msg}\n\nCheck AWS credentials, region, and Bedrock model access for ${agentConfig.id}.`,
     };
   }
 }

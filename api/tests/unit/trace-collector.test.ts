@@ -107,6 +107,18 @@ describe("TraceCollector summary + cost", () => {
     expect(s.estimatedCostUsd).toBeNull();
     expect(s.costEstimateComplete).toBe(false);
   });
+
+  test("counts MongoDB vector search as search activity", () => {
+    const c = makeCollector();
+    c.event("mongo.vector_search", {
+      embeddingSource: "mock",
+      queryText: "error E-104",
+      scores: [0.92, 0.85, 0.8],
+    });
+    const s = c.summary();
+    expect(s.mongoQueries).toBe(1);
+    expect(s.mongoDocsReturned).toBe(3);
+  });
 });
 
 describe("TraceCollector byte-cap → degraded mode", () => {
@@ -237,6 +249,60 @@ describe("TraceCollector — attachEventsNested", () => {
     expect(c.getEvent("n1")?.ts).toBe(baseTs);
     // _originalTs preserved.
     expect((c.getEvent("n1")?.payload as any)._originalTs).toBe(baseTs - 1_000);
+  });
+
+  test("rolls up tool / mongo / mcp counters and mongoDocsReturned from spliced events (mixed span + one-off shapes)", () => {
+    // Pin the regression that bit us live: the AgentCore Runtime emits a full
+    // child trace and we splice it into the parent. The runtime mixes two
+    // emission shapes:
+    //   - Strands' `tool.call` arrives as start/end span PAIRS (start: no
+    //     durationMs, end: with durationMs).
+    //   - The Lambda's `mongo.*` events and the MCP wrapper's `tool.mcp`
+    //     event arrive as ONE-OFF events from `event(...)` (no durationMs).
+    // Before this fix, the parent's `summary` rollup was driven by `end(...)`
+    // only, so spliced child events were invisible to the summary. Trace
+    // Viewer showed `toolCalls: 0 / mongoQueries: 0` for an agent that had
+    // just queried Mongo three times.
+    const c = makeCollector();
+    const wrapper = c.start("agentcore.invoke", { arn: "x", mode: "orchestrator_to_specialist", latencyMs: 100 });
+    c.end(wrapper);
+    const wrapperEv = c.getEvents().find((e) => e.id === wrapper)!;
+    const baseTs = wrapperEv.ts;
+
+    const nested = [
+      // tool.call: span pair from Strands SDK — only the end (durationMs set)
+      // counts to avoid double-counting.
+      { id: "ts1", type: "tool.call", ts: baseTs - 10, payload: { name: "mongodb_query" } },
+      { id: "te1", parentId: "ts1", type: "tool.call", ts: baseTs - 5, durationMs: 50, payload: { name: "mongodb_query", success: true } },
+      // mongo.query: one-off event from the MCP runtime's traceMongoQuery (no span).
+      { id: "mq1", type: "mongo.query", ts: baseTs - 8, payload: { collection: "orders" } },
+      // mongo.result: one-off event with docCount = N (sum into
+      // mongoDocsReturned). The MongoDB MCP runtime emits `docCount` (see
+      // mcp-runtimes/mongodb-mcp/src/vendor/tracing.mjs); legacy in-process
+      // emitters used `count` — both must roll up.
+      { id: "mr1", type: "mongo.result", ts: baseTs - 6, payload: { docCount: 3 } },
+      { id: "mr2", type: "mongo.result", ts: baseTs - 4, payload: { count: 2 } },
+      // tool.mcp: one-off event from McpClient.callTool wrapper (no span).
+      { id: "tm1", type: "tool.mcp", ts: baseTs - 7, payload: { name: "mongodb-mcp___mongodb_query" } },
+      // agentcore.invoke: span pair from the runtime's own
+      // orchestrator → specialist hop. The OUTER hop (this collector's own
+      // agentcore.invoke) already counts as 1 from the parent's end(...).
+      // The nested INNER hop must also be counted so the summary reflects
+      // the real topology (Hono → orchestrator + orchestrator → specialist
+      // = 2 hops). Without the rollup, agentcoreHops always shows 1.
+      { id: "as1", type: "agentcore.invoke", ts: baseTs - 9, payload: { mode: "orchestrator_to_specialist" } },
+      { id: "ae1", parentId: "as1", type: "agentcore.invoke", ts: baseTs - 1, durationMs: 100, payload: { mode: "orchestrator_to_specialist", httpStatus: 200 } },
+    ] as any;
+
+    c.attachEventsNested(nested, wrapper);
+
+    const summary = c.toJSON().summary;
+    expect(summary.toolCalls).toBe(1);
+    expect(summary.mongoQueries).toBe(1);
+    expect(summary.mcpCalls).toBe(1);
+    expect(summary.mongoDocsReturned).toBe(5);
+    // 1 outer (parent's wrapper) + 1 inner (spliced nested completion).
+    expect(summary.agentcoreHops).toBe(2);
   });
 
   test("idempotency: replaying the same nestedEvents twice (defensive copies) is stable", () => {

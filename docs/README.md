@@ -46,16 +46,11 @@ The same diagrams are rendered inline (as Mermaid) in [architecture.md](architec
 
 ---
 
-## Two ways to run this code
+## How to run this code
 
-The system has **two modes** — same code, different runtime:
+There is one runtime topology: the Hono API is a thin proxy in front of a deployed AgentCore Orchestrator runtime, which then invokes the specialist runtimes. Mongo tool calls go through the dedicated MongoDB MCP AgentCore Runtime; the AgentCore Gateway remains available for non-Mongo tools.
 
-| Mode | Where agents run | Who pays the bill |
-|---|---|---|
-| **Local dev** | Strands SDK in-process inside the Hono API on your laptop | Free (only Bedrock token costs if `CHAT_MODE=live`) |
-| **EC2 / production POC** | 4 separate AgentCore Runtimes managed by AWS | EC2 + AgentCore + Atlas M10 + Lambda + KB (~$300/mo) |
-
-Local dev is the default. EC2 mode is what gets deployed when you run `deploy/scripts/deploy.sh`.
+`AGENTCORE_ORCHESTRATOR_ARN` is asserted at startup, so the API will not boot without a deployed orchestrator runtime to point at — locally or on EC2. EC2 mode is what gets provisioned when you run `deploy/scripts/deploy.sh`.
 
 ---
 
@@ -71,7 +66,7 @@ When in doubt, code beats docs. Authoritative files for each major concern:
 | Long-term memory | [`api/src/lib/long-term-memory.ts`](../api/src/lib/long-term-memory.ts) |
 | Deployment | [`deploy/scripts/deploy.sh`](../deploy/scripts/deploy.sh) |
 | Infrastructure | [`deploy/terraform/envs/ec2/main.tf`](../deploy/terraform/envs/ec2/main.tf) |
-| Lambda MCP tools | [`lambda/mongodb-mcp/index.mjs`](../lambda/mongodb-mcp/index.mjs) |
+| MongoDB MCP runtime | [`mcp-runtimes/mongodb-mcp/`](../mcp-runtimes/mongodb-mcp/) |
 
 ---
 

@@ -57,7 +57,7 @@ variable "atlas_db_name" {
 
 variable "mongodb_allow_write" {
   type        = bool
-  description = "Allow the mongodb-mcp Lambda to perform insertOne / updateOne. Default false — the handler is read-only unless this is explicitly flipped. Destructive ops (delete*, drop*, replaceOne, …) remain refused regardless."
+  description = "Allow the mongodb-mcp AgentCore Runtime to perform insertOne / updateOne. Default false — the handler is read-only unless this is explicitly flipped. Destructive ops (delete*, drop*, replaceOne, …) remain refused regardless."
   default     = false
 }
 
@@ -85,15 +85,49 @@ variable "embed_model_id" {
   default = "amazon.titan-embed-text-v2:0"
 }
 
+variable "enable_kb_privatelink" {
+  type        = bool
+  description = <<-EOT
+    SoW alignment for CLIENT_REVIEW P1-6 (Option A): provision an NLB + VPC
+    Endpoint Service so Bedrock Knowledge Base ingestion connects to MongoDB
+    Atlas via AWS PrivateLink instead of the public SRV hostname.
+
+    Default `true` — the SoW requires PrivateLink end-to-end for Atlas access,
+    including KB ingestion. Setting this to `false` is an explicit, written
+    deviation from the SoW (admin-only ingestion still avoids runtime PII, but
+    leaves the path on public Atlas SRV) — do not flip without sign-off.
+
+    When true, an instance of modules/bedrock-kb-privatelink is created and
+    its endpoint_service_name is forwarded into module.bedrock_kb. Cost:
+    fixed NLB (~$22/mo) plus per-LCU billing.
+  EOT
+  default     = true
+}
+
 # ── Voyage AI (optional) ──────────────────────────────────────────────────────
 variable "voyage_model_package_arn" {
-  type    = string
-  default = ""
+  type        = string
+  description = "AWS Marketplace SageMaker model package ARN for Voyage embeddings. Empty disables SageMaker; non-empty must point at a voyage-multimodal-3 package."
+  default     = ""
+
+  validation {
+    condition = (
+      var.voyage_model_package_arn == ""
+      || can(regex("^arn:aws:sagemaker:[a-z0-9-]+:[0-9]{12}:model-package/voyage-multimodal-3($|-)", var.voyage_model_package_arn))
+    )
+    error_message = "voyage_model_package_arn must be empty or point at a voyage-multimodal-3 SageMaker Marketplace model package. Non-multimodal Voyage packages are not allowed."
+  }
 }
 
 variable "voyage_instance_type" {
   type    = string
-  default = "ml.c5.4xlarge"
+  default = "ml.g6.xlarge"
+}
+
+variable "voyage_endpoint_name_suffix" {
+  type        = string
+  description = "Identifier baked into the SageMaker endpoint name. Defaults to voyage-multimodal-3 (the SoW model). Set to voyage-3-5-lite if you intentionally subscribe to the older listing."
+  default     = "voyage-multimodal-3"
 }
 
 # ── AgentCore ─────────────────────────────────────────────────────────────────
@@ -118,10 +152,4 @@ variable "agentcore_code_artifact_prefix" {
 variable "log_retention_days" {
   type    = number
   default = 30
-}
-
-variable "lambda_artifact_key_prefix" {
-  type        = string
-  description = "S3 key prefix used for Lambda MCP deployment artifacts"
-  default     = "artifacts/lambda-mcp"
 }

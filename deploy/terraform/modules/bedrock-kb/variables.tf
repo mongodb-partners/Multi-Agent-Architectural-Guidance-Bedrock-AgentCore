@@ -34,6 +34,12 @@ variable "atlas_srv_host" {
   description = "Atlas SRV hostname without scheme, e.g. troubleshooting-demo.9mtgg.mongodb.net"
 }
 
+variable "kb_endpoint_host" {
+  type        = string
+  default     = ""
+  description = "Optional Atlas hostname for the Bedrock KB storage endpoint. Leave empty to use atlas_srv_host. When endpoint_service_name is set for PrivateLink, pass the Atlas -pl SRV hostname here while keeping atlas_srv_host on the normal SRV for local collection seeding."
+}
+
 variable "atlas_db_user" {
   type        = string
   description = "Atlas database username"
@@ -104,4 +110,25 @@ variable "shared_bucket_arn" {
 variable "kb_docs_path" {
   type        = string
   description = "Absolute or relative path to the directory containing KB source .txt files"
+}
+
+variable "common_tags" {
+  type        = map(string)
+  default     = {}
+  description = "Common tags applied to log groups and other taggable resources in this module."
+}
+
+# ── Optional: PrivateLink ingestion (CLIENT_REVIEW P1-6 Option A) ──────────────
+variable "endpoint_service_name" {
+  type        = string
+  default     = ""
+  description = <<-EOT
+    Optional VPC Endpoint Service name (e.g. com.amazonaws.vpce.us-east-1.vpce-svc-XXXX) that fronts an
+    NLB → Atlas VPCE path. When non-empty it is forwarded to the
+    aws_bedrockagent_knowledge_base storage_configuration so Bedrock-managed
+    ingestion connects to MongoDB Atlas via AWS PrivateLink instead of the
+    public SRV hostname. Provisioned by the bedrock-kb-privatelink module
+    (see envs/ec2/main.tf var.enable_kb_privatelink). Leave empty to keep
+    the documented Option B fallback (public SRV; admin-only ingest traffic).
+  EOT
 }

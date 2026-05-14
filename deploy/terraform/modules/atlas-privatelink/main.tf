@@ -2,7 +2,7 @@ terraform {
   required_providers {
     aws = {
       source  = "hashicorp/aws"
-      version = "~> 5.0"
+      version = ">= 6.27, < 7.0"
     }
     mongodbatlas = {
       source  = "mongodb/mongodbatlas"
@@ -22,6 +22,14 @@ terraform {
 # share that single service — Atlas returns HTTP 409 on the second create.
 # This module therefore looks the service up via the Atlas Admin API and only
 # creates it if it doesn't already exist.
+#
+# null_resource is intentional here: the `mongodbatlas` provider's
+# `mongodbatlas_privatelink_endpoint` resource is a strict create-only resource
+# (no "discover or adopt" mode) and there is no `data.mongodbatlas_privatelink_endpoints_by_region`
+# data source as of provider 1.14, so the only way to get idempotent
+# discover-or-create behaviour across multiple deployments sharing one Atlas
+# project + region is to drive the Atlas Admin API directly. See CLIENT_REVIEW
+# Phase 10 residual-risk summary.
 #
 # CRITICAL: this resource has NO destroy provisioner. The Atlas service is
 # intentionally NOT torn down by `terraform destroy` because other deployments

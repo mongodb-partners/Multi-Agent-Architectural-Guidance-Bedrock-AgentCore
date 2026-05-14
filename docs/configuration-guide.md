@@ -28,49 +28,28 @@ flowchart LR
 
 ---
 
-## 2. The mode flags (what selects each path)
+## 2. The mode flags
 
-These four env vars together control nearly all behavior.
-
-### `CHAT_MODE`
-
-| Value | Effect |
-|---|---|
-| unset (default) or `live` | Real Bedrock model calls (or `DevMockModel` if `DEV_MOCK_BACKENDS=1`). |
-| `stub` | Returns a synthetic stub stream. No model call. Useful for UI/E2E tests. |
-
-> The chat path defaults to `live`. Set `CHAT_MODE=stub` to opt out. Source of truth: [`api/src/lib/runtime-defaults.ts`](../api/src/lib/runtime-defaults.ts).
-
-### `ORCHESTRATOR_MODE`
-
-| Value | Effect | Used in |
-|---|---|---|
-| `runtime` (production) | API calls AgentCore Runtimes via SDK. Multi-agent orchestration is split across 4 separate AWS-managed containers. | EC2 deployment |
-| `swarm` | API runs Strands Swarm in-process. All 4 agents run inside the Hono process. | Local dev |
-| `single` (default if unset) | API runs a single Strands Agent in-process. No multi-agent routing. | Quick local tests |
+The Hono API is a thin proxy in front of an AgentCore Runtime, so the only meaningful mode switch is whether the orchestrator runtime should run Strands Swarm or single-agent routing.
 
 ### `AGENTCORE_ORCHESTRATOR_ARN`
 
-This **overrides** `ORCHESTRATOR_MODE`. If set, the API always invokes AgentCore (Path A in [`api/src/routes/chat.ts:88`](../api/src/routes/chat.ts)). If not set, the API runs Strands in-process (Path B).
+**Required at startup** (asserted by `assertAgentcoreOrchestratorArn()` in `api/src/index.ts`). Set to the orchestrator AgentCore Runtime ARN. The legacy alias `AGENTCORE_RUNTIME_ARN` is also accepted.
 
-In production (EC2), this is set by `deploy.sh` Phase 9 to the orchestrator runtime ARN. In local dev, leave it unset.
+In production (EC2), this is set by `deploy.sh` to the orchestrator runtime ARN.
 
-### `TOOL_HOSTING_MODE`
+### `ORCHESTRATOR_MODE`
 
-The two production modes are **mutually exclusive per runtime**. An agent in `lambda` mode has only in-process Mongo tools attached; an agent in `gateway` mode has only the MCP tools served from the AgentCore Gateway. They never coexist on the same agent — enforced in [`api/src/lib/create-strands-agent.ts`](../api/src/lib/create-strands-agent.ts) with a defensive guard in [`api/src/adapters/mongo-data.ts`](../api/src/adapters/mongo-data.ts).
-
-| Value | Effect | Used in |
-|---|---|---|
-| `lambda` (production default) | Specialist runtimes call Lambda MCP via `lambda:InvokeFunction`. Tools execute in Lambda. | EC2 deployment |
-| `gateway` | Specialist runtimes call AgentCore Gateway over HTTP MCP authenticated with the caller's Cognito JWT (forwarded from the API). Gateway routes to Lambda. | Optional opt-in via `GATEWAY_DEMO_RUNTIMES` in [`env.sh`](../env.sh) (mutually exclusive with `lambda`; requires `REQUIRE_AUTH=true` + Cognito wired). |
-| `direct` | Tools execute in-process (MongoDB driver in the API container). | Local dev with real Mongo |
-
-### `DEV_MOCK_BACKENDS`
+Read by the orchestrator runtime container (not the API).
 
 | Value | Effect |
 |---|---|
-| unset (default) | Real Bedrock + real Mongo |
-| `1` | `DevMockModel` (no Bedrock calls), fixture data from `data/dev/mongo-fixtures.json` (no Atlas), canned KB responses, deterministic embeddings |
+| `swarm` (default for the orchestrator runtime) | The orchestrator runtime runs Strands Swarm; specialists run in their own runtime containers. |
+| `single` / `runtime` / anything else | Single-agent routing — the orchestrator picks one specialist and invokes its runtime ARN directly via `InvokeAgentRuntime`. |
+
+### Tool hosting
+
+There is no `TOOL_HOSTING_MODE` switch. Mongo tool calls use the dedicated MongoDB MCP AgentCore Runtime (`MONGODB_MCP_RUNTIME_ARN` / `MONGODB_MCP_RUNTIME_ENDPOINT`) and are IAM-authorized with `bedrock-agentcore:InvokeAgentRuntime`. The AgentCore Gateway (`AGENTCORE_GATEWAY_URL` / `MCP_SERVER_URL`) remains configured for non-Mongo Gateway tools and JWT-authenticated fallback behavior. The legacy Lambda MCP target is deleted.
 
 ---
 
@@ -88,7 +67,9 @@ These are typically set in `.env.live` by `deploy.sh`. For local dev with real A
 | `AGENTCORE_RUNTIME_ARN_ORDER_MANAGEMENT` | `arn:aws:bedrock-agentcore:...order_management...` | Same |
 | `AGENTCORE_RUNTIME_ARN_PRODUCT_RECOMMENDATION` | `arn:aws:bedrock-agentcore:...product_recommendation...` | Same |
 | `AGENTCORE_MEMORY_STORE_ID` | `bedrock_ma_use1_memory_dev-aaTMdv52rv` | Long-term memory backend |
-| `AGENTCORE_GATEWAY_URL` | `https://bedrock-ma-use1-gw-dev-...gateway.bedrock-agentcore.us-east-1.amazonaws.com/mcp` | Always provisioned; consumed only by runtimes opted in via `GATEWAY_DEMO_RUNTIMES` (deploy.sh copies it into `MCP_SERVER_URL` for those runtimes). |
+| `AGENTCORE_GATEWAY_URL` | `https://bedrock-ma-use1-gw-dev-...gateway.bedrock-agentcore.us-east-1.amazonaws.com/mcp` | Required for Gateway-hosted non-Mongo tools. `deploy.sh` copies this into `MCP_SERVER_URL` on every runtime as the fallback MCP endpoint. |
+| `MONGODB_MCP_RUNTIME_ARN` | `arn:aws:bedrock-agentcore:...:runtime/bedrock-ma-use1-mongodb-mcp-dev-...` | Direct MongoDB MCP runtime target used by `api/src/adapters/mongodb-mcp-client.ts`. |
+| `MONGODB_MCP_RUNTIME_ENDPOINT` | `https://bedrock-agentcore.../runtimes/.../invocations?qualifier=DEFAULT` | Streamable-HTTP MCP endpoint for the MongoDB MCP AgentCore Runtime. |
 | `AGENTCORE_ACTOR_ID` | `default` or JWT sub | AgentCore session actor |
 | `BEDROCK_KB_ID` | `YDF16V4CRX` | Default knowledge base for `bedrock_kb_retrieve` |
 | `EMBEDDING_MODEL_ID` | `amazon.titan-embed-text-v2:0` | Bedrock embedding model. Used as the **fallback** when `VOYAGE_SAGEMAKER_ENDPOINT` is unset. Must match Atlas vector index dimensionality (Titan v2 = 1024-d). See §3.5 below for the Voyage AI override. |
@@ -99,10 +80,9 @@ These are typically set in `.env.live` by `deploy.sh`. For local dev with real A
 
 | Variable | Example value | Purpose |
 |---|---|---|
-| `MONGODB_URI` | `mongodb+srv://...` (local) or `mongodb://...:1024,...:1025/?ssl=true` (Lambda PrivateLink) | Atlas connection string |
+| `MONGODB_URI` | `mongodb+srv://...` (local) or `mongodb://...:1024,...:1025/?ssl=true` (AgentCore Runtime PrivateLink) | Atlas connection string |
 | `MONGODB_DB` | `<project>_<env>` (e.g. `mongodb_multiagent_dev`) | Database name; project+env-derived (underscored) by `env.sh` |
 | `MONGODB_ALLOW_WRITE` | `1` or `true` | Required for `updateOne` against real Atlas. Default off (read-only). |
-| `LAMBDA_MCP_FUNCTION_NAME` | `bedrock-ma-use1-mongodb-mcp-dev` | Lambda function name (specialist runtimes need this when `TOOL_HOSTING_MODE=lambda`) |
 | `SHORT_TERM_MEMORY_BACKEND` | `agentcore` (EC2 deploy default) | `agentcore` enables AgentCore short-term event storage when authenticated; otherwise session-store fallback |
 | `PERSIST_CHAT_SESSIONS` | unset (default-on when `MONGODB_URI` is set), `0`/`false` to opt out | Persist short-term chat history in MongoDB `chat_sessions`. Defaults to enabled whenever `MONGODB_URI` is configured. |
 | `MEMORY_TTL_DAYS` | `30` (EC2 deploy default) | TTL for `agent_memory_facts` long-term facts collection |
@@ -110,13 +90,14 @@ These are typically set in `.env.live` by `deploy.sh`. For local dev with real A
 
 ### Auth
 
+JWKS auth is mandatory — the API refuses to boot without `AUTH_JWKS_URI` + `AUTH_ISSUER` (`assertJwksAuthConfigured()` in `api/src/lib/jwt-verify.ts`). There is no `ALLOW_UNAUTHENTICATED` / `REQUIRE_AUTH=false` bypass.
+
 | Variable | Example | Purpose |
 |---|---|---|
-| `REQUIRE_AUTH` | `true` | Forces `Authorization: Bearer ...` on every request |
-| `AUTH_JWKS_URI` | `https://cognito-idp.us-east-1.amazonaws.com/us-east-1_giTk8MWzq/.well-known/jwks.json` | JWKS for JWT signature verification |
-| `AUTH_ISSUER` | `https://cognito-idp.us-east-1.amazonaws.com/us-east-1_giTk8MWzq` | JWT `iss` claim must match |
-| `AUTH_APP_CLIENT_ID` | Cognito app client ID | Optional `aud` validation |
-| `AUTH_TOKEN_USE` | `access` (recommended) or `id` | Cognito token type |
+| `AUTH_JWKS_URI` | `https://cognito-idp.us-east-1.amazonaws.com/us-east-1_giTk8MWzq/.well-known/jwks.json` | **Required** — JWKS for JWT signature verification |
+| `AUTH_ISSUER` | `https://cognito-idp.us-east-1.amazonaws.com/us-east-1_giTk8MWzq` | **Required** — JWT `iss` claim must match |
+| `AUTH_APP_CLIENT_ID` | Cognito app client ID | Optional `aud`/`client_id` validation |
+| `AUTH_TOKEN_USE` | `access` (recommended) or `id` | Optional Cognito token type pin |
 
 ### Streamlit UI
 
@@ -330,33 +311,29 @@ config/skills/order-management/
 
 ## 7. Local development examples
 
-### Fully offline (no AWS, no Atlas)
+The API requires `AGENTCORE_ORCHESTRATOR_ARN` + AWS credentials at startup, so all local-dev examples assume you have a deployed AgentCore Runtime to point at.
 
-```bash
-export DEV_MOCK_BACKENDS=1
-cd api && bun run dev   # CHAT_MODE defaults to live
-```
-
-### Local with real Bedrock + real Atlas
+### Local against a deployed AgentCore Runtime
 
 ```bash
 source env.sh
-source .env.live
+source .env.live   # exports AGENTCORE_ORCHESTRATOR_ARN, AWS creds, etc.
 export PATH="$HOME/.bun/bin:$PATH"
-export ORCHESTRATOR_MODE=swarm
 cd api && bun run dev
 ```
 
-### Local with auth on (testing JWT path)
+### Local development
 
 ```bash
 source env.sh
-export REQUIRE_AUTH=true
+# AUTH_JWKS_URI + AUTH_ISSUER are required for the API to boot. Point them at the
+# dev Cognito pool (deploy.sh writes them into .env.live, or copy from your dev
+# environment).
 export AUTH_JWKS_URI=https://cognito-idp.us-east-1.amazonaws.com/us-east-1_giTk8MWzq/.well-known/jwks.json
 export AUTH_ISSUER=https://cognito-idp.us-east-1.amazonaws.com/us-east-1_giTk8MWzq
 cd api && bun run dev
 
-# Get a token via Cognito and set it
+# Get a token via Cognito and set it on every request
 curl -H "Authorization: Bearer eyJ..." http://localhost:3000/sessions
 ```
 
@@ -401,9 +378,9 @@ curl -s http://localhost:3000/agents | jq '.[] | {id, name, model}'
 | [`api/src/lib/environment-config.ts`](../api/src/lib/environment-config.ts) | Reads YAML defaults + env vars at boot |
 | [`api/src/lib/schemas.ts`](../api/src/lib/schemas.ts) | Zod schemas for agent + skill frontmatter |
 | [`api/src/lib/config-scan.ts`](../api/src/lib/config-scan.ts) | Loads + caches `config/` files (mtime-keyed) |
-| [`api/src/lib/orchestrator-mode.ts`](../api/src/lib/orchestrator-mode.ts) | Decides Swarm vs Runtime path |
-| [`api/src/adapters/agentcore-runtime.ts`](../api/src/adapters/agentcore-runtime.ts) | Switches between Path A (AgentCore) and Path B (in-process) |
-| [`api/src/adapters/mongo-data.ts`](../api/src/adapters/mongo-data.ts) | Switches between fixture / in-process MongoDB / Lambda MCP / Gateway MCP |
+| [`api/src/lib/orchestrator-mode.ts`](../api/src/lib/orchestrator-mode.ts) | Decides Strands Swarm vs single-agent routing inside the orchestrator runtime |
+| [`api/src/adapters/agentcore-runtime.ts`](../api/src/adapters/agentcore-runtime.ts) | `invokeAgentRuntime` + the `AGENTCORE_ORCHESTRATOR_ARN` startup guard |
+| [`api/src/lib/mongodb-mcp-client.ts`](../api/src/lib/mongodb-mcp-client.ts) | StreamableHTTP MCP client used by every runtime to call the MongoDB MCP AgentCore Runtime, with Gateway fallback |
 | [`config/environment.yaml`](../config/environment.yaml) | API port, CORS, defaults |
 | [`config/agents/`](../config/agents/) | Agent personas |
 | [`config/skills/`](../config/skills/) | Skill bundles |

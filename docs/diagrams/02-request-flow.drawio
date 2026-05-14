@@ -179,7 +179,7 @@
         </mxCell>
 
         <!-- Footer note -->
-        <mxCell id="note" value="Notes:&#xa;• InvokeAgentRuntime is request/response, not streaming. The full reply is wrapped in a single SSE 'token' event for UI compatibility.&#xa;• Lambda MCP is reached via lambda:InvokeFunction directly (TOOL_HOSTING_MODE=lambda). AgentCore Gateway is bypassed in the tool path.&#xa;• Long-term memory only writes if userId (JWT sub claim) is known and agent has memory.longTerm: true." style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=10;align=left;" vertex="1" parent="1">
+        <mxCell id="note" value="Notes:&#xa;• InvokeAgentRuntime is request/response, not streaming. The full reply is wrapped in a single SSE 'token' event for UI compatibility.&#xa;• Mongo tools always go through the AgentCore Gateway MCP endpoint (MCP_SERVER_URL = AGENTCORE_GATEWAY_URL), authenticated with the caller's Cognito JWT.&#xa;• Long-term memory only writes if userId (JWT sub claim) is known and agent has memory.longTerm: true." style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=10;align=left;" vertex="1" parent="1">
           <mxGeometry x="80" y="1010" width="1500" height="80" as="geometry" />
         </mxCell>
       </root>

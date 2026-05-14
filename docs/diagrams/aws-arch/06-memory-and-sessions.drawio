@@ -50,7 +50,7 @@
         </mxCell>
 
         <!-- Long-term read -->
-        <mxCell id="lt-read" value="① Read: readLongTermMemory(userId, agentId)&#xa;→ last MEMORY_INJECT_TURNS turns (default: 5)&#xa;→ formatted as plain text&#xa;→ injected as memoryContext into payload&#xa;&#xa;Requires: REQUIRE_AUTH=true + valid JWT&#xa;(userId = JWT sub claim)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=11;align=left;" vertex="1" parent="1">
+        <mxCell id="lt-read" value="① Read: readLongTermMemory(userId, agentId)&#xa;→ last MEMORY_INJECT_TURNS turns (default: 5)&#xa;→ formatted as plain text&#xa;→ injected as memoryContext into payload&#xa;&#xa;Auth is mandatory (assertJwksAuthConfigured at boot);&#xa;userId = JWT sub claim from the verified Bearer token." style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=11;align=left;" vertex="1" parent="1">
           <mxGeometry x="580" y="210" width="380" height="120" as="geometry"/>
         </mxCell>
 
@@ -91,7 +91,7 @@
         </mxCell>
 
         <!-- Constraint note -->
-        <mxCell id="auth-note" value="⚠️ CRITICAL CONSTRAINT: Long-term memory only fires when userId is known. userId comes from JWT sub claim. This means REQUIRE_AUTH=true + a valid Cognito JWT is required. Without auth, all long-term memory reads/writes are silently skipped." style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=11;align=left;" vertex="1" parent="1">
+        <mxCell id="auth-note" value="Long-term memory keys on userId = JWT sub. Auth is mandatory: the API refuses to start without AUTH_JWKS_URI + AUTH_ISSUER, and every protected request must carry a valid Cognito Bearer JWT." style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=11;align=left;" vertex="1" parent="1">
           <mxGeometry x="40" y="790" width="1080" height="50" as="geometry"/>
         </mxCell>
 

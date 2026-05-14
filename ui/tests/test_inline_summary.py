@@ -70,13 +70,6 @@ class TestAggregateSummary:
         assert s.cost_estimate_complete is False
         assert s.cost_usd is None
 
-    def test_mock_backend_flag(self) -> None:
-        events = [
-            _ev("model.request", {"backend": "mock", "modelId": "x", "systemPromptHash": "", "systemPromptBytes": 0, "priorTurnsCount": 0, "userMessage": ""}),
-        ]
-        s = aggregate_summary(events)
-        assert s.backend_mock is True
-
     def test_tools_used_dedup_on_end_phase(self) -> None:
         events = [
             _ev("tool.call", {"toolName": "lookup", "phase": "start"}),
@@ -105,6 +98,57 @@ class TestAggregateSummary:
         ]
         s = aggregate_summary(events)
         assert s.handoffs == [("orchestrator", "order-management")]
+
+    def test_classification_reasoning_captured(self) -> None:
+        events = [
+            _ev(
+                "agentcore.classification",
+                {
+                    "inputMessage": "where is my order",
+                    "chosenSpecialist": "order-management",
+                    "reasoning": "Detected order-tracking intent.",
+                    "latencyMs": 240,
+                },
+            ),
+            _ev(
+                "agentcore.classification",
+                {
+                    "chosenSpecialist": "product-recommendation",
+                    "reasoning": "",
+                    "latencyMs": 180,
+                },
+            ),
+            _ev(
+                "agentcore.classification",
+                {"chosenSpecialist": "", "reasoning": ""},
+            ),
+        ]
+        s = aggregate_summary(events)
+        assert len(s.classifications) == 2
+        assert s.classifications[0]["chosen"] == "order-management"
+        assert s.classifications[0]["reasoning"].startswith("Detected")
+        assert s.classifications[0]["latency_ms"] == 240
+        assert s.classifications[1]["chosen"] == "product-recommendation"
+        assert s.classifications[1]["reasoning"] == ""
+        assert s.has_reasoning() is True
+        assert s.has_signal() is True
+
+    def test_thinking_blocks_captured_and_empty_dropped(self) -> None:
+        events = [
+            _ev("model.thinking_block", {"text": "Step 1: parse query.", "bytes": 20}),
+            _ev("model.thinking_block", {"text": "  ", "bytes": 2}),
+            _ev("model.thinking_block", {"text": "Step 2: pick collection.", "bytes": 24}),
+        ]
+        s = aggregate_summary(events)
+        assert s.thinking_blocks == [
+            "Step 1: parse query.",
+            "Step 2: pick collection.",
+        ]
+        assert s.has_reasoning() is True
+
+    def test_no_reasoning_means_has_reasoning_false(self) -> None:
+        s = aggregate_summary([])
+        assert s.has_reasoning() is False
 
     def test_memory_facts_read_and_written(self) -> None:
         events = [

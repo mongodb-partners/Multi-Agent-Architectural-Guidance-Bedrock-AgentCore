@@ -1,11 +1,17 @@
-# Playwright E2E (API)
+# Playwright E2E smoke tests
 
-Starts the **Bun API** from `../api` with `CHAT_MODE=stub` and `PORT=3456` (no Bedrock, no Streamlit).
+These Playwright specs run against an **already-deployed** API. There is no
+in-tree stub server: the production code requires AWS credentials and a real
+AgentCore Runtime, so we never spin up a local API in CI.
 
 ```bash
-cd api && bun install
-cd ../e2e && bun install && bunx playwright install chromium
-bun run test
+cd e2e && bun install && bunx playwright install chromium
+
+# Point at your deployed API (EC2, ECS, etc.)
+API_URL=http://your-api-host:3000 bun run test
 ```
 
-CI runs `playwright install --with-deps chromium` for system deps on Linux.
+The default `tests/api.spec.ts` only hits read-only public endpoints
+(`/health`, `/agents`, `/skills`) so it's safe to run against any environment.
+Add chat-flow specs as needed for environments where you control auth and
+billing.

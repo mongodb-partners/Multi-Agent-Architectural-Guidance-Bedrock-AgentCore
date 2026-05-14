@@ -39,7 +39,7 @@
         <mxCell id="orch-title" value="🎯 Runtime #1 — Orchestrator" style="text;html=1;align=left;fontSize=13;fontStyle=1;strokeColor=none;fillColor=none;" vertex="1" parent="1">
           <mxGeometry x="290" y="278" width="300" height="22" as="geometry"/>
         </mxCell>
-        <mxCell id="orch-env" value="AGENT_ID = orchestrator&#xa;TOOL_HOSTING_MODE = lambda&#xa;AGENTCORE_RUNTIME_ARN_TROUBLESHOOTING = arn:...&#xa;AGENTCORE_RUNTIME_ARN_ORDER_MANAGEMENT = arn:...&#xa;AGENTCORE_RUNTIME_ARN_PRODUCT_RECOMMENDATION = arn:..." style="text;html=1;align=left;fontSize=10;strokeColor=none;fillColor=none;fontFamily=Courier New;" vertex="1" parent="1">
+        <mxCell id="orch-env" value="AGENT_ID = orchestrator&#xa;MCP_SERVER_URL = AGENTCORE_GATEWAY_URL&#xa;AGENTCORE_RUNTIME_ARN_TROUBLESHOOTING = arn:...&#xa;AGENTCORE_RUNTIME_ARN_ORDER_MANAGEMENT = arn:...&#xa;AGENTCORE_RUNTIME_ARN_PRODUCT_RECOMMENDATION = arn:..." style="text;html=1;align=left;fontSize=10;strokeColor=none;fillColor=none;fontFamily=Courier New;" vertex="1" parent="1">
           <mxGeometry x="295" y="302" width="330" height="90" as="geometry"/>
         </mxCell>
         <mxCell id="orch-logic" value="Behavior: classifies the user's message using Claude Sonnet 4.6,&#xa;then calls InvokeAgentRuntime on the right specialist." style="text;html=1;align=left;fontSize=10;strokeColor=none;fillColor=none;fontStyle=2;fontColor=#1A3DCB;" vertex="1" parent="1">

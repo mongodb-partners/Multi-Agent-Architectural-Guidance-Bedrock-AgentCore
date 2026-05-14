@@ -4,7 +4,7 @@
 
 The API is a Hono server (TypeScript on Bun) listening on port `3000`. It exposes JSON endpoints for session management and a Server-Sent Events stream for chat.
 
-By default, **no authentication is required**. Set `REQUIRE_AUTH=true` (with `AUTH_JWKS_URI` + `AUTH_ISSUER`) to require a valid JWT on every endpoint except `/health`.
+**Authentication is mandatory.** The API refuses to boot without `AUTH_JWKS_URI` + `AUTH_ISSUER` (`assertJwksAuthConfigured()` in `api/src/lib/jwt-verify.ts`). Every endpoint except `/health` and `/demo-prompts` requires a valid Bearer JWT signed by the configured JWKS pool. There is no `ALLOW_UNAUTHENTICATED` / `REQUIRE_AUTH=false` bypass.
 
 ---
 
@@ -44,7 +44,7 @@ Returns liveness + dependency state. Always public (auth bypass).
     "mongodb": "connected",
     "longTermMemory": "connected",
     "chatSessions": "memory",
-    "toolHosting": "lambda",
+    "toolHosting": "hybrid",
     "agentcore": "connected",
     "mcpServer": "connected",
     "bedrockKnowledgeBase": "connected"
@@ -57,9 +57,9 @@ Returns liveness + dependency state. Always public (auth bypass).
 | `mongodb` | `connected` / `unavailable` | Real Mongo ping result |
 | `longTermMemory` | `connected` / `unavailable` / `mongodb` / `agentcore` | Long-term memory backend status |
 | `chatSessions` | `memory` / `mongodb` / `agentcore` / `unavailable` | Where short-term sessions live |
-| `toolHosting` | `lambda` / `gateway` / `direct` | Tool execution mode (per `TOOL_HOSTING_MODE`) |
+| `toolHosting` | `hybrid` | MongoDB MCP calls go directly to the MongoDB MCP AgentCore Runtime; Gateway remains for non-Mongo MCP tools. |
 | `agentcore` | `connected` / `unreachable` / `not_configured` | AgentCore SDK probe (`ListSessions`) |
-| `mcpServer` | `connected` / `unreachable` / `not_configured` | Lambda MCP probe |
+| `mcpServer` | `connected` / `unreachable` | MongoDB MCP runtime / configured MCP endpoint probe |
 | `bedrockKnowledgeBase` | `connected` / `not_configured` | KB ID present + reachable |
 
 Returns `503` with `status: degraded` if `mongodb` is `unreachable` or `chatSessions` is `unavailable` while session persistence is enabled (default when `MONGODB_URI` is set; opt out with `PERSIST_CHAT_SESSIONS=0`).
@@ -209,8 +209,7 @@ with requests.post(
 
 Lists sessions for the calling user.
 
-- If `REQUIRE_AUTH=true`: filters by JWT `sub` claim. Returns only sessions owned by the caller plus sessions with no `userId`.
-- If auth is off: returns all sessions in process memory (or MongoDB when session persistence is enabled — default when `MONGODB_URI` is set; opt out with `PERSIST_CHAT_SESSIONS=0`).
+Filters by JWT `sub` claim — returns only sessions owned by the caller. Sessions persisted before user scoping was wired (no `userId` on the document) are treated as legacy and remain visible to any authenticated caller; new sessions always carry a `userId`. Persistence: when `MONGODB_URI` is set sessions are mirrored to the `chat_sessions` collection (opt out with `PERSIST_CHAT_SESSIONS=0`).
 
 **Response:**
 
@@ -344,15 +343,15 @@ When `HTTP_TOOLS_MOCK=1`, all tools return mock payloads regardless of `urlConfi
 
 ## 10. Authentication
 
-When `REQUIRE_AUTH=true`:
+JWKS auth is **always required** — the API refuses to start without `AUTH_JWKS_URI` + `AUTH_ISSUER`.
 
-- Every request needs `Authorization: Bearer <jwt>`.
-- If `AUTH_JWKS_URI` + `AUTH_ISSUER` are set, JWT signature, `iss`, and `exp` are verified using `jose`. Optional `AUTH_APP_CLIENT_ID` validates `aud`/`client_id`. `AUTH_TOKEN_USE` controls whether `token_use` must equal `access` or `id`.
-- In Cognito mode, API uses JWT `sub` as `userId` and resolves email/profile for auth-context-aware routing/personalization.
-- If JWKS vars are unset, any non-empty Bearer token is accepted (development only — never use in production).
+- Every protected request needs `Authorization: Bearer <jwt>`.
+- JWT signature, `iss`, and `exp` are verified using `jose`. Optional `AUTH_APP_CLIENT_ID` validates `aud`/`client_id`. `AUTH_TOKEN_USE` controls whether `token_use` must equal `access` or `id`.
 - The decoded JWT `sub` claim becomes the `userId` used for session ownership and long-term memory keying.
 
-`401 INVALID_TOKEN` if verification fails.
+Public routes that bypass the gate: `GET /health`, `GET /demo-prompts`.
+
+Errors: `401 UNAUTHORIZED` for missing or malformed Authorization header; `401 INVALID_TOKEN` for tokens that fail verification.
 
 ---
 

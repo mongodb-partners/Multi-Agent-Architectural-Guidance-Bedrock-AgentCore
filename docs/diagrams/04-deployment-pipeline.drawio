@@ -81,7 +81,7 @@
         <mxCell id="p9" value="9. .env.live → EC2" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=12;fontStyle=1;" vertex="1" parent="1">
           <mxGeometry x="310" y="380" width="200" height="80" as="geometry" />
         </mxCell>
-        <mxCell id="p9d" value="Generate .env.live with:&#xa;CHAT_MODE=live · TOOL_HOSTING_MODE=lambda&#xa;ORCHESTRATOR_MODE=runtime&#xa;AGENTCORE_ORCHESTRATOR_ARN=...&#xa;Copy to EC2 /opt/multiagent/.env.live via SSM (mode 600)" style="text;html=1;align=left;verticalAlign=top;fontSize=10;" vertex="1" parent="1">
+        <mxCell id="p9d" value="Generate .env.live with:&#xa;AGENTCORE_ORCHESTRATOR_ARN=...&#xa;AGENTCORE_GATEWAY_URL=... (= MCP_SERVER_URL on every runtime)&#xa;Cognito AUTH_JWKS_URI + AUTH_ISSUER (required by the API boot guard)&#xa;Copy to EC2 /opt/multiagent/.env.live via SSM (mode 600)" style="text;html=1;align=left;verticalAlign=top;fontSize=10;" vertex="1" parent="1">
           <mxGeometry x="310" y="460" width="220" height="120" as="geometry" />
         </mxCell>
 

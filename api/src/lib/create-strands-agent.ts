@@ -51,29 +51,21 @@ export async function createConfiguredStrandsAgent(
 
   const model = resolveModel(agentConfig);
 
-  // Tool composition is mutually exclusive by TOOL_HOSTING_MODE:
-  //   - gateway → MCP tools (from AgentCore Gateway) + non-Mongo in-process tools
-  //   - lambda / direct → only in-process tools (Mongo tools internally route
-  //     to Lambda when TOOL_HOSTING_MODE=lambda, or to the local driver when
-  //     "direct"). MCP tools are never attached.
-  // The agent never sees both Mongo sources at once.
-  const mode = (process.env.TOOL_HOSTING_MODE ?? "direct").trim().toLowerCase();
-  const isGateway = mode === "gateway";
-
-  const inProcessTools = toolsForAgent(agentConfig.tools, registry, {
-    excludeMongoTools: isGateway,
-  });
-
-  let tools = inProcessTools;
-  if (isGateway) {
-    const mcpTools = await getMcpTools();
-    if (mcpTools.length > 0) {
-      logger.debug("[agent] attaching MCP tools (gateway mode)", { agentId, count: mcpTools.length });
-    } else {
-      logger.warn("[agent] gateway mode set but no MCP tools loaded — Mongo tool calls will fail", { agentId });
-    }
-    tools = [...inProcessTools, ...mcpTools];
+  // Tools come from two places:
+  //   - Non-Mongo in-process tools (HTTP, skill scripts, KB retrieve, etc.)
+  //   - Mongo tools served as MCP from the AgentCore Gateway
+  // The agent never has an in-process Mongo driver.
+  const inProcessTools = toolsForAgent(agentConfig.tools, registry);
+  const mcpTools = await getMcpTools();
+  if (mcpTools.length > 0) {
+    logger.debug("[agent] attached gateway MCP tools", { agentId, count: mcpTools.length });
+  } else {
+    logger.warn(
+      "[agent] no MCP tools loaded from gateway — Mongo tool calls will fail",
+      { agentId },
+    );
   }
+  const tools = [...inProcessTools, ...mcpTools];
 
   const seed = strandsHistory(options.priorTurns);
 

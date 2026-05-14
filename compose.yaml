@@ -1,7 +1,10 @@
 # Full stack: API + Streamlit. From repo root:
 #   docker compose up --build
 #
-# Default: dev-mock agent loop (no Bedrock/MongoDB required). Override via `.env` or shell.
+# The API is a thin proxy in front of an AgentCore Runtime, so it requires
+# AGENTCORE_ORCHESTRATOR_ARN (or legacy AGENTCORE_RUNTIME_ARN) and AWS
+# credentials at runtime. Set them in `.env` next to compose.yaml or in your
+# shell before running `docker compose up`.
 
 name: bedrock-multi-agent
 
@@ -14,9 +17,14 @@ services:
       - "${API_PORT:-3000}:3000"
     environment:
       PORT: "3000"
-      CHAT_MODE: "${CHAT_MODE:-live}"
-      DEV_MOCK_BACKENDS: "${DEV_MOCK_BACKENDS:-1}"
-      # Optional: MONGODB_URI, PERSIST_CHAT_SESSIONS=1, AWS_REGION, REQUIRE_AUTH, AUTH_JWKS_URI, AUTH_ISSUER, etc.
+      AGENTCORE_ORCHESTRATOR_ARN: "${AGENTCORE_ORCHESTRATOR_ARN:-}"
+      AWS_REGION: "${AWS_REGION:-us-east-1}"
+      # JWKS auth is required (assertJwksAuthConfigured() in api/src/index.ts).
+      # Set in your .env next to compose.yaml so the API can boot.
+      AUTH_JWKS_URI: "${AUTH_JWKS_URI:-}"
+      AUTH_ISSUER: "${AUTH_ISSUER:-}"
+      # Optional: MONGODB_URI, PERSIST_CHAT_SESSIONS=1, AGENTCORE_GATEWAY_URL,
+      # AUTH_APP_CLIENT_ID, AUTH_TOKEN_USE, etc.
     healthcheck:
       test:
         [
@@ -39,7 +47,8 @@ services:
     environment:
       STREAMLIT_API_URL: http://api:3000
       STREAMLIT_BROWSER_GATHER_USAGE_STATS: "false"
-      # When API uses REQUIRE_AUTH=true, set Cognito (see .env.example — matching AUTH_* on api):
+      # The API requires Cognito JWKS auth — set the same Cognito pool here so the UI
+      # can mint Bearer tokens (see .env.example — matching AUTH_* on api):
       # STREAMLIT_COGNITO_POOL_ID: ...
       # STREAMLIT_COGNITO_CLIENT_ID: ...
       # STREAMLIT_COGNITO_CLIENT_SECRET: ...

@@ -1,6 +1,6 @@
 /**
  * AsyncLocalStorage carrying the active `TraceCollector` for the in-flight
- * chat turn. Adapters (`mongo-data.ts`, `http-tools-runtime.ts`, etc.) call
+ * chat turn. Adapters (`http-tools-runtime.ts`, etc.) call
  * `currentTrace()?.span(...)` without changing their public signatures.
  */
 

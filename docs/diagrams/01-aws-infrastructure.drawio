@@ -176,7 +176,7 @@
         <mxCell id="e6" style="edgeStyle=orthogonalEdgeStyle;strokeColor=#ED7100;strokeWidth=2;" edge="1" parent="1" source="ac-ts" target="lambda">
           <mxGeometry relative="1" as="geometry" />
         </mxCell>
-        <mxCell id="e6lab" value="lambda:InvokeFunction&#xa;TOOL_HOSTING_MODE=lambda" style="edgeLabel;html=1;align=center;fontSize=9;" vertex="1" parent="1">
+        <mxCell id="e6lab" value="MCP target Lambda&#xa;(invoked by AgentCore Gateway)" style="edgeLabel;html=1;align=center;fontSize=9;" vertex="1" parent="1">
           <mxGeometry x="-0.2" y="0" relative="1" as="geometry"><mxPoint as="offset"/></mxGeometry>
         </mxCell>
         <mxCell id="e7" style="edgeStyle=orthogonalEdgeStyle;strokeColor=#ED7100;strokeWidth=1;" edge="1" parent="1" source="ac-om" target="lambda">

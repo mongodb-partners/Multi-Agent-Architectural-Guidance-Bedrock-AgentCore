@@ -10,7 +10,9 @@ output "atlas_connection_string" {
 }
 
 output "kb_docs_bucket" { value = module.bedrock_kb.kb_docs_bucket_name }
-output "kb_state_file" { value = module.bedrock_kb.kb_state_file }
+output "knowledge_base_id" { value = module.bedrock_kb.knowledge_base_id }
+output "knowledge_base_arn" { value = module.bedrock_kb.knowledge_base_arn }
+output "kb_data_source_id" { value = module.bedrock_kb.data_source_id }
 output "atlas_secret_arn" { value = module.bedrock_kb.atlas_secret_arn }
 
 output "cloudwatch_api_log_group" { value = module.cloudwatch.api_log_group_name }

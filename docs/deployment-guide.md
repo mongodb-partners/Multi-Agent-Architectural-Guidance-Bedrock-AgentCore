@@ -6,7 +6,7 @@ There are three Terraform root configs (and three deploy scripts):
 
 - **Network mode** — `envs/network/` provisions the **shared** VPC + subnets + Atlas PrivateLink Interface VPCE for a region, and publishes the resulting IDs to SSM Parameter Store under `/${SHARED_VPC_NAME}/${AWS_REGION}/`. Run **once per region** with `deploy-network.sh`.
 - **Local mode** — runs the API + UI on your laptop. Used for daily development and demos. Some Terraform-provisioned AWS resources are still required (Bedrock KB, Cognito, Secrets Manager). Does **not** consume the shared network.
-- **EC2 mode** — full cloud deployment. The frozen baseline. Reads the shared VPC's IDs from SSM and provisions the per-project EC2 / Lambda / AgentCore stack on top, plus a per-cluster Route 53 zone for the Atlas SRV hostname.
+- **EC2 mode** — full cloud deployment. The frozen baseline. Reads the shared VPC's IDs from SSM and provisions the per-project EC2 / AgentCore Runtime / MongoDB MCP Runtime stack on top, plus a per-cluster Route 53 zone for the Atlas SRV hostname and the AWS service VPC endpoints required by the VPC-mode MongoDB MCP runtime (ECR API, ECR Docker, S3 gateway, CloudWatch Logs). The legacy Lambda MongoDB MCP host (and its Terraform module) was deleted in CLIENT_REVIEW Phase 7e. MongoDB MCP is invoked directly as an AgentCore Runtime; the AgentCore Gateway remains available for non-Mongo tools.
 
 ---
 
@@ -130,7 +130,7 @@ Editable diagram with descriptions: [`diagrams/04-deployment-pipeline.drawio`](d
 | 2 | Bootstrap + config generation | Ensures shared S3 bucket exists, writes backend/tfvars for env. |
 | 3 | Build AgentCore code artifact | Bundles TS runtime code and uploads zip artifact to S3 (code mode). |
 | 4 | Terraform apply | Provisions/updates infrastructure and outputs. |
-| 5 | Data/auth sub-phases | Idempotent Mongo seed check, Lambda/API Mongo URI normalization for PrivateLink, Cognito deterministic user seeding. |
+| 5 | Data/auth sub-phases | Idempotent Mongo seed check, API Mongo URI normalization for PrivateLink, Cognito deterministic user seeding. The MCP runtime gets its `MONGODB_URI` directly from Terraform, no script-level patching needed. |
 | 6 | Docker build/push (optional) | Builds/pushes API/UI images unless `--skip-docker`. |
 | 7 | AgentCore runtime env rollout | Updates runtime env vars and verifies deterministic runtime env state. |
 | 8 | EC2 env sync + restart | Writes `.env.live`, copies via SSM, pulls images, restarts API/UI services. |
@@ -145,7 +145,8 @@ Editable diagram with descriptions: [`diagrams/04-deployment-pipeline.drawio`](d
 | Phase 4 fails with `Operation not allowed` on Bedrock | Model access not granted | Bedrock console → Model Access → request Anthropic Claude Sonnet 4.6 (use-case form, ~15 min) |
 | Phase 4 hangs > 15 min on Atlas | Atlas M10 cluster provisioning | Normal. M10 takes 8-12 min on first apply. |
 | Phase 6 fails: "no awsPrivateLink connection string" | Atlas PrivateLink not yet active | Re-run after 60s. Atlas takes a moment to attach the AWS endpoint to the cluster. |
-| Phase 8: "Role validation failed" | IAM trust policy not yet propagated | The `create-runtime.sh` script retries 10× with 15s backoff. If it still fails, wait 30s and re-run `deploy.sh`. |
+| Phase 8: "Role validation failed" | IAM trust policy not yet propagated | The `aws_bedrockagentcore_agent_runtime` resource will retry on the next `terraform apply`; if it still fails after 30s, re-run `deploy.sh`. |
+| API health hangs on `mcpServer` / MCP logs are empty | Missing VPC endpoints for the VPC-mode MongoDB MCP runtime | EC2 mode should create ECR API, ECR Docker, S3 gateway, and CloudWatch Logs endpoints. Apply `envs/ec2` and verify those endpoints are `available`. |
 | Phase 11 health check fails on `agentcore: unreachable` | Known issue — `ListSessions` health probe requires extra IAM | Non-blocking. Functional memory still works. |
 | Deploy exits after Docker push with code 1 | Known `docker-build-push.sh` exit anomaly | Re-run `./deploy/scripts/deploy.sh --auto-approve --skip-docker` to apply/restart with pushed images. |
 
@@ -173,7 +174,7 @@ aws sts get-caller-identity
 - Cognito user pool
 - Secrets Manager Atlas creds
 
-It does NOT create EC2, Lambda, AgentCore runtimes, or Atlas (you can either point at an existing Atlas cluster or use `DEV_MOCK_BACKENDS=1`).
+It does NOT create EC2, AgentCore runtimes, MongoDB MCP runtime, or Atlas. To run the local stack you must point at a deployed AgentCore Orchestrator runtime (`AGENTCORE_ORCHESTRATOR_ARN`) — the API has no in-process fallback.
 
 ### 4.2 Daily start
 
@@ -181,9 +182,8 @@ It does NOT create EC2, Lambda, AgentCore runtimes, or Atlas (you can either poi
 
 ```bash
 cd mongodb-aws-bedrock-multi-agent-framework
-source env.sh && source .env.live
+source env.sh && source .env.live   # exports AGENTCORE_ORCHESTRATOR_ARN + AWS creds
 export PATH="$HOME/.bun/bin:$PATH"
-export ORCHESTRATOR_MODE=swarm   # multi-agent in-process
 cd api && bun run dev
 ```
 
@@ -194,15 +194,6 @@ cd api && bun run dev
 ```
 
 Open `http://localhost:8501`.
-
-### 4.3 Fully offline (no AWS, no MongoDB)
-
-```bash
-export DEV_MOCK_BACKENDS=1   # CHAT_MODE defaults to live; uses mock Bedrock + fixture MongoDB data
-cd api && bun run dev
-```
-
-The API uses `data/dev/mongo-fixtures.json` as its database. Useful for E2E tests, demos with no internet, and debugging the agent loop without burning Bedrock tokens.
 
 ---
 
@@ -217,7 +208,7 @@ source env.sh
 ./deploy/scripts/docker-build-push.sh "$ECR_API_REPO" "$ECR_UI_REPO" "$AWS_REGION"
 
 # 2. Optionally: re-zip and upload AgentCore runtime artifact
-#    (only needed if you changed agent-runtime-server.ts or agent/skill configs)
+#    (only needed if you changed agent-runtime-code.ts or agent/skill configs)
 cd api && bun run build:agentcore-code
 zip -r deployment_package.zip agent-runtime-code.js ../config/
 aws s3 cp deployment_package.zip "s3://$S3_BUCKET/artifacts/agentcore-runtime/$(git rev-parse --short HEAD)/"
@@ -251,12 +242,12 @@ source env.sh
 ```
 
 `--mode ec2` runs `terraform destroy` on `envs/ec2/`. Order matters:
-1. AgentCore runtimes (via the `null_resource` destroy provisioners)
-2. Lambda
-3. EC2 + EIP
-4. Atlas cluster (slow — ~5 min)
-5. Per-cluster Route 53 zone (`atlas-cluster-dns`)
-6. Supporting services (Cognito, ECR, KB, Secrets, CloudWatch)
+1. AgentCore Gateway → Agent runtimes → MongoDB MCP runtime (native `aws_bedrockagentcore_*` deletes, no shell shim)
+2. EC2 + EIP
+3. Atlas cluster (slow — ~5 min)
+4. Per-cluster Route 53 zone (`atlas-cluster-dns`)
+5. Supporting services (Cognito, ECR, KB, Memory, Secrets, CloudWatch)
+6. Optional `bedrock-kb-privatelink` (NLB + VPC Endpoint Service) when `enable_kb_privatelink = true`
 
 The shared VPC, Atlas PrivateLink VPCE, and the Atlas-side endpoint binding are **not** touched by `--mode ec2`. They live in `envs/network/` and are only removed by `--mode network`. The Atlas endpoint *service* (`com.amazonaws.vpce.<region>.vpce-svc-...`) is intentionally preserved across destroys — `discover-or-create-pl.sh` reuses it on the next `deploy-network.sh`.
 
@@ -323,7 +314,7 @@ aws ssm send-command \
 CloudWatch log groups for full log search:
 - `/<project>/<env>/api` — Hono API (e.g. `/mongodb-multiagent/dev/api`)
 - `/<project>/<env>/agentcore` — AgentCore runtime traces
-- `/<project>/<env>/mcp` — Lambda MCP
+- `/aws/bedrock-agentcore/runtimes/<mongodb-mcp-runtime-id>/...` — MongoDB MCP runtime (AgentCore-managed log group; the legacy `/<project>/<env>/mcp` Lambda log group is gone post Phase 7e)
 
 ---
 

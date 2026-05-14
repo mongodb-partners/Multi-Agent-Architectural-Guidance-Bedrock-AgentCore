@@ -1,6 +1,6 @@
 variable "aws_region" {
   type        = string
-  description = "AWS region"
+  description = "AWS region (kept for backward compatibility with callers — the native aws_bedrockagentcore_memory resource takes its region from the provider)"
 }
 
 variable "project_name" {
@@ -21,6 +21,6 @@ variable "event_expiry_days" {
 
 variable "tags" {
   type        = map(string)
-  description = "Tags applied to the Memory Store (passed through to create-memory --tags)"
+  description = "Tags applied to the Memory Store"
   default     = {}
 }

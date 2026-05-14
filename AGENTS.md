@@ -35,6 +35,7 @@ Authoritative plan: [`ACTION_PLAN.md`](ACTION_PLAN.md). Day-to-day checklist: [`
 | `config/environment.yaml` | Environment defaults (expand as needed) |
 | `config/demo-prompts.yaml` | Sidebar "Try a prompt" entries surfaced by the Streamlit UI |
 | `docs/` | Architecture, API, deployment, authoring guides |
+| `e2e-smoke/` | Post-deploy live AWS smoke tests; run `python3 e2e-smoke/post-deploy-smoke.py` after `deploy/scripts/deploy.sh` to verify health, KB PrivateLink, Voyage/SageMaker alignment, and all agents |
 
 [`ACTION_PLAN.md`](ACTION_PLAN.md) still describes an `apps/` / `packages/` layout; the **implemented** layout is **`api/` + `ui/` + `deploy/`** until a workspace refactor. Prefer editing what exists; update `TASKS.md` when you add new top-level dirs.
 
@@ -59,6 +60,9 @@ cd ui && pip install -r requirements.txt && streamlit run app.py
 
 # Terraform (optional)
 cd deploy/terraform && terraform init && terraform validate
+
+# Post-deploy live smoke tests (after deploy/scripts/deploy.sh)
+source env.sh && python3 e2e-smoke/post-deploy-smoke.py
 
 # Docker — full stack (mock model + fixtures; no AWS required)
 docker compose up --build
@@ -108,9 +112,8 @@ memory:
 |----------|---------|
 | `MONGODB_URI` | MongoDB Atlas connection string |
 | `MONGODB_DB` | Database name. Project+env-derived (underscored) by `env.sh`, e.g. `mongodb_multiagent_dev` |
-| `REQUIRE_AUTH=true` | Force Bearer token on every request |
-| `AUTH_JWKS_URI` | JWKS endpoint (e.g. Cognito pool) |
-| `AUTH_ISSUER` | Token issuer URL (e.g. Cognito pool URL) |
+| `AUTH_JWKS_URI` | JWKS endpoint (e.g. Cognito pool). **Required** — `assertJwksAuthConfigured()` refuses to boot the API without it. |
+| `AUTH_ISSUER` | Token issuer URL (e.g. Cognito pool URL). **Required** for the same reason. |
 | `MEMORY_INJECT_TURNS` | Past turns to inject into system prompt (default: `5`) |
 
 **One-time MongoDB setup** (create TTL index):
@@ -154,7 +157,7 @@ cd api && bun run dev
 - Long-term memory: `api/src/lib/long-term-memory.ts` — `readLongTermMemory` / `writeLongTermMemory` against MongoDB `agent_memory` collection (or in-process mock map when **`DEV_MOCK_BACKENDS=1`**). Activated in `POST /chat` when agent has `memory.longTerm: true` and `userId` is known.
 - Base tools: `api/src/lib/base-tools.ts` (includes per-skill `http-tools.json` under `config/skills/<skill>/`).
 - HTTP tools metadata: `api/src/routes/http-tools-meta.ts` (`GET /http-tools`).
-- Auth: `api/src/middleware/auth.ts` + `api/src/lib/jwt-verify.ts` — when **`REQUIRE_AUTH=true`** and **`AUTH_JWKS_URI`** + **`AUTH_ISSUER`** are set, JWTs are verified with **`jose`**; JWT `sub` stored in `c.get("jwtPayload")?.sub` and used for session userId scoping.
+- Auth: `api/src/middleware/auth.ts` + `api/src/lib/jwt-verify.ts` — JWKS auth is mandatory. `assertJwksAuthConfigured()` runs at boot in `api/src/index.ts` and refuses to start without **`AUTH_JWKS_URI`** + **`AUTH_ISSUER`**. Every protected request is required to carry a valid Bearer JWT verified with **`jose`**; JWT `sub` is stored in `c.get("jwtPayload")?.sub` and used for session userId scoping. There is no `ALLOW_UNAUTHENTICATED` / `REQUIRE_AUTH=false` bypass.
 - Session userId scoping: `api/src/lib/session-store.ts` carries `userId?`; `api/src/routes/sessions.ts` filters `GET /sessions` by user and enforces `DELETE` ownership.
 - Structured logging: `api/src/lib/logger.ts` — JSON lines, level controlled by **`LOG_LEVEL`** (`error`|`warn`|`info`|`debug`; default `info`). Used across config-scan, skill-loader, mongo-data, base-tools, app error handler, chat/swarm streams.
 - HTTP + SSE: `api/src/routes/chat.ts`.

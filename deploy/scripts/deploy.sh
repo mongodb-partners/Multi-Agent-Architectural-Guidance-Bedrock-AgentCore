@@ -38,8 +38,6 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 TF_ROOT="$REPO_ROOT/deploy/terraform"
 TF_DIR="$TF_ROOT/envs/ec2"
 BOOTSTRAP_DIR="$TF_ROOT/bootstrap"
-KB_STATE_FILE="$TF_ROOT/modules/bedrock-kb/.kb-state.json"
-
 ENV_FILE="$REPO_ROOT/env.sh"
 AUTO_APPROVE=false
 SKIP_DOCKER=false
@@ -58,7 +56,6 @@ unset _PROJECT_SLUG
 VPC_CIDR="${VPC_CIDR:-10.0.0.0/16}"
 SHARED_VPC_NAME="${SHARED_VPC_NAME:-shared-network}"
 COGNITO_SEED_USERS="${COGNITO_SEED_USERS:-true}"
-COGNITO_REQUIRE_AUTH="${COGNITO_REQUIRE_AUTH:-true}"
 COGNITO_TEST_USERS_CSV="${COGNITO_TEST_USERS_CSV:-alex@example.com,blake@example.com,casey@example.com}"
 COGNITO_TEST_PASSWORD="${COGNITO_TEST_PASSWORD:-DemoUser#2026}"
 COGNITO_SMOKE_USER_EMAIL="${COGNITO_SMOKE_USER_EMAIL:-alex@example.com}"
@@ -274,18 +271,67 @@ rm -f /tmp/.atlas_check.json
 
 SHARED_BUCKET="${PROJECT_NAME}-${ENVIRONMENT}-${ACCOUNT_ID}"
 VOYAGE_ARN="${VOYAGE_MODEL_PACKAGE_ARN:-}"
-# voyage-3.5-lite on AWS Marketplace only ships GPU images; ml.g6.xlarge is the
-# cheapest supported instance. CPU instances (m5/c5) will fail at endpoint creation.
+# voyage-multimodal-3 on AWS Marketplace ships GPU-only images; ml.g6.xlarge
+# is the cheapest supported real-time instance. CPU instances (m5/c5) fail at
+# endpoint creation.
 VOYAGE_INSTANCE="${VOYAGE_INSTANCE_TYPE:-ml.g6.xlarge}"
 EC2_KEY_PAIR="${EC2_KEY_PAIR:-}"
 AGENTCORE_RUNTIME_DEPLOYMENT_MODE="${AGENTCORE_RUNTIME_DEPLOYMENT_MODE:-code}"
 GIT_SHA=$(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null || echo "unknown")
 AGENTCORE_CODE_ARTIFACT_PREFIX="artifacts/agentcore-runtime/${GIT_SHA}/deployment_package.zip"
 
-if [[ -z "$VOYAGE_ARN" ]]; then
-  warn "VOYAGE_MODEL_PACKAGE_ARN not set — SageMaker endpoint will not be deployed."
-  warn "API will fall back to Titan embeddings. Set it in env.sh after Marketplace approval."
-fi
+# ── Embedding provider guard: explicit opt-in, no silent fallback ─────────────
+# The pipeline previously warned and silently fell back to Titan when
+# VOYAGE_MODEL_PACKAGE_ARN was empty, and accepted any Voyage ARN (including
+# voyage-3-5-lite) without checking. The SoW pins this stack to
+# voyage-multimodal-3 — every alternative must be an explicit, loud choice.
+EMBEDDINGS_PROVIDER="${EMBEDDINGS_PROVIDER:-}"
+case "$EMBEDDINGS_PROVIDER" in
+  voyage)
+    if [[ -z "$VOYAGE_ARN" ]]; then
+      err "EMBEDDINGS_PROVIDER=voyage but VOYAGE_MODEL_PACKAGE_ARN is empty.
+       Run: ./deploy/scripts/setup-voyage-marketplace.sh   (one-time, opens Marketplace)
+       Then re-source env.sh and re-run this script."
+    fi
+    # Marketplace ARN tail format:
+    #   arn:aws:sagemaker:<region>:<vendor>:model-package/<package-name>
+    # AWS Marketplace package names may include vendor version suffixes such as
+    # `voyage-multimodal-3-5-v1-<hash>`. Keep the guard strict enough to reject
+    # unrelated packages like voyage-3-5-lite, but record the exact tail below
+    # so version suffixes never disappear silently from deploy-manifest.json.
+    VOYAGE_ARN_TAIL="${VOYAGE_ARN##*/}"
+    if [[ ! "$VOYAGE_ARN_TAIL" =~ ^voyage-multimodal-3($|-) ]]; then
+      err "VOYAGE_MODEL_PACKAGE_ARN does not point at voyage-multimodal-3.
+       Got tail:  $VOYAGE_ARN_TAIL
+       Expected:  voyage-multimodal-3 or voyage-multimodal-3-<version/hash>
+       SoW pins this stack to voyage-multimodal-3 — refusing to deploy a different model.
+       Re-run ./deploy/scripts/setup-voyage-marketplace.sh to subscribe + rewrite env.sh."
+    fi
+    ok "Embeddings: $VOYAGE_ARN_TAIL (SoW-aligned Voyage multimodal, SageMaker endpoint will be provisioned)"
+    ;;
+  titan)
+    # Explicit, deliberate deviation from the SoW — Bedrock Titan v2 only. No
+    # SageMaker endpoint is created; API + runtimes embed via Bedrock. Override
+    # any leaked VOYAGE_ARN so the tfvars block below cannot trigger SageMaker.
+    VOYAGE_ARN=""
+    warn "═══════════════════════════════════════════════════════════════════════"
+    warn "  EMBEDDINGS_PROVIDER=titan — explicit deviation from SoW"
+    warn "  Voyage SageMaker endpoint will NOT be provisioned."
+    warn "  Embeddings: amazon.titan-embed-text-v2:0 (1024-d) via Bedrock."
+    warn "  This is recorded in deploy-manifest.json. To restore SoW alignment,"
+    warn "  set EMBEDDINGS_PROVIDER=voyage and re-run setup-voyage-marketplace.sh."
+    warn "═══════════════════════════════════════════════════════════════════════"
+    ;;
+  "")
+    err "EMBEDDINGS_PROVIDER is not set — refusing to deploy with an implicit default.
+       Set one of the following in env.sh (or your shell) and re-source it:
+         export EMBEDDINGS_PROVIDER=voyage   # SoW-aligned, requires Marketplace subscription
+         export EMBEDDINGS_PROVIDER=titan    # explicit deviation, Bedrock Titan v2"
+    ;;
+  *)
+    err "EMBEDDINGS_PROVIDER='$EMBEDDINGS_PROVIDER' is not recognised. Use 'voyage' or 'titan'."
+    ;;
+esac
 
 # Re-read SHARED_VPC_NAME after sourcing env.sh so an env.sh override wins.
 SHARED_VPC_NAME="${SHARED_VPC_NAME:-shared-network}"
@@ -418,26 +464,15 @@ if [[ "$AGENTCORE_RUNTIME_DEPLOYMENT_MODE" == "code" ]]; then
 fi
 
 # ══════════════════════════════════════════════════════════════════════════════
-# PHASE 4c — Install Lambda MCP runtime dependencies
-# Terraform's archive_file zips lambda/mongodb-mcp/ as-is. Without node_modules
-# the deployed Lambda crashes with "Cannot find package 'mongodb'" on cold
-# start. Run npm install --omit=dev in-place so the next archive_file hash
-# picks up the dependency tree.
-# ══════════════════════════════════════════════════════════════════════════════
-LAMBDA_MCP_DIR="$REPO_ROOT/lambda/mongodb-mcp"
-if [[ -f "$LAMBDA_MCP_DIR/package.json" ]]; then
-  sep
-  log "Phase 4c — Installing Lambda MCP runtime dependencies (npm install --omit=dev)..."
-  command -v npm >/dev/null || err "'npm' not found in PATH but required to package lambda/mongodb-mcp"
-  # Use an isolated cache to avoid the macOS root-owned ~/.npm/_cacache failure mode.
-  (cd "$LAMBDA_MCP_DIR" && npm install --omit=dev --no-audit --no-fund \
-    --cache "${TMPDIR:-/tmp}/npm-cache-lambda-mcp" >/dev/null) \
-    || err "npm install failed in $LAMBDA_MCP_DIR"
-  ok "Lambda MCP node_modules ready ($(du -sh "$LAMBDA_MCP_DIR/node_modules" 2>/dev/null | cut -f1))"
-fi
-
-# ══════════════════════════════════════════════════════════════════════════════
-# PHASE 5 — terraform apply (envs/ec2)
+# PHASE 4d — Pre-apply: build + push the mongodb-mcp runtime image
+#
+# The mongodb-mcp AgentCore Runtime uses container deployment mode (it's an
+# Express/MCP-SDK server, not the direct-code Strands shape) and AgentCore
+# refuses to bring it READY if `:latest` doesn't exist in ECR. So we apply
+# JUST the ECR repo first, push the image, and then let the full apply
+# create the runtime against an existing image.
+#
+# Skipped when --skip-docker is set.
 # ══════════════════════════════════════════════════════════════════════════════
 sep
 cd "$TF_DIR"
@@ -445,6 +480,47 @@ log "Phase 5 — terraform init..."
 terraform init -input=false -reconfigure -backend-config="$TF_DIR/backend.hcl"
 ok "init complete"
 
+if [[ "$SKIP_DOCKER" != "true" ]]; then
+  sep
+  log "Phase 4d — Ensuring mongodb-mcp runtime ECR repo, then push image..."
+  MCP_RUNTIME_REPO_NAME="${PROJECT_NAME}-mongodb-mcp-${ENVIRONMENT}"
+  MCP_RUNTIME_REPO="${ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${MCP_RUNTIME_REPO_NAME}"
+
+  if ! aws ecr describe-repositories \
+    --region "$AWS_REGION" \
+    --repository-names "$MCP_RUNTIME_REPO_NAME" >/dev/null 2>&1; then
+    log "  creating ECR repo → $MCP_RUNTIME_REPO_NAME"
+    aws ecr create-repository \
+      --region "$AWS_REGION" \
+      --repository-name "$MCP_RUNTIME_REPO_NAME" \
+      --image-tag-mutability MUTABLE \
+      --image-scanning-configuration scanOnPush=true >/dev/null
+  fi
+
+  # Do not use `terraform -target` here. Targeted plans break when unrelated
+  # resources have moved addresses, and they can hide drift in the rest of the
+  # stack. If this is a first deploy, import the repo so the following normal
+  # full plan owns it and can manage the lifecycle policy idempotently.
+  if ! terraform state list 2>/dev/null | awk '$0 == "aws_ecr_repository.mongodb_mcp_runtime" { found = 1 } END { exit !found }'; then
+    log "  importing ECR repo into Terraform state → aws_ecr_repository.mongodb_mcp_runtime"
+    terraform import -input=false aws_ecr_repository.mongodb_mcp_runtime "$MCP_RUNTIME_REPO_NAME" >/dev/null
+  fi
+
+  ECR_REGISTRY=$(echo "$MCP_RUNTIME_REPO" | cut -d'/' -f1)
+  log "  ECR login → $ECR_REGISTRY"
+  aws ecr get-login-password --region "$AWS_REGION" \
+    | docker login --username AWS --password-stdin "$ECR_REGISTRY" >/dev/null
+  log "  building mongodb-mcp-runtime image (linux/arm64)..."
+  docker buildx build \
+    --platform linux/arm64 \
+    -f "$REPO_ROOT/mcp-runtimes/mongodb-mcp/Dockerfile" \
+    -t "${MCP_RUNTIME_REPO}:latest" \
+    --push \
+    "$REPO_ROOT/mcp-runtimes/mongodb-mcp" >/dev/null
+  ok "mongodb-mcp-runtime pushed: ${MCP_RUNTIME_REPO}:latest"
+fi
+
+sep
 log "Running terraform plan..."
 terraform plan -input=false -out="$TF_DIR/.tfplan"
 ok "plan complete"
@@ -479,6 +555,9 @@ load_tf_outputs() {
   ECR_API_REPO=$(terraform output -raw ecr_api_repository_url 2>/dev/null || echo "")
   ECR_UI_REPO=$(terraform output -raw ecr_ui_repository_url 2>/dev/null || echo "")
   ECR_RUNTIME_REPO=$(terraform output -raw ecr_agent_runtime_repository_url 2>/dev/null || echo "")
+  ECR_MCP_RUNTIME_REPO=$(terraform output -raw ecr_mongodb_mcp_runtime_repository_url 2>/dev/null || echo "")
+  MONGODB_MCP_RUNTIME_ARN=$(terraform output -raw mongodb_mcp_runtime_arn 2>/dev/null || echo "")
+  MONGODB_MCP_RUNTIME_ENDPOINT=$(terraform output -raw mongodb_mcp_runtime_endpoint 2>/dev/null || echo "")
   AGENTCORE_RUNTIME_DEPLOYMENT_MODE=$(terraform output -raw agentcore_runtime_deployment_mode 2>/dev/null || echo "$AGENTCORE_RUNTIME_DEPLOYMENT_MODE")
   AGENTCORE_CODE_ARTIFACT_PREFIX=$(terraform output -raw agentcore_code_artifact_prefix 2>/dev/null || echo "$AGENTCORE_CODE_ARTIFACT_PREFIX")
   AGENTCORE_MEMORY_STORE_ID=$(terraform output -raw agentcore_memory_id 2>/dev/null || echo "")
@@ -491,11 +570,6 @@ load_tf_outputs() {
   AGENTCORE_ORDER_MANAGEMENT_ID=$(terraform output -raw acr_order_management_id 2>/dev/null || echo "")
   AGENTCORE_PRODUCT_RECOMMENDATION_ARN=$(terraform output -raw acr_product_recommendation_arn 2>/dev/null || echo "")
   AGENTCORE_PRODUCT_RECOMMENDATION_ID=$(terraform output -raw acr_product_recommendation_id 2>/dev/null || echo "")
-  LAMBDA_MCP_ARN=$(terraform output -raw lambda_mcp_arn 2>/dev/null || echo "")
-  LAMBDA_MCP_FUNCTION_NAME=$(terraform output -raw lambda_mcp_function_name 2>/dev/null || echo "")
-  if [[ -z "$LAMBDA_MCP_FUNCTION_NAME" && -n "$LAMBDA_MCP_ARN" ]]; then
-    LAMBDA_MCP_FUNCTION_NAME="${LAMBDA_MCP_ARN##*:function:}"
-  fi
   ATLAS_PRIVATELINK_ENDPOINT_ID=$(terraform output -raw atlas_privatelink_endpoint_id 2>/dev/null || echo "")
   CW_API_LOG_GROUP=$(terraform output -raw cloudwatch_api_log_group 2>/dev/null || echo "/${PROJECT_NAME}/${ENVIRONMENT}/api")
 }
@@ -520,14 +594,30 @@ fi
 [[ -n "$AGENTCORE_ORCHESTRATOR_ID" ]] || err "AGENTCORE_ORCHESTRATOR_ID output is empty after apply/refresh."
 [[ -n "$AGENTCORE_TROUBLESHOOTING_ID" ]] || err "Troubleshooting runtime ID output is empty after apply/refresh."
 [[ -n "$AGENTCORE_ORDER_MANAGEMENT_ID" ]] || err "Order-management runtime ID output is empty after apply/refresh."
+[[ -n "$MONGODB_MCP_RUNTIME_ARN" ]] || err "MongoDB MCP runtime ARN output is empty after apply/refresh."
+[[ -n "$MONGODB_MCP_RUNTIME_ENDPOINT" ]] || err "MongoDB MCP runtime endpoint output is empty after apply/refresh."
 [[ -n "$AGENTCORE_PRODUCT_RECOMMENDATION_ID" ]] || err "Product-recommendation runtime ID output is empty after apply/refresh."
-[[ -n "$LAMBDA_MCP_FUNCTION_NAME" ]] || err "lambda_mcp_function_name output is empty after apply/refresh."
 
-# Re-read KB ID post-apply
-BEDROCK_KB_ID=""
-if [[ -f "$KB_STATE_FILE" ]]; then
-  BEDROCK_KB_ID=$(python3 -c "import json; print(json.load(open('$KB_STATE_FILE')).get('knowledge_base_id',''))" 2>/dev/null || echo "")
+if [[ "$EMBEDDINGS_PROVIDER" == "voyage" ]]; then
+  [[ -n "$VOYAGE_ENDPOINT" ]] || err "EMBEDDINGS_PROVIDER=voyage but Terraform output voyage_endpoint_name is empty."
+
+  VOYAGE_ENDPOINT_STATUS="$(aws sagemaker describe-endpoint \
+    --endpoint-name "$VOYAGE_ENDPOINT" \
+    --region "$AWS_REGION" \
+    --query 'EndpointStatus' --output text 2>/tmp/_voyage_endpoint_err.txt || true)"
+  if [[ "$VOYAGE_ENDPOINT_STATUS" != "InService" ]]; then
+    _VOYAGE_ERR="$(cat /tmp/_voyage_endpoint_err.txt 2>/dev/null || true)"
+    err "Terraform output says Voyage endpoint '$VOYAGE_ENDPOINT' should exist, but SageMaker status is '${VOYAGE_ENDPOINT_STATUS:-missing}'.
+       AWS error: ${_VOYAGE_ERR:-none}
+       Refusing to continue because EMBEDDINGS_PROVIDER=voyage must not silently fall back or write a stale manifest."
+  fi
+  ok "Voyage endpoint verified InService: $VOYAGE_ENDPOINT"
 fi
+
+# Re-read KB ID post-apply (now sourced directly from terraform output —
+# the legacy JSON state file at $KB_STATE_FILE is gone since the bedrock-kb
+# module migrated to the native aws_bedrockagent_knowledge_base resource).
+BEDROCK_KB_ID="$(terraform output -raw knowledge_base_id 2>/dev/null || echo "")"
 
 # Build Mongo URI once for both runtime updates and .env.live output.
 if [[ -n "$ATLAS_CONNECTION_STRING" ]]; then
@@ -582,13 +672,18 @@ else
 fi
 
 # ══════════════════════════════════════════════════════════════════════════════
-# PHASE 5c — Lambda MCP MongoDB URI normalization (PrivateLink direct URI)
-# Avoid SRV DNS edge-cases in VPC Lambda by using Atlas awsPrivateLink URI.
+# PHASE 5c — API MongoDB URI normalization (Atlas awsPrivateLink direct URI)
+# Avoid SRV DNS edge-cases in the EC2 API by using Atlas's multi-host
+# awsPrivateLink connection string. The mongodb-mcp AgentCore Runtime gets
+# its MONGODB_URI baked in by Terraform from the cluster's
+# `connection_strings.private_endpoint[*].srv_connection_string` (resolves
+# privately via the per-cluster Route 53 zone), so this normalization is now
+# API-only.
 # ══════════════════════════════════════════════════════════════════════════════
-if [[ -n "$LAMBDA_MCP_FUNCTION_NAME" && -n "$ATLAS_PRIVATELINK_ENDPOINT_ID" ]]; then
+if [[ -n "$ATLAS_PRIVATELINK_ENDPOINT_ID" ]]; then
   sep
-  log "Phase 5c — Updating Lambda MCP MongoDB URI to Atlas PrivateLink direct URI..."
-  if LAMBDA_PRIVATE_URI=$(ATLAS_PROJECT_ID="$TF_VAR_atlas_project_id" \
+  log "Phase 5c — Computing Atlas awsPrivateLink direct URI for the EC2 API..."
+  if API_PRIVATE_URI=$(ATLAS_PROJECT_ID="$TF_VAR_atlas_project_id" \
     CLUSTER_NAME="${PROJECT_NAME}-${ENVIRONMENT}" \
     VPCE_ID="$ATLAS_PRIVATELINK_ENDPOINT_ID" \
     BASE_MONGODB_URI="$MONGODB_URI" \
@@ -631,22 +726,13 @@ no_scheme = pl_conn.replace("mongodb://", "", 1)
 print(f"mongodb://{user}:{pwd}@{no_scheme}&retryWrites=true&w=majority&tlsAllowInvalidHostnames=true")
 PY
   ); then
-    aws lambda update-function-configuration \
-      --region "$AWS_REGION" \
-      --function-name "$LAMBDA_MCP_FUNCTION_NAME" \
-      --environment "{\"Variables\":{\"MONGODB_URI\":\"${LAMBDA_PRIVATE_URI}\",\"MONGODB_DB\":\"${ATLAS_DB_NAME}\"}}" \
-      --output json >/dev/null 2>&1 \
-      && ok "Lambda MCP MongoDB URI updated to awsPrivateLink direct connection string" \
-      || err "Failed to update Lambda MCP MongoDB URI"
-    # Keep API and Lambda on the same PrivateLink-safe URI so API-side memory
-    # (short-term fallback + long-term facts) can reach Mongo reliably.
-    MONGODB_URI="$LAMBDA_PRIVATE_URI"
+    MONGODB_URI="$API_PRIVATE_URI"
     ok "API MongoDB URI normalized to awsPrivateLink direct connection string"
   else
-    err "Could not compute Atlas awsPrivateLink URI for Lambda MCP"
+    err "Could not compute Atlas awsPrivateLink URI for the API"
   fi
 else
-  err "Missing Lambda MCP function name or Atlas PrivateLink endpoint ID for deterministic deploy"
+  err "Missing Atlas PrivateLink endpoint ID for deterministic deploy"
 fi
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -709,10 +795,14 @@ if [[ "$SKIP_DOCKER" == "true" ]]; then
   warn "Phase 6 — Skipping Docker build/push (--skip-docker)"
 else
   log "Phase 6 — Building and pushing Docker images to ECR..."
+  # docker-build-push.sh signature:
+  #   <api_repo> <ui_repo> <aws_region> [agent_runtime_repo] [mongodb_mcp_runtime_repo]
+  # mongodb-mcp runtime image is rebuilt here so any code changes between Phase 4d
+  # and Phase 6 (rare in normal runs) land before the runtime updates in Phase 7.
   if [[ "$AGENTCORE_RUNTIME_DEPLOYMENT_MODE" == "container" ]]; then
-    "$SCRIPT_DIR/docker-build-push.sh" "$ECR_API_REPO" "$ECR_UI_REPO" "$AWS_REGION" "$ECR_RUNTIME_REPO"
+    "$SCRIPT_DIR/docker-build-push.sh" "$ECR_API_REPO" "$ECR_UI_REPO" "$AWS_REGION" "$ECR_RUNTIME_REPO" "$ECR_MCP_RUNTIME_REPO"
   else
-    "$SCRIPT_DIR/docker-build-push.sh" "$ECR_API_REPO" "$ECR_UI_REPO" "$AWS_REGION"
+    "$SCRIPT_DIR/docker-build-push.sh" "$ECR_API_REPO" "$ECR_UI_REPO" "$AWS_REGION" "" "$ECR_MCP_RUNTIME_REPO"
   fi
   ok "Images pushed to ECR"
 fi
@@ -729,65 +819,20 @@ if [[ -n "$AGENTCORE_ORCHESTRATOR_ID" ]]; then
   sep
   log "Phase 6b — Updating AgentCore Runtime environment variables..."
 
-  # ── Gateway opt-in (env.sh-driven) ─────────────────────────────────────────
-  # GATEWAY_DEMO_RUNTIMES is a space-separated list of runtime names that
-  # should be flipped to TOOL_HOSTING_MODE=gateway. Listed runtimes route
-  # MongoDB tool calls through the AgentCore Gateway MCP endpoint
-  # (authenticated with the caller's Cognito JWT, forwarded from the API).
-  # All other runtimes stay on TOOL_HOSTING_MODE=lambda. The two modes are
-  # mutually exclusive per runtime — never coexist on one agent.
-  is_gateway_runtime() {
-    local name="$1"
-    case " ${GATEWAY_DEMO_RUNTIMES:-} " in
-      *" ${name} "*) return 0 ;;
-      *) return 1 ;;
-    esac
-  }
-
-  # If any runtime is opted in, the Gateway URL is mandatory.
-  if [[ -n "${GATEWAY_DEMO_RUNTIMES:-}" && -z "${AGENTCORE_GATEWAY_URL:-}" ]]; then
-    err "GATEWAY_DEMO_RUNTIMES is set ('${GATEWAY_DEMO_RUNTIMES}') but AGENTCORE_GATEWAY_URL is empty. \
-Provision the AgentCore Gateway first (terraform apply) or clear GATEWAY_DEMO_RUNTIMES in env.sh."
+  # Gateway stays available for non-Mongo tools. MongoDB MCP calls use the
+  # dedicated mongodb-mcp AgentCore Runtime directly because Gateway mcpServer
+  # targets cannot point at AgentCore Runtime endpoints.
+  if [[ -z "${AGENTCORE_GATEWAY_URL:-}" ]]; then
+    err "AGENTCORE_GATEWAY_URL is empty. Provision the AgentCore Gateway first (terraform apply)."
   fi
-
-  if [[ -n "${GATEWAY_DEMO_RUNTIMES:-}" ]]; then
-    # No allowlist of names: custom agents can also opt in. A typo simply
-    # produces no match in is_gateway_runtime — the runtime stays on the
-    # lambda default, which is the safer failure mode.
-    log "Gateway opt-in: ${GATEWAY_DEMO_RUNTIMES}"
-  fi
-
-  # Apply the gateway override (TOOL_HOSTING_MODE + MCP_SERVER_URL) to a
-  # runtime's env JSON when its name is in GATEWAY_DEMO_RUNTIMES, else pass
-  # through unchanged. Echoes the (possibly modified) env JSON to stdout.
-  # Called from update_runtime_env so every runtime gets the override
-  # automatically — including future custom agents — without per-name
-  # unrolling in the call sites.
-  apply_gateway_override() {
-    local name="$1"
-    local env_json="$2"
-    if is_gateway_runtime "$name"; then
-      ENV_JSON="$env_json" GW_URL="$AGENTCORE_GATEWAY_URL" python3 -c "
-import json, os
-env = json.loads(os.environ['ENV_JSON'])
-env['TOOL_HOSTING_MODE'] = 'gateway'
-env['MCP_SERVER_URL']    = os.environ['GW_URL']
-print(json.dumps(env))
-"
-    else
-      echo "$env_json"
-    fi
-  }
 
   DYNAMIC_ENV_BASE=$(MONGODB_URI="$MONGODB_URI" ATLAS_DB_NAME="$ATLAS_DB_NAME" BEDROCK_KB_ID="$BEDROCK_KB_ID" \
     AGENTCORE_MEMORY_STORE_ID="$AGENTCORE_MEMORY_STORE_ID" AGENTCORE_GATEWAY_URL="$AGENTCORE_GATEWAY_URL" \
-    LAMBDA_MCP_FUNCTION_NAME="$LAMBDA_MCP_FUNCTION_NAME" LAMBDA_MCP_ARN="$LAMBDA_MCP_ARN" \
+    MONGODB_MCP_RUNTIME_ARN="$MONGODB_MCP_RUNTIME_ARN" MONGODB_MCP_RUNTIME_ENDPOINT="$MONGODB_MCP_RUNTIME_ENDPOINT" \
     VOYAGE_ENDPOINT="$VOYAGE_ENDPOINT" python3 -c "
 import json, os
 env = {
   'AWS_REGION':               os.environ['AWS_REGION'],
-  'CHAT_MODE':                'live',
-  'TOOL_HOSTING_MODE':        'lambda',
   'SHORT_TERM_MEMORY_BACKEND':'agentcore',
   'PERSIST_CHAT_SESSIONS':    '1',
   'MEMORY_TTL_DAYS':          '30',
@@ -796,16 +841,24 @@ env = {
   'MONGODB_DB':               os.environ['ATLAS_DB_NAME'],
   'BEDROCK_KB_ID':            os.environ.get('BEDROCK_KB_ID',''),
   'AGENTCORE_MEMORY_STORE_ID':os.environ.get('AGENTCORE_MEMORY_STORE_ID',''),
-  'LAMBDA_MCP_FUNCTION_NAME': os.environ.get('LAMBDA_MCP_FUNCTION_NAME',''),
-  'LAMBDA_MCP_FUNCTION_ARN':  os.environ.get('LAMBDA_MCP_ARN',''),
-  'MCP_SERVER_URL':           '',
-  'AGENTCORE_GATEWAY_URL':    os.environ.get('AGENTCORE_GATEWAY_URL',''),
+  'MCP_SERVER_URL':           os.environ['AGENTCORE_GATEWAY_URL'],
+  'AGENTCORE_GATEWAY_URL':    os.environ['AGENTCORE_GATEWAY_URL'],
+  'MONGODB_MCP_RUNTIME_ARN':  os.environ.get('MONGODB_MCP_RUNTIME_ARN',''),
+  'MONGODB_MCP_RUNTIME_ENDPOINT': os.environ.get('MONGODB_MCP_RUNTIME_ENDPOINT',''),
   'EMBEDDING_MODEL_ID':       'amazon.titan-embed-text-v2:0',
+  # Explicit provider switch — propagated from deploy.sh so the API logs and
+  # CloudWatch can confirm whether the running stack is SoW-aligned (voyage)
+  # or running the documented Titan deviation. The API will assert this matches
+  # what is actually configured at boot.
+  'EMBEDDINGS_PROVIDER':      os.environ.get('EMBEDDINGS_PROVIDER',''),
   # When VOYAGE_SAGEMAKER_ENDPOINT is set, the API + runtimes prefer Voyage AI
   # over the Bedrock Titan fallback. Skipped here when the endpoint isn't
   # provisioned (Voyage Marketplace ARN not set), so the Titan path stays live.
   'VOYAGE_SAGEMAKER_ENDPOINT':os.environ.get('VOYAGE_ENDPOINT',''),
   'VOYAGE_OUTPUT_DIM':        '1024',
+  # Request envelope is pinned to multimodal-3 in env.sh. Forwarded verbatim
+  # so any deviation is visible in the runtime env (not silently rewritten).
+  'VOYAGE_REQUEST_FORMAT':    os.environ.get('VOYAGE_REQUEST_FORMAT','multimodal'),
 }
 # AWS CLI env format: {\"KEY\": \"VAL\"}
 print(json.dumps({k: str(v) for k,v in env.items() if v}))
@@ -836,11 +889,6 @@ print(json.dumps(base))
     local runtime_id="$1"
     local env_json="$2"
     local runtime_label="$3"
-    # Layer the gateway opt-in override on top of whatever the caller built.
-    # No-op when the runtime is not in GATEWAY_DEMO_RUNTIMES. Centralising this
-    # here means any runtime — including custom agents added later — picks up
-    # the override without touching the call sites.
-    env_json=$(apply_gateway_override "$runtime_label" "$env_json")
     local role_arn
     role_arn=$(aws bedrock-agentcore-control get-agent-runtime \
       --region "$AWS_REGION" \
@@ -881,12 +929,9 @@ print(json.dumps(base))
     local runtime_label="$2"
     local expected_agent_id="$3"
     local must_be_orchestrator="$4"
-    # Mode + gateway URL are derived from GATEWAY_DEMO_RUNTIMES here rather
-    # than passed in, so call sites don't need to know about the opt-in
-    # mechanism. AGENTCORE_GATEWAY_URL is read from the surrounding scope.
-    local expected_mode
-    expected_mode=$(expected_mode_for "$runtime_label")
     local expected_gw_url="${AGENTCORE_GATEWAY_URL:-}"
+    local expected_mcp_runtime_arn="${MONGODB_MCP_RUNTIME_ARN:-}"
+    local expected_mcp_runtime_endpoint="${MONGODB_MCP_RUNTIME_ENDPOINT:-}"
     local env_json
     local attempt
     for attempt in $(seq 1 12); do
@@ -896,14 +941,15 @@ print(json.dumps(base))
         --query "environmentVariables" \
         --output json 2>/dev/null || echo "{}")
 
-      if python3 - <<'PY' "$env_json" "$runtime_label" "$expected_agent_id" "$must_be_orchestrator" "$expected_mode" "$expected_gw_url"
+      if python3 - <<'PY' "$env_json" "$runtime_label" "$expected_agent_id" "$must_be_orchestrator" "$expected_gw_url" "$expected_mcp_runtime_arn" "$expected_mcp_runtime_endpoint"
 import json, sys
 env = json.loads(sys.argv[1] or "{}")
 label = sys.argv[2]
 expected_agent = sys.argv[3]
 is_orch = sys.argv[4] == "yes"
-expected_mode = sys.argv[5]
-expected_gw_url = sys.argv[6]
+expected_gw_url = sys.argv[5]
+expected_mcp_runtime_arn = sys.argv[6]
+expected_mcp_runtime_endpoint = sys.argv[7]
 
 def fail(msg: str) -> None:
     raise SystemExit(f"{label}: {msg}")
@@ -911,25 +957,23 @@ def fail(msg: str) -> None:
 if env.get("AGENT_ID") != expected_agent:
     fail(f"AGENT_ID expected {expected_agent}, got {env.get('AGENT_ID')}")
 
-# Tool hosting mode + companion env. lambda and gateway are mutually exclusive.
-mode = env.get("TOOL_HOSTING_MODE")
-if mode != expected_mode:
-    fail(f"TOOL_HOSTING_MODE expected {expected_mode}, got {mode}")
-if expected_mode == "lambda":
-    if not env.get("LAMBDA_MCP_FUNCTION_NAME"):
-        fail("LAMBDA_MCP_FUNCTION_NAME missing (required when TOOL_HOSTING_MODE=lambda)")
-    if env.get("MCP_SERVER_URL"):
-        fail(f"MCP_SERVER_URL must be empty when TOOL_HOSTING_MODE=lambda, got '{env.get('MCP_SERVER_URL')}'")
-elif expected_mode == "gateway":
-    mcp_url = env.get("MCP_SERVER_URL")
-    if not mcp_url:
-        fail("MCP_SERVER_URL missing (required when TOOL_HOSTING_MODE=gateway)")
-    if not expected_gw_url:
-        fail("expected_gw_url not provided to verifier in gateway mode (deploy.sh bug)")
-    if mcp_url != expected_gw_url:
-        fail(f"MCP_SERVER_URL != AGENTCORE_GATEWAY_URL (got '{mcp_url}', expected '{expected_gw_url}')")
-else:
-    fail(f"expected_mode must be lambda or gateway, got '{expected_mode}'")
+# Gateway remains configured for non-Mongo tools; MongoDB MCP uses the direct
+# AgentCore Runtime endpoint.
+mcp_url = env.get("MCP_SERVER_URL")
+if not mcp_url:
+    fail("MCP_SERVER_URL missing (required for AgentCore Gateway)")
+if not expected_gw_url:
+    fail("AGENTCORE_GATEWAY_URL not exported to verifier (deploy.sh bug)")
+if mcp_url != expected_gw_url:
+    fail(f"MCP_SERVER_URL != AGENTCORE_GATEWAY_URL (got '{mcp_url}', expected '{expected_gw_url}')")
+if not expected_mcp_runtime_arn:
+    fail("MONGODB_MCP_RUNTIME_ARN not exported to verifier (deploy.sh bug)")
+if not expected_mcp_runtime_endpoint:
+    fail("MONGODB_MCP_RUNTIME_ENDPOINT not exported to verifier (deploy.sh bug)")
+if env.get("MONGODB_MCP_RUNTIME_ARN") != expected_mcp_runtime_arn:
+    fail("MONGODB_MCP_RUNTIME_ARN missing or mismatched")
+if env.get("MONGODB_MCP_RUNTIME_ENDPOINT") != expected_mcp_runtime_endpoint:
+    fail("MONGODB_MCP_RUNTIME_ENDPOINT missing or mismatched")
 
 if env.get("SHORT_TERM_MEMORY_BACKEND") != "agentcore":
     fail(f"SHORT_TERM_MEMORY_BACKEND expected agentcore, got {env.get('SHORT_TERM_MEMORY_BACKEND')}")
@@ -951,15 +995,6 @@ PY
       sleep 5
     done
     return 1
-  }
-
-  # Helper: compute "lambda" or "gateway" for a runtime based on GATEWAY_DEMO_RUNTIMES.
-  expected_mode_for() {
-    if is_gateway_runtime "$1"; then
-      echo "gateway"
-    else
-      echo "lambda"
-    fi
   }
 
   # Specialists: base dynamic env + AGENT_ID
@@ -990,11 +1025,6 @@ env['AGENT_ID'] = 'orchestrator'
 print(json.dumps(env))
 ")
 
-  # The gateway opt-in override is applied inside update_runtime_env, so any
-  # runtime passed below — including future custom agents — automatically
-  # picks up TOOL_HOSTING_MODE=gateway + MCP_SERVER_URL when its name is in
-  # GATEWAY_DEMO_RUNTIMES. No per-runtime unrolling needed here.
-
   update_runtime_env "$AGENTCORE_ORCHESTRATOR_ID" "$DYNAMIC_ENV_ORCHESTRATOR" "orchestrator"
 
   [[ -n "$AGENTCORE_TROUBLESHOOTING_ID" && "$AGENTCORE_TROUBLESHOOTING_ID" != "None" ]] && \
@@ -1022,14 +1052,16 @@ fi
 sep
 log "Phase 7 — Writing .env.live and copying to EC2 via SSM..."
 
-# Tool hosting
-#
-# MongoDB MCP runs as a Lambda function invoked directly by AgentCore runtimes.
-TOOL_HOSTING_MODE="lambda"
-MCP_SERVER_URL=""
-
 if [[ -n "$VOYAGE_ENDPOINT" ]]; then
-  EMBEDDING_LINE="Voyage AI multimodal-3 (${VOYAGE_ENDPOINT})"
+  # Best-effort: derive the model package id from VOYAGE_MODEL_PACKAGE_ARN
+  # so the .env.live banner doesn't lie about which Voyage variant is live.
+  # Example ARN tail: model-package/voyage-3-5-lite-9e7d9de9...
+  VOYAGE_MODEL_LABEL="unknown"
+  VOYAGE_MODEL_TAIL="${VOYAGE_MODEL_PACKAGE_ARN##*/}"
+  if [[ "$VOYAGE_MODEL_TAIL" =~ ^(.+)-[0-9a-f]{8,}$ ]]; then
+    VOYAGE_MODEL_LABEL="${BASH_REMATCH[1]}"
+  fi
+  EMBEDDING_LINE="Voyage AI ${VOYAGE_MODEL_LABEL} (${VOYAGE_ENDPOINT})"
 else
   EMBEDDING_LINE="Bedrock Titan (amazon.titan-embed-text-v2:0)"
 fi
@@ -1037,9 +1069,8 @@ fi
 cat > "$REPO_ROOT/.env.live" <<EOF
 # EC2 mode — generated by deploy.sh on $(date -u +"%Y-%m-%dT%H:%M:%SZ")
 # Embedding: ${EMBEDDING_LINE}
-# Tools:     Direct Lambda MongoDB MCP (no AgentCore Gateway path)
+# Tools:     MongoDB MCP direct AgentCore Runtime; Gateway for non-Mongo tools
 # NOTE: plain KEY=VALUE only — no export, no quotes, no declare -x
-CHAT_MODE=live
 ORCHESTRATOR_MODE=runtime
 
 # MongoDB Atlas
@@ -1050,29 +1081,40 @@ MONGODB_DB=${ATLAS_DB_NAME}
 BEDROCK_KB_ID=${BEDROCK_KB_ID}
 AWS_REGION=${AWS_REGION}
 
-# Embedding — Voyage SageMaker when ARN was set at deploy time, Titan otherwise
+# Embedding — explicit provider switch from deploy.sh (no silent fallback).
+#   voyage  → VOYAGE_SAGEMAKER_ENDPOINT set, voyage-multimodal-3 (SoW)
+#   titan   → VOYAGE_SAGEMAKER_ENDPOINT empty, Bedrock Titan v2 (deviation)
+EMBEDDINGS_PROVIDER=${EMBEDDINGS_PROVIDER}
 VOYAGE_SAGEMAKER_ENDPOINT=${VOYAGE_ENDPOINT}
+VOYAGE_OUTPUT_DIM=1024
+VOYAGE_REQUEST_FORMAT=${VOYAGE_REQUEST_FORMAT:-multimodal}
 EMBEDDING_MODEL_ID=amazon.titan-embed-text-v2:0
 
-# AgentCore — Memory store, Gateway (Lambda MCP), Agent runtimes (orchestrator + specialists)
+# AgentCore — Memory store, Gateway, Agent runtimes (orchestrator + specialists)
 AGENTCORE_MEMORY_STORE_ID=${AGENTCORE_MEMORY_STORE_ID}
 AGENTCORE_GATEWAY_URL=${AGENTCORE_GATEWAY_URL}
 AGENTCORE_ORCHESTRATOR_ARN=${AGENTCORE_ORCHESTRATOR_ARN}
 
-# Tool hosting — AgentCore runtime direct invoke to Lambda MongoDB MCP
-TOOL_HOSTING_MODE=${TOOL_HOSTING_MODE}
-MCP_SERVER_URL=${MCP_SERVER_URL}
-LAMBDA_MCP_FUNCTION_NAME=${LAMBDA_MCP_FUNCTION_NAME}
-LAMBDA_MCP_FUNCTION_ARN=${LAMBDA_MCP_ARN}
+# Tool hosting — Gateway remains for non-Mongo tools; MongoDB MCP calls go
+# directly to the dedicated AgentCore Runtime.
+MCP_SERVER_URL=${AGENTCORE_GATEWAY_URL}
+MONGODB_MCP_RUNTIME_ARN=${MONGODB_MCP_RUNTIME_ARN}
+MONGODB_MCP_RUNTIME_ENDPOINT=${MONGODB_MCP_RUNTIME_ENDPOINT}
 SHORT_TERM_MEMORY_BACKEND=agentcore
 PERSIST_CHAT_SESSIONS=1
 MEMORY_TTL_DAYS=30
 
+# Long-term memory fact extractor. Pinned to Claude Haiku 4.5 because the
+# previous default (claude-3-5-haiku-20241022) is deprecated and silently
+# AccessDenied on freshly granted Bedrock accounts. Override only if you have
+# enabled a different tool-use-capable model in your account.
+MEMORY_EXTRACTION_MODEL_ID=us.anthropic.claude-haiku-4-5-20251001-v1:0
+
 # CloudWatch
 CLOUDWATCH_LOG_GROUP=${CW_API_LOG_GROUP}
 
-# Cognito — JWT auth for the API (toggle via REQUIRE_AUTH)
-REQUIRE_AUTH=${COGNITO_REQUIRE_AUTH}
+# Cognito — JWT auth for the API. Always on; assertJwksAuthConfigured() refuses to boot
+# the API without AUTH_JWKS_URI + AUTH_ISSUER (api/src/lib/jwt-verify.ts).
 AUTH_JWKS_URI=${COGNITO_JWKS}
 AUTH_ISSUER=https://cognito-idp.${AWS_REGION}.amazonaws.com/${COGNITO_POOL_ID}
 STREAMLIT_COGNITO_POOL_ID=${COGNITO_POOL_ID}
@@ -1178,23 +1220,60 @@ if [[ "$HEALTH_OK" != "yes" ]]; then
 fi
 
 sep
+log "Phase 9a2 — /health dependency smoke (mongodb + agentcore + mcpServer must report 'connected')..."
+HEALTH_PAYLOAD=$(curl -sf --max-time 10 "http://${EC2_IP}:3000/health" 2>/dev/null || echo "")
+if [[ -n "$HEALTH_PAYLOAD" ]]; then
+  python3 - "$HEALTH_PAYLOAD" <<'PY'
+import json, sys
+payload = json.loads(sys.argv[1])
+deps = payload.get("dependencies", {})
+required = {
+    # Atlas: must be connected (we just seeded data there).
+    "mongodb": "connected",
+    # AgentCore Memory Store: probe must classify "Actor not found"
+    # for the synthetic health-probe actor as `connected` — the API
+    # round-trip succeeded, IAM is fine, the memory store exists.
+    # If this regresses to `unreachable`, somebody dropped the
+    # `ResourceNotFoundException` + `/actor/i` carve-out in
+    # api/src/lib/health-status.ts.
+    "agentcore": "connected",
+    # AgentCore Gateway MCP handshake: must be reachable from EC2.
+    "mcpServer": "connected",
+}
+mismatches = []
+for key, want in required.items():
+    got = deps.get(key)
+    if got != want:
+        mismatches.append(f"  {key}: want={want}  got={got}")
+if mismatches:
+    raise SystemExit(
+        "Phase 9a2 failed — /health reported wrong dependency status.\n"
+        "Full /health payload:\n"
+        + json.dumps(payload, indent=2)
+        + "\nMismatches:\n" + "\n".join(mismatches)
+    )
+print("  /health dependencies all 'connected' as expected")
+PY
+  ok "/health dependency smoke passed"
+else
+  warn "/health probe returned no body — skipping dependency smoke"
+fi
+
+sep
 log "Phase 9b — Deterministic backend smoke validation..."
 SMOKE_SESSION_ID="deploy-smoke-$(date +%s)"
 EC2_API_URL="http://${EC2_IP}:3000"
-SMOKE_ID_TOKEN=""
-if [[ "$COGNITO_REQUIRE_AUTH" == "true" ]]; then
-  SMOKE_ID_TOKEN=$(aws cognito-idp initiate-auth \
-    --region "$AWS_REGION" \
-    --client-id "$COGNITO_CLIENT_ID" \
-    --auth-flow USER_PASSWORD_AUTH \
-    --auth-parameters "USERNAME=${COGNITO_SMOKE_USER_EMAIL},PASSWORD=${COGNITO_TEST_PASSWORD}" \
-    --query "AuthenticationResult.IdToken" \
-    --output text 2>/dev/null || echo "")
-  [[ -n "$SMOKE_ID_TOKEN" && "$SMOKE_ID_TOKEN" != "None" ]] || err "Could not obtain Cognito IdToken for smoke user ${COGNITO_SMOKE_USER_EMAIL}"
-fi
+SMOKE_ID_TOKEN=$(aws cognito-idp initiate-auth \
+  --region "$AWS_REGION" \
+  --client-id "$COGNITO_CLIENT_ID" \
+  --auth-flow USER_PASSWORD_AUTH \
+  --auth-parameters "USERNAME=${COGNITO_SMOKE_USER_EMAIL},PASSWORD=${COGNITO_TEST_PASSWORD}" \
+  --query "AuthenticationResult.IdToken" \
+  --output text 2>/dev/null || echo "")
+[[ -n "$SMOKE_ID_TOKEN" && "$SMOKE_ID_TOKEN" != "None" ]] || err "Could not obtain Cognito IdToken for smoke user ${COGNITO_SMOKE_USER_EMAIL}"
 
 python3 - <<'PY' "$EC2_API_URL" "$SMOKE_SESSION_ID" "$SMOKE_ID_TOKEN"
-import json, sys, urllib.request
+import http.client, json, sys, time, urllib.error, urllib.request
 api = sys.argv[1].rstrip("/")
 sid = sys.argv[2]
 id_token = sys.argv[3]
@@ -1208,8 +1287,47 @@ def post_chat(message: str) -> str:
         data=json.dumps({"sessionId": sid, "message": message}).encode(),
         headers=headers,
     )
-    with urllib.request.urlopen(req, timeout=120) as r:
-        return r.read().decode("utf-8", "replace")
+    last_error = None
+    for attempt in range(1, 4):
+        try:
+            with urllib.request.urlopen(req, timeout=180) as r:
+                return r.read().decode("utf-8", "replace")
+        except (http.client.IncompleteRead, http.client.HTTPException, TimeoutError, urllib.error.URLError) as exc:
+            last_error = exc
+            # Right after EC2 service restart, the first SSE request can lose the
+            # chunked terminator while the API/AgentCore runtime is still warming.
+            # Retry transport-level failures only; semantic validation below
+            # still requires token/handoff/done events and real Mongo/MCP traces.
+            if attempt == 3:
+                break
+            time.sleep(5 * attempt)
+    raise SystemExit(f"SSE smoke validation failed: chat stream transport error after retries: {last_error}")
+
+def parse_turn_end(body: str) -> dict:
+    """Pull the chat.turn.end trace event out of the SSE body, return its summary.
+
+    We rely on this rather than substring matching the model output so the
+    smoke test cannot pass when the runtime silently degrades to "narrate
+    what I would have done" mode (see history: gateway JWT scope, MCP tool
+    name aliasing, run-chat-stream missing getMcpTools, and Lambda
+    parseEvent — all of which produced fluent SSE streams with zero real
+    tool calls).
+    """
+    for raw in body.split("\n\n"):
+        lines = raw.strip().splitlines()
+        evt = next((l[7:].strip() for l in lines if l.startswith("event: ")), "")
+        if evt != "trace":
+            continue
+        data_line = next((l[5:].lstrip() for l in lines if l.startswith("data:")), "")
+        if not data_line:
+            continue
+        try:
+            payload = json.loads(data_line)
+        except json.JSONDecodeError:
+            continue
+        if payload.get("type") == "chat.turn.end":
+            return payload.get("payload", {}).get("summary", {}) or {}
+    return {}
 
 first = post_chat("I need to return an item from a delivered order!")
 second = post_chat("Order ORD-1003 for alex@example.com. Please start the return.")
@@ -1226,6 +1344,64 @@ if not (t1 and d1 and t2 and h2 and d2):
     raise SystemExit("SSE smoke validation failed: missing token/handoff/done events")
 if "event: error" in first or "event: error" in second:
     raise SystemExit("SSE smoke validation failed: error event present")
+
+# Substantive check: the second turn must actually pull the real order document
+# from Atlas (otherwise the agent is just narrating). The seeded dataset lists
+# ORD-1003 as a delivered Compact Widget order — assert at least one of those
+# identifiers is in the response, and that the chat.turn.end summary shows the
+# AgentCore Runtime reported a non-empty response.
+second_summary = parse_turn_end(second)
+if not second_summary:
+    raise SystemExit("SSE smoke validation failed: chat.turn.end summary missing for second turn")
+if (second_summary.get("agentcoreRuntimeMs") or 0) <= 0:
+    raise SystemExit("SSE smoke validation failed: agentcoreRuntimeMs <= 0 (Hono never called the runtime)")
+if (second_summary.get("bytesOut") or 0) <= 0:
+    raise SystemExit("SSE smoke validation failed: bytesOut == 0 (runtime returned an empty response)")
+
+# An order question must always reach the order-management specialist runtime,
+# producing a 2-hop trace (Hono → orchestrator + orchestrator → specialist).
+# `agentcoreHops` is incremented by `TraceCollector.attachEventsNested` from
+# the spliced inner agentcore.invoke event. If this stays at 1, either the
+# runtime entrypoint (`api/src/agent-runtime-code.ts`) is not shipping back
+# its `traceEvents`, or the splice is dropping the inner hop, or the
+# orchestrator silently fell back to in-process answering. Any of these makes
+# the Trace Viewer summary lie about the runtime topology.
+hops = second_summary.get("agentcoreHops") or 0
+if hops < 2:
+    raise SystemExit(
+        f"SSE smoke validation failed: agentcoreHops={hops} < 2 for an "
+        "order question (expected 2: Hono → orchestrator → specialist). "
+        "Either the runtime trace splice is broken (check "
+        "`agent-runtime-code.ts` returns `traceEvents` and Hono adapter "
+        "calls `trace.attachEventsNested(...)`), or the orchestrator's "
+        "swarm handoff didn't fire and the fallback path answered in-process."
+    )
+# Substantive tool counters must reflect at least one Mongo query and one MCP
+# call. Without the counter rollup in `attachEventsNested(...)`, every nested
+# tool/mongo/mcp event is invisible to the summary even when present in
+# events[] — exactly the trace-summary regression that masked itself behind
+# successful SSE streams.
+if (second_summary.get("mongoQueries") or 0) <= 0:
+    raise SystemExit("SSE smoke validation failed: mongoQueries == 0 — counter rollup or Mongo path broken")
+if (second_summary.get("mcpCalls") or 0) <= 0:
+    raise SystemExit("SSE smoke validation failed: mcpCalls == 0 — gateway MCP path or counter rollup broken")
+
+# The seeded dataset for ORD-1003 always contains "Compact Widget" or "SKU-1"
+# in the order document. If neither shows up in the model's response after
+# asking about the order, the agent did not successfully read Atlas — most
+# likely the gateway MCP path is broken (JWT scope, tool-name alias, or
+# Lambda parseEvent envelope) even though SSE looks healthy.
+def has_order_data(body: str) -> bool:
+    needles = ("Compact Widget", "SKU-1", "29.99")
+    return any(n in body for n in needles)
+
+if not has_order_data(second):
+    raise SystemExit(
+        "SSE smoke validation failed: response for ORD-1003 lacks any seeded "
+        "order field (Compact Widget / SKU-1 / 29.99). The MCP tool path is "
+        "almost certainly broken — check AgentCore Runtime logs for "
+        "'no MCP tools loaded' and Lambda logs for 'Unrecognized event shape'."
+    )
 
 if id_token:
     req = urllib.request.Request(
@@ -1253,8 +1429,9 @@ echo "  Bedrock KB : ${BEDROCK_KB_ID:-'(not yet provisioned)'}"
 echo "  Embedding  : ${VOYAGE_ENDPOINT:-'Titan (amazon.titan-embed-text-v2:0)'}"
 echo "  AgentCore  : memory=${AGENTCORE_MEMORY_STORE_ID:-?}"
 echo "               gateway=${AGENTCORE_GATEWAY_URL:-?}"
-echo "  Tools/MCP  : Lambda ${LAMBDA_MCP_ARN:-?} direct invoke (no Gateway)"
-echo "  Auth       : REQUIRE_AUTH=${COGNITO_REQUIRE_AUTH}"
+echo "  Tools/MCP  : MongoDB direct runtime ${MONGODB_MCP_RUNTIME_ARN:-?}"
+echo "               Gateway available for non-Mongo tools ${AGENTCORE_GATEWAY_URL:-?}"
+echo "  Auth       : Cognito JWKS required (no bypass)"
 echo "               Cognito users=${COGNITO_TEST_USERS_CSV}"
 echo "               Password=${COGNITO_TEST_PASSWORD}"
 echo ""
@@ -1277,10 +1454,13 @@ export _M_EC2_IP="$EC2_IP"        _M_EC2_ID="$EC2_INSTANCE_ID"
 export _M_EC2_API="$EC2_API"      _M_EC2_UI="$EC2_UI"
 export _M_COGNITO_POOL="$COGNITO_POOL_ID" _M_COGNITO_CLIENT="$COGNITO_CLIENT_ID"
 export _M_VOYAGE="$VOYAGE_ENDPOINT"
+export _M_EMBEDDINGS_PROVIDER="$EMBEDDINGS_PROVIDER"
+export _M_EMBEDDINGS_MODEL="$([[ "$EMBEDDINGS_PROVIDER" == "voyage" ]] && echo "${VOYAGE_MODEL_PACKAGE_ARN##*/}" || echo "amazon.titan-embed-text-v2:0")"
+export _M_EMBEDDINGS_SOW_ALIGNED="$([[ "$EMBEDDINGS_PROVIDER" == "voyage" ]] && echo "true" || echo "false")"
 export _M_ECR_API="$ECR_API_REPO"  _M_ECR_UI="$ECR_UI_REPO"
-export _M_AC_MEM="$AGENTCORE_MEMORY_STORE_ID" _M_AC_GW="$AGENTCORE_GATEWAY_URL" _M_LAMBDA_ARN="$LAMBDA_MCP_ARN"
+export _M_AC_MEM="$AGENTCORE_MEMORY_STORE_ID" _M_AC_GW="$AGENTCORE_GATEWAY_URL" _M_MCP_RUNTIME_ARN="$MONGODB_MCP_RUNTIME_ARN" _M_MCP_RUNTIME_ENDPOINT="$MONGODB_MCP_RUNTIME_ENDPOINT"
 export _M_ATLAS_PROJ="$TF_VAR_atlas_project_id" _M_ATLAS_HOST="$ATLAS_MONGO_HOST"
-export _M_TOOL_MODE="$TOOL_HOSTING_MODE"
+export _M_TOOL_MODE="hybrid"
 export _M_KB_SECRET_NAME="${PROJECT_NAME}-bedrock-kb-creds-${ENVIRONMENT}"
 
 python3 - <<'PYEOF' > "$MANIFEST_FILE"
@@ -1304,16 +1484,20 @@ manifest = {
     "cognito_user_pool_id":       v("_M_COGNITO_POOL"),
     "cognito_client_id":          v("_M_COGNITO_CLIENT"),
     "voyage_sagemaker_endpoint":  v("_M_VOYAGE"),
+    "embeddings_provider":        v("_M_EMBEDDINGS_PROVIDER"),
+    "embeddings_model":           v("_M_EMBEDDINGS_MODEL"),
+    "embeddings_sow_aligned":     v("_M_EMBEDDINGS_SOW_ALIGNED") == "true",
     "ecr_api_repo":               v("_M_ECR_API"),
     "ecr_ui_repo":                v("_M_ECR_UI"),
     "agentcore_memory_id":        v("_M_AC_MEM"),
     "agentcore_gateway_url":      v("_M_AC_GW"),
-    "agentcore_gateway_target":   "not used in tool path (direct Lambda invoke)",
-    "lambda_mcp_function_arn":    v("_M_LAMBDA_ARN"),
+    "agentcore_gateway_target":   "reserved for non-Mongo Gateway-hosted tools",
+    "mongodb_mcp_runtime_arn":    v("_M_MCP_RUNTIME_ARN"),
+    "mongodb_mcp_runtime_endpoint": v("_M_MCP_RUNTIME_ENDPOINT"),
     "atlas_project_id":           v("_M_ATLAS_PROJ"),
     "atlas_srv_host":             v("_M_ATLAS_HOST"),
     "tool_hosting_mode":          v("_M_TOOL_MODE"),
-    "mcp_server":                 "Lambda: mongodb-mcp invoked directly by AgentCore runtimes",
+    "mcp_server":                 "MongoDB MCP direct AgentCore Runtime; other tools via AgentCore Gateway",
   }
 }
 print(json.dumps(manifest, indent=2))

@@ -122,7 +122,7 @@
         <mxCell id="ca4" style="edgeStyle=orthogonalEdgeStyle;html=1;strokeColor=#82b366;strokeWidth=2;" edge="1" parent="1" source="cog4" target="cog5"><mxGeometry relative="1" as="geometry"/></mxCell>
 
         <!-- S3 note -->
-        <mxCell id="s3-note" value="JWKS URI: https://cognito-idp.us-east-1.amazonaws.com/us-east-1_giTk8MWzq/.well-known/jwks.json (REQUIRE_AUTH=true + AUTH_JWKS_URI must be set. Auth is OFF by default in POC.)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontSize=10;align=left;" vertex="1" parent="1">
+        <mxCell id="s3-note" value="JWKS URI: https://cognito-idp.us-east-1.amazonaws.com/us-east-1_giTk8MWzq/.well-known/jwks.json (AUTH_JWKS_URI + AUTH_ISSUER are required at boot — assertJwksAuthConfigured() in api/src/lib/jwt-verify.ts. Auth is mandatory; there is no unauthenticated mode.)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontSize=10;align=left;" vertex="1" parent="1">
           <mxGeometry x="40" y="595" width="1100" height="40" as="geometry"/>
         </mxCell>
 

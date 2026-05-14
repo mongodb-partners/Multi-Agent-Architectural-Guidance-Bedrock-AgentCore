@@ -1,14 +1,13 @@
 /**
  * Trace retrieval endpoints.
  *
- * Auth ownership matrix:
- *  - When `userId` is known (JWT or local dev token), the trace's `userId`
- *    must match — otherwise the response is 404 (treat unauthorized as
- *    "not found" to avoid leaking the existence of someone else's trace).
- *  - When auth is disabled and the trace has no `userId`, the trace is
- *    returned to any caller.
- *  - Traces still in the in-process ring buffer with a `userId` set on the
- *    request are filtered the same way.
+ * Auth ownership matrix (auth is always required — see api/src/middleware/auth.ts):
+ *  - When the trace has a `userId`, the caller's JWT `sub` must match — otherwise the
+ *    response is 404 (treat unauthorized as "not found" to avoid leaking the existence
+ *    of someone else's trace).
+ *  - Traces written before user scoping was wired (no `userId` on the document) are
+ *    treated as unscoped and visible to any authenticated caller. New traces always
+ *    carry a `userId`.
  *
  * Endpoints:
  *  - `GET /traces/:traceId`        — fetch a complete trace document.
@@ -39,7 +38,7 @@ const MONGO_TYPES = new Set([
 
 function userOwnsTrace(trace: Trace | undefined, userId: string | undefined): boolean {
   if (!trace) return false;
-  if (!trace.userId) return true; // unscoped trace (dev / no-auth) — readable by any caller
+  if (!trace.userId) return true; // unscoped legacy trace — readable by any authenticated caller
   if (!userId) return false;
   return trace.userId === userId;
 }

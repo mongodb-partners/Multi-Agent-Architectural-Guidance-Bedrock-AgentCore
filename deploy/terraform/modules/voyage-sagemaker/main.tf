@@ -2,13 +2,16 @@ terraform {
   required_providers {
     aws = {
       source  = "hashicorp/aws"
-      version = "~> 5.0"
+      version = ">= 6.27, < 7.0"
     }
   }
 }
 
 locals {
-  endpoint_name = "${var.project_name}-voyage-3-${var.environment}"
+  # Endpoint name carries the model variant so swapping listings
+  # (voyage-multimodal-3 ↔ voyage-3-5-lite) creates a new endpoint instead
+  # of confusingly reusing the previous one.
+  endpoint_name = "${var.project_name}-${var.endpoint_name_suffix}-${var.environment}"
 }
 
 # =============================================================================

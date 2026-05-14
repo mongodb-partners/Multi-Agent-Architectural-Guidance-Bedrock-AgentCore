@@ -1,9 +1,4 @@
-"""Inline summary card rendered under the assistant reply.
-
-Shown for every assistant turn whenever at least one trace event arrived.
-High-priority signals are surfaced prominently as tiles; lower-priority
-detail collapses into "View full trace" + a developer-details expander.
-"""
+"""Trace Viewer link rendered under the assistant reply."""
 
 from __future__ import annotations
 
@@ -13,6 +8,7 @@ from typing import Iterable
 import streamlit as st
 
 from lib.api_client import TraceEvent
+from lib.trace_navigation import open_trace_viewer, trace_id_from_url
 
 
 @dataclass
@@ -35,9 +31,10 @@ class TurnSummary:
     memory_facts_read: int = 0
     memory_facts_written: int = 0
     skills_activated: list[str] = field(default_factory=list)
-    backend_mock: bool = False
     error_count: int = 0
     degraded: bool = False
+    classifications: list[dict] = field(default_factory=list)
+    thinking_blocks: list[str] = field(default_factory=list)
 
     def has_signal(self) -> bool:
         return bool(
@@ -49,8 +46,13 @@ class TurnSummary:
             or self.skills_activated
             or self.memory_facts_read
             or self.memory_facts_written
+            or self.classifications
+            or self.thinking_blocks
             or self.trace_id
         )
+
+    def has_reasoning(self) -> bool:
+        return bool(self.classifications or self.thinking_blocks)
 
 
 # ---------------------------------------------------------------------------
@@ -103,11 +105,6 @@ def aggregate_summary(events: Iterable[TraceEvent]) -> TurnSummary:
             else:
                 cost_total += cost
 
-        elif t == "model.request":
-            backend = str(p.get("backend") or "")
-            if backend == "mock":
-                s.backend_mock = True
-
         elif t == "tool.call":
             name = str(p.get("toolName") or "")
             if p.get("phase") == "end" and name and name not in s.tools_used:
@@ -141,6 +138,23 @@ def aggregate_summary(events: Iterable[TraceEvent]) -> TurnSummary:
 
         elif t == "agentcore.nested_trace":
             s.agentcore_nested += int(p.get("eventCount") or 0)
+
+        elif t == "agentcore.classification":
+            chosen = str(p.get("chosenSpecialist") or "").strip()
+            reasoning = str(p.get("reasoning") or "").strip()
+            if chosen or reasoning:
+                s.classifications.append(
+                    {
+                        "chosen": chosen,
+                        "reasoning": reasoning,
+                        "latency_ms": int(p.get("latencyMs") or 0),
+                    }
+                )
+
+        elif t == "model.thinking_block":
+            text = str(p.get("text") or "").strip()
+            if text:
+                s.thinking_blocks.append(text)
 
         elif t == "error":
             s.error_count += 1
@@ -176,78 +190,84 @@ def _tile(label: str, value: str, *, hint: str | None = None) -> None:
     )
 
 
+_THINKING_PREVIEW_CHARS = 280
+
+
+def _render_reasoning_panel(s: TurnSummary) -> None:
+    """Inline reasoning surface: classification + extended-thinking blocks.
+
+    Lives inside the assistant message so it stays attached to the reply
+    on replay (see chat_panel.render_message_history → render_inline_summary).
+    Both signals are collapsed by default so they don't dominate the chat.
+    """
+    if not s.has_reasoning():
+        return
+
+    parts: list[str] = []
+    if s.classifications:
+        parts.append(
+            f"{len(s.classifications)} routing decision"
+            f"{'s' if len(s.classifications) != 1 else ''}"
+        )
+    if s.thinking_blocks:
+        parts.append(
+            f"{len(s.thinking_blocks)} thinking block"
+            f"{'s' if len(s.thinking_blocks) != 1 else ''}"
+        )
+    header = "🧠 Reasoning — " + " · ".join(parts)
+
+    with st.expander(header, expanded=False):
+        for i, c in enumerate(s.classifications, 1):
+            chosen = c.get("chosen") or "?"
+            latency = int(c.get("latency_ms") or 0)
+            st.markdown(
+                f"**Routing #{i}** → `{chosen}`"
+                + (f" · {latency} ms" if latency else "")
+            )
+            reasoning = (c.get("reasoning") or "").strip()
+            if reasoning:
+                st.markdown(f"> {reasoning}")
+            else:
+                st.caption("_(no orchestrator reasoning emitted)_")
+        for i, block in enumerate(s.thinking_blocks, 1):
+            preview = block[:_THINKING_PREVIEW_CHARS]
+            truncated = len(block) > _THINKING_PREVIEW_CHARS
+            label = (
+                f"🤔 Thinking block #{i}"
+                f" ({len(block):,} chars)" if truncated else f"🤔 Thinking block #{i}"
+            )
+            with st.expander(label, expanded=False):
+                if truncated:
+                    st.caption(
+                        f"Showing first {_THINKING_PREVIEW_CHARS} chars — full text below."
+                    )
+                    st.markdown(preview + "…")
+                    st.text_area(
+                        "Full thinking",
+                        value=block,
+                        height=200,
+                        key=f"thinking_full_{id(s)}_{i}",
+                        disabled=True,
+                    )
+                else:
+                    st.markdown(block)
+
+
 def render_inline_summary(
     s: TurnSummary,
     *,
     trace_url: str | None = None,
+    trace_id: str | None = None,
     raw_events: list[TraceEvent] | None = None,
 ) -> None:
-    """Render the inline summary card under an assistant reply."""
+    """Render only the Trace Viewer button under an assistant reply."""
     if not s.has_signal():
         return
 
-    if s.backend_mock:
-        st.info("This turn ran against **DEV_MOCK_BACKENDS** — no real Bedrock/Atlas call.", icon="🧪")
-
-    # ── Top tile row — high priority signals ──────────────────────────────
-    cols = st.columns([1, 1, 1, 1, 1])
-    with cols[0]:
-        if s.duration_ms:
-            _tile("Latency", f"{s.duration_ms / 1000:.1f}s")
-    with cols[1]:
-        if s.total_tokens:
-            _tile("Tokens", f"{s.total_tokens:,}", hint=f"{s.input_tokens:,} in / {s.output_tokens:,} out")
-    with cols[2]:
-        if s.cost_usd is not None:
-            mark = "≈" if not s.cost_estimate_complete else ""
-            _tile("Cost", f"{mark}${s.cost_usd:.4f}")
-    with cols[3]:
-        if s.tools_used:
-            _tile("Tools", str(len(s.tools_used)), hint=", ".join(s.tools_used[:2]))
-    with cols[4]:
-        if s.mongo_ops:
-            success = sum(1 for op in s.mongo_ops if op["status"] != "error")
-            _tile(
-                "MongoDB",
-                f"{success}/{len(s.mongo_ops)} ok",
-                hint=f"avg {sum(op['latencyMs'] for op in s.mongo_ops) // max(len(s.mongo_ops), 1)} ms",
-            )
-
-    # ── Memory + skills + agentcore badges ─────────────────────────────────
-    badges: list[str] = []
-    if s.memory_facts_read:
-        badges.append(f"🧠 {s.memory_facts_read} fact{'s' if s.memory_facts_read != 1 else ''} read")
-    if s.memory_facts_written:
-        badges.append(f"💾 {s.memory_facts_written} stored")
-    if s.skills_activated:
-        badges.append(f"📚 Skills: {', '.join(s.skills_activated[:3])}")
-    if s.agentcore_invokes:
-        badges.append(f"☁️ AgentCore × {s.agentcore_invokes}")
-    if s.handoffs:
-        for fr, to in s.handoffs:
-            badges.append(f"🔀 `{fr}` → `{to}`")
-    if s.error_count:
-        badges.append(f"⚠️ {s.error_count} error{'s' if s.error_count != 1 else ''}")
-    if badges:
-        st.markdown(" · ".join(badges))
-
-    # ── Mongo mini-trail (compact) ────────────────────────────────────────
-    if s.mongo_ops:
-        with st.expander(f"MongoDB ops ({len(s.mongo_ops)})", expanded=False):
-            for i, op in enumerate(s.mongo_ops, 1):
-                emoji = "✅" if op["status"] == "ok" else ("∅" if op["status"] == "empty" else "❌")
-                st.markdown(f"{emoji} **#{i}** — {op['docCount']} docs · {op['latencyMs']} ms · {op['status']}")
-
-    # ── Footer link to full trace + developer details ─────────────────────
-    if trace_url:
-        st.markdown(f"[**View full trace →**]({trace_url})")
-
-    if raw_events:
-        with st.expander("Developer details (raw trace events)", expanded=False):
-            st.json([_event_to_json(e) for e in raw_events])
-
-    if s.degraded:
-        st.caption("⚠️ Trace was byte-capped — some low-priority events were dropped.")
+    _ = raw_events  # Metrics and raw events intentionally live only in Trace Viewer.
+    tid = trace_id or trace_id_from_url(trace_url)
+    if tid and st.button("View full trace →", key=f"view_full_trace_{tid}"):
+        open_trace_viewer(tid)
 
 
 def _event_to_json(ev: TraceEvent) -> dict:

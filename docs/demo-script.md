@@ -20,7 +20,7 @@ source env.sh && aws sts get-caller-identity
 
 # 2. Start stack (kill old processes first)
 lsof -ti:3000,8501 | xargs kill -9 2>/dev/null
-source env.sh && source .env.live && export PATH=”$HOME/.bun/bin:$PATH” && export ORCHESTRATOR_MODE=swarm
+source env.sh && source .env.live && export PATH=”$HOME/.bun/bin:$PATH”
 cd api && nohup bun run dev > ../logs/api.log 2>&1 &
 ~/.venvs/multiagent-ui/bin/streamlit run ui/app.py --server.headless true &
 
@@ -121,7 +121,7 @@ Switch to the **repo** (IDE or GitHub):
 
 1. Open [`config/agents/orchestrator.agent.md`](../config/agents/orchestrator.agent.md) — **handoffs** table in frontmatter.
 2. Open [`config/skills/order-management/SKILL.md`](../config/skills/order-management/SKILL.md) — tool usage + `read_skill_resource` paths.
-3. Open [`data/dev/mongo-fixtures.json`](../data/dev/mongo-fixtures.json) — **orders** / **products** / **customers**.
+3. Open the [`db-seeding/`](../db-seeding/) `seed-{products,orders,customers}.ts` scripts — the same fixtures that live in Atlas, served through the MongoDB MCP AgentCore Runtime.
 
 **Presenter line:** *“A new vertical is mostly new markdown under `config/` plus data shape—not a new microservice per customer.”*
 
@@ -140,8 +140,8 @@ Switch to the **repo** (IDE or GitHub):
 
 | Symptom | Likely fix |
 |---------|------------|
-| `[stub]` in reply | API missing `CHAT_MODE=live` |
-| No handoff lines | `ORCHESTRATOR_MODE=swarm` not set, or target agent isn’t **orchestrator** |
+| API exits at boot with "AGENTCORE_ORCHESTRATOR_ARN is not set" | Source `.env.live` (or export the ARN) before `bun run dev` |
+| No handoff lines | The orchestrator runtime is in single-agent mode; set `ORCHESTRATOR_MODE=swarm` on that runtime and redeploy |
 | Empty / errors | API not running; check `curl -s http://127.0.0.1:3000/health` |
 | UI can’t reach API | `STREAMLIT_API_URL` / firewall; default `http://127.0.0.1:3000` |
 
@@ -151,7 +151,7 @@ Switch to the **repo** (IDE or GitHub):
 
 - Point to [`DEV_STATUS.md`](../DEV_STATUS.md) for the full env matrix. Optional setup (persistence, auth, real backends) is summarized in **[Before the demo](#before-the-demo)** above.
 - Point to [`TASKS.md`](../TASKS.md) demo acceptance for what’s still open for a **full** production story (auth, persistent memory, Atlas, etc.).
-- **Docker option:** run `docker compose up --build` (or `make docker-up`) from the repo root to show the full stack in containers — no Bun or Python install required. Uses the same `DEV_MOCK_BACKENDS=1` defaults.
+- **Docker option:** run `docker compose up --build` (or `make docker-up`) from the repo root to show the full stack in containers — no Bun or Python install required. The API still requires `AGENTCORE_ORCHESTRATOR_ARN` and AWS credentials in the environment.
 
 ---
 
@@ -161,13 +161,13 @@ Use this after a demo session so someone else can **run it again** and **explain
 
 | # | Topic | They should be able to… |
 |---|--------|-------------------------|
-| 1 | **Run the stack** | Start API (`bun run dev` in `api/`) + UI (`streamlit run app.py` in `ui/`) with `CHAT_MODE=live` and `DEV_MOCK_BACKENDS=1`. |
-| 2 | **Swarm vs single** | Set or unset `ORCHESTRATOR_MODE=swarm`, pick **orchestrator** vs a specialist in the UI, and state what changes (handoffs vs direct agent). |
+| 1 | **Run the stack** | Source `env.sh` + `.env.live`, then start API (`bun run dev` in `api/`) and UI (`streamlit run app.py` in `ui/`) pointing at the deployed AgentCore Orchestrator runtime. |
+| 2 | **Swarm vs single** | Toggle `ORCHESTRATOR_MODE=swarm` on the orchestrator runtime, pick **orchestrator** vs a specialist in the UI, and state what changes (handoffs vs direct agent). |
 | 3 | **Where config lives** | Open `config/agents/*.agent.md` (persona + `handoffs` + `tools`) and `config/skills/*/SKILL.md` (domain instructions + progressive disclosure). |
-| 4 | **Dev data** | Point to `data/dev/mongo-fixtures.json` and say it backs `mongodb_query` / vector/KB **mocks** when `DEV_MOCK_BACKENDS=1`. |
+| 4 | **Tool path** | All Mongo tools resolve to MCP calls against the MongoDB MCP AgentCore Runtime (`MONGODB_MCP_RUNTIME_ARN` / `MONGODB_MCP_RUNTIME_ENDPOINT`); Gateway remains for non-Mongo tools. |
 | 5 | **API contract** | Name `POST /chat` (SSE), `GET /agents`, `GET /skills`, `GET /sessions`, `DELETE /sessions/:id`, `GET /http-tools`, and where events are documented ([`docs/api-reference.md`](api-reference.md)). |
-| 6 | **What’s actually missing** | List at least three **not implemented** items (configurable behavior belongs in [Before the demo](#before-the-demo)): e.g. **multi-instance** coherence for Mongo-backed **`chat_sessions`**; **AgentCore** Memory/Gateway/Code Interpreter wired into product flows (SDK validate only today); **Lambda** handlers under **`lambda/base-tools/`** for Gateway mode; **full Terraform/ECS/ALB** rollout beyond stubs/images; **long-term memory** still raw turn excerpts, not PII-safe extraction + vector recall. Source of truth: [`TASKS.md`](../TASKS.md), [`DEV_STATUS.md`](../DEV_STATUS.md). |
+| 6 | **What’s actually missing** | List at least three **not implemented** items (configurable behavior belongs in [Before the demo](#before-the-demo)): e.g. **multi-instance** coherence for Mongo-backed **`chat_sessions`**; **AgentCore** Code Interpreter wired into product flows; **full Terraform/ECS/ALB** rollout beyond stubs/images; **long-term memory** still raw turn excerpts, not PII-safe extraction + vector recall. Source of truth: [`TASKS.md`](../TASKS.md), [`DEV_STATUS.md`](../DEV_STATUS.md). |
 | 7 | **Extend a vertical** | Describe the steps to add a new skill folder + reference an agent’s `skills:` list (or walk through [`docs/skills-authoring-guide.md`](skills-authoring-guide.md) / [`docs/agent-authoring-guide.md`](agent-authoring-guide.md)). |
-| 8 | **Regression** | Run `cd api && bun run typecheck && bun run test:all` before a big demo or config change. |
+| 8 | **Regression** | Run `cd api && bun run typecheck && bun test` before a big demo or config change. |
 
 **Optional deep dives (assign reading):** [`AGENTS.md`](../AGENTS.md) (contributor rules), [`docs/architecture.md`](architecture.md), [`docs/configuration-guide.md`](configuration-guide.md).

@@ -16,6 +16,7 @@ from lib.api_client import delete_session, get_session, list_sessions
 from lib.cognito_gate import ensure_api_bearer_token, render_cognito_logout
 from lib.config import load_settings
 from lib.session_state import ensure_defaults
+from lib.trace_navigation import open_trace_viewer
 
 st.set_page_config(page_title="Sessions", layout="wide")
 
@@ -90,8 +91,7 @@ else:
                     ]
                     if asst_with_trace:
                         latest = asst_with_trace[-1]
-                        st.query_params["traceId"] = latest["traceId"]
-                        st.switch_page("pages/2_Trace_Viewer.py")
+                        open_trace_viewer(latest["traceId"])
                     else:
                         st.warning("No traces yet for this session.")
                 except Exception as exc:

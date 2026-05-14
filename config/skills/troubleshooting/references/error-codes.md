@@ -32,8 +32,7 @@ Each entry shows: meaning, linked doc playbook, resolution path, and when to esc
 
 ---
 
-## Dev mock note
+## Knowledge Base note
 
-In dev mode (`DEV_MOCK_BACKENDS=1`), `bedrock_kb_retrieve` returns canned snippets.
-Treat KB results as supplementary — always prefer `troubleshooting_docs` playbooks
-when both return content on the same issue.
+`bedrock_kb_retrieve` returns supplementary context. Always prefer
+`troubleshooting_docs` playbooks when both return content on the same issue.

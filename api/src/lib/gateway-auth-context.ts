@@ -3,7 +3,7 @@
  * AgentCore Runtime `/invocations` request (or, in non-runtime deployments,
  * during a single Hono chat turn).
  *
- * Why this exists: when TOOL_HOSTING_MODE=gateway, the MCP transport in
+ * Why this exists: the MCP transport in
  * `api/src/adapters/mongodb-mcp-client.ts` needs to inject
  * `Authorization: Bearer <jwt>` on every outbound HTTP request to the
  * AgentCore Gateway. The JWT arrives in the invocation payload, but the

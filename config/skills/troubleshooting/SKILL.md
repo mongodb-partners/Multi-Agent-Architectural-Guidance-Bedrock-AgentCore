@@ -35,11 +35,21 @@ Always retrieve first, then answer. Never answer from model memory alone.
 
 Call `mongodb_vector_search` with:
 - `collection`: `troubleshooting_docs`
-- `queryText`: the customer's symptom in their own words (do not paraphrase to a code)
+- `queryText`: the customer's symptom in their own words (do not paraphrase to a code).
+  The platform embeds this text server-side (Voyage AI primary, Bedrock fallback)
+  before running `$vectorSearch` — never pass `queryVector` yourself.
 - `limit`: 3
+
+The vector index defaults to `troubleshooting-vector-index`; you do not need
+to pass `indexName` for this collection.
 
 If the customer also mentions an **error code** (e.g. HW-900, PWR-001), add a parallel call:
 - `mongodb_query` with `{ "errorCodes": { "$in": ["<CODE>"] } }` on `troubleshooting_docs`
+
+If `mongodb_vector_search` returns `status: "error"` (for example
+`code: "no_provider_configured"` when the embedding service is down), fall
+back to `mongodb_query` with a keyword filter on `symptoms` /
+`errorCodes` rather than retrying the vector call.
 
 **Step 2 — Knowledge Base supplement**
 
@@ -124,5 +134,5 @@ Be concise, direct, and efficient. Customers want their issue resolved — not a
 - For HW-900: do NOT ask the customer to keep power-cycling. Do NOT walk through
   self-service steps. IMMEDIATELY call `run_skill_script` → `buildSupportTicket`
   with the error code and symptom, then present the ticketId to the customer.
-- In dev mock mode (`DEV_MOCK_BACKENDS=1`), KB results are canned snippets —
-  treat them as supplementary and ground your answer in `troubleshooting_docs`.
+- Treat KB results as supplementary — always prefer `troubleshooting_docs` playbooks
+  when both return content on the same issue.

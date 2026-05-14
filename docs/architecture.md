@@ -7,7 +7,7 @@
 
 ## 1. The 30-second version
 
-You type a question into a chat box. A web API on a small AWS server receives it and hands it to an "orchestrator" AI agent. The orchestrator reads the question, picks the right specialist (one of three), and forwards the question. The specialist looks up data in MongoDB through a small AWS Lambda function and writes a reply. The reply streams back to your screen. Past conversations are remembered between sessions.
+You type a question into a chat box. A web API on a small AWS server receives it and hands it to an "orchestrator" AI agent. The orchestrator reads the question, picks the right specialist (one of three), and forwards the question. The specialist looks up data in MongoDB through a small **MCP runtime** (an AgentCore Runtime container that fronts the MongoDB driver) reached directly with AgentCore Runtime invocation, and writes a reply. The AgentCore Gateway remains available for non-Mongo tools. The reply streams back to your screen. Past conversations are remembered between sessions.
 
 That is the entire system. The rest of this document explains *how* each step works and *why* it was designed that way.
 
@@ -24,10 +24,13 @@ flowchart LR
   SPEC --> TS[troubleshooting]
   SPEC --> OM[order-management]
   SPEC --> PR[product-recommendation]
-  TS -->|InvokeFunction| LAMBDA[Lambda MCP<br/>mongodb-mcp]
-  OM -->|InvokeFunction| LAMBDA
-  PR -->|InvokeFunction| LAMBDA
-  LAMBDA -->|PrivateLink| ATLAS[(MongoDB Atlas M10)]
+  TS -->|MCP via InvokeAgentRuntime| MCPRT[mongodb-mcp-runtime<br/>AgentCore Runtime]
+  OM -->|MCP via InvokeAgentRuntime| MCPRT
+  PR -->|MCP via InvokeAgentRuntime| MCPRT
+  TS -.->|non-Mongo MCP tools| GW[AgentCore Gateway]
+  OM -.->|non-Mongo MCP tools| GW
+  PR -.->|non-Mongo MCP tools| GW
+  MCPRT -->|PrivateLink| ATLAS[(MongoDB Atlas M10)]
   API -->|CreateEvent / ListEvents| MEM[(AgentCore Memory)]
   TS -.->|Retrieve| KB[(Bedrock KB<br/>troubleshooting docs)]
   ORCH -.->|InvokeModel| BEDROCK[Bedrock<br/>Claude Sonnet 4.6]
@@ -43,7 +46,7 @@ flowchart LR
 | **AgentCore Runtime** | An AWS-managed container service | Hosts each agent in its own isolated runtime |
 | **Specialist agents** | 3 separate AgentCore runtimes | Each is an expert: orders, troubleshooting, products |
 | **Bedrock** | AWS's foundation model service | Runs Claude Sonnet 4.6 (the brain doing the reasoning) |
-| **Lambda MCP** | A small AWS Lambda function | The only thing that talks to MongoDB. Exposes 3 tools: `mongodb_query`, `mongodb_vector_search`, `mongodb_aggregate` |
+| **MongoDB MCP Runtime** | An AgentCore Runtime container ([`mcp-runtimes/mongodb-mcp/`](../mcp-runtimes/mongodb-mcp/)) | The only thing that talks to MongoDB. Exposes 3 tools: `mongodb_query`, `mongodb_vector_search`, `mongodb_aggregate`. Reached directly via AgentCore Runtime invocation over MCP, never `lambda:InvokeFunction`. The legacy Lambda host was deleted in CLIENT_REVIEW Phase 7e. |
 | **MongoDB Atlas M10** | A managed MongoDB cluster | Stores customers, orders, products, troubleshooting docs |
 | **AgentCore Memory** | An AWS-managed memory store | Remembers past conversations (per user, per agent) |
 | **Bedrock KB** | A vector-search knowledge base | Used by troubleshooting agent for RAG over manuals |
@@ -82,7 +85,7 @@ sequenceDiagram
   participant ORCH as Orchestrator Runtime
   participant SPEC as order-management Runtime
   participant BED as Bedrock (Claude)
-  participant LAM as Lambda MCP
+  participant MCPRT as mongodb-mcp-runtime
   participant DB as MongoDB Atlas
 
   U->>API: POST /chat {message, sessionId}
@@ -94,10 +97,10 @@ sequenceDiagram
   ORCH->>SPEC: InvokeAgentRuntime(orderMgmtArn, payload)
   SPEC->>BED: InvokeModel — reason about question
   BED-->>SPEC: tool_use: mongodb_query
-  SPEC->>LAM: lambda:InvokeFunction(mongodb_query, args)
-  LAM->>DB: db.orders.findOne({orderId: "ORD-1234"})
-  DB-->>LAM: order document
-  LAM-->>SPEC: {count: 1, documents: [...]}
+  SPEC->>MCPRT: MCP tools/call via InvokeAgentRuntime
+  MCPRT->>DB: db.orders.findOne({orderId: "ORD-1234"})
+  DB-->>MCPRT: order document
+  MCPRT-->>SPEC: MCP response {count: 1, documents: [...]}
   SPEC->>BED: InvokeModel — compose answer
   BED-->>SPEC: final response text
   SPEC-->>ORCH: {response, agentId}
@@ -113,7 +116,7 @@ For an editable version: [`diagrams/02-request-flow.drawio`](diagrams/02-request
 - The API stays *outside* AgentCore. It owns sessions and memory. The runtimes are stateless — they get full context on every call.
 - `InvokeAgentRuntime` is **request/response, not streaming**. The full reply comes back as one chunk and the API wraps it in a single SSE `token` event so the UI client doesn't need to know.
 - The `runtimeSessionId` must be at least 33 characters (an AgentCore requirement). The API pads short session IDs.
-- Tools always go through Lambda MCP. The agents themselves never talk to MongoDB.
+- MongoDB tools always go through the MongoDB MCP Runtime. The agents themselves never open MongoDB connections.
 
 ---
 
@@ -130,7 +133,7 @@ flowchart TB
         EC2[EC2 t3.medium<br/>Hono API + Streamlit UI<br/>EIP 44.209.8.211]
       end
       subgraph priv[Private Subnets 10.0.10.0/24, 10.0.11.0/24]
-        LAM[Lambda MCP<br/>mongodb-mcp]
+        MCPRT[mongodb-mcp-runtime<br/>AgentCore Runtime]
         VPCE[VPC Endpoint<br/>Atlas PrivateLink]
         R53[Route 53 Private Zone<br/>cluster.mongodb.net]
       end
@@ -142,7 +145,7 @@ flowchart TB
       ACS2[Order-Management Runtime]
       ACS3[Product-Rec Runtime]
       ACMEM[AgentCore Memory]
-      ACGW[AgentCore Gateway<br/>provisioned but bypassed]
+      ACGW[AgentCore Gateway<br/>non-Mongo MCP tools]
     end
 
     subgraph data[Data + Models]
@@ -162,8 +165,9 @@ flowchart TB
 
     EC2 --> ACO
     ACO --> ACS1 & ACS2 & ACS3
-    ACS1 & ACS2 & ACS3 --> LAM
-    LAM --> VPCE --> R53 --> ATLAS
+    ACS1 & ACS2 & ACS3 --> ACGW
+    ACGW --> MCPRT
+    MCPRT --> VPCE --> R53 --> ATLAS
     EC2 --> ACMEM
     ACS1 -.-> KB
     ACS1 & ACS2 & ACS3 -.-> BED
@@ -182,10 +186,11 @@ For the editable, fully-labeled version: [`diagrams/01-aws-infrastructure.drawio
 | ECR | API repo | `bedrock-ma-use1-api` |
 | ECR | UI repo | `bedrock-ma-use1-ui` |
 | ECR | Agent runtime repo (only if container mode) | `bedrock-ma-use1-agent-runtime` |
-| AgentCore | 4 runtimes | `bedrock-ma-use1-{orchestrator,troubleshooting,order_management,product_recommendation}-dev` |
+| ECR | MongoDB MCP runtime repo | `bedrock-ma-use1-mongodb-mcp-runtime` |
+| AgentCore | 4 agent runtimes | `bedrock-ma-use1-{orchestrator,troubleshooting,order_management,product_recommendation}-dev` |
+| AgentCore | MongoDB MCP runtime | `bedrock-ma-use1-mongodb-mcp-runtime-dev` (`mcp_server` host fronting `mcp-runtimes/mongodb-mcp/src/vendor/`) |
 | AgentCore | Memory store | `bedrock_ma_use1_memory_dev-aaTMdv52rv` |
-| AgentCore | Gateway | `bedrock-ma-use1-gw-dev-jslrisrr8k` (provisioned, not in tool path) |
-| Lambda | MCP function | `bedrock-ma-use1-mongodb-mcp-dev` |
+| AgentCore | Gateway | `bedrock-ma-use1-gw-dev-jslrisrr8k` (`mcp_server` target → `mongodb-mcp-runtime`) |
 | Bedrock | Knowledge base | `YDF16V4CRX` |
 | Bedrock | Model access | `us.anthropic.claude-sonnet-4-6`, `amazon.titan-embed-text-v2:0` |
 | Atlas | Cluster | `bedrock-ma-use1-dev` (M10, 3 nodes, us-east-1) |
@@ -234,34 +239,44 @@ flowchart TB
   LT --> LTAC[AgentCore Memory Store<br/>fallback]
 ```
 
-- **Short-term**: every message in the current chat session. In EC2 auth mode it is primarily read/written via AgentCore events keyed by `(userId, sessionId)` with `session-store` fallback.
-- **Long-term**: memorable user facts/preferences. Primary store is MongoDB `agent_memory_facts` (TTL), with AgentCore fallback if Mongo read/write fails.
+- **Short-term**: every message in the current chat session. In production it is primarily read/written via AgentCore events keyed by `(userId, sessionId)` with `session-store` fallback. The full backend selection matrix (`SHORT_TERM_MEMORY_BACKEND` × `AGENTCORE_MEMORY_STORE_ID` × `MONGODB_URI`) lives in [memory-architecture.md §1](memory-architecture.md).
+- **Long-term**: memorable user facts/preferences. Primary store is MongoDB `agent_memory_facts` (TTL), with AgentCore fallback if Mongo read/write fails. Fact extraction is LLM-only via `api/src/lib/llm-fact-extractor.ts` — there is no regex fallback, by design (a regex fallback would silently store false-positive "facts" on every Bedrock blip).
 - **Auth context**: per-turn prompt context includes authenticated identity (`sub`, resolved email, customer tier, recent SKUs) so "my orders/my open tickets/recommend for me" resolve without asking for email.
 
-Long-term memory **only works when authentication is enabled** because it needs `userId` from the JWT `sub` claim. With auth off, the API silently skips memory writes/reads. See [memory-architecture.md](memory-architecture.md) for the full picture.
+JWKS auth is mandatory end-to-end (see `assertJwksAuthConfigured()` in [`api/src/lib/jwt-verify.ts`](../api/src/lib/jwt-verify.ts)), so `userId = jwtPayload.sub` is always present and long-term memory always has an identity to scope by. See [memory-architecture.md](memory-architecture.md) for the full picture.
+
+### Embedding strategy across collections
+
+This answers the question _"the system currently lacks embeddings across all collections — how is user preference maintained and coherence ensured?"_
+
+| Collection | Has embeddings? | How user-preference / coherence is preserved |
+|---|---|---|
+| `products` | **Yes** (Voyage AI 1024-d) | `mongodb_vector_search` against `embedding` from the product specialist. |
+| `troubleshooting_docs` | **Yes** (Voyage AI 1024-d, also indexed by Bedrock KB) | `mongodb_vector_search` and Bedrock KB retrieve. |
+| `orders`, `customers` | **No** (structured-only today) | Deterministic primary-key queries from `mongodb_query` (e.g. `{customerId, orderId}`); embeddings would not improve "show me ORD-1234." |
+| `agent_memory_facts` | **No** | Recency replay (sort by `ts`, limit `MEMORY_INJECT_TURNS`) — vector recall is tracked under P1-7 (Not To Be Done Now). |
+| `chat_sessions` | **No** | Verbatim short-term replay into the model context, no semantic retrieval needed. |
+| `traces` | **No** | Operational data, not in-context. |
+
+Coherence comes from the orchestrator routing decision plus skill activation plus identity-aware context — embeddings are reserved for genuinely unstructured corpora.
 
 ---
 
 ## 7. Key design decisions (and why)
 
-### 7.1 Lambda MCP by default, AgentCore Gateway as an opt-in alternative
+### 7.1 MongoDB MCP runs in AgentCore Runtime; Gateway is for non-Mongo tools
 
-Both paths are wired. Operators choose per runtime via a single env knob; the two paths are mutually exclusive on any given agent.
+Every Mongo tool call from every runtime is served by the dedicated `mongodb-mcp-runtime` AgentCore Runtime ([`mcp-runtimes/mongodb-mcp/`](../mcp-runtimes/mongodb-mcp/)), which owns the MongoDB driver, query guards, and vector search. The MCP client uses `MONGODB_MCP_RUNTIME_ARN` / `MONGODB_MCP_RUNTIME_ENDPOINT` and invokes the runtime with `bedrock-agentcore:InvokeAgentRuntime`. The AgentCore Gateway remains provisioned for non-Mongo Gateway-hosted tools, but Mongo does **not** register as a Gateway `mcp_server` target because that target type cannot use an AgentCore Runtime endpoint. The legacy Lambda host (`lambda/mongodb-mcp/`) and its `deploy/terraform/modules/lambda-mcp/` module were physically deleted in CLIENT_REVIEW Phase 7e — the canonical home for Mongo tool implementations is now [`mcp-runtimes/mongodb-mcp/src/vendor/`](../mcp-runtimes/mongodb-mcp/src/vendor/). There is no `TOOL_HOSTING_MODE` switch and no `lambda:InvokeFunction` path.
 
-**Default — `TOOL_HOSTING_MODE=lambda`:** specialist runtimes call Lambda MCP directly via `lambda:InvokeFunction`. Simple IAM, low latency, easy to debug.
-
-**Opt-in — `TOOL_HOSTING_MODE=gateway`:** the runtime's tools come from the AgentCore Gateway's MCP target (which still fronts the same Lambda). Authentication is the caller's Cognito access token, forwarded from the Hono API through the AgentCore Runtime invocation payload (`userJwt`) and injected on every outbound MCP request via an `AsyncLocalStorage`-scoped `Authorization: Bearer <jwt>` header.
+**Auth:** direct Mongo MCP calls are IAM-authorized by the caller runtime role (`bedrock-agentcore:InvokeAgentRuntime`). The caller's Cognito access token is still forwarded from the Hono API through the AgentCore Runtime invocation payload (`userJwt`) so Gateway-backed non-Mongo tools can inject it via an `AsyncLocalStorage`-scoped `Authorization: Bearer <jwt>` header.
 
 | Knob | Where | Meaning |
 |---|---|---|
-| `GATEWAY_DEMO_RUNTIMES` | [`env.sh`](../env.sh) | Space-separated list of AgentCore Runtime names to flip to gateway mode. Empty (default) = every runtime stays on lambda. |
-| `MCP_SERVER_URL` | Per-runtime env (set by `deploy.sh`) | Populated to `AGENTCORE_GATEWAY_URL` when a runtime is opted in; empty otherwise. The validator in `deploy.sh` enforces this. |
+| `MONGODB_MCP_RUNTIME_ARN` / `MONGODB_MCP_RUNTIME_ENDPOINT` | Per-runtime env | Direct MongoDB MCP runtime target. Preferred by `mongodb-mcp-client.ts`. |
+| `AGENTCORE_GATEWAY_URL` | `.env.live` (generated by `deploy.sh`) | Gateway MCP endpoint for non-Mongo tools. |
+| `MCP_SERVER_URL` | Per-runtime env | Set by `deploy.sh` from `AGENTCORE_GATEWAY_URL` as the Gateway fallback. |
 
-Flipping a runtime to gateway mode only requires editing `env.sh` and re-running `deploy.sh` (no `terraform apply` — Terraform's static `TOOL_HOSTING_MODE = "lambda"` defaults flow through unchanged, and the env override is layered on top in deploy.sh's per-runtime update phase).
-
-**Why we keep lambda as the default:** direct Lambda invoke avoids the extra HTTPS hop, the customJWTAuthorizer roundtrip, and Cognito-dependent runtime startup. **Why we wire gateway as an option:** it showcases the full AgentCore stack for client demos, supports bring-your-own-tool via the Gateway's MCP target schema, and validates the auth-passthrough plumbing end to end.
-
-**Trade-off:** gateway mode adds one HTTPS hop (~30–80 ms per tool call) and requires `REQUIRE_AUTH=true` + a working Cognito pool because every tool call needs a valid JWT. The cached `McpClient` singleton is safe across many users because only the header varies per request, not the client itself. A mid-conversation Cognito token expiry surfaces a 401 to the chat and invalidates the singleton; the next user turn brings a fresh token and reconnects.
+**Trade-off:** Mongo loses the single Gateway audit surface, but avoids the unsupported Gateway `mcp_server` → AgentCore Runtime shape. The Gateway still supports bring-your-own non-Mongo tools; Mongo keeps AgentCore isolation, VPC PrivateLink access to Atlas, and IAM-scoped invocation without reintroducing Lambda.
 
 ### 7.2 S3 code artifacts, not ECR containers, for AgentCore runtimes
 
@@ -273,7 +288,7 @@ AgentCore Runtimes can be deployed in two modes:
 | **code** (default) | Zip uploaded to S3, executed on `NODE_22` runtime | No Docker build, faster deploys, no ARM64 toolchain needed |
 
 We default to **code mode**. The `deploy.sh` script:
-1. Bundles `api/src/agent-runtime-server.ts` with esbuild → `agent-runtime-code.js` (CommonJS)
+1. Bundles `api/src/agent-runtime-code.ts` with esbuild → `agent-runtime-code.js` (CommonJS)
 2. Zips it with the `config/` directory
 3. Uploads to `s3://shared-bucket/artifacts/agentcore-runtime/{git-sha}/deployment_package.zip`
 4. Tells AgentCore to use that S3 object as the runtime artifact
@@ -293,7 +308,18 @@ The API and UI run as Docker containers managed by systemd. ECR is the image reg
 
 MongoDB credentials traversing the public internet would be a security concern, so Atlas access is via **PrivateLink + Route 53 private zone + VPC endpoint** to keep that traffic on the AWS backbone.
 
-Bedrock, AgentCore, Lambda, Cognito, ECR, S3 — all are reached over the public internet from EC2. They use AWS SDK signing (SigV4) which is sufficient for a POC. Adding VPC interface endpoints for these would cost ~$102/month with no meaningful security gain at this scale.
+#### `atlas-cluster-dns` — per-cluster private zone
+
+The shared **Atlas Interface VPCE** is provisioned once per region in `envs/network`; the **per-cluster** Route 53 private hosted zone is created by [`deploy/terraform/modules/atlas-cluster-dns/`](../deploy/terraform/modules/atlas-cluster-dns/). The module builds:
+
+1. A private hosted zone named `<cluster>.<id>.mongodb.net`, bound to the shared VPC.
+2. A wildcard `CNAME` at `*.<cluster>.<id>.mongodb.net` pointing at the Atlas Interface VPCE DNS name.
+
+Why a separate module: Atlas SRV connection strings (`mongodb+srv://...`) resolve to multiple per-shard / per-mongos hostnames under `<cluster>.<id>.mongodb.net`. PrivateLink alone gives you a VPCE — without a private DNS zone in your VPC that maps every per-shard hostname to that VPCE, the MongoDB driver still resolves the per-shard records over public DNS and the connection fails. The Atlas VPCE is shared across all clusters in the region (one-time, expensive); the private zone is per-cluster because the SRV hostname differs per cluster. Each per-project env (`envs/ec2`) calls the module once to bind the zone for *its* cluster.
+
+> **Bedrock KB ingestion — public SRV is the default, PrivateLink is a one-flag opt-in.** The EC2 / `mongodb-mcp-runtime` runtime paths use the per-cluster private zone, but **Bedrock-managed KB ingestion runs in an AWS-owned VPC that does not share ours**, so by default it reaches Atlas via the public SRV endpoint (`<cluster>.<id>.mongodb.net`). The default ships as Option B because (a) ingestion is administrative — no runtime PII on the wire, (b) the source docs come from a private S3 bucket in our account, and (c) the private path adds an NLB (~$22/mo + LCU). Option A is now implemented and gated: set `TF_VAR_enable_kb_privatelink=true` in `envs/ec2` to provision [`bedrock-kb-privatelink/`](../deploy/terraform/modules/bedrock-kb-privatelink/) (internal NLB → VPC Endpoint Service in front of the existing Atlas Interface VPCE) and have `bedrock-kb` forward `endpointServiceName` to `mongo_db_atlas_configuration`. Verify with `terraform output bedrock_kb_endpoint_service_name`. See [CLIENT_REVIEW_EXPLAINER §P1-6](../CLIENT_REVIEW_EXPLAINER.md#p1-6--bedrock-kb-bypasses-privatelink) for the full trade-off and the design.
+
+Bedrock, AgentCore, Cognito, ECR, S3 — all are reached over the public internet from EC2. They use AWS SDK signing (SigV4) which is sufficient for a POC. Adding VPC interface endpoints for these would cost ~$102/month with no meaningful security gain at this scale.
 
 ### 7.5 Claude Sonnet 4.6 for every agent
 
@@ -301,21 +327,35 @@ The SoW originally specified Amazon Nova. Per a verbal client decision, **all ag
 
 Model access for Claude Sonnet 4.6 on the deploy account requires the Anthropic use-case form to be filled out in the Bedrock console. This was unblocked on 2026-04-30.
 
+### 7.6 VoyageAI SageMaker utilization
+
+Voyage AI on SageMaker is the **active** embedding provider for both online query embedding and offline corpus embedding. Bedrock Titan v2 (`amazon.titan-embed-text-v2:0`) is the documented fallback only.
+
+| Path | What runs Voyage | Triggered by |
+|---|---|---|
+| **Online query** | `embedQueryText()` in [`api/src/lib/embed-query.ts`](../api/src/lib/embed-query.ts) → `voyageGenerateEmbedding(text, endpoint, "query")` | Every `mongodb_vector_search` call from a specialist. The vector is computed in the API process (or runtime) **before** the MCP envelope is sent — the Mongo MCP host receives an already-vectorised `queryVector`. |
+| **Offline corpus** | [`db-seeding/seed-embeddings.ts`](../db-seeding/seed-embeddings.ts) using `input_type: "document"` | `bun db-seeding/seed-embeddings.ts` (re-runnable via `REWIRE_EMBEDDINGS=1`) for both `products` and `troubleshooting_docs`. |
+| **Bedrock KB ingestion** | Bedrock Titan v2 (no Voyage support yet on the KB side) | Bedrock KB sync. |
+
+`deploy/scripts/deploy.sh` writes `VOYAGE_SAGEMAKER_ENDPOINT` and `VOYAGE_OUTPUT_DIM=1024` into both the EC2 API's `.env.live` and into each AgentCore Runtime's env vars, so Voyage is reachable from every place that needs an embedding. If the SageMaker endpoint is unconfigured or fails, the wrapper falls back to Bedrock Titan / Cohere via `EMBEDDING_MODEL_ID`; if neither is available the tool returns a structured `status: "error"` so the LLM can degrade to keyword search via `mongodb_query`.
+
+The Voyage **model name** vs SoW (`voyage-3.5-lite` vs `voyage-multimodal-3`) is tracked separately under P1-5 in [`CLIENT_REVIEW_TASKS.md`](../CLIENT_REVIEW_TASKS.md).
+
 ---
 
 ## 8. Two modes: local dev vs EC2 production
 
 | | **Local dev** | **EC2 production** |
 |---|---|---|
-| Where agents run | In-process inside the Hono API (Strands SDK) | 4 separate AgentCore Runtimes (managed by AWS) |
-| Tool execution | In-process MongoDB driver | Lambda MCP via `InvokeFunction` |
+| Where agents run | In-process inside the Hono API (Strands SDK) when `AGENTCORE_ORCHESTRATOR_ARN` is unset | 4 separate AgentCore Runtimes (managed by AWS) |
+| Tool execution | AgentCore Gateway → MCP (same path as production) | AgentCore Gateway → MCP |
 | Long-term memory | MongoDB `agent_memory_facts` (primary) + AgentCore fallback | MongoDB `agent_memory_facts` (primary) + AgentCore fallback |
 | MongoDB connection | Direct SRV (public) | PrivateLink (private) |
 | Bedrock access | Local AWS creds | EC2 instance profile |
-| Auth | Optional (off by default) | Cognito JWT |
+| Auth | Cognito JWKS (mandatory — local dev points at the dev account's Cognito pool) | Cognito JWKS (mandatory) |
 | Switch mechanism | `AGENTCORE_ORCHESTRATOR_ARN` is unset → in-process | `AGENTCORE_ORCHESTRATOR_ARN` is set → AgentCore |
 
-The same codebase serves both. The `useAgentcoreOrchestratorArn()` check in [`api/src/routes/chat.ts:88`](../api/src/routes/chat.ts) flips the entire request path.
+The same codebase serves both. The `useAgentcoreOrchestratorArn()` check in [`api/src/routes/chat.ts`](../api/src/routes/chat.ts) flips the entire request path. There is **no auth bypass** anywhere — `assertJwksAuthConfigured()` refuses to boot the API in either mode without `AUTH_JWKS_URI` and `AUTH_ISSUER`.
 
 For local dev with multi-agent orchestration, set `ORCHESTRATOR_MODE=swarm` to use the in-process Strands Swarm. This is **not used in production** — production uses 4 separate AgentCore runtimes via `ORCHESTRATOR_MODE=runtime`.
 
@@ -325,7 +365,7 @@ For local dev with multi-agent orchestration, set `ORCHESTRATOR_MODE=swarm` to u
 
 For the full delta against the SoW, see [gap-analysis.md](gap-analysis.md). Highlights:
 
-- **Voyage AI on SageMaker** for embeddings — parked. Bedrock Titan is used instead.
+- ✅ **Voyage `multimodal-3`** — defaults to the SoW model (`voyage-multimodal-3`); the older `voyage-3.5-lite` listing remains opt-in via `VOYAGE_REQUEST_FORMAT=legacy`.
 - **AgentCore Code Interpreter** — not implemented. Skill scripts run as local `.mjs` imports.
 - **Streamlit Cognito hosted-UI** — implemented but not production-hardened (cookie persistence, multi-region QA).
 - **Multi-tenancy / customerId scoping** — agents query by user-supplied IDs, not by authenticated `customerId`.

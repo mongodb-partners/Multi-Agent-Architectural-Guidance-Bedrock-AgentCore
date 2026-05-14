@@ -179,6 +179,7 @@ class TestEnsureApiBearerToken:
 
     def test_returns_access_token_when_already_logged_in(self):
         mock_creds = MagicMock()
+        mock_creds.id_token = None
         mock_creds.access_token = "tok_abc"
         mock_auth = MagicMock()
         mock_auth.is_logged_in.return_value = True
@@ -224,6 +225,7 @@ class TestEnsureApiBearerToken:
         mock_st = _make_mock_st()
         mock_st.rerun.side_effect = SystemExit(0)
         mock_creds = MagicMock()
+        mock_creds.id_token = None
         mock_creds.access_token = ""
         mock_auth = MagicMock()
         mock_auth.is_logged_in.return_value = True

@@ -14,10 +14,15 @@ Use `mongodb_vector_search` and `mongodb_query` on the `products` collection.
 
 **Vector search parameters:**
 - `collection`: `products`
-- `indexName`: `products-vector-index`
-- `queryText`: the customer's description in their own words
+- `queryText`: the customer's description in their own words.
+  The platform embeds this server-side (Voyage AI primary, Bedrock fallback)
+  before running `$vectorSearch`. Never compute or pass `queryVector` yourself.
+- `limit`: 3 (tune up to 10 for browsing-style queries)
+
+The vector index defaults to `products-vector-index`; pass `indexName` only if
+you need to override it.
 
 On-demand references (via `read_skill_resource`):
 
-- `references/catalog-overview.md` — fixture fields and categories
+- `references/catalog-overview.md` — catalog fields and categories
 - `references/search-patterns.md` — replacement and similarity flows

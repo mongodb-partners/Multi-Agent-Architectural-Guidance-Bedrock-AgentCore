@@ -31,7 +31,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 TF_ROOT="$REPO_ROOT/deploy/terraform"
 BOOTSTRAP_DIR="$TF_ROOT/bootstrap"
-KB_STATE_FILE="$TF_ROOT/modules/bedrock-kb/.kb-state.json"
 REPORTS_DIR="$REPO_ROOT/destroy-reports"
 
 ENV_FILE="$REPO_ROOT/env.sh"
@@ -140,7 +139,7 @@ case "$MODE" in
   ec2)
     warn "  • Atlas M10 cluster + DB user"
     warn "  • EC2 instance + Elastic IP + ECR repos + Cognito pool"
-    warn "  • Lambda (mongodb-mcp) + AgentCore Memory + AgentCore Gateway"
+    warn "  • mongodb-mcp AgentCore Runtime + AgentCore Memory + AgentCore Gateway"
     warn "  • Per-cluster Route 53 private zone (atlas-cluster-dns)"
     warn "  • Bedrock Knowledge Base + Voyage SageMaker (if deployed)"
     warn "  • CloudWatch log groups"
@@ -301,18 +300,18 @@ else
   ok "S3 bucket $SHARED_BUCKET: gone"
 fi
 
-# Bedrock KB (managed by local + ec2 envs — skip in network mode)
+# Bedrock KB (managed by local + ec2 envs — skip in network mode).
+# Source the KB ID from the project tag — KB module migrated from JSON state
+# file to native aws_bedrockagent_knowledge_base, so the state file is gone.
 if [[ "$MODE" != "network" ]]; then
-  _KB_ID=""
-  [[ -f "$KB_STATE_FILE" ]] && _KB_ID=$(python3 -c "import json; print(json.load(open('$KB_STATE_FILE')).get('knowledge_base_id',''))" 2>/dev/null || true)
-  if [[ -n "$_KB_ID" ]]; then
-    if aws bedrock-agent get-knowledge-base --knowledge-base-id "$_KB_ID" --region "$AWS_REGION" 2>/dev/null | grep -q knowledgeBase; then
-      RESIDUES["bedrock_kb"]="EXISTS — KB $_KB_ID"
-    else
-      RESIDUES["bedrock_kb"]="DELETED (id: $_KB_ID)"
-    fi
+  _KB_NAME="${PROJECT_NAME}-troubleshooting-kb-${ENVIRONMENT}"
+  _KB_ID=$(aws bedrock-agent list-knowledge-bases --region "$AWS_REGION" \
+    --query "knowledgeBaseSummaries[?name=='${_KB_NAME}'].knowledgeBaseId | [0]" \
+    --output text 2>/dev/null || echo "None")
+  if [[ -n "$_KB_ID" && "$_KB_ID" != "None" ]]; then
+    RESIDUES["bedrock_kb"]="EXISTS — KB $_KB_ID (name: $_KB_NAME)"
   else
-    RESIDUES["bedrock_kb"]="UNKNOWN — KB ID not found in state file"
+    RESIDUES["bedrock_kb"]="DELETED"
   fi
 fi
 
@@ -367,13 +366,16 @@ if [[ "$MODE" == "network" ]]; then
   warn "  see modules/atlas-privatelink/scripts/discover-or-create-pl.sh)."
 fi
 
-# Lambda MCP (only ec2 mode)
+# Legacy Lambda MCP residue check (only ec2 mode). The lambda-mcp host has
+# been deleted in CLIENT_REVIEW Phase 7e and replaced by the mongodb-mcp
+# AgentCore Runtime; this probe stays in place to flag any function that
+# survives an old terraform state from before the cutover.
 if [[ "$MODE" == "ec2" ]]; then
-  _LAMBDA_NAME="${PROJECT_NAME}-mongodb-mcp-${ENVIRONMENT}"
-  if aws lambda get-function --function-name "$_LAMBDA_NAME" --region "$AWS_REGION" >/dev/null 2>&1; then
-    RESIDUES["lambda_mcp"]="RESIDUE — $_LAMBDA_NAME still exists"
+  _LEGACY_LAMBDA_NAME="${PROJECT_NAME}-mongodb-mcp-${ENVIRONMENT}"
+  if aws lambda get-function --function-name "$_LEGACY_LAMBDA_NAME" --region "$AWS_REGION" >/dev/null 2>&1; then
+    RESIDUES["legacy_lambda_mcp"]="RESIDUE — $_LEGACY_LAMBDA_NAME still exists (pre-Phase-7e leftover; delete manually)"
   else
-    RESIDUES["lambda_mcp"]="DELETED"
+    RESIDUES["legacy_lambda_mcp"]="DELETED"
   fi
 fi
 

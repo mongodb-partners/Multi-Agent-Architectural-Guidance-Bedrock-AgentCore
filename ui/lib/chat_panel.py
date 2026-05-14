@@ -35,7 +35,7 @@ def render_message_history() -> None:
                 render_inline_summary(
                     inline["summary"],
                     trace_url=inline.get("trace_url"),
-                    raw_events=inline.get("events"),
+                    trace_id=inline.get("trace_id") or m.get("trace_id"),
                 )
 
 
@@ -153,14 +153,10 @@ def handle_chat_input(api_base: str, token: str | None, agent_id: str) -> None:
         inline_block: dict | None = None
         if trace_events:
             summary = aggregate_summary(trace_events)
-            trace_url = (
-                f"/Trace_Viewer?traceId={done_trace_id}" if done_trace_id else None
-            )
-            render_inline_summary(summary, trace_url=trace_url, raw_events=trace_events)
+            render_inline_summary(summary, trace_id=done_trace_id)
             inline_block = {
                 "summary": summary,
-                "trace_url": trace_url,
-                "events": trace_events,
+                "trace_id": done_trace_id,
             }
 
     msg: dict = {"role": "assistant", "content": full, "badges": badges}

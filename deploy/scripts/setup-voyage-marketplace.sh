@@ -29,7 +29,14 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 ENV_FILE="$REPO_ROOT/env.sh"
 
-MODEL="voyage-3-5-lite"
+# Pinned to the SoW model — voyage-multimodal-3. The `--model` override is
+# kept only so a future SoW change can re-target without editing this script;
+# any other value is rejected later in Phase 1.
+MODEL="${VOYAGE_MARKETPLACE_MODEL:-voyage-multimodal-3}"
+# When this guard is set the script will refuse to proceed with any model
+# other than voyage-multimodal-3. Set REQUIRE_VOYAGE_MULTIMODAL_3=false ONLY
+# with an explicit, written SoW deviation.
+REQUIRE_VOYAGE_MULTIMODAL_3="${REQUIRE_VOYAGE_MULTIMODAL_3:-true}"
 AWS_REGION="${AWS_REGION:-us-east-1}"
 UPDATE_ENV=true
 UPDATE_GH=true
@@ -40,9 +47,11 @@ GH_REPO="PeerIslands/mongodb-aws-bedrock-multi-agent-framework"
 # stays the same.
 VOYAGE_VENDOR_ACCOUNT="865070037744"
 
-# Marketplace landing page (user must click "Continue to Subscribe" here).
-# voyage-3.5-lite (MongoDB-managed listing, GPU model packages, free trial):
-MARKETPLACE_URL="https://aws.amazon.com/marketplace/pp/prodview-xj76cqxng4wyw"
+# Per-model Marketplace landing pages — resolved after `--model` is parsed.
+declare -A MARKETPLACE_URLS=(
+  [voyage-multimodal-3]="https://aws.amazon.com/marketplace/pp/prodview-hrid2zxusacxy"
+  [voyage-3-5-lite]="https://aws.amazon.com/marketplace/pp/prodview-xj76cqxng4wyw"
+)
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -58,6 +67,8 @@ while [[ $# -gt 0 ]]; do
   esac
   shift
 done
+
+MARKETPLACE_URL="${MARKETPLACE_URLS[$MODEL]:-https://aws.amazon.com/marketplace/seller-profile?id=c9032c7b-70dd-459f-834f-c1e23cf3d092}"
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 log()  { echo "  [voyage] $*"; }
@@ -94,6 +105,12 @@ fi
 ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text 2>/dev/null)" \
   || err "AWS credentials invalid or expired. Run: source env.sh"
 ok "AWS account: $ACCOUNT_ID (region: $AWS_REGION)"
+
+# SoW guard — fail fast on any silent deviation from voyage-multimodal-3.
+if [[ "$REQUIRE_VOYAGE_MULTIMODAL_3" == "true" && "$MODEL" != "voyage-multimodal-3" ]]; then
+  err "Refusing to subscribe to '$MODEL' — SoW pins this stack to 'voyage-multimodal-3'.
+     To override, re-run with REQUIRE_VOYAGE_MULTIMODAL_3=false (requires written sign-off)."
+fi
 ok "Target Voyage model: $MODEL"
 
 # ── Phase 2 — Check subscription state ────────────────────────────────────────
