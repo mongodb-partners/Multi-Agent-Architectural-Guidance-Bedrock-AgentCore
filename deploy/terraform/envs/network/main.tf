@@ -56,7 +56,7 @@ module "networking" {
 # ══════════════════════════════════════════════════════════════════════════════
 # Atlas PrivateLink — Interface VPCE + Atlas-side endpoint binding + SG
 # (Per-cluster Route 53 zone is NOT here; it lives with the cluster in
-#  envs/ec2 via modules/atlas-cluster-dns.)
+#  envs/ec2 via modules/atlas-privatelink-dns.)
 #
 # Atlas allows ONLY ONE endpoint service per (Atlas project, AWS region), so
 # the discover-or-create script reuses an existing service when present.

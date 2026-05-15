@@ -5,7 +5,7 @@ output "vpc_endpoint_id" {
 
 output "vpce_dns_name" {
   value       = aws_vpc_endpoint.atlas.dns_entry[0]["dns_name"]
-  description = "Regional DNS name of the AWS VPCE — consumed by per-cluster Route 53 wildcard CNAMEs (modules/atlas-cluster-dns)"
+  description = "Regional DNS name of the AWS VPCE — consumed by per-cluster Route 53 wildcard CNAMEs (modules/atlas-privatelink-dns)"
 }
 
 output "endpoint_service_name" {

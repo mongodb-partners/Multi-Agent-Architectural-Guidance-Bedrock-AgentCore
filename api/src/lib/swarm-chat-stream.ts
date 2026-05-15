@@ -71,7 +71,7 @@ export async function* runSwarmChatStream(params: {
   memoryContext?: string;
 }): AsyncGenerator<ChatStreamPart> {
   const agentIds = buildSwarmAgentIds();
-  logger.debug("[swarm] building swarm", { agentIds });
+  logger.info("[swarm] swarm stream start", { agentIds });
 
   /** Track which agent node is currently active. */
   let currentNodeId = "";
@@ -367,6 +367,7 @@ export async function* runSwarmChatStream(params: {
         }
         // Always yield the handoff once a specialist is reached; suppress orch→orch self-loops
         if (to !== "orchestrator" || !suppressOrchestratorEvents) {
+          logger.info("[swarm] handoff", { from: ev.source, to });
           yield {
             type: "handoff",
             from: ev.source,
@@ -446,6 +447,7 @@ export async function* runSwarmChatStream(params: {
               toolSpans.set(toolUseId, spanId);
             }
             if (!suppressOrchestratorEvents) {
+              logger.info("[swarm] tool_call started", { nodeId: currentNodeId, toolName });
               yield { type: "tool_call", tool: toolName, status: "started" };
             }
             if (toolName === "activate_skill") {
@@ -486,6 +488,11 @@ export async function* runSwarmChatStream(params: {
               completedToolCalls.push({ name: aev.toolUse.name, toolUseId });
             }
             if (!suppressOrchestratorEvents) {
+              logger.info("[swarm] tool_call completed", {
+                nodeId: currentNodeId,
+                toolName: aev.toolUse.name,
+                ok: !aev.error,
+              });
               yield { type: "tool_call", tool: aev.toolUse.name, status: "completed" };
             }
             // When a specialist agent (non-orchestrator) emits a terminal strands_structured_output

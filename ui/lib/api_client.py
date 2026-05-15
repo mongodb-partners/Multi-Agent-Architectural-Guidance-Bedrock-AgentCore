@@ -4,9 +4,19 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import Generator, Any
+from typing import Any, Callable, Generator
 
 import requests
+
+from lib import log as ui_log
+
+
+def _http_headers(access_token: str | None, request_id: str | None = None) -> dict[str, str]:
+    h: dict[str, str] = {}
+    if access_token:
+        h["Authorization"] = f"Bearer {access_token}"
+    h["X-Request-Id"] = request_id or ui_log.new_request_id()
+    return h
 
 
 class ChatStreamError(RuntimeError):
@@ -93,6 +103,8 @@ def stream_chat_events(
     *,
     agent_id: str | None = None,
     access_token: str | None = None,
+    request_id: str | None = None,
+    on_response_headers: Callable[[requests.Response], None] | None = None,
     timeout: float = 120.0,
 ) -> Generator[ChatStreamEvent, None, None]:
     """POST /chat and yield typed SSE events."""
@@ -100,9 +112,8 @@ def stream_chat_events(
     headers = {
         "Content-Type": "application/json",
         "Accept": "text/event-stream",
+        **_http_headers(access_token, request_id),
     }
-    if access_token:
-        headers["Authorization"] = f"Bearer {access_token}"
 
     payload: dict[str, Any] = {
         "message": message,
@@ -119,6 +130,11 @@ def stream_chat_events(
         timeout=timeout,
     ) as resp:
         resp.raise_for_status()
+        if on_response_headers:
+            on_response_headers(resp)
+        x_trace = resp.headers.get("X-Trace-Id")
+        if x_trace:
+            ui_log.info("api chat response headers", x_trace_id=x_trace, request_id=headers.get("X-Request-Id"))
         # SSE responses often omit charset, and requests may default to ISO-8859-1.
         # Force UTF-8 to avoid mojibake like â€™ / â€œ / â†’.
         resp.encoding = "utf-8"
@@ -154,7 +170,7 @@ def stream_chat_events(
                 )
             if ev in ("token", "message") and "text" in data:
                 yield TokenEvent(text=str(data["text"]))
-            elif ev == "agent_active":
+            elif ev in ("agent_active", "agent_info"):
                 yield AgentActiveEvent(
                     agent_id=str(data.get("agentId") or ""),
                     agent_name=str(data.get("agentName") or data.get("agentId") or "agent"),
@@ -201,6 +217,8 @@ def stream_chat(
     *,
     agent_id: str | None = None,
     access_token: str | None = None,
+    request_id: str | None = None,
+    on_response_headers: Callable[[requests.Response], None] | None = None,
     timeout: float = 120.0,
 ) -> Generator[str, None, None]:
     """POST /chat and yield assistant text chunks (backwards-compatible text-only view)."""
@@ -210,6 +228,8 @@ def stream_chat(
         session_id,
         agent_id=agent_id,
         access_token=access_token,
+        request_id=request_id,
+        on_response_headers=on_response_headers,
         timeout=timeout,
     ):
         if isinstance(ev, TokenEvent):
@@ -220,32 +240,26 @@ def stream_chat(
             yield f"\n\n*Handoff: {ev.from_agent} → {ev.to_agent}*\n\n"
 
 
-def list_sessions(api_base: str, access_token: str | None = None) -> list[dict]:
+def list_sessions(api_base: str, access_token: str | None = None, request_id: str | None = None) -> list[dict]:
     url = f"{api_base.rstrip('/')}/sessions"
-    headers = {}
-    if access_token:
-        headers["Authorization"] = f"Bearer {access_token}"
+    headers = _http_headers(access_token, request_id)
     r = requests.get(url, headers=headers, timeout=30.0)
     r.raise_for_status()
     return r.json().get("sessions", [])
 
 
-def get_session(api_base: str, session_id: str, access_token: str | None = None) -> dict:
+def get_session(api_base: str, session_id: str, access_token: str | None = None, request_id: str | None = None) -> dict:
     url = f"{api_base.rstrip('/')}/sessions/{session_id}"
-    headers = {}
-    if access_token:
-        headers["Authorization"] = f"Bearer {access_token}"
+    headers = _http_headers(access_token, request_id)
     r = requests.get(url, headers=headers, timeout=30.0)
     r.raise_for_status()
     return r.json()
 
 
-def delete_session(api_base: str, session_id: str, access_token: str | None = None) -> bool:
+def delete_session(api_base: str, session_id: str, access_token: str | None = None, request_id: str | None = None) -> bool:
     """DELETE /sessions/:id. Returns False if the session was not found (404)."""
     url = f"{api_base.rstrip('/')}/sessions/{session_id}"
-    headers = {}
-    if access_token:
-        headers["Authorization"] = f"Bearer {access_token}"
+    headers = _http_headers(access_token, request_id)
     r = requests.delete(url, headers=headers, timeout=30.0)
     if r.status_code == 404:
         return False
@@ -253,33 +267,27 @@ def delete_session(api_base: str, session_id: str, access_token: str | None = No
     return True
 
 
-def list_agents(api_base: str, access_token: str | None = None) -> list[dict]:
+def list_agents(api_base: str, access_token: str | None = None, request_id: str | None = None) -> list[dict]:
     url = f"{api_base.rstrip('/')}/agents"
-    headers = {}
-    if access_token:
-        headers["Authorization"] = f"Bearer {access_token}"
+    headers = _http_headers(access_token, request_id)
     r = requests.get(url, headers=headers, timeout=30.0)
     r.raise_for_status()
     return r.json().get("agents", [])
 
 
-def get_http_tools(api_base: str, access_token: str | None = None) -> dict[str, Any]:
+def get_http_tools(api_base: str, access_token: str | None = None, request_id: str | None = None) -> dict[str, Any]:
     """GET /http-tools — configured global + per-skill HTTP (Lambda) tools metadata."""
     url = f"{api_base.rstrip('/')}/http-tools"
-    headers = {}
-    if access_token:
-        headers["Authorization"] = f"Bearer {access_token}"
+    headers = _http_headers(access_token, request_id)
     r = requests.get(url, headers=headers, timeout=30.0)
     r.raise_for_status()
     return r.json()
 
 
-def get_health(api_base: str, access_token: str | None = None) -> dict[str, Any]:
+def get_health(api_base: str, access_token: str | None = None, request_id: str | None = None) -> dict[str, Any]:
     """GET /health — API health and dependency status."""
     url = f"{api_base.rstrip('/')}/health"
-    headers = {}
-    if access_token:
-        headers["Authorization"] = f"Bearer {access_token}"
+    headers = _http_headers(access_token, request_id)
     r = requests.get(url, headers=headers, timeout=10.0)
     # Return even on 503 (degraded) — the body has useful info
     try:
@@ -292,11 +300,8 @@ def get_health(api_base: str, access_token: str | None = None) -> dict[str, Any]
 # Trace endpoints
 # ---------------------------------------------------------------------------
 
-def _trace_headers(access_token: str | None) -> dict[str, str]:
-    h: dict[str, str] = {}
-    if access_token:
-        h["Authorization"] = f"Bearer {access_token}"
-    return h
+def _trace_headers(access_token: str | None, request_id: str | None = None) -> dict[str, str]:
+    return _http_headers(access_token, request_id)
 
 
 def get_trace(
@@ -306,6 +311,7 @@ def get_trace(
     session_id: str | None = None,
     message_id: str | None = None,
     access_token: str | None = None,
+    request_id: str | None = None,
     timeout: float = 10.0,
 ) -> dict | None:
     """GET /traces/:id or /trace?sessionId=…&messageId=…
@@ -315,7 +321,7 @@ def get_trace(
     case where the API has already shipped the SSE `done` event but the
     background `persistTrace()` hasn't completed yet.
     """
-    headers = _trace_headers(access_token)
+    headers = _trace_headers(access_token, request_id)
     if trace_id:
         url = f"{api_base.rstrip('/')}/traces/{trace_id}"
     elif session_id and message_id:
@@ -336,13 +342,14 @@ def get_trace_mongo(
     session_id: str | None = None,
     message_id: str | None = None,
     access_token: str | None = None,
+    request_id: str | None = None,
     timeout: float = 10.0,
 ) -> dict | None:
     """GET /trace/mongo — returns a trace projection with only mongo.* events.
 
     Returns None on 404.
     """
-    headers = _trace_headers(access_token)
+    headers = _trace_headers(access_token, request_id)
     params: list[str] = []
     if trace_id:
         params.append(f"traceId={trace_id}")
@@ -364,16 +371,17 @@ def list_recent_traces(
     *,
     limit: int = 25,
     access_token: str | None = None,
+    request_id: str | None = None,
     timeout: float = 10.0,
 ) -> list[dict]:
     """GET /traces — recent traces visible to the caller."""
     url = f"{api_base.rstrip('/')}/traces?limit={limit}"
-    r = requests.get(url, headers=_trace_headers(access_token), timeout=timeout)
+    r = requests.get(url, headers=_trace_headers(access_token, request_id), timeout=timeout)
     r.raise_for_status()
     return r.json().get("traces", [])
 
 
-def get_demo_prompts(api_base: str, *, timeout: float = 5.0) -> list[dict]:
+def get_demo_prompts(api_base: str, *, request_id: str | None = None, timeout: float = 5.0) -> list[dict]:
     """GET /demo-prompts — the sidebar's "Try a prompt" entries.
 
     Public endpoint (no auth required) so the sidebar can render before login.
@@ -382,7 +390,7 @@ def get_demo_prompts(api_base: str, *, timeout: float = 5.0) -> list[dict]:
     """
     url = f"{api_base.rstrip('/')}/demo-prompts"
     try:
-        r = requests.get(url, timeout=timeout)
+        r = requests.get(url, headers=_http_headers(None, request_id), timeout=timeout)
         r.raise_for_status()
     except (requests.RequestException, ValueError):
         return []

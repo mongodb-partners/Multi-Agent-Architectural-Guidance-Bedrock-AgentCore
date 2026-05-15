@@ -184,6 +184,6 @@ resource "aws_security_group" "atlas_pl" {
 }
 
 # NOTE: The per-cluster Route 53 private zone + wildcard CNAME (which used to
-# live here) moved to modules/atlas-cluster-dns/. The DNS zone is named after
+# live here) moved to modules/atlas-privatelink-dns/. The DNS zone is named after
 # the cluster's SRV host, so it is per-cluster — i.e. per-project — and lives
 # alongside the cluster definition in envs/ec2 rather than in envs/network.

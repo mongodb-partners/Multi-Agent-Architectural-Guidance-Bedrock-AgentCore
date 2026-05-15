@@ -61,6 +61,9 @@ data "aws_network_interface" "atlas_vpce_eni" {
 
 locals {
   atlas_port_keys = toset([for port in var.atlas_ports : tostring(port)])
+  # NLB names are capped at 32 chars. Keep a readable project prefix and hash
+  # the full project/env identity so parallel demo environments don't collide.
+  nlb_name = "kb-${substr(replace(var.project_name, "-", ""), 0, 17)}-${substr(md5("${var.project_name}-${var.environment}"), 0, 8)}"
 
   atlas_vpce_eni_ips = [
     for eni in data.aws_network_interface.atlas_vpce_eni : eni.private_ip
@@ -77,14 +80,14 @@ locals {
 
 # ── Network Load Balancer fronting the Atlas VPCE ENIs ────────────────────────
 resource "aws_lb" "atlas_kb" {
-  name                             = "${var.project_name}-kb-pl-${var.environment}"
+  name                             = local.nlb_name
   internal                         = true
   load_balancer_type               = "network"
   subnets                          = var.private_subnet_ids
   enable_cross_zone_load_balancing = true
 
   tags = merge(var.tags, {
-    Name = "${var.project_name}-kb-pl-${var.environment}"
+    Name = local.nlb_name
     Role = "bedrock-kb-privatelink"
   })
 }

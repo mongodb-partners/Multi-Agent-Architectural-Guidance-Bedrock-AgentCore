@@ -69,13 +69,16 @@ describe("Strands Agent constructor invariants", () => {
   });
 
   for (const rel of ALLOWED_AGENT_CONSTRUCTORS) {
-    test(`${rel} attaches gateway MCP tools (calls getMcpTools)`, () => {
+    test(`${rel} attaches gateway MCP tools (directly or via cached template)`, () => {
       const body = readSrc(rel);
-      expect(body).toMatch(/getMcpTools\s*\(/);
-      // Belt-and-braces: `await getMcpTools()` should appear before the
-      // `new Agent(` site in the same file. We just check both substrings
-      // exist; ordering is enforced by the typecheck (mcpTools must be
-      // declared before it is spread into `tools: [...inProcessTools, ...mcpTools]`).
+      // Either the file calls getMcpTools() inline (create-strands-agent.ts
+      // does this when building a template), or it sources its `tools:`
+      // array from a template returned by `getAgentTemplate()` (run-chat-stream.ts
+      // post-Phase 4c). Both paths produce a `tools` array that contains
+      // the gateway MCP tools.
+      const inlinesGetMcpTools = /getMcpTools\s*\(/.test(body);
+      const usesAgentTemplate = /getAgentTemplate\s*\(/.test(body) && /template\.tools/.test(body);
+      expect(inlinesGetMcpTools || usesAgentTemplate).toBe(true);
       expect(body).toMatch(/new\s+Agent\s*\(/);
     });
   }

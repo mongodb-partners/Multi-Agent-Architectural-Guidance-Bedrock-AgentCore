@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { logger } from "./logger.ts";
 import { resolveConfigRoot } from "./paths.ts";
 import { expandEnvTemplate } from "./http-tools-load.ts";
 import {
@@ -82,14 +83,14 @@ export function loadSkillHttpToolsDefinitions(skillName: string, force = false):
   try {
     json = JSON.parse(raw);
   } catch (e) {
-    console.warn(`[skill-http-tools] invalid JSON in ${file}:`, e);
+    logger.warn("[skill-http-tools] invalid JSON", { file, skillName, error: String(e) });
     cache.set(skillName, { mtimeMs: 0, tools: [] });
     return [];
   }
 
   const parsed = skillHttpToolsFileSchema.safeParse(json);
   if (!parsed.success) {
-    console.warn(`[skill-http-tools] schema errors in ${file}:`, parsed.error.flatten());
+    logger.warn("[skill-http-tools] schema errors", { file, skillName, issues: parsed.error.flatten() });
     cache.set(skillName, { mtimeMs: 0, tools: [] });
     return [];
   }
@@ -99,11 +100,11 @@ export function loadSkillHttpToolsDefinitions(skillName: string, force = false):
   for (const t of parsed.data.tools) {
     const n = t.name.trim();
     if (RESERVED_LOCAL_TOOL_NAMES.has(n)) {
-      console.warn(`[skill-http-tools] skipping reserved local name "${n}" in ${file}`);
+      logger.warn("[skill-http-tools] skipping reserved local name", { name: n, file, skillName });
       continue;
     }
     if (seen.has(n)) {
-      console.warn(`[skill-http-tools] duplicate "${n}" in ${file} — keeping first`);
+      logger.warn("[skill-http-tools] duplicate — keeping first", { name: n, file, skillName });
       continue;
     }
     seen.add(n);

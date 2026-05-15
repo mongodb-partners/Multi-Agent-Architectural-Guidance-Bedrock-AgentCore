@@ -140,7 +140,7 @@ case "$MODE" in
     warn "  • Atlas M10 cluster + DB user"
     warn "  • EC2 instance + Elastic IP + ECR repos + Cognito pool"
     warn "  • mongodb-mcp AgentCore Runtime + AgentCore Memory + AgentCore Gateway"
-    warn "  • Per-cluster Route 53 private zone (atlas-cluster-dns)"
+    warn "  • Per-cluster Route 53 private zone (atlas-privatelink-dns)"
     warn "  • Bedrock Knowledge Base + Voyage SageMaker (if deployed)"
     warn "  • CloudWatch log groups"
     warn "  (Shared VPC + Atlas PrivateLink VPCE are NOT touched — they live in envs/network)"

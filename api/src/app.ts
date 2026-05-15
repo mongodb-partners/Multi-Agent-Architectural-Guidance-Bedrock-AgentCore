@@ -3,6 +3,7 @@ import { cors } from "hono/cors";
 import { authMiddleware } from "./middleware/auth.ts";
 import { rateLimitMiddleware } from "./middleware/rate-limit.ts";
 import { requestIdMiddleware } from "./middleware/request-id.ts";
+import { otelServerSpanMiddleware } from "./middleware/otel.ts";
 import { accessLogMiddleware } from "./middleware/access-log.ts";
 import { resolveCorsOrigins } from "./lib/environment-config.ts";
 import { logger } from "./lib/logger.ts";
@@ -38,14 +39,15 @@ export function createApp(): Hono {
   const corsOrigins = resolveCorsOrigins();
 
   app.use("*", requestIdMiddleware);
+  app.use("*", otelServerSpanMiddleware);
   app.use("*", accessLogMiddleware);
   app.use(
     "*",
     cors({
       origin: corsOrigins,
       allowMethods: ["GET", "POST", "DELETE", "OPTIONS"],
-      allowHeaders: ["Authorization", "Content-Type", "Accept"],
-      exposeHeaders: ["X-Request-Id"],
+      allowHeaders: ["Authorization", "Content-Type", "Accept", "X-Request-Id", "traceparent", "tracestate"],
+      exposeHeaders: ["X-Request-Id", "X-Trace-Id"],
     }),
   );
 

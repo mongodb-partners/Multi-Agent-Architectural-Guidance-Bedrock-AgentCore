@@ -52,3 +52,13 @@ variable "ecr_registry" {
   description = "ECR registry hostname for docker login (e.g. 123456789.dkr.ecr.us-east-1.amazonaws.com)"
   default     = ""
 }
+
+variable "cw_log_group_api" {
+  type        = string
+  description = "CloudWatch Logs group name for API journald → agent (must exist before first PutLogEvents)"
+}
+
+variable "cw_log_group_ui" {
+  type        = string
+  description = "CloudWatch Logs group name for UI journald → agent"
+}

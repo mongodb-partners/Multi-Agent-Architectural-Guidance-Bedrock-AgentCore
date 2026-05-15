@@ -119,11 +119,13 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-render_trace_meta(trace)
-render_mock_banner(trace.get("events") or [])
-render_summary_header(trace)
-
 events = trace.get("events") or []
+
+render_trace_meta(trace)
+render_mock_banner(events)
+render_summary_header(trace)
+render_mongo_dashboard(events)
+
 narrative_lines = narrate(events)
 if narrative_lines:
     st.markdown('<div class="trace-section-title">What happened</div>', unsafe_allow_html=True)
@@ -131,14 +133,16 @@ if narrative_lines:
         st.markdown(f"- {line}", unsafe_allow_html=True)
 
 st.divider()
-render_timeline(events)
-render_context(events)
-render_prompt_and_skills(events)
-render_model_activity(events)
-render_routing(events)
-render_mongo_dashboard(events)
-render_tool_calls(events)
-render_agentcore(events)
-render_memory(events)
-render_errors(events)
+for render_section in (
+    render_timeline,
+    render_context,
+    render_prompt_and_skills,
+    render_model_activity,
+    render_routing,
+    render_tool_calls,
+    render_agentcore,
+    render_memory,
+    render_errors,
+):
+    render_section(events)
 render_developer_details(trace)

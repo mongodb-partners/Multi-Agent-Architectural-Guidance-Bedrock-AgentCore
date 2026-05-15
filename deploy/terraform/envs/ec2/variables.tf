@@ -126,7 +126,7 @@ variable "voyage_instance_type" {
 
 variable "voyage_endpoint_name_suffix" {
   type        = string
-  description = "Identifier baked into the SageMaker endpoint name. Defaults to voyage-multimodal-3 (the SoW model). Set to voyage-3-5-lite if you intentionally subscribe to the older listing."
+  description = "Identifier baked into the SageMaker endpoint name. Use voyage-multimodal-3 for the SoW model or voyage-3-5-lite for the supported legacy text-only listing."
   default     = "voyage-multimodal-3"
 }
 
@@ -146,6 +146,12 @@ variable "agentcore_code_artifact_prefix" {
   type        = string
   description = "S3 key for AgentCore direct-code deployment zip"
   default     = "artifacts/agentcore-runtime/deployment_package.zip"
+}
+
+variable "create_agentcore_runtime_vpc_endpoints" {
+  type        = bool
+  description = "Create ECR API, ECR Docker, CloudWatch Logs interface endpoints and the S3 gateway endpoint for VPC-mode AgentCore runtimes. Set false when the shared VPC already has these singleton endpoints."
+  default     = true
 }
 
 # ── CloudWatch ────────────────────────────────────────────────────────────────

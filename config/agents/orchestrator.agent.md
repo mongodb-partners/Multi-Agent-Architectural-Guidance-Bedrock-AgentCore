@@ -4,8 +4,8 @@ description: Routes customer messages to the appropriate specialist agent.
 id: orchestrator
 skills: []
 tools: []
-model: us.anthropic.claude-sonnet-4-6
-maxTokens: 4096
+model: us.anthropic.claude-haiku-4-5-20251001-v1:0
+maxTokens: 1024
 temperature: 0.3
 handoffs:
   - label: Order question

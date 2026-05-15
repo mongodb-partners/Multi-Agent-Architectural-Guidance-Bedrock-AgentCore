@@ -21,6 +21,9 @@ locals {
   kb_name     = "${var.project_name}-troubleshooting-kb-${var.environment}"
   secret_name = "${var.project_name}-bedrock-kb-creds-${var.environment}"
   ds_name     = "${local.kb_name}-s3"
+  # CloudWatch vended-log delivery names are capped at 60 chars. Keep the
+  # human-readable project prefix while adding a hash to avoid collisions.
+  kb_log_delivery_prefix = "${substr(local.kb_name, 0, 37)}-${substr(md5(local.kb_name), 0, 8)}"
 
   # IAM role name — caller can override via var.kb_iam_role_name; otherwise
   # we derive a project+env-scoped name. Account-global names are the worst
@@ -329,13 +332,13 @@ resource "aws_cloudwatch_log_group" "kb_application" {
 }
 
 resource "aws_cloudwatch_log_delivery_source" "kb_application" {
-  name         = "${local.kb_name}-app-logs-src"
+  name         = "${local.kb_log_delivery_prefix}-app-logs-src"
   resource_arn = aws_bedrockagent_knowledge_base.this.arn
   log_type     = "APPLICATION_LOGS"
 }
 
 resource "aws_cloudwatch_log_delivery_destination" "kb_application_cwl" {
-  name = "${local.kb_name}-app-logs-cwl"
+  name = "${local.kb_log_delivery_prefix}-app-logs-cwl"
 
   delivery_destination_configuration {
     destination_resource_arn = "${aws_cloudwatch_log_group.kb_application.arn}:*"

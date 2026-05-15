@@ -24,6 +24,7 @@ COPY tsconfig.json ./
 COPY src/server.ts src/server.ts
 COPY src/index.ts  src/index.ts
 COPY src/vendor    src/vendor
+COPY src/lib       src/lib
 
 RUN npx tsc
 

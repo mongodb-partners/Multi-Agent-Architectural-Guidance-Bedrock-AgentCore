@@ -11,7 +11,7 @@ metadata:
 
 # Order Management
 
-Use `mongodb_query` on the `orders` collection. Prefer **`find`** with `orderId` or `customerEmail` when the user provides them; use limits to keep responses small. For **tracking**, read `trackingNumber` and `trackingUrl` from the order document when present.
+Use `mongodb_query` on the `orders` collection. Prefer **`find`** with `orderId` or `customerEmail` when the user provides them; use limits to keep responses small. For **tracking**, read `trackingNumber` and `trackingUrl` from the order document when present. If you already chose `run_skill_script` with `scriptPath='scripts/mongodb-query.mjs'` and `exportName='mongodb_query'`, the runtime maps that compatibility request to the same shared read-only MongoDB query path.
 
 Optional: `customers` collection — `findOne` on `email` to confirm a verified profile when policy calls for it (see `references/order-schema.md`).
 

@@ -502,14 +502,23 @@ export async function writeLongTermMemory(
   }
 
   if (result.outcome === "failed") {
-    logger.warn("[memory] failed to write long-term memory", {
+    logger.audit().warn("[memory] failed to write long-term memory", {
       userId,
       agentId,
       backend: "mongodb",
       error: result.errorMessage,
     });
   } else {
-    logger.debug("[memory] wrote facts to MongoDB agent_memory_facts", { userId, agentId });
+    // Audit-channel: every long-term memory write is a compliance-relevant
+    // mutation (per-user PII facts) — surface count + bytes (no content).
+    logger.audit().info("[memory] long-term memory facts persisted", {
+      userId,
+      agentId,
+      backend: "mongodb",
+      factCount: result.inserted,
+      assistantBytes: assistantReplyBytes,
+      userBytes: userMessageBytes,
+    });
   }
 
   trace?.event("memory.long_term_write", {

@@ -79,15 +79,38 @@ export function listSkillDiscovery(): SkillDiscovery[] {
 
 // ---------------------------------------------------------------------------
 // Phase 2 — Full SKILL.md body (loaded on activation)
+//
+// Cached by file mtime so specialist agents (which pre-activate every turn
+// via SkillRegistry.activateAll) don't re-read disk on every chat. The
+// discovery index above already had this pattern; the body cache mirrors it.
 // ---------------------------------------------------------------------------
+
+type SkillBodyCacheEntry = { mtimeMs: number; body: string | undefined };
+const skillBodyCache = new Map<string, SkillBodyCacheEntry>();
 
 /** Load the markdown body (after frontmatter) of a single skill. */
 export function loadSkillInstructions(skillName: string): string | undefined {
   const skillPath = path.join(skillsRoot(), skillName, "SKILL.md");
   if (!fs.existsSync(skillPath)) return undefined;
+  let mtimeMs = -1;
+  try {
+    mtimeMs = fs.statSync(skillPath).mtimeMs;
+  } catch {
+    /* fall through and re-read */
+  }
+  const cached = skillBodyCache.get(skillPath);
+  if (cached && cached.mtimeMs === mtimeMs) return cached.body;
+
   const raw = fs.readFileSync(skillPath, "utf8");
   const { content } = matter(raw);
-  return content.trim() || undefined;
+  const body = content.trim() || undefined;
+  skillBodyCache.set(skillPath, { mtimeMs, body });
+  return body;
+}
+
+/** Test helper: drop the SKILL.md body cache. */
+export function clearSkillInstructionsCacheForTests(): void {
+  skillBodyCache.clear();
 }
 
 // ---------------------------------------------------------------------------

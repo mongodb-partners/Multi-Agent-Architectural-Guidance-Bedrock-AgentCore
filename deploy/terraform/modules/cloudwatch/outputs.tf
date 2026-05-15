@@ -3,6 +3,11 @@ output "api_log_group_name" {
   description = "CloudWatch log group for the Hono/Bun API"
 }
 
+output "ui_log_group_name" {
+  value       = aws_cloudwatch_log_group.ui.name
+  description = "CloudWatch log group for Streamlit UI (journald → CW agent)"
+}
+
 output "mcp_log_group_name" {
   value       = aws_cloudwatch_log_group.mcp.name
   description = "CloudWatch log group for the mongodb-mcp-server sidecar"

@@ -68,6 +68,7 @@ const PROTECTED_TYPES: ReadonlySet<TraceEventType> = new Set<TraceEventType>([
   "agentcore.invoke",
   "agentcore.classification",
   "agentcore.nested_trace",
+  "latency.checkpoint",
   "error",
   "tool.call", // start/end stubs kept; large payloads stripped first
   "mongo.intent",

@@ -214,14 +214,18 @@ module "ec2" {
   ecr_api_image    = "${module.ecr.api_repository_url}:latest"
   ecr_ui_image     = "${module.ecr.ui_repository_url}:latest"
   ecr_registry     = "${module.ecr.registry_id}.dkr.ecr.${var.aws_region}.amazonaws.com"
+  cw_log_group_api = module.cloudwatch.api_log_group_name
+  cw_log_group_ui  = module.cloudwatch.ui_log_group_name
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Atlas cluster DNS — per-cluster Route 53 private zone pointing at the
-# shared Atlas Interface VPCE (envs/network owns the VPCE itself).
+# Atlas PrivateLink DNS — per-cluster Route 53 private zone pointing at the
+# shared Atlas Interface VPCE (envs/network owns the VPCE itself). This is
+# the per-cluster DNS half of the Atlas PrivateLink setup; the regional VPCE
+# half lives in modules/atlas-privatelink/.
 # ══════════════════════════════════════════════════════════════════════════════
-module "atlas_cluster_dns" {
-  source = "../../modules/atlas-cluster-dns"
+module "atlas_privatelink_dns" {
+  source = "../../modules/atlas-privatelink-dns"
 
   project_name   = var.project_name
   environment    = var.environment
@@ -349,6 +353,8 @@ resource "aws_security_group" "agentcore_runtime_vpce" {
 }
 
 resource "aws_vpc_endpoint" "agentcore_runtime_ecr_api" {
+  count = var.create_agentcore_runtime_vpc_endpoints ? 1 : 0
+
   vpc_id              = local.shared_vpc_id
   service_name        = "com.amazonaws.${var.aws_region}.ecr.api"
   vpc_endpoint_type   = "Interface"
@@ -362,6 +368,8 @@ resource "aws_vpc_endpoint" "agentcore_runtime_ecr_api" {
 }
 
 resource "aws_vpc_endpoint" "agentcore_runtime_ecr_dkr" {
+  count = var.create_agentcore_runtime_vpc_endpoints ? 1 : 0
+
   vpc_id              = local.shared_vpc_id
   service_name        = "com.amazonaws.${var.aws_region}.ecr.dkr"
   vpc_endpoint_type   = "Interface"
@@ -375,6 +383,8 @@ resource "aws_vpc_endpoint" "agentcore_runtime_ecr_dkr" {
 }
 
 resource "aws_vpc_endpoint" "agentcore_runtime_logs" {
+  count = var.create_agentcore_runtime_vpc_endpoints ? 1 : 0
+
   vpc_id              = local.shared_vpc_id
   service_name        = "com.amazonaws.${var.aws_region}.logs"
   vpc_endpoint_type   = "Interface"
@@ -388,6 +398,8 @@ resource "aws_vpc_endpoint" "agentcore_runtime_logs" {
 }
 
 resource "aws_vpc_endpoint" "agentcore_runtime_s3" {
+  count = var.create_agentcore_runtime_vpc_endpoints ? 1 : 0
+
   vpc_id            = local.shared_vpc_id
   service_name      = "com.amazonaws.${var.aws_region}.s3"
   vpc_endpoint_type = "Gateway"
@@ -396,6 +408,74 @@ resource "aws_vpc_endpoint" "agentcore_runtime_s3" {
   tags = merge(local.common_tags, {
     Name = "${var.project_name}-vpce-s3-agentcore-${var.environment}"
   })
+}
+
+data "aws_vpc_endpoint" "existing_agentcore_runtime_ecr_api" {
+  count = var.create_agentcore_runtime_vpc_endpoints ? 0 : 1
+
+  vpc_id       = local.shared_vpc_id
+  service_name = "com.amazonaws.${var.aws_region}.ecr.api"
+}
+
+data "aws_vpc_endpoint" "existing_agentcore_runtime_ecr_dkr" {
+  count = var.create_agentcore_runtime_vpc_endpoints ? 0 : 1
+
+  vpc_id       = local.shared_vpc_id
+  service_name = "com.amazonaws.${var.aws_region}.ecr.dkr"
+}
+
+data "aws_vpc_endpoint" "existing_agentcore_runtime_logs" {
+  count = var.create_agentcore_runtime_vpc_endpoints ? 0 : 1
+
+  vpc_id       = local.shared_vpc_id
+  service_name = "com.amazonaws.${var.aws_region}.logs"
+}
+
+locals {
+  existing_agentcore_runtime_vpce_security_group_ids = var.create_agentcore_runtime_vpc_endpoints ? [] : distinct(flatten([
+    data.aws_vpc_endpoint.existing_agentcore_runtime_ecr_api[0].security_group_ids,
+    data.aws_vpc_endpoint.existing_agentcore_runtime_ecr_dkr[0].security_group_ids,
+    data.aws_vpc_endpoint.existing_agentcore_runtime_logs[0].security_group_ids,
+  ]))
+  existing_agentcore_runtime_vpce_access_pairs = var.create_agentcore_runtime_vpc_endpoints ? {} : merge([
+    for endpoint_sg_id in local.existing_agentcore_runtime_vpce_security_group_ids : {
+      for source_sg_id in [
+        module.ec2.security_group_id,
+        aws_security_group.mongodb_mcp_runtime.id,
+        ] : "${endpoint_sg_id}-${source_sg_id}" => {
+        endpoint_sg_id = endpoint_sg_id
+        source_sg_id   = source_sg_id
+      }
+    }
+  ]...)
+}
+
+resource "null_resource" "existing_agentcore_vpce_access" {
+  for_each = local.existing_agentcore_runtime_vpce_access_pairs
+
+  triggers = {
+    endpoint_sg_id = each.value.endpoint_sg_id
+    source_sg_id   = each.value.source_sg_id
+    region         = var.aws_region
+  }
+
+  provisioner "local-exec" {
+    command = <<-EOT
+      set +e
+      OUT=$(aws ec2 authorize-security-group-ingress \
+        --region '${var.aws_region}' \
+        --group-id '${each.value.endpoint_sg_id}' \
+        --protocol tcp \
+        --port 443 \
+        --source-group '${each.value.source_sg_id}' 2>&1)
+      RC=$?
+      if [ "$RC" -eq 0 ] || echo "$OUT" | grep -q 'InvalidPermission.Duplicate'; then
+        exit 0
+      fi
+      echo "$OUT" >&2
+      exit "$RC"
+    EOT
+  }
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -442,7 +522,8 @@ module "mongodb_mcp_runtime" {
     aws_vpc_endpoint.agentcore_runtime_ecr_dkr,
     aws_vpc_endpoint.agentcore_runtime_logs,
     aws_vpc_endpoint.agentcore_runtime_s3,
-    module.atlas_cluster_dns,
+    null_resource.existing_agentcore_vpce_access,
+    module.atlas_privatelink_dns,
   ]
 }
 
@@ -663,8 +744,8 @@ module "voyage_sagemaker" {
 # CloudWatch — log groups for API, MCP, AgentCore
 # ══════════════════════════════════════════════════════════════════════════════
 module "cloudwatch" {
-  source         = "../../modules/cloudwatch"
-  project_name   = var.project_name
-  environment    = var.environment
-  retention_days = var.log_retention_days
+  source             = "../../modules/cloudwatch"
+  project_name       = var.project_name
+  environment        = var.environment
+  api_retention_days = var.log_retention_days
 }

@@ -1,4 +1,6 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { trace } from "@opentelemetry/api";
+import { afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
+import { initOtel } from "../../src/lib/otel.ts";
 
 // We test the logger by intercepting writes to stdout/stderr.
 // Bun supports process.stdout.write / process.stderr.write capture via mocking.
@@ -126,5 +128,35 @@ describe("logger — LOG_LEVEL filtering", () => {
     expect(dbg).toBe("");
     const info = await captureStdout(() => logger.info("should appear"));
     expect(info).not.toBe("");
+  });
+});
+
+describe("logger — OpenTelemetry trace correlation", () => {
+  beforeAll(() => {
+    initOtel({ serviceName: "mongodb-multiagent-api-logger-test" });
+  });
+
+  test("logger.info includes trace_id when inside an active span", async () => {
+    process.env.LOG_LEVEL = "info";
+    const logger = await getLogger();
+    const t = trace.getTracer("logger-test");
+    await t.startActiveSpan("unit-span", async (span) => {
+      const out = await captureStdout(() => logger.info("inside span"));
+      const line = JSON.parse(out.trim()) as Record<string, unknown>;
+      expect(line.trace_id).toBe(span.spanContext().traceId);
+      expect(line.span_id).toBe(span.spanContext().spanId);
+      span.end();
+    });
+  });
+
+  test("logger.child merges base fields", async () => {
+    process.env.LOG_LEVEL = "info";
+    const mod = await import("../../src/lib/logger.ts");
+    const child = mod.logger.child({ route: "/unit" });
+    const out = await captureStdout(() => child.info("child msg", { extra: 1 }));
+    const line = JSON.parse(out.trim()) as Record<string, unknown>;
+    expect(line.route).toBe("/unit");
+    expect(line.msg).toBe("child msg");
+    expect(line.extra).toBe(1);
   });
 });

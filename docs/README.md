@@ -26,8 +26,9 @@ Five AWS services are doing the heavy lifting: Bedrock (the AI model), AgentCore
 | See the **AgentCore runtime topology** in detail | [agentcore-runtime-design.md](agentcore-runtime-design.md) |
 | **Author a new agent** | [agent-authoring-guide.md](agent-authoring-guide.md) |
 | **Author a new skill** | [skills-authoring-guide.md](skills-authoring-guide.md) |
-| **Run the demo** locally | [demo-script.md](demo-script.md) |
+| Run the demo locally | [demo-script.md](demo-script.md) |
 | See **estimated AWS costs** | [estimate.md](estimate.md) |
+| Understand **structured logs, OTel trace correlation, and CloudWatch shipping** | [logging-architecture.md](logging-architecture.md) |
 
 ---
 

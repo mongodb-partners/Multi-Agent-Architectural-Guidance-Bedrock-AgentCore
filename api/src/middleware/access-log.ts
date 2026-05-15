@@ -12,6 +12,8 @@ import { logger } from "../lib/logger.ts";
  */
 
 const HEALTH_PATH = /^\/health/;
+const PROBE_PATHS =
+  /^\/(agents|skills|traces|trace|demo-prompts|http-tools)(\/|$)/;
 
 export const accessLogMiddleware: MiddlewareHandler = async (c, next) => {
   const start = Date.now();
@@ -22,8 +24,8 @@ export const accessLogMiddleware: MiddlewareHandler = async (c, next) => {
   const path = new URL(c.req.url).pathname;
   const status = c.res.status;
 
-  // Suppress /health at info level — only emit at debug to avoid poll noise.
-  const isHealth = HEALTH_PATH.test(path);
-  const level = isHealth ? "debug" : "info";
+  // Suppress noisy probe paths at info — still emit at debug.
+  const isProbe = HEALTH_PATH.test(path) || PROBE_PATHS.test(path);
+  const level = isProbe ? "debug" : "info";
   logger[level]("request", { requestId, method, path, status, durationMs });
 };

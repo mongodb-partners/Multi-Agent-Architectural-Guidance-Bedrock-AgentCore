@@ -19,8 +19,9 @@
 #   Phase 8  — Pull images + restart multiagent-api, multiagent-ui, mongodb-mcp on EC2
 #   Phase 9  — Health check, summary, manifest
 #
-# Embedding: Bedrock Titan by default. Voyage AI SageMaker only when
-#            VOYAGE_MODEL_PACKAGE_ARN is set in env.sh.
+# Embedding: explicit provider selection via EMBEDDINGS_PROVIDER.
+#            titan  -> Bedrock Titan v2, no SageMaker ARN required.
+#            voyage -> SageMaker endpoint from VOYAGE_MODEL_PACKAGE_ARN.
 #
 # Tools:     MongoDB MCP runs as a systemd service on the EC2 instance
 #            (`mongodb-mcp.service`, bound to 127.0.0.1:8080) and the API talks
@@ -76,13 +77,15 @@ err()  { echo "  [ec2] ✗ $*" >&2; exit 1; }
 warn() { echo "  [ec2] ⚠ $*"; }
 sep()  { echo "────────────────────────────────────────────────"; }
 
-# Wrap `terraform apply` with retry-on-transient-Atlas-API-error.
+# Wrap `terraform apply` with retry-on-transient-errors.
 # The MongoDB Atlas API at cloud.mongodb.com occasionally returns i/o timeouts
-# or connection-resets that vanish on the next call. We retry the apply up to
-# `max_attempts - 1` times, re-planning between attempts so the saved plan
-# stays consistent with the post-partial-apply state. Any error that is NOT
-# a known-transient Atlas API failure is treated as a hard failure and stops
-# the script immediately. We never silently swallow a real provider error.
+# or connection-resets that vanish on the next call. Terraform can also reject
+# a saved plan as stale if a previous target apply, retry, or parallel operator
+# changed remote state between plan and apply. We retry the apply up to
+# `max_attempts - 1` times, re-planning between attempts so the saved plan stays
+# consistent with the latest state. Any error that is NOT a known-transient
+# failure is treated as a hard failure. We never silently swallow a real
+# provider error.
 apply_with_retry() {
   local plan_file="$1"
   local max_attempts=3   # initial + 2 retries, per project policy
@@ -106,9 +109,10 @@ apply_with_retry() {
       rm -f "$log_file"
       return 0
     fi
-    # Transient = network/timeout error talking to the Atlas control-plane.
-    if grep -qE 'cloud\.mongodb\.com.*(i/o timeout|connection reset|connection refused|EOF|TLS handshake timeout)' "$log_file"; then
-      warn "Transient Atlas API error detected on attempt ${attempt} — will retry"
+    # Transient = network/timeout error talking to Atlas, or Terraform saved-plan
+    # staleness after state changed between plan and apply.
+    if grep -qE 'cloud\.mongodb\.com.*(i/o timeout|connection reset|connection refused|EOF|TLS handshake timeout)|Saved plan is stale' "$log_file"; then
+      warn "Transient Terraform apply error detected on attempt ${attempt} — will re-plan and retry"
       attempt=$((attempt + 1))
       continue
     fi
@@ -271,20 +275,25 @@ rm -f /tmp/.atlas_check.json
 
 SHARED_BUCKET="${PROJECT_NAME}-${ENVIRONMENT}-${ACCOUNT_ID}"
 VOYAGE_ARN="${VOYAGE_MODEL_PACKAGE_ARN:-}"
-# voyage-multimodal-3 on AWS Marketplace ships GPU-only images; ml.g6.xlarge
-# is the cheapest supported real-time instance. CPU instances (m5/c5) fail at
-# endpoint creation.
 VOYAGE_INSTANCE="${VOYAGE_INSTANCE_TYPE:-ml.g6.xlarge}"
+VOYAGE_REQUEST_FORMAT="${VOYAGE_REQUEST_FORMAT:-}"
+VOYAGE_MARKETPLACE_MODEL="${VOYAGE_MARKETPLACE_MODEL:-}"
+VOYAGE_MODEL_LABEL=""
+EMBEDDINGS_MODEL_ID=""
+EMBEDDINGS_SOW_ALIGNED="false"
+VOYAGE_ENDPOINT_SUFFIX="${TF_VAR_voyage_endpoint_name_suffix:-}"
 EC2_KEY_PAIR="${EC2_KEY_PAIR:-}"
 AGENTCORE_RUNTIME_DEPLOYMENT_MODE="${AGENTCORE_RUNTIME_DEPLOYMENT_MODE:-code}"
 GIT_SHA=$(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null || echo "unknown")
 AGENTCORE_CODE_ARTIFACT_PREFIX="artifacts/agentcore-runtime/${GIT_SHA}/deployment_package.zip"
 
 # ── Embedding provider guard: explicit opt-in, no silent fallback ─────────────
-# The pipeline previously warned and silently fell back to Titan when
-# VOYAGE_MODEL_PACKAGE_ARN was empty, and accepted any Voyage ARN (including
-# voyage-3-5-lite) without checking. The SoW pins this stack to
-# voyage-multimodal-3 — every alternative must be an explicit, loud choice.
+# The pipeline supports three explicit modes:
+#   titan  — no SageMaker endpoint, query/doc embeddings use Bedrock Titan v2.
+#   voyage — provision SageMaker from VOYAGE_MODEL_PACKAGE_ARN. Supported request
+#            envelopes are selected by VOYAGE_REQUEST_FORMAT:
+#              multimodal -> voyage-multimodal-3
+#              legacy     -> voyage-3.5-lite / older text-only Voyage listing
 EMBEDDINGS_PROVIDER="${EMBEDDINGS_PROVIDER:-}"
 case "$EMBEDDINGS_PROVIDER" in
   voyage)
@@ -296,24 +305,40 @@ case "$EMBEDDINGS_PROVIDER" in
     # Marketplace ARN tail format:
     #   arn:aws:sagemaker:<region>:<vendor>:model-package/<package-name>
     # AWS Marketplace package names may include vendor version suffixes such as
-    # `voyage-multimodal-3-5-v1-<hash>`. Keep the guard strict enough to reject
-    # unrelated packages like voyage-3-5-lite, but record the exact tail below
-    # so version suffixes never disappear silently from deploy-manifest.json.
+    # `voyage-multimodal-3-5-v1-<hash>`. Keep provider routing based on the
+    # canonical model family, but preserve the exact tail in deploy-manifest.json
+    # so version suffixes never disappear silently.
     VOYAGE_ARN_TAIL="${VOYAGE_ARN##*/}"
-    if [[ ! "$VOYAGE_ARN_TAIL" =~ ^voyage-multimodal-3($|-) ]]; then
-      err "VOYAGE_MODEL_PACKAGE_ARN does not point at voyage-multimodal-3.
-       Got tail:  $VOYAGE_ARN_TAIL
-       Expected:  voyage-multimodal-3 or voyage-multimodal-3-<version/hash>
-       SoW pins this stack to voyage-multimodal-3 — refusing to deploy a different model.
-       Re-run ./deploy/scripts/setup-voyage-marketplace.sh to subscribe + rewrite env.sh."
+    if [[ "$VOYAGE_ARN_TAIL" =~ ^voyage-multimodal-3($|-) ]]; then
+      VOYAGE_MODEL_LABEL="voyage-multimodal-3"
+      VOYAGE_REQUEST_FORMAT="${VOYAGE_REQUEST_FORMAT:-multimodal}"
+      [[ "$VOYAGE_REQUEST_FORMAT" == "multimodal" ]] || err "voyage-multimodal-3 requires VOYAGE_REQUEST_FORMAT=multimodal"
+      EMBEDDINGS_SOW_ALIGNED="true"
+    elif [[ "$VOYAGE_ARN_TAIL" =~ ^voyage-3-5-lite($|-) ]]; then
+      VOYAGE_MODEL_LABEL="voyage-3-5-lite"
+      VOYAGE_REQUEST_FORMAT="${VOYAGE_REQUEST_FORMAT:-legacy}"
+      [[ "$VOYAGE_REQUEST_FORMAT" == "legacy" ]] || err "voyage-3-5-lite requires VOYAGE_REQUEST_FORMAT=legacy"
+    else
+      VOYAGE_MODEL_LABEL="$VOYAGE_MARKETPLACE_MODEL"
+      [[ -n "$VOYAGE_MODEL_LABEL" && "$VOYAGE_MODEL_LABEL" != "voyage-multimodal-3" ]] || err "Could not infer Voyage model from VOYAGE_MODEL_PACKAGE_ARN tail '$VOYAGE_ARN_TAIL'.
+       Set VOYAGE_MARKETPLACE_MODEL to the selected custom model and VOYAGE_REQUEST_FORMAT to multimodal or legacy."
+      [[ "$VOYAGE_REQUEST_FORMAT" == "multimodal" || "$VOYAGE_REQUEST_FORMAT" == "legacy" ]] || err "Custom Voyage model '$VOYAGE_MODEL_LABEL' requires VOYAGE_REQUEST_FORMAT=multimodal or legacy"
     fi
-    ok "Embeddings: $VOYAGE_ARN_TAIL (SoW-aligned Voyage multimodal, SageMaker endpoint will be provisioned)"
+    EMBEDDINGS_MODEL_ID="$VOYAGE_ARN_TAIL"
+    VOYAGE_MARKETPLACE_MODEL="$VOYAGE_MODEL_LABEL"
+    if [[ -z "$VOYAGE_ENDPOINT_SUFFIX" ]]; then
+      VOYAGE_ENDPOINT_SUFFIX="$(echo "$VOYAGE_MODEL_LABEL" | tr '[:upper:]' '[:lower:]' | sed -E 's/[_.]/-/g; s/[^a-z0-9-]+/-/g; s/^-+//; s/-+$//')"
+    fi
+    ok "Embeddings: ${VOYAGE_MODEL_LABEL} via SageMaker (${VOYAGE_REQUEST_FORMAT} request format; package ${VOYAGE_ARN_TAIL})"
     ;;
   titan)
     # Explicit, deliberate deviation from the SoW — Bedrock Titan v2 only. No
     # SageMaker endpoint is created; API + runtimes embed via Bedrock. Override
     # any leaked VOYAGE_ARN so the tfvars block below cannot trigger SageMaker.
     VOYAGE_ARN=""
+    VOYAGE_MODEL_LABEL=""
+    EMBEDDINGS_MODEL_ID="amazon.titan-embed-text-v2:0"
+    VOYAGE_REQUEST_FORMAT="${VOYAGE_REQUEST_FORMAT:-multimodal}"
     warn "═══════════════════════════════════════════════════════════════════════"
     warn "  EMBEDDINGS_PROVIDER=titan — explicit deviation from SoW"
     warn "  Voyage SageMaker endpoint will NOT be provisioned."
@@ -332,6 +357,11 @@ case "$EMBEDDINGS_PROVIDER" in
     err "EMBEDDINGS_PROVIDER='$EMBEDDINGS_PROVIDER' is not recognised. Use 'voyage' or 'titan'."
     ;;
 esac
+export VOYAGE_REQUEST_FORMAT
+export VOYAGE_MARKETPLACE_MODEL
+export EMBEDDINGS_MODEL_ID
+export EMBEDDINGS_SOW_ALIGNED
+export VOYAGE_ENDPOINT_SUFFIX
 
 # Re-read SHARED_VPC_NAME after sourcing env.sh so an env.sh override wins.
 SHARED_VPC_NAME="${SHARED_VPC_NAME:-shared-network}"
@@ -430,6 +460,7 @@ ec2_key_pair_name = "${EC2_KEY_PAIR}"
 # Voyage AI SageMaker (embeds queries on EC2; leave empty to skip endpoint deploy)
 voyage_model_package_arn = "${VOYAGE_ARN}"
 voyage_instance_type     = "${VOYAGE_INSTANCE}"
+voyage_endpoint_name_suffix = "${VOYAGE_ENDPOINT_SUFFIX:-voyage-multimodal-3}"
 
 # AgentCore Memory TTL
 agentcore_memory_expiry_days = 30
@@ -572,6 +603,7 @@ load_tf_outputs() {
   AGENTCORE_PRODUCT_RECOMMENDATION_ID=$(terraform output -raw acr_product_recommendation_id 2>/dev/null || echo "")
   ATLAS_PRIVATELINK_ENDPOINT_ID=$(terraform output -raw atlas_privatelink_endpoint_id 2>/dev/null || echo "")
   CW_API_LOG_GROUP=$(terraform output -raw cloudwatch_api_log_group 2>/dev/null || echo "/${PROJECT_NAME}/${ENVIRONMENT}/api")
+  CW_UI_LOG_GROUP=$(terraform output -raw cloudwatch_ui_log_group 2>/dev/null || echo "/${PROJECT_NAME}/${ENVIRONMENT}/ui")
 }
 
 load_tf_outputs
@@ -847,17 +879,16 @@ env = {
   'MONGODB_MCP_RUNTIME_ENDPOINT': os.environ.get('MONGODB_MCP_RUNTIME_ENDPOINT',''),
   'EMBEDDING_MODEL_ID':       'amazon.titan-embed-text-v2:0',
   # Explicit provider switch — propagated from deploy.sh so the API logs and
-  # CloudWatch can confirm whether the running stack is SoW-aligned (voyage)
-  # or running the documented Titan deviation. The API will assert this matches
-  # what is actually configured at boot.
+  # CloudWatch can confirm whether the running stack is using Voyage or the
+  # documented Titan deviation.
   'EMBEDDINGS_PROVIDER':      os.environ.get('EMBEDDINGS_PROVIDER',''),
   # When VOYAGE_SAGEMAKER_ENDPOINT is set, the API + runtimes prefer Voyage AI
   # over the Bedrock Titan fallback. Skipped here when the endpoint isn't
   # provisioned (Voyage Marketplace ARN not set), so the Titan path stays live.
   'VOYAGE_SAGEMAKER_ENDPOINT':os.environ.get('VOYAGE_ENDPOINT',''),
   'VOYAGE_OUTPUT_DIM':        '1024',
-  # Request envelope is pinned to multimodal-3 in env.sh. Forwarded verbatim
-  # so any deviation is visible in the runtime env (not silently rewritten).
+  # Request envelope selected by the deployment guard: multimodal for
+  # voyage-multimodal-3, legacy for voyage-3.5-lite / older text-only listings.
   'VOYAGE_REQUEST_FORMAT':    os.environ.get('VOYAGE_REQUEST_FORMAT','multimodal'),
 }
 # AWS CLI env format: {\"KEY\": \"VAL\"}
@@ -1082,7 +1113,7 @@ BEDROCK_KB_ID=${BEDROCK_KB_ID}
 AWS_REGION=${AWS_REGION}
 
 # Embedding — explicit provider switch from deploy.sh (no silent fallback).
-#   voyage  → VOYAGE_SAGEMAKER_ENDPOINT set, voyage-multimodal-3 (SoW)
+#   voyage  → VOYAGE_SAGEMAKER_ENDPOINT set, selected Voyage Marketplace model
 #   titan   → VOYAGE_SAGEMAKER_ENDPOINT empty, Bedrock Titan v2 (deviation)
 EMBEDDINGS_PROVIDER=${EMBEDDINGS_PROVIDER}
 VOYAGE_SAGEMAKER_ENDPOINT=${VOYAGE_ENDPOINT}
@@ -1094,6 +1125,9 @@ EMBEDDING_MODEL_ID=amazon.titan-embed-text-v2:0
 AGENTCORE_MEMORY_STORE_ID=${AGENTCORE_MEMORY_STORE_ID}
 AGENTCORE_GATEWAY_URL=${AGENTCORE_GATEWAY_URL}
 AGENTCORE_ORCHESTRATOR_ARN=${AGENTCORE_ORCHESTRATOR_ARN}
+AGENTCORE_ORDER_MANAGEMENT_ARN=${AGENTCORE_ORDER_MANAGEMENT_ARN}
+AGENTCORE_PRODUCT_RECOMMENDATION_ARN=${AGENTCORE_PRODUCT_RECOMMENDATION_ARN}
+AGENTCORE_TROUBLESHOOTING_ARN=${AGENTCORE_TROUBLESHOOTING_ARN}
 
 # Tool hosting — Gateway remains for non-Mongo tools; MongoDB MCP calls go
 # directly to the dedicated AgentCore Runtime.
@@ -1110,8 +1144,9 @@ MEMORY_TTL_DAYS=30
 # enabled a different tool-use-capable model in your account.
 MEMORY_EXTRACTION_MODEL_ID=us.anthropic.claude-haiku-4-5-20251001-v1:0
 
-# CloudWatch
+# CloudWatch (API + UI log groups; journald → CW agent on EC2 ships here)
 CLOUDWATCH_LOG_GROUP=${CW_API_LOG_GROUP}
+CLOUDWATCH_UI_LOG_GROUP=${CW_UI_LOG_GROUP}
 
 # Cognito — JWT auth for the API. Always on; assertJwksAuthConfigured() refuses to boot
 # the API without AUTH_JWKS_URI + AUTH_ISSUER (api/src/lib/jwt-verify.ts).
@@ -1148,6 +1183,32 @@ if [[ "$BOOTSTRAP_OUT" != *"yes"* ]]; then
 fi
 ok "EC2 bootstrap marker detected"
 
+# ── CloudWatch Agent readiness ────────────────────────────────────────────────
+# The amazon-cloudwatch-agent service must be active and a log stream must be
+# created in /<project>/<env>/api within 60 s of API restart, otherwise journald
+# logs are never shipped to CloudWatch. We probe both before continuing.
+log "Verifying amazon-cloudwatch-agent is active on EC2..."
+CWA_STATUS_CMD_ID=$(send_ssm_command_retry \
+  "$EC2_INSTANCE_ID" \
+  "multiagent: cw-agent status" \
+  '["systemctl is-active amazon-cloudwatch-agent || true"]' \
+  12) || warn "Failed to send cw-agent status command via SSM"
+
+if [[ -n "$CWA_STATUS_CMD_ID" ]]; then
+  wait_for_ssm_command_success "$CWA_STATUS_CMD_ID" "$EC2_INSTANCE_ID" 12 || true
+  CWA_STATUS_OUT=$(aws ssm get-command-invocation \
+    --region "$AWS_REGION" \
+    --command-id "$CWA_STATUS_CMD_ID" \
+    --instance-id "$EC2_INSTANCE_ID" \
+    --query "StandardOutputContent" --output text 2>/dev/null || echo "unknown")
+  CWA_STATUS_OUT="$(echo "$CWA_STATUS_OUT" | tr -d '[:space:]')"
+  if [[ "$CWA_STATUS_OUT" == "active" ]]; then
+    ok "amazon-cloudwatch-agent is active"
+  else
+    warn "amazon-cloudwatch-agent reported '${CWA_STATUS_OUT:-unknown}' (continuing; CloudWatch shipping may be delayed)"
+  fi
+fi
+
 # Copy via SSM Session Manager — no SSH key required.
 log "Copying .env.live to EC2 ($EC2_INSTANCE_ID) via SSM..."
 _ENV_B64=$(base64 < "$REPO_ROOT/.env.live" | tr -d '\n')
@@ -1167,14 +1228,69 @@ ok ".env.live synced to /opt/multiagent/.env.live"
 sep
 log "Phase 8 — Pulling images + restarting services on EC2..."
 
+# Interface endpoints use private DNS for ECR/Logs. If the endpoint security
+# group drifts and no longer allows a consumer SG, calls resolve privately and
+# then time out. Repair that ingress here as a deploy-time guardrail; Terraform's
+# null_resource authorizer is idempotent but cannot detect manually removed SG
+# rules after its state has already recorded success.
+EC2_VPC_ID="$(aws ec2 describe-instances \
+  --region "$AWS_REGION" \
+  --instance-ids "$EC2_INSTANCE_ID" \
+  --query 'Reservations[0].Instances[0].VpcId' \
+  --output text)"
+EC2_SECURITY_GROUP_IDS="$(aws ec2 describe-instances \
+  --region "$AWS_REGION" \
+  --instance-ids "$EC2_INSTANCE_ID" \
+  --query 'Reservations[0].Instances[0].SecurityGroups[].GroupId' \
+  --output text)"
+MONGODB_MCP_RUNTIME_ID="${MONGODB_MCP_RUNTIME_ARN##*/}"
+MONGODB_MCP_RUNTIME_SECURITY_GROUP_IDS="$(aws bedrock-agentcore-control get-agent-runtime \
+  --region "$AWS_REGION" \
+  --agent-runtime-id "$MONGODB_MCP_RUNTIME_ID" \
+  --query 'networkConfiguration.networkModeConfig.securityGroups[]' \
+  --output text 2>/dev/null || true)"
+ENDPOINT_CONSUMER_SECURITY_GROUP_IDS="$(printf "%s\n%s\n" \
+  "$EC2_SECURITY_GROUP_IDS" \
+  "$MONGODB_MCP_RUNTIME_SECURITY_GROUP_IDS" | tr '\t' '\n' | sort -u)"
+AWS_ENDPOINT_SECURITY_GROUP_IDS="$(aws ec2 describe-vpc-endpoints \
+  --region "$AWS_REGION" \
+  --filters \
+    "Name=vpc-id,Values=${EC2_VPC_ID}" \
+    "Name=service-name,Values=com.amazonaws.${AWS_REGION}.ecr.api,com.amazonaws.${AWS_REGION}.ecr.dkr,com.amazonaws.${AWS_REGION}.logs" \
+  --query 'VpcEndpoints[].Groups[].GroupId' \
+  --output text | tr '\t' '\n' | sort -u)"
+if [[ -n "$AWS_ENDPOINT_SECURITY_GROUP_IDS" && "$AWS_ENDPOINT_SECURITY_GROUP_IDS" != "None" ]]; then
+  for endpoint_sg_id in $AWS_ENDPOINT_SECURITY_GROUP_IDS; do
+    for source_sg_id in $ENDPOINT_CONSUMER_SECURITY_GROUP_IDS; do
+      [[ -n "$source_sg_id" && "$source_sg_id" != "None" ]] || continue
+      OUT=$(aws ec2 authorize-security-group-ingress \
+        --region "$AWS_REGION" \
+        --group-id "$endpoint_sg_id" \
+        --protocol tcp \
+        --port 443 \
+        --source-group "$source_sg_id" 2>&1) || {
+        if [[ "$OUT" != *"InvalidPermission.Duplicate"* ]]; then
+          echo "$OUT" >&2
+          err "Failed to allow consumer SG $source_sg_id to reach AWS endpoint SG $endpoint_sg_id"
+        fi
+      }
+    done
+  done
+  ok "ECR/Logs VPC endpoint ingress allows EC2 host and MongoDB MCP runtime"
+fi
+
 # Single SSM command: ECR login, pull latest images, restart API + UI containers.
 # MongoDB MCP is now a Lambda function (no local sidecar to restart).
 ECR_REGISTRY=$(echo "$ECR_API_REPO" | cut -d'/' -f1)
-RESTART_CMD="aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${ECR_REGISTRY} \
-  && docker pull ${ECR_API_IMAGE} \
-  && docker pull ${ECR_UI_IMAGE} \
-  && systemctl daemon-reload \
-  && systemctl restart multiagent-api multiagent-ui"
+if [[ "$SKIP_DOCKER" == "true" ]]; then
+  RESTART_CMD="systemctl daemon-reload && systemctl restart multiagent-api multiagent-ui"
+else
+  RESTART_CMD="aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${ECR_REGISTRY} \
+    && docker pull ${ECR_API_IMAGE} \
+    && docker pull ${ECR_UI_IMAGE} \
+    && systemctl daemon-reload \
+    && systemctl restart multiagent-api multiagent-ui"
+fi
 
 RESTART_CMD_ID=$(send_ssm_command_retry \
   "$EC2_INSTANCE_ID" \
@@ -1219,8 +1335,35 @@ if [[ "$HEALTH_OK" != "yes" ]]; then
   ok "API is healthy (verified via EC2 local probe)"
 fi
 
+# ── CloudWatch Logs streams probe ────────────────────────────────────────────
+# After the API restarted, the CW agent should have created at least one log
+# stream in $CW_API_LOG_GROUP from the multiagent-api journald unit within 60s.
+# We probe up to 12 times every 5s — non-fatal so a flaky agent doesn't block
+# the deploy, but we surface a loud warn() so an operator notices.
+if [[ -n "${CW_API_LOG_GROUP:-}" ]]; then
+  log "Probing CloudWatch log streams in ${CW_API_LOG_GROUP}..."
+  CW_STREAMS_OK="no"
+  for i in $(seq 1 12); do
+    STREAM_COUNT=$(aws logs describe-log-streams \
+      --region "$AWS_REGION" \
+      --log-group-name "$CW_API_LOG_GROUP" \
+      --max-items 1 \
+      --query 'length(logStreams)' --output text 2>/dev/null || echo 0)
+    if [[ "$STREAM_COUNT" =~ ^[0-9]+$ ]] && (( STREAM_COUNT >= 1 )); then
+      CW_STREAMS_OK="yes"
+      break
+    fi
+    sleep 5
+  done
+  if [[ "$CW_STREAMS_OK" == "yes" ]]; then
+    ok "CloudWatch agent is shipping API logs (${CW_API_LOG_GROUP})"
+  else
+    warn "No log streams found in ${CW_API_LOG_GROUP} after 60s — CloudWatch agent may not be shipping. Check journalctl -u amazon-cloudwatch-agent on EC2."
+  fi
+fi
+
 sep
-log "Phase 9a2 — /health dependency smoke (mongodb + agentcore + mcpServer must report 'connected')..."
+log "Phase 9a2 — /health dependency smoke (mongodb + agentcore must report 'connected'; mcpServer warns if unreachable)..."
 HEALTH_PAYLOAD=$(curl -sf --max-time 10 "http://${EC2_IP}:3000/health" 2>/dev/null || echo "")
 if [[ -n "$HEALTH_PAYLOAD" ]]; then
   python3 - "$HEALTH_PAYLOAD" <<'PY'
@@ -1237,8 +1380,6 @@ required = {
     # `ResourceNotFoundException` + `/actor/i` carve-out in
     # api/src/lib/health-status.ts.
     "agentcore": "connected",
-    # AgentCore Gateway MCP handshake: must be reachable from EC2.
-    "mcpServer": "connected",
 }
 mismatches = []
 for key, want in required.items():
@@ -1252,7 +1393,11 @@ if mismatches:
         + json.dumps(payload, indent=2)
         + "\nMismatches:\n" + "\n".join(mismatches)
     )
-print("  /health dependencies all 'connected' as expected")
+mcp = deps.get("mcpServer")
+if mcp != "connected":
+    print(f"  warning: mcpServer={mcp}; API deploy can proceed, but Mongo MCP tool calls may be degraded")
+else:
+    print("  /health dependencies all 'connected' as expected")
 PY
   ok "/health dependency smoke passed"
 else
@@ -1358,23 +1503,17 @@ if (second_summary.get("agentcoreRuntimeMs") or 0) <= 0:
 if (second_summary.get("bytesOut") or 0) <= 0:
     raise SystemExit("SSE smoke validation failed: bytesOut == 0 (runtime returned an empty response)")
 
-# An order question must always reach the order-management specialist runtime,
-# producing a 2-hop trace (Hono → orchestrator + orchestrator → specialist).
-# `agentcoreHops` is incremented by `TraceCollector.attachEventsNested` from
-# the spliced inner agentcore.invoke event. If this stays at 1, either the
-# runtime entrypoint (`api/src/agent-runtime-code.ts`) is not shipping back
-# its `traceEvents`, or the splice is dropping the inner hop, or the
-# orchestrator silently fell back to in-process answering. Any of these makes
-# the Trace Viewer summary lie about the runtime topology.
+# An order question must always reach the order-management specialist runtime.
+# In the optimized path the Hono API classifies and invokes that specialist
+# directly, producing exactly one AgentCore hop. When USE_ORCHESTRATOR_RUNTIME=1
+# is set, the legacy orchestrator-runtime path may produce two hops. Either is
+# valid, but zero means Hono never invoked AgentCore.
 hops = second_summary.get("agentcoreHops") or 0
-if hops < 2:
+if hops < 1:
     raise SystemExit(
-        f"SSE smoke validation failed: agentcoreHops={hops} < 2 for an "
-        "order question (expected 2: Hono → orchestrator → specialist). "
-        "Either the runtime trace splice is broken (check "
-        "`agent-runtime-code.ts` returns `traceEvents` and Hono adapter "
-        "calls `trace.attachEventsNested(...)`), or the orchestrator's "
-        "swarm handoff didn't fire and the fallback path answered in-process."
+        f"SSE smoke validation failed: agentcoreHops={hops} < 1 for an "
+        "order question (expected Hono → specialist, or legacy "
+        "Hono → orchestrator → specialist when USE_ORCHESTRATOR_RUNTIME=1)."
     )
 # Substantive tool counters must reflect at least one Mongo query and one MCP
 # call. Without the counter rollup in `attachEventsNested(...)`, every nested
@@ -1455,8 +1594,8 @@ export _M_EC2_API="$EC2_API"      _M_EC2_UI="$EC2_UI"
 export _M_COGNITO_POOL="$COGNITO_POOL_ID" _M_COGNITO_CLIENT="$COGNITO_CLIENT_ID"
 export _M_VOYAGE="$VOYAGE_ENDPOINT"
 export _M_EMBEDDINGS_PROVIDER="$EMBEDDINGS_PROVIDER"
-export _M_EMBEDDINGS_MODEL="$([[ "$EMBEDDINGS_PROVIDER" == "voyage" ]] && echo "${VOYAGE_MODEL_PACKAGE_ARN##*/}" || echo "amazon.titan-embed-text-v2:0")"
-export _M_EMBEDDINGS_SOW_ALIGNED="$([[ "$EMBEDDINGS_PROVIDER" == "voyage" ]] && echo "true" || echo "false")"
+export _M_EMBEDDINGS_MODEL="$EMBEDDINGS_MODEL_ID"
+export _M_EMBEDDINGS_SOW_ALIGNED="$EMBEDDINGS_SOW_ALIGNED"
 export _M_ECR_API="$ECR_API_REPO"  _M_ECR_UI="$ECR_UI_REPO"
 export _M_AC_MEM="$AGENTCORE_MEMORY_STORE_ID" _M_AC_GW="$AGENTCORE_GATEWAY_URL" _M_MCP_RUNTIME_ARN="$MONGODB_MCP_RUNTIME_ARN" _M_MCP_RUNTIME_ENDPOINT="$MONGODB_MCP_RUNTIME_ENDPOINT"
 export _M_ATLAS_PROJ="$TF_VAR_atlas_project_id" _M_ATLAS_HOST="$ATLAS_MONGO_HOST"

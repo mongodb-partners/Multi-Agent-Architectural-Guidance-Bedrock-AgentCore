@@ -428,7 +428,7 @@ deploy/
       networking/          ← VPC, subnets, EIP, security groups, S3 gateway endpoint
       mongodb-atlas/       ← Atlas M10 cluster + DB user + IP allowlist
       atlas-privatelink/   ← AWS Interface VPCE + Atlas-side endpoint binding + CIDR-scoped SG (envs/network)
-      atlas-cluster-dns/   ← per-cluster Route 53 private zone + wildcard CNAME (envs/ec2)
+      atlas-privatelink-dns/ ← per-cluster Route 53 private zone + wildcard CNAME — DNS half of Atlas PrivateLink (envs/ec2)
       ec2/                 ← EC2 instance profile + user-data (SSM-only, no SSH)
       ecr/                 ← private ECR repos for API + UI images
       cognito/             ← Cognito User Pool + App Client for JWT auth

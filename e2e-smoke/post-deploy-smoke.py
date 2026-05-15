@@ -184,12 +184,16 @@ def check_terraform_outputs(resources: dict[str, Any]) -> None:
         ["terraform", "output", "-raw", "bedrock_kb_endpoint_service_name"],
         cwd=TF_DIR,
     )
+    cw_api = run(["terraform", "output", "-raw", "cloudwatch_api_log_group"], cwd=TF_DIR)
+    cw_ui = run(["terraform", "output", "-raw", "cloudwatch_ui_log_group"], cwd=TF_DIR)
     log(
         json.dumps(
             {
                 "voyage_endpoint_name": voyage_output,
                 "bedrock_kb_privatelink_enabled": kb_pl_enabled,
                 "bedrock_kb_endpoint_service_name": kb_endpoint_service,
+                "cloudwatch_api_log_group": cw_api,
+                "cloudwatch_ui_log_group": cw_ui,
             },
             sort_keys=True,
         )
@@ -205,6 +209,8 @@ def check_terraform_outputs(resources: dict[str, Any]) -> None:
         kb_endpoint_service.startswith("com.amazonaws.vpce."),
         f"Bedrock KB endpoint service name missing/invalid: {kb_endpoint_service}",
     )
+    require("/" in cw_api and cw_api.rstrip("/").endswith("/api"), f"unexpected api log group: {cw_api!r}")
+    require("/" in cw_ui and cw_ui.rstrip("/").endswith("/ui"), f"unexpected ui log group: {cw_ui!r}")
 
 
 def check_bedrock_kb(resources: dict[str, Any]) -> None:
@@ -263,7 +269,7 @@ def cognito_token(client_id: str) -> str:
     return token
 
 
-def post_chat(api_url: str, token: str, agent: str, message: str) -> str:
+def post_chat(api_url: str, token: str, agent: str, message: str) -> tuple[str, str | None]:
     payload = json.dumps(
         {
             "agentId": agent,
@@ -285,7 +291,9 @@ def post_chat(api_url: str, token: str, agent: str, message: str) -> str:
                 method="POST",
             )
             with urllib.request.urlopen(request, timeout=240) as response:
-                return response.read().decode("utf-8", "replace")
+                x_trace = response.headers.get("X-Trace-Id") or response.headers.get("x-trace-id")
+                body = response.read().decode("utf-8", "replace")
+                return body, x_trace
         except (
             http.client.IncompleteRead,
             http.client.HTTPException,
@@ -370,7 +378,11 @@ def check_all_agents(api_url: str, token: str) -> None:
     for case in cases:
         agent = case["agent"]
         log(f"\n-- {agent} --")
-        body = post_chat(api_url, token, str(agent), str(case["message"]))
+        body, x_trace = post_chat(api_url, token, str(agent), str(case["message"]))
+        require(
+            isinstance(x_trace, str) and len(x_trace) == 32 and re.match(r"^[0-9a-f]{32}$", x_trace, re.I),
+            f"{agent}: POST /chat missing valid X-Trace-Id header (got {x_trace!r})",
+        )
         text, events, traces, handoffs, errors = parse_sse(body)
         flat = re.sub(r"\s+", " ", text).strip()
         checks = {
@@ -391,6 +403,193 @@ def check_all_agents(api_url: str, token: str) -> None:
         log(f"checks={json.dumps(checks, sort_keys=True)}")
         require(all(checks.values()), f"{agent} smoke failed: {checks}")
         log(f"PASS {agent}")
+
+
+def check_cloudwatch_join(resources: dict[str, Any], api_url: str, token: str) -> None:
+    """Cross-boundary OTel correlation — Phase 10 smoke check.
+
+    POST /chat, capture `X-Trace-Id`, then verify ≥1 CloudWatch Logs entry
+    in the API log group carries the same `trace_id` JSON field. Non-fatal:
+    journald → CW agent is best-effort and can lag a few seconds on a fresh
+    EC2; we wait up to 90 s before warning.
+    """
+    log("\n== CloudWatch trace_id join ==")
+    if os.environ.get("SKIP_CHAT_CHECKS") == "1":
+        log("skipped via SKIP_CHAT_CHECKS=1")
+        return
+
+    api_group = (resources.get("cloudwatch_api_log_group") or "").strip()
+    if not api_group:
+        if os.environ.get("SKIP_TERRAFORM_CHECKS") == "1":
+            log("no cloudwatch_api_log_group in manifest and terraform checks skipped — skipping CW join")
+            return
+        try:
+            api_group = run(["terraform", "output", "-raw", "cloudwatch_api_log_group"], cwd=TF_DIR)
+        except SmokeFailure:
+            log("cloudwatch_api_log_group output missing — skipping CW join")
+            return
+
+    region = str(resources.get("aws_region") or os.environ.get("AWS_REGION") or "us-east-1")
+    # Use a routing prompt that forces orchestrator -> specialist hand-off so both
+    # the API span AND the downstream AgentCore runtime emit logs carrying the
+    # same trace_id. A bare greeting often short-circuits inside the orchestrator
+    # without invoking any specialist runtime, leaving CloudWatch with API-only hits.
+    _, x_trace = post_chat(api_url, token, "orchestrator", "Please look up the status of order ORD-1001.")
+    require(
+        isinstance(x_trace, str) and len(x_trace) == 32 and re.match(r"^[0-9a-f]{32}$", x_trace, re.I),
+        f"POST /chat missing X-Trace-Id (got {x_trace!r})",
+    )
+    log(f"x_trace_id={x_trace}")
+    log(f"log_group={api_group}")
+
+    pattern = '{ $.trace_id = "' + str(x_trace) + '" }'
+    start_ts = int(time.time() * 1000) - 5 * 60 * 1000
+
+    found = 0
+    deadline = time.time() + 90
+    while time.time() < deadline:
+        try:
+            raw = run(
+                [
+                    "aws",
+                    "logs",
+                    "filter-log-events",
+                    "--region",
+                    region,
+                    "--log-group-name",
+                    api_group,
+                    "--start-time",
+                    str(start_ts),
+                    "--filter-pattern",
+                    pattern,
+                    "--max-items",
+                    "5",
+                    "--output",
+                    "json",
+                ],
+                timeout=30,
+            )
+        except SmokeFailure as exc:
+            log(f"filter-log-events failed (will retry): {exc}")
+            time.sleep(10)
+            continue
+        try:
+            doc = json.loads(raw)
+        except json.JSONDecodeError:
+            time.sleep(5)
+            continue
+        events = doc.get("events") or []
+        found = len(events)
+        if found >= 1:
+            break
+        time.sleep(5)
+
+    if found >= 1:
+        log(f"PASS cloudwatch_trace_join (matched {found} log events for trace_id={x_trace})")
+    else:
+        log(
+            f"WARN: 0 log events with trace_id={x_trace} in {api_group} within 90s — "
+            "journald → CW agent may be lagging or agent unhealthy."
+        )
+
+    # AgentCore-managed log groups land under /aws/bedrock-agentcore/runtimes/<id>/.
+    # The account commonly accumulates legacy groups from prior deployments, so
+    # we scope the discovery prefix to the *current* deployment's project slug
+    # derived from the API log group (e.g. `/mongodb-multiagent3/dev/api` ->
+    # project_slug `mongodb_multiagent3`). Without this, alphabetic sort can hide
+    # the current runtimes behind legacy groups when AWS caps the page size.
+    project_slug: str | None = None
+    parts = api_group.strip("/").split("/")
+    if parts:
+        project_slug = parts[0].replace("-", "_")
+    if project_slug:
+        agentcore_prefix = f"/aws/bedrock-agentcore/runtimes/{project_slug}_"
+    else:
+        agentcore_prefix = "/aws/bedrock-agentcore/runtimes/"
+    try:
+        groups_raw = run(
+            [
+                "aws",
+                "logs",
+                "describe-log-groups",
+                "--region",
+                region,
+                "--log-group-name-prefix",
+                agentcore_prefix,
+                "--output",
+                "json",
+            ],
+            timeout=30,
+        )
+    except SmokeFailure as exc:
+        log(f"AgentCore log-group discovery skipped: {exc}")
+        return
+
+    try:
+        agentcore_groups = [
+            str(g.get("logGroupName") or "")
+            for g in (json.loads(groups_raw).get("logGroups") or [])
+            if g.get("logGroupName")
+        ]
+    except json.JSONDecodeError:
+        agentcore_groups = []
+
+    if not agentcore_groups:
+        log(
+            f"WARN: no AgentCore log groups under {agentcore_prefix!r} — "
+            "AgentCore trace join skipped."
+        )
+        return
+    log(f"agentcore_log_groups_scanned={len(agentcore_groups)} (prefix={agentcore_prefix})")
+
+    # AgentCore-managed log delivery to CloudWatch can lag 30-90 s on cold
+    # runtimes. Poll for up to ~120 s before giving up.
+    agentcore_hits = 0
+    matched_group: str | None = None
+    deadline = time.time() + 120
+    while time.time() < deadline and agentcore_hits == 0:
+        for grp in agentcore_groups:
+            try:
+                raw = run(
+                    [
+                        "aws",
+                        "logs",
+                        "filter-log-events",
+                        "--region",
+                        region,
+                        "--log-group-name",
+                        grp,
+                        "--start-time",
+                        str(start_ts),
+                        "--filter-pattern",
+                        pattern,
+                        "--max-items",
+                        "3",
+                        "--output",
+                        "json",
+                    ],
+                    timeout=20,
+                )
+            except SmokeFailure:
+                continue
+            try:
+                events = (json.loads(raw).get("events") or [])
+            except json.JSONDecodeError:
+                continue
+            if events:
+                agentcore_hits = len(events)
+                matched_group = grp
+                break
+        if agentcore_hits == 0:
+            time.sleep(10)
+
+    if agentcore_hits >= 1:
+        log(f"PASS agentcore_trace_join (matched {agentcore_hits} events in {matched_group} for trace_id={x_trace})")
+    else:
+        log(
+            f"WARN: 0 AgentCore-runtime log events with trace_id={x_trace} across "
+            f"{len(agentcore_groups)} group(s) — verify _trace propagation in adapters/agentcore-runtime.ts."
+        )
 
 
 def main() -> int:
@@ -420,6 +619,7 @@ def main() -> int:
     check_terraform_outputs(resources)
     check_bedrock_kb(resources)
     check_all_agents(api_url, token)
+    check_cloudwatch_join(resources, api_url, token)
 
     log("\nALL_POST_DEPLOY_SMOKE_CHECKS_PASSED")
     return 0

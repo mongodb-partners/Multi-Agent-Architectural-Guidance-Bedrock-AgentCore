@@ -82,7 +82,7 @@ docker compose up --build
 6. **After meaningful increments**, update [`TASKS.md`](TASKS.md) checkboxes so the implementation tracker stays honest.
 7. **When run behavior or implementation status changes**, update [`DEV_STATUS.md`](DEV_STATUS.md) in the same change. **Docker / Compose / ECR scripts / CI image jobs:** also align [`docs/deployment-guide.md`](docs/deployment-guide.md) (Step 5 + top status box) and this file’s layout/commands if paths or build context change.
 8. **When a pitfall has recurred more than twice** (or is a critical regression worth a permanent rule), add a concise entry to [`memory.md`](memory.md). See that file’s Purpose section — do not append every fix there.
-9. **Use `logger` (not `console.log`) for new diagnostic output** in `api/src/`. Import from `./logger.ts` (or `../lib/logger.ts`). `console.log` / `console.error` in tests and Streamlit (`ui/`) are fine.
+9. **Use `logger` (not `console.log`) for new diagnostic output** in `api/src/`. Import from `./logger.ts` (or `../lib/logger.ts`). `console.log` / `console.error` in tests and Streamlit (`ui/`) are fine. For **new Streamlit-side diagnostics**, prefer `ui/lib/log.py` (`log.info` / `warn` / `error` / `debug`) so support can grep JSON in process logs the same way as the API.
 
 ---
 
@@ -181,6 +181,7 @@ Implemented: Streamlit **Cognito** (`streamlit-cognito-auth`, `ui/lib/cognito_ga
 | [`docs/configuration-guide.md`](docs/configuration-guide.md) | Config and environment |
 | [`docs/deployment-guide.md`](docs/deployment-guide.md) | Target AWS/Terraform, **Docker & ECR** (reference), ECS notes |
 | [`docs/architecture.md`](docs/architecture.md) | System design |
+| [`docs/logging-architecture.md`](docs/logging-architecture.md) | Structured JSON logger, OpenTelemetry trace correlation, CloudWatch shipping, audit channel, redaction |
 | [`docs/demo-mode-guide.md`](docs/demo-mode-guide.md) | Trace UI walkthrough + env knobs for client demos |
 
 ---

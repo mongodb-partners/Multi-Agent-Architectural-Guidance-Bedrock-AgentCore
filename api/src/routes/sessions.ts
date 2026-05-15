@@ -1,4 +1,5 @@
 import { Hono, type Context } from "hono";
+import { logger } from "../lib/logger.ts";
 import {
   deleteSession,
   FORBIDDEN_SESSION,
@@ -61,5 +62,10 @@ sessionsRoutes.delete("/sessions/:sessionId", async (c) => {
   if (!userId) return unauthorized(c);
   const ok = await deleteSession(sessionId, userId);
   if (!ok) return notFound(c, sessionId);
+  logger.audit().info("[sessions] session deleted", {
+    requestId: c.get("requestId") ?? "unknown",
+    sessionId,
+    userId,
+  });
   return c.body(null, 204);
 });

@@ -16,7 +16,7 @@ from lib.cognito_gate import ensure_api_bearer_token, render_cognito_logout
 from lib.config import load_settings
 from lib.metrics_sidebar import render_metrics_block
 from lib.session_state import ensure_defaults
-from lib.sidebar import render_session_and_agent_sidebar
+from lib.sidebar import render_api_health, render_session_and_agent_sidebar
 from lib.suggested_prompts import render_suggested_prompts
 from lib.trace_css import inject_trace_css
 
@@ -42,10 +42,16 @@ st.caption(
 ensure_defaults()
 
 with st.sidebar:
-    render_cognito_logout(settings)
     agent_id = render_session_and_agent_sidebar(settings.api_base, api_token)
     render_suggested_prompts(settings.api_base)
     render_metrics_block(settings.api_base, api_token)
+    st.markdown("---")
+    render_api_health(settings.api_base, api_token)
+    render_cognito_logout(settings)
 
 render_message_history()
 handle_chat_input(settings.api_base, api_token, agent_id)
+
+_xt = st.session_state.get("last_x_trace_id")
+if _xt:
+    st.caption(f"**X-Trace-Id** (support / CloudWatch): `{_xt}`")

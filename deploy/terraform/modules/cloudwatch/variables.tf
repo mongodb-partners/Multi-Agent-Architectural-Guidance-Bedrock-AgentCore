@@ -8,8 +8,14 @@ variable "environment" {
   description = "Deployment environment (dev, staging, prod)"
 }
 
-variable "retention_days" {
+variable "api_retention_days" {
   type        = number
-  description = "Log retention in days"
+  description = "Retention for the API log group (audit / compliance)"
   default     = 30
+}
+
+variable "aux_retention_days" {
+  type        = number
+  description = "Retention for UI, MCP, and AgentCore placeholder log groups"
+  default     = 7
 }

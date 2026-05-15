@@ -199,7 +199,7 @@ For the editable, fully-labeled version: [`diagrams/01-aws-infrastructure.drawio
 | Route 53 | Private zone | `Z016186537N2SVS43FXN` (Atlas SRV resolution) |
 | S3 | Shared bucket | `bedrock-ma-use1-dev-483874864688` (tfstate, KB docs, runtime zips) |
 | Secrets Manager | Atlas creds | `<project>-bedrock-kb-creds-<env>` (e.g. `mongodb-multiagent-bedrock-kb-creds-dev`) |
-| CloudWatch | Log groups | `/<project>/<env>/{api,mcp,agentcore}` |
+| CloudWatch | Log groups | `/<project>/<env>/{api,ui,mcp,agentcore}` |
 
 ### What is *not* in the architecture (deliberately)
 
@@ -308,9 +308,9 @@ The API and UI run as Docker containers managed by systemd. ECR is the image reg
 
 MongoDB credentials traversing the public internet would be a security concern, so Atlas access is via **PrivateLink + Route 53 private zone + VPC endpoint** to keep that traffic on the AWS backbone.
 
-#### `atlas-cluster-dns` — per-cluster private zone
+#### `atlas-privatelink-dns` — per-cluster private zone
 
-The shared **Atlas Interface VPCE** is provisioned once per region in `envs/network`; the **per-cluster** Route 53 private hosted zone is created by [`deploy/terraform/modules/atlas-cluster-dns/`](../deploy/terraform/modules/atlas-cluster-dns/). The module builds:
+The shared **Atlas Interface VPCE** is provisioned once per region in `envs/network`; the **per-cluster** Route 53 private hosted zone is created by [`deploy/terraform/modules/atlas-privatelink-dns/`](../deploy/terraform/modules/atlas-privatelink-dns/). The module builds:
 
 1. A private hosted zone named `<cluster>.<id>.mongodb.net`, bound to the shared VPC.
 2. A wildcard `CNAME` at `*.<cluster>.<id>.mongodb.net` pointing at the Atlas Interface VPCE DNS name.
@@ -375,7 +375,15 @@ For the full delta against the SoW, see [gap-analysis.md](gap-analysis.md). High
 
 ## 10. Observability and tracing
 
-Every chat turn produces a structured `Trace`:
+### Structured logs and trace correlation
+
+- **OpenTelemetry (in-process):** `api/src/lib/otel.ts` bootstraps a `BasicTracerProvider`, W3C `traceparent` propagation, and an async-hooks context manager. There is **no OTLP exporter** in-repo — traces exist to correlate logs and outbound calls.
+- **JSON logger:** `api/src/lib/logger.ts` emits one JSON object per line (`level`, `ts`, `msg`, `service`, optional `trace_id` / `span_id` / `trace_flags` from the active span). `STRANDS_LOG_REDIRECT=1` sends Strands SDK `console.*` into the same logger (`api/src/lib/strands-console-redirect.ts`).
+- **HTTP:** `api/src/middleware/request-id.ts` + `api/src/middleware/otel.ts` run on the Hono app (`api/src/app.ts`). Responses expose **`X-Request-Id`** and **`X-Trace-Id`** (W3C trace id hex) for support correlation and CloudWatch Logs Insights filters. CORS exposes these headers to the Streamlit origin.
+- **EC2 shipping:** Terraform creates the log groups; EC2 `user_data` installs **amazon-cloudwatch-agent** and tails **journald** for `multiagent-api.service` and `multiagent-ui.service` into `/<project>/<env>/api` and `/<project>/<env>/ui` respectively.
+- **UI:** `ui/lib/log.py` mirrors JSON lines to stdout; `stream_chat_events` logs the response `X-Trace-Id`. The main chat page shows the last trace id in a footer caption for copy/paste.
+
+### Trace collector (product trace)
 
 - **Collector**: `api/src/lib/trace-collector.ts` runs inside an
   `AsyncLocalStorage` context (`api/src/lib/trace-context.ts`) so any module

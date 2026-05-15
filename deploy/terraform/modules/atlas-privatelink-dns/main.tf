@@ -19,7 +19,7 @@ terraform {
 # Wildcard CNAME ensures all shard / mongos hostnames resolve via the VPCE.
 #
 # Full architectural rationale: docs/architecture.md §7.4 ("PrivateLink to
-# Atlas → atlas-cluster-dns per-cluster zone").
+# Atlas → atlas-privatelink-dns per-cluster zone").
 # =============================================================================
 
 resource "aws_route53_zone" "atlas" {

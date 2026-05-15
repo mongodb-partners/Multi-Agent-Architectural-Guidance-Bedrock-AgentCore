@@ -119,7 +119,19 @@ export async function resolveAgentcoreDependencyStatus(): Promise<AgentcoreStatu
 
 /** Probe the mongodb-mcp-server via the MCP client adapter. */
 export async function resolveMcpDependencyStatus(): Promise<McpStatus> {
-  return probeMcpServer();
+  try {
+    return await Promise.race([
+      probeMcpServer(),
+      new Promise<McpStatus>((resolve) => {
+        setTimeout(() => resolve("unreachable"), PING_MS);
+      }),
+    ]);
+  } catch (err) {
+    logger.warn("[health] MCP probe failed", {
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return "unreachable";
+  }
 }
 
 /** Short-term chat session storage: in-process Map vs MongoDB `chat_sessions`. */

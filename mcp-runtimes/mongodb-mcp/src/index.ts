@@ -9,9 +9,30 @@
 // its default streamable response mode rather than forcing JSON responses.
 
 import express, { type Request, type Response } from "express";
+import type { IncomingHttpHeaders } from "node:http";
+import { context } from "@opentelemetry/api";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 
 import { mcpServerCreate } from "./server.js";
+import { initOtel, extractContextFromHeaders } from "./lib/otel.js";
+import { logger } from "./lib/logger.js";
+
+initOtel({ serviceName: "mongodb-multiagent-mcp" });
+
+function headersToFetchApiHeaders(headers: IncomingHttpHeaders): Headers {
+  const h = new Headers();
+  for (const [key, value] of Object.entries(headers)) {
+    if (value === undefined) continue;
+    if (Array.isArray(value)) {
+      for (const v of value) {
+        if (v != null) h.append(key, v);
+      }
+    } else if (typeof value === "string") {
+      h.set(key, value);
+    }
+  }
+  return h;
+}
 
 const PORT = Number.parseInt(process.env.PORT ?? "8000", 10);
 const HOST = process.env.HOST ?? "0.0.0.0";
@@ -20,37 +41,46 @@ const app = express();
 app.use(express.json({ limit: "4mb" }));
 
 app.post("/mcp", async (req: Request, res: Response) => {
-  const startedAt = Date.now();
-  const method = typeof req.body?.method === "string" ? req.body.method : "unknown";
-  const shouldLogRequest = method !== "ping";
-  if (shouldLogRequest) {
-    console.log(`MCP request start method=${method} session=${req.get("mcp-session-id") ?? "none"}`);
-  }
-  const server = mcpServerCreate();
-  try {
-    const transport = new StreamableHTTPServerTransport({
-      sessionIdGenerator: undefined,
-    });
-    await server.connect(transport);
-    await transport.handleRequest(req, res, req.body);
-    res.on("close", () => {
-      if (shouldLogRequest) {
-        console.log(`MCP request close method=${method} durationMs=${Date.now() - startedAt}`);
-      }
-      transport.close();
-      server.close();
-    });
-  } catch (err) {
-    const msg = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
-    console.error("MCP request error:", msg.slice(0, 500));
-    if (!res.headersSent) {
-      res.status(500).json({
-        jsonrpc: "2.0",
-        error: { code: -32603, message: "Internal server error" },
-        id: null,
+  const parentCtx = extractContextFromHeaders(headersToFetchApiHeaders(req.headers));
+  await context.with(parentCtx, async () => {
+    const startedAt = Date.now();
+    const method = typeof req.body?.method === "string" ? req.body.method : "unknown";
+    const shouldLogRequest = method !== "ping";
+    if (shouldLogRequest) {
+      logger.info("mcp request start", {
+        method,
+        session: req.get("mcp-session-id") ?? "none",
       });
     }
-  }
+    const server = mcpServerCreate();
+    try {
+      const transport = new StreamableHTTPServerTransport({
+        sessionIdGenerator: undefined,
+      });
+      await server.connect(transport);
+      await transport.handleRequest(req, res, req.body);
+      res.on("close", () => {
+        if (shouldLogRequest) {
+          logger.info("mcp request close", {
+            method,
+            durationMs: Date.now() - startedAt,
+          });
+        }
+        transport.close();
+        server.close();
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
+      logger.error("mcp request error", { message: msg.slice(0, 500) });
+      if (!res.headersSent) {
+        res.status(500).json({
+          jsonrpc: "2.0",
+          error: { code: -32603, message: "Internal server error" },
+          id: null,
+        });
+      }
+    }
+  });
 });
 
 app.get("/mcp", (_req: Request, res: Response) => {
@@ -72,5 +102,5 @@ app.get("/ping", (_req, res) => {
 });
 
 app.listen(PORT, HOST, () => {
-  console.log(`mongodb-mcp Streamable-HTTP MCP server listening on ${HOST}:${PORT}/mcp`);
+  logger.info("mongodb-mcp listening", { host: HOST, port: PORT, path: "/mcp" });
 });

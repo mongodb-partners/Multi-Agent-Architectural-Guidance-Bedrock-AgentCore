@@ -15,6 +15,7 @@ if _UI_ROOT not in sys.path:
     sys.path.insert(0, _UI_ROOT)
 
 from lib.api_client import (  # noqa: E402
+    AgentActiveEvent,
     DoneEvent,
     TokenEvent,
     TraceEvent,
@@ -111,6 +112,20 @@ class TestStreamChatTraceParsing:
             events = list(stream_chat_events("http://api", "hi", "s1"))
         assert not any(isinstance(e, TraceEvent) for e in events)
         assert any(isinstance(e, TokenEvent) for e in events)
+
+    def test_emits_agent_active_for_agent_info(self) -> None:
+        body = _sse_blob(
+            ("agent_info", {"agentId": "order-management", "agentName": "Order Management"}),
+            ("token", {"text": "ok"}),
+            ("done", {"sessionId": "s1"}),
+        )
+        with patch("lib.api_client.requests.post", return_value=_FakeResp(body)):
+            events = list(stream_chat_events("http://api", "hi", "s1"))
+
+        active = [e for e in events if isinstance(e, AgentActiveEvent)]
+        assert len(active) == 1
+        assert active[0].agent_id == "order-management"
+        assert active[0].agent_name == "Order Management"
 
 
 class TestGetTrace:

@@ -103,4 +103,6 @@ output "voyage_endpoint_name" {
 
 # ── CloudWatch ────────────────────────────────────────────────────────────────
 output "cloudwatch_api_log_group" { value = module.cloudwatch.api_log_group_name }
+output "cloudwatch_ui_log_group" { value = module.cloudwatch.ui_log_group_name }
 output "cloudwatch_mcp_log_group" { value = module.cloudwatch.mcp_log_group_name }
+output "cloudwatch_agentcore_log_group" { value = module.cloudwatch.agentcore_log_group_name }

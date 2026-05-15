@@ -59,6 +59,7 @@ export type TraceEventType =
   | "agentcore.nested_trace"
   | "agentcore.observability_link"
   | "agentcore.gateway"
+  | "latency.checkpoint"
   | "error";
 
 // ---------------------------------------------------------------------------
@@ -455,6 +456,23 @@ export type AgentcoreGatewayPayload = {
   routingDecision?: string;
 };
 
+export type LatencyCheckpointPayload = {
+  name:
+    | "api.stream.opened"
+    | "api.runtime.first_frame"
+    | "api.client.first_token"
+    | "runtime.headers_flushed"
+    | "runtime.first_frame"
+    | "runtime.first_token"
+    | "model.first_delta"
+    | "model.first_tool_call";
+  elapsedMs: number;
+  agentId?: string;
+  eventKind?: string;
+  partType?: string;
+  toolName?: string;
+};
+
 // Error event ---------------------------------------------------------------
 
 export type ErrorPayload = {
@@ -502,6 +520,7 @@ export type TraceEvent =
   | (TraceEventBase & { type: "agentcore.nested_trace"; payload: AgentcoreNestedTracePayload })
   | (TraceEventBase & { type: "agentcore.observability_link"; payload: AgentcoreObservabilityLinkPayload })
   | (TraceEventBase & { type: "agentcore.gateway"; payload: AgentcoreGatewayPayload })
+  | (TraceEventBase & { type: "latency.checkpoint"; payload: LatencyCheckpointPayload })
   | (TraceEventBase & { type: "error"; payload: ErrorPayload });
 
 /** Rolled-up trace document persisted to MongoDB / served by the trace endpoints. */

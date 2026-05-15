@@ -20,7 +20,7 @@ Turn the flag on when:
 
 Otherwise leave it off — runtime traffic (the Strands agents → MongoDB MCP
 runtime path) is **already** PrivateLink today via the per-cluster Route 53
-zone in `modules/atlas-cluster-dns/`. KB ingestion is admin-only traffic
+zone in `modules/atlas-privatelink-dns/`. KB ingestion is admin-only traffic
 (uploaded `*.txt` files → embedded → indexed) and carries no end-user PII.
 
 ## How it works

@@ -72,9 +72,13 @@ These are typically set in `.env.live` by `deploy.sh`. For local dev with real A
 | `MONGODB_MCP_RUNTIME_ENDPOINT` | `https://bedrock-agentcore.../runtimes/.../invocations?qualifier=DEFAULT` | Streamable-HTTP MCP endpoint for the MongoDB MCP AgentCore Runtime. |
 | `AGENTCORE_ACTOR_ID` | `default` or JWT sub | AgentCore session actor |
 | `BEDROCK_KB_ID` | `YDF16V4CRX` | Default knowledge base for `bedrock_kb_retrieve` |
-| `EMBEDDING_MODEL_ID` | `amazon.titan-embed-text-v2:0` | Bedrock embedding model. Used as the **fallback** when `VOYAGE_SAGEMAKER_ENDPOINT` is unset. Must match Atlas vector index dimensionality (Titan v2 = 1024-d). See §3.5 below for the Voyage AI override. |
-| `VOYAGE_SAGEMAKER_ENDPOINT` | `mongodb-multiagent3-voyage-3-dev` | Optional. If set, the API + AgentCore runtimes use Voyage AI on SageMaker for query embeddings instead of Bedrock Titan. See §3.5 to enable. |
-| `VOYAGE_OUTPUT_DIM` | `1024` | Embedding dimension to request from voyage-3.5-lite. Pinned to 1024 to match the Atlas index. Allowed: `2048` (default), `1024`, `512`, `256`. **Re-seed required if changed.** |
+| `EMBEDDINGS_PROVIDER` | `titan` or `voyage` | Explicit embedding provider. `titan` needs no Voyage ARN; `voyage` provisions/uses SageMaker from `VOYAGE_MODEL_PACKAGE_ARN`. |
+| `EMBEDDING_MODEL_ID` | `amazon.titan-embed-text-v2:0` | Bedrock embedding model for `EMBEDDINGS_PROVIDER=titan` and fallback paths. Must match Atlas vector index dimensionality (Titan v2 = 1024-d). |
+| `VOYAGE_MODEL_PACKAGE_ARN` | `arn:aws:sagemaker:...:model-package/...` | Required only for `EMBEDDINGS_PROVIDER=voyage`. Supports `voyage-multimodal-3` and `voyage-3-5-lite` ARNs. |
+| `VOYAGE_MARKETPLACE_MODEL` | `voyage-multimodal-3` or `voyage-3-5-lite` | Selected Voyage Marketplace model. Used for endpoint naming and env consistency. |
+| `VOYAGE_SAGEMAKER_ENDPOINT` | `mongodb-multiagent3-voyage-multimodal-3-dev` | Runtime endpoint name written by deploy when Voyage is enabled. If empty, API + AgentCore runtimes use Titan. |
+| `VOYAGE_REQUEST_FORMAT` | `multimodal` or `legacy` | SageMaker request envelope. Use `multimodal` for `voyage-multimodal-3`; use `legacy` for `voyage-3-5-lite`. |
+| `VOYAGE_OUTPUT_DIM` | `1024` | Embedding dimension to request from legacy Voyage models. Pinned to 1024 to match the Atlas index. **Re-seed required if changed.** |
 
 ### MongoDB
 
@@ -116,17 +120,25 @@ Notes:
 
 ---
 
-## 3.5 Voyage AI on SageMaker (optional embedding override)
+## 3.5 Embedding Provider Modes
 
-The default embedding path is **Bedrock Titan v2** (1024-d), used by the `generate_embedding` tool and as the query-side embedder for `mongodb_vector_search`. To switch to **Voyage AI** (`voyage-3.5-lite`) on a self-hosted SageMaker endpoint, set `VOYAGE_MODEL_PACKAGE_ARN` in [`env.sh`](../env.sh) and re-run `deploy.sh`.
+The deployment supports three explicit modes:
+
+| Mode | Required env | Runtime behavior |
+|---|---|---|
+| Titan/no ARN | `EMBEDDINGS_PROVIDER=titan` | No SageMaker endpoint is created. API + AgentCore runtimes use Bedrock Titan v2 (`amazon.titan-embed-text-v2:0`). |
+| Voyage multimodal | `EMBEDDINGS_PROVIDER=voyage`, `VOYAGE_MARKETPLACE_MODEL=voyage-multimodal-3`, `VOYAGE_REQUEST_FORMAT=multimodal`, `VOYAGE_MODEL_PACKAGE_ARN=...voyage-multimodal-3...` | Provisions SageMaker and uses Voyage multimodal embeddings. This is the SoW-aligned path. |
+| Voyage legacy/text | `EMBEDDINGS_PROVIDER=voyage`, `VOYAGE_MARKETPLACE_MODEL=voyage-3-5-lite`, `VOYAGE_REQUEST_FORMAT=legacy`, `VOYAGE_OUTPUT_DIM=1024`, `VOYAGE_MODEL_PACKAGE_ARN=...voyage-3-5-lite...` | Provisions SageMaker and uses the older text-only Voyage listing. |
+
+`products` and `troubleshooting_docs` are the only seeded collections that need the `embedding` field for the current chat flows. `orders`, `customers`, `chat_sessions`, and empty `agent_memory` do not need embeddings unless new semantic-search behavior is added.
 
 ### What you get vs Titan v2
 
-| | Titan v2 (default) | voyage-3.5-lite (override) |
+| | Titan v2 | Voyage on SageMaker |
 |---|---|---|
-| Hosting | AWS-managed Bedrock API | Self-hosted SageMaker endpoint (your account) |
-| Dimensions | 1024-d (fixed) | 256 / 512 / 1024 / 2048 — we pin to **1024** for index compat |
-| Context window | 8K tokens | 32K tokens |
+| Hosting | AWS-managed Bedrock API | Self-hosted SageMaker endpoint in your account |
+| Dimensions | 1024-d (fixed) | `voyage-multimodal-3`: 1024-d; `voyage-3-5-lite`: configurable, pinned to **1024** |
+| Context window | 8K tokens | Larger Voyage context; model-specific |
 | Cost | $0.00002 / 1K tokens | ~$2.45 / hour while endpoint is running (ml.g6.xlarge) |
 | Quality | Good baseline | Higher retrieval quality (esp. for long docs); Matryoshka + int8 quant supported |
 | Tradeoff | Pay-per-token, no cold start | Always-on cost, but no per-call charges |
@@ -134,28 +146,30 @@ The default embedding path is **Bedrock Titan v2** (1024-d), used by the `genera
 ### One-time setup
 
 1. **Subscribe to the Marketplace listing** (manual; cannot be automated — requires EULA acceptance):
-   - Open [MongoDB voyage-3.5-lite Embedding Model](https://aws.amazon.com/marketplace/pp/prodview-xj76cqxng4wyw)
+   - SoW path: [MongoDB voyage-multimodal-3](https://aws.amazon.com/marketplace/pp/prodview-hrid2zxusacxy)
+   - Legacy path: [MongoDB voyage-3.5-lite Embedding Model](https://aws.amazon.com/marketplace/pp/prodview-xj76cqxng4wyw)
    - Click **Continue to Subscribe** → **Accept Offer**
 2. **Request GPU quota** (if not already granted):
    - Open [SageMaker Service Quotas — us-east-1](https://console.aws.amazon.com/servicequotas/home/services/sagemaker/quotas)
    - Search `ml.g6.xlarge for endpoint usage`. If 0, request increase to 1. Usually instant.
 3. **Discover the region-specific Product ARN and persist it to `env.sh`:**
    ```bash
-   ./deploy/scripts/setup-voyage-marketplace.sh --model voyage-3-5-lite
+   ./deploy/scripts/setup-voyage-marketplace.sh --model voyage-multimodal-3
+   # or: ./deploy/scripts/setup-voyage-marketplace.sh --model voyage-3-5-lite
    ```
-   This appends/updates `VOYAGE_MODEL_PACKAGE_ARN` in `env.sh` (and pushes the value to GitHub Secrets if `gh auth status` is OK).
+   This appends/updates `EMBEDDINGS_PROVIDER`, `VOYAGE_MODEL_PACKAGE_ARN`, `VOYAGE_MARKETPLACE_MODEL`, `VOYAGE_REQUEST_FORMAT`, `VOYAGE_OUTPUT_DIM`, and endpoint suffix settings in `env.sh` (and pushes the ARN to GitHub Secrets if `gh auth status` is OK).
 
 ### Enable on a deployed environment
 
 ```bash
-source env.sh                              # VOYAGE_MODEL_PACKAGE_ARN is now exported
+source env.sh                              # EMBEDDINGS_PROVIDER=voyage + ARN are now exported
 ./deploy/scripts/deploy.sh --auto-approve  # provisions the endpoint, wires env vars
 
 # After deploy.sh finishes, re-seed Atlas embeddings with Voyage (1024-d):
 cd db-seeding
 MONGODB_URI="$(cd ../deploy/terraform/envs/ec2 && terraform output -raw atlas_connection_string)" \
 MONGODB_DB="${ATLAS_DB_NAME}" \
-VOYAGE_SAGEMAKER_ENDPOINT="${PROJECT_NAME}-voyage-3-${ENVIRONMENT}" \
+VOYAGE_SAGEMAKER_ENDPOINT="$(cd ../deploy/terraform/envs/ec2 && terraform output -raw voyage_endpoint_name)" \
 REWIRE_EMBEDDINGS=1 \
 bun seed-embeddings.ts
 ```
@@ -164,7 +178,7 @@ bun seed-embeddings.ts
 
 ### What deploy.sh does for you
 
-When `VOYAGE_MODEL_PACKAGE_ARN` is non-empty, `deploy.sh` automatically sets `VOYAGE_SAGEMAKER_ENDPOINT` + `VOYAGE_OUTPUT_DIM=1024` on **all three surfaces** that need it:
+When `EMBEDDINGS_PROVIDER=voyage`, `deploy.sh` validates the selected Voyage model/request format and sets `VOYAGE_SAGEMAKER_ENDPOINT`, `VOYAGE_OUTPUT_DIM=1024`, and `VOYAGE_REQUEST_FORMAT` on all surfaces that need them:
 
 1. **EC2 API** — written into `/opt/multiagent/.env.live`, picked up on next API restart
 2. **Lambda MCP** — not directly (the Lambda receives a precomputed `queryVector`); the runtime + API embed the query first, then pass the vector
@@ -174,7 +188,7 @@ Forgetting any one of these makes vector search silently degrade to "catalog app
 
 ### Disable / fall back to Titan
 
-Just empty out `VOYAGE_MODEL_PACKAGE_ARN` in `env.sh` and re-run `deploy.sh`. The next apply skips the SageMaker module (`count = 0`), the runtimes get `VOYAGE_SAGEMAKER_ENDPOINT=""`, and the adapters fall through to `bedrockGenerateEmbedding(EMBEDDING_MODEL_ID)`. Then re-seed:
+Set `EMBEDDINGS_PROVIDER=titan` in `env.sh` and re-run `deploy.sh`. The next apply skips the SageMaker module (`count = 0`), the runtimes get `VOYAGE_SAGEMAKER_ENDPOINT=""`, and the adapters use `bedrockGenerateEmbedding(EMBEDDING_MODEL_ID)`. Then re-seed:
 
 ```bash
 EMBEDDING_MODEL_ID=amazon.titan-embed-text-v2:0 REWIRE_EMBEDDINGS=1 \
@@ -249,6 +263,8 @@ You are the Order Management Agent. You help customers...
 ```
 
 Frontmatter fields validated by [`api/src/lib/schemas.ts`](../api/src/lib/schemas.ts):
+
+Runtime model selection is frontmatter-driven: `api/src/adapters/resolve-model.ts` reads `model`, `maxTokens`, and `temperature` from the selected agent's `.agent.md` and caches the resulting Bedrock model per agent/config/region. To change a specialist's model, edit that specialist's frontmatter; there is no per-agent model environment override.
 
 | Field | Type | Notes |
 |---|---|---|

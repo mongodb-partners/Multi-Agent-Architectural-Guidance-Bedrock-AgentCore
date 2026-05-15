@@ -92,9 +92,14 @@ resource "aws_iam_role_policy" "ec2_app" {
         Resource = "*"
       },
       {
-        Sid      = "CloudWatchLogs"
-        Effect   = "Allow"
-        Action   = ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"]
+        Sid    = "CloudWatchLogs"
+        Effect = "Allow"
+        Action = [
+          "logs:CreateLogGroup",
+          "logs:CreateLogStream",
+          "logs:PutLogEvents",
+          "logs:DescribeLogStreams",
+        ]
         Resource = "*"
       },
       {
@@ -200,11 +205,13 @@ resource "aws_instance" "app" {
   # which makes user_data appear "different" on each run and forces the
   # instance to be replaced — even when nothing in the script actually changed.
   user_data_base64 = base64encode(templatefile("${path.module}/user_data.sh", {
-    project_name  = var.project_name
-    aws_region    = var.aws_region
-    ecr_registry  = var.ecr_registry
-    ecr_api_image = var.ecr_api_image
-    ecr_ui_image  = var.ecr_ui_image
+    project_name     = var.project_name
+    aws_region       = var.aws_region
+    ecr_registry     = var.ecr_registry
+    ecr_api_image    = var.ecr_api_image
+    ecr_ui_image     = var.ecr_ui_image
+    cw_log_group_api = var.cw_log_group_api
+    cw_log_group_ui  = var.cw_log_group_ui
   }))
   user_data_replace_on_change = true
 

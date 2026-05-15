@@ -29,14 +29,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 ENV_FILE="$REPO_ROOT/env.sh"
 
-# Pinned to the SoW model — voyage-multimodal-3. The `--model` override is
-# kept only so a future SoW change can re-target without editing this script;
-# any other value is rejected later in Phase 1.
+# Default to the SoW model, but keep voyage-3-5-lite as a supported legacy
+# option for lower-cost/text-only deployments.
 MODEL="${VOYAGE_MARKETPLACE_MODEL:-voyage-multimodal-3}"
-# When this guard is set the script will refuse to proceed with any model
-# other than voyage-multimodal-3. Set REQUIRE_VOYAGE_MULTIMODAL_3=false ONLY
-# with an explicit, written SoW deviation.
-REQUIRE_VOYAGE_MULTIMODAL_3="${REQUIRE_VOYAGE_MULTIMODAL_3:-true}"
+REQUIRE_VOYAGE_MULTIMODAL_3="${REQUIRE_VOYAGE_MULTIMODAL_3:-false}"
 AWS_REGION="${AWS_REGION:-us-east-1}"
 UPDATE_ENV=true
 UPDATE_GH=true
@@ -106,10 +102,13 @@ ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text 2>/dev/n
   || err "AWS credentials invalid or expired. Run: source env.sh"
 ok "AWS account: $ACCOUNT_ID (region: $AWS_REGION)"
 
-# SoW guard — fail fast on any silent deviation from voyage-multimodal-3.
+# Optional SoW guard — fail fast on any silent deviation from voyage-multimodal-3.
 if [[ "$REQUIRE_VOYAGE_MULTIMODAL_3" == "true" && "$MODEL" != "voyage-multimodal-3" ]]; then
   err "Refusing to subscribe to '$MODEL' — SoW pins this stack to 'voyage-multimodal-3'.
      To override, re-run with REQUIRE_VOYAGE_MULTIMODAL_3=false (requires written sign-off)."
+fi
+if [[ -z "${MARKETPLACE_URLS[$MODEL]:-}" ]]; then
+  err "Unsupported Voyage model '$MODEL'. Supported: ${!MARKETPLACE_URLS[*]}"
 fi
 ok "Target Voyage model: $MODEL"
 
@@ -197,24 +196,47 @@ fi
 if [[ "$UPDATE_ENV" == "true" ]]; then
   sep
   log "Phase 4 — Updating $ENV_FILE..."
+  REQUEST_FORMAT="multimodal"
+  ENDPOINT_SUFFIX="$MODEL"
+  if [[ "$MODEL" == "voyage-3-5-lite" ]]; then
+    REQUEST_FORMAT="legacy"
+  fi
+
+  upsert_export() {
+    local key="$1"
+    local value="$2"
+    local tmp
+    tmp="$(mktemp)"
+    if grep -q "^export ${key}=" "$ENV_FILE"; then
+      sed "s|^export ${key}=.*|export ${key}=\"${value}\"|" "$ENV_FILE" > "$tmp" && mv "$tmp" "$ENV_FILE"
+    else
+      cp "$ENV_FILE" "$tmp"
+      printf '\nexport %s="%s"\n' "$key" "$value" >> "$tmp"
+      mv "$tmp" "$ENV_FILE"
+    fi
+  }
+
   if [[ ! -f "$ENV_FILE" ]]; then
     warn "env.sh not found — creating from scratch"
     cat > "$ENV_FILE" <<EOF
 #!/bin/bash
+export EMBEDDINGS_PROVIDER="voyage"
 export VOYAGE_MODEL_PACKAGE_ARN="$ARN"
+export VOYAGE_MARKETPLACE_MODEL="$MODEL"
+export VOYAGE_REQUEST_FORMAT="$REQUEST_FORMAT"
+export VOYAGE_OUTPUT_DIM="1024"
+export TF_VAR_voyage_endpoint_name_suffix="$ENDPOINT_SUFFIX"
 EOF
     chmod 600 "$ENV_FILE"
     ok "Created $ENV_FILE"
-  elif grep -q '^export VOYAGE_MODEL_PACKAGE_ARN=' "$ENV_FILE"; then
-    # Replace existing line in-place (portable sed)
-    # Use '|' as delimiter to avoid escaping ARN colons/slashes
-    tmp="$(mktemp)"
-    sed "s|^export VOYAGE_MODEL_PACKAGE_ARN=.*|export VOYAGE_MODEL_PACKAGE_ARN=\"$ARN\"|" \
-      "$ENV_FILE" > "$tmp" && mv "$tmp" "$ENV_FILE"
-    ok "Updated VOYAGE_MODEL_PACKAGE_ARN in $ENV_FILE"
   else
-    printf '\nexport VOYAGE_MODEL_PACKAGE_ARN="%s"\n' "$ARN" >> "$ENV_FILE"
-    ok "Appended VOYAGE_MODEL_PACKAGE_ARN to $ENV_FILE"
+    upsert_export "EMBEDDINGS_PROVIDER" "voyage"
+    upsert_export "VOYAGE_MODEL_PACKAGE_ARN" "$ARN"
+    upsert_export "VOYAGE_MARKETPLACE_MODEL" "$MODEL"
+    upsert_export "VOYAGE_REQUEST_FORMAT" "$REQUEST_FORMAT"
+    upsert_export "VOYAGE_OUTPUT_DIM" "1024"
+    upsert_export "TF_VAR_voyage_endpoint_name_suffix" "$ENDPOINT_SUFFIX"
+    ok "Updated Voyage env vars in $ENV_FILE"
   fi
 else
   log "Skipped env.sh update (--skip-env)"

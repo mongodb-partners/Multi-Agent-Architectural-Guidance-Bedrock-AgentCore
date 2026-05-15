@@ -11,10 +11,22 @@ mock.module("../../src/adapters/agentcore-runtime.ts", () => ({
     "arn:aws:bedrock-agentcore:us-east-1:000000000000:runtime/test",
   agentcoreOrchestratorArn: () =>
     "arn:aws:bedrock-agentcore:us-east-1:000000000000:runtime/test",
-  invokeAgentRuntime: async () => ({
-    response: "Hello!",
-    agentId: "order-management",
-  }),
+  agentcoreSpecialistArn: () => undefined,
+  // The streaming contract is `AsyncIterable<RuntimeStreamEvent>`. Yield a
+  // single token then a `done` frame so the chat route forwards exactly the
+  // shape it would in production.
+  // eslint-disable-next-line require-yield
+  invokeAgentRuntime: async function* () {
+    yield { kind: "stream", part: { type: "token", text: "Hello!" } };
+    yield {
+      kind: "done",
+      payload: {
+        agentId: "order-management",
+        nestedTraceId: "nested-trace-stub",
+        nestedEventsDropped: 0,
+      },
+    };
+  },
 }));
 
 const { createApp } = await import("../../src/app.ts");
@@ -79,6 +91,9 @@ describe("POST /chat — SSE trace events", () => {
       }),
     });
     expect(res.status).toBe(200);
+    const xTrace = res.headers.get("X-Trace-Id");
+    expect(xTrace).toBeTruthy();
+    expect(xTrace).toMatch(/^[0-9a-f]{32}$/i);
     const body = await res.text();
     const events = parseSseResponse(body);
 

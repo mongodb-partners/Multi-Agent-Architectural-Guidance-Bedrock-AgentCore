@@ -11,6 +11,7 @@ import {
   getVoyageEndpoint,
 } from "../adapters/voyage-embedding.ts";
 import { pathToFileURL } from "node:url";
+import type { Sort } from "mongodb";
 import { readSkillResourceFile, resolveSkillResourcePath, type SkillRegistry } from "./skill-loader.ts";
 import {
   getHttpToolsMap,
@@ -20,6 +21,8 @@ import {
   findSkillHttpToolDefinition,
   parseSkillScopedHttpToolName,
 } from "./skill-http-tools-load.ts";
+import { getMongoDb } from "./mongo-client.ts";
+import { currentTrace } from "./trace-context.ts";
 
 /** Shared by `makeReadSkillResourceTool` and unit tests. */
 export function readSkillResourceWithRegistry(
@@ -110,6 +113,9 @@ export function makeRunSkillScriptTool(registry: SkillRegistry): Tool {
           hint: "Call activate_skill first.",
         };
       }
+      if (input.scriptPath === "scripts/mongodb-query.mjs" && input.exportName === "mongodb_query") {
+        return runMongoQueryCompatibilityScript(input.skillName, input.args);
+      }
       const resolved = resolveSkillResourcePath(input.skillName, input.scriptPath);
       if (!resolved.ok) {
         return { status: "error", code: resolved.error, skillName: input.skillName, scriptPath: input.scriptPath };
@@ -138,6 +144,71 @@ export function makeRunSkillScriptTool(registry: SkillRegistry): Tool {
       }
     },
   });
+}
+
+async function runMongoQueryCompatibilityScript(skillName: string, raw: unknown): Promise<JSONValue> {
+  const args = isPlainRecord(raw) ? raw : {};
+  const collection = typeof args.collection === "string" ? args.collection.trim() : "";
+  const operation = typeof args.operation === "string" ? args.operation.trim() : "find";
+  const query = isPlainRecord(args.query) ? args.query : {};
+  const projection = isPlainRecord(args.projection) ? args.projection : undefined;
+  const sort = isPlainRecord(args.sort) ? (args.sort as unknown as Sort) : undefined;
+  const limitRaw = typeof args.limit === "number" ? args.limit : Number(args.limit ?? 10);
+  const limit = Math.max(1, Math.min(50, Number.isFinite(limitRaw) ? Math.floor(limitRaw) : 10));
+
+  if (!collection) return { status: "error", code: "missing_collection", skillName };
+  if (!["find", "findOne", "countDocuments"].includes(operation)) {
+    return { status: "error", code: "unsupported_operation", operation, allowed: ["find", "findOne", "countDocuments"] };
+  }
+
+  const trace = currentTrace();
+  const t0 = Date.now();
+  trace?.event("mongo.query", {
+    collection,
+    operation,
+    filter: query,
+    source: "run_skill_script_compat",
+  });
+
+  const db = await getMongoDb();
+  if (!db) return { status: "error", code: "mongodb_unavailable", skillName };
+
+  if (operation === "countDocuments") {
+    const count = await db.collection(collection).countDocuments(query);
+    trace?.event("mongo.result", {
+      collection,
+      operation,
+      docCount: count,
+      latencyMs: Date.now() - t0,
+    });
+    return { status: "ok", skillName, result: { count } };
+  }
+
+  if (operation === "findOne") {
+    const doc = await db.collection(collection).findOne(query, { ...(projection ? { projection } : {}) });
+    trace?.event("mongo.result", {
+      collection,
+      operation,
+      docCount: doc ? 1 : 0,
+      latencyMs: Date.now() - t0,
+    });
+    return { status: "ok", skillName, result: doc };
+  }
+
+  let cursor = db.collection(collection).find(query, { ...(projection ? { projection } : {}) });
+  if (sort) cursor = cursor.sort(sort);
+  const documents = await cursor.limit(limit).toArray();
+  trace?.event("mongo.result", {
+    collection,
+    operation,
+    docCount: documents.length,
+    latencyMs: Date.now() - t0,
+  });
+  return { status: "ok", skillName, result: { documents } };
+}
+
+function isPlainRecord(value: unknown): value is Record<string, JSONValue> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 export const bedrockKbRetrieveTool = tool({
@@ -258,7 +329,10 @@ const GATEWAY_MONGO_TOOL_NAMES: ReadonlySet<string> = new Set([
 /**
  * Build the Strands tool list for an agent.
  *
- * - Always includes `activate_skill` (bound to the per-turn registry).
+ * - Includes `activate_skill` only when the registry has skills that are not
+ *   already activated. Specialist agents pre-activate every skill at template
+ *   build time, so `activate_skill` is dead weight in their tool list and is
+ *   omitted to shrink the tool-choice search space.
  * - Adds static tools listed in the agent's `tools:` array.
  * - Silently drops Mongo tool names from the agent's `tools:` array; those
  *   are attached separately as MCP tools by `createConfiguredStrandsAgent`
@@ -268,8 +342,15 @@ export function toolsForAgent(
   toolNames: string[],
   registry: SkillRegistry,
 ): Tool[] {
-  const out: Tool[] = [makeActivateSkillTool(registry)];
-  const seen = new Set<string>(["activate_skill"]);
+  const out: Tool[] = [];
+  const seen = new Set<string>();
+  const hasInactiveSkill = Array.from(registry.allowedSkills).some(
+    (s) => !registry.isSkillActivated(s),
+  );
+  if (hasInactiveSkill) {
+    out.push(makeActivateSkillTool(registry));
+    seen.add("activate_skill");
+  }
   const httpTools = getHttpToolsMap();
   for (const raw of toolNames) {
     const name = raw.trim();

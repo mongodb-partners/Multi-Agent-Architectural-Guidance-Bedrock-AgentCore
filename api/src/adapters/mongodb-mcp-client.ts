@@ -36,6 +36,7 @@ import { Hash } from "@smithy/hash-node";
 import { HttpRequest } from "@smithy/protocol-http";
 import { SignatureV4 } from "@smithy/signature-v4";
 import { logger } from "../lib/logger.ts";
+import { appendTraceContextHeaders } from "../lib/otel.ts";
 import { currentTrace } from "../lib/trace-context.ts";
 import { currentGatewayJwt } from "../lib/gateway-auth-context.ts";
 import { embedQueryText, previewVector, type EmbedResult } from "../lib/embed-query.ts";
@@ -538,9 +539,8 @@ let _mcpClient: McpClient | null = null;
 // by `AliasedMcpTool` to strip the gateway target-name prefix; both subclasses
 // satisfy `Tool` and that is the only thing Strands' `Agent` requires.
 let _mcpTools: Tool[] | null = null;
+let _mcpToolsPromise: Promise<Tool[]> | null = null;
 let _agentCoreClient: BedrockAgentCoreClient | null = null;
-const DIRECT_RUNTIME_SESSION_ID =
-  `mongodb-mcp-runtime-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
 
 type McpEndpoint =
   | { mode: "agentcore-runtime"; url: string; runtimeArn: string }
@@ -597,11 +597,11 @@ export const jwtInjectingFetch = (
   init?: RequestInit,
 ): Promise<Response> => {
   const jwt = currentGatewayJwt();
-  if (!jwt) return globalThis.fetch(input, init);
   const headers = new Headers(init?.headers);
-  // Always overwrite — the SDK may pre-populate Authorization from its own
-  // OAuthClientProvider; we own the auth surface in gateway mode.
-  headers.set("Authorization", `Bearer ${jwt}`);
+  if (jwt) {
+    headers.set("Authorization", `Bearer ${jwt}`);
+  }
+  appendTraceContextHeaders(headers);
   return globalThis.fetch(input, { ...init, headers });
 };
 
@@ -621,7 +621,8 @@ function buildAgentCoreRuntimeEndpoint(runtimeArn: string): string {
 
 function directRuntimeSessionId(): string {
   const configured = process.env.MONGODB_MCP_RUNTIME_SESSION_ID?.trim();
-  const sessionId = configured || DIRECT_RUNTIME_SESSION_ID;
+  const sessionId = configured ||
+    `mongodb-mcp-runtime-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
   return sessionId.length >= 33 ? sessionId : sessionId.padEnd(33, "0");
 }
 
@@ -646,6 +647,7 @@ async function resolveAwsCredentials(): Promise<AwsCredentials> {
 
 async function signAgentCoreRequest(
   input: string | URL,
+  runtimeSessionId: string,
   init?: RequestInit,
 ): Promise<{ url: URL; init: RequestInit }> {
   const url = new URL(input.toString());
@@ -656,7 +658,7 @@ async function signAgentCoreRequest(
 
   headers.set("host", url.host);
   if (!headers.has("x-amzn-bedrock-agentcore-runtime-session-id")) {
-    headers.set("x-amzn-bedrock-agentcore-runtime-session-id", directRuntimeSessionId());
+    headers.set("x-amzn-bedrock-agentcore-runtime-session-id", runtimeSessionId);
   }
   if (!headers.has("mcp-protocol-version")) {
     headers.set("mcp-protocol-version", "2025-06-18");
@@ -686,9 +688,15 @@ async function signAgentCoreRequest(
       ...init,
       method,
       ...(method === "GET" || method === "HEAD" ? {} : { body }),
-      headers: Object.fromEntries(
-        Object.entries(signed.headers).filter(([k]) => k.toLowerCase() !== "host"),
-      ),
+      headers: (() => {
+        const h = new Headers(
+          Object.fromEntries(
+            Object.entries(signed.headers).filter(([k]) => k.toLowerCase() !== "host"),
+          ),
+        );
+        appendTraceContextHeaders(h);
+        return Object.fromEntries(h.entries());
+      })(),
     },
   };
 }
@@ -699,8 +707,9 @@ async function signAgentCoreRequest(
  * AgentCore Runtime accepts the HTTPS MCP request under the EC2/runtime role.
  */
 function buildAgentCoreRuntimeFetch(_runtimeArn: string): typeof jwtInjectingFetch {
+  const runtimeSessionId = directRuntimeSessionId();
   return async (input: string | URL, init?: RequestInit): Promise<Response> => {
-    const signed = await signAgentCoreRequest(input, init);
+    const signed = await signAgentCoreRequest(input, runtimeSessionId, init);
     return globalThis.fetch(signed.url, signed.init);
   };
 }
@@ -761,6 +770,13 @@ async function connectMcpClient(): Promise<McpClient> {
     args: unknown,
   ) {
     const trace = currentTrace();
+    logger.audit().info("[mcp] callTool", {
+      toolName: tool.name,
+      argPreview:
+        typeof args === "object" && args !== null
+          ? JSON.stringify(args).slice(0, 400)
+          : String(args).slice(0, 400),
+    });
     try {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const result = await originalCallTool(tool as any, args as any);
@@ -835,7 +851,17 @@ async function ensureMcpClient(): Promise<McpClient | null> {
  */
 export async function getMcpTools(): Promise<Tool[]> {
   if (_mcpTools) return _mcpTools;
+  if (_mcpToolsPromise) return _mcpToolsPromise;
 
+  _mcpToolsPromise = loadMcpTools();
+  try {
+    return await _mcpToolsPromise;
+  } finally {
+    _mcpToolsPromise = null;
+  }
+}
+
+async function loadMcpTools(): Promise<Tool[]> {
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
       const client = await ensureMcpClient();
@@ -859,8 +885,8 @@ export async function getMcpTools(): Promise<Tool[]> {
       return _mcpTools;
     } catch (err) {
       const last = attempt === 1;
-      if (isAuthError(err) && !last) {
-        logger.warn("[mcp] listTools auth error — resetting client and retrying once", {
+      if (!last) {
+        logger.warn("[mcp] listTools failed — resetting client and retrying once", {
           error: err instanceof Error ? err.message : String(err),
         });
         _mcpClient = null;

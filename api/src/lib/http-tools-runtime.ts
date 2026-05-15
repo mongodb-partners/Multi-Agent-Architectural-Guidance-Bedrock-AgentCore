@@ -5,6 +5,7 @@ import type { HttpToolDefinition, HttpToolParameter, HttpToolsFile } from "./htt
 import type { SkillRegistry } from "./skill-loader.ts";
 import { resetSkillHttpToolsCacheForTests } from "./skill-http-tools-load.ts";
 import { currentTrace } from "./trace-context.ts";
+import { logger } from "./logger.ts";
 
 /** When `HTTP_TOOLS_MOCK=1`, HTTP tools return a mock payload without calling the network. */
 export function isHttpToolsMockMode(): boolean {
@@ -202,11 +203,26 @@ async function runHttpCall(
   }
 
   let res: Response;
+  const t0 = Date.now();
+  let host = "unknown";
+  try {
+    host = new URL(requestUrl).hostname;
+  } catch {
+    /* ignore */
+  }
   try {
     res = await fetch(requestUrl, { method, headers, body, signal });
   } catch (e) {
     const errMsg = e instanceof Error ? e.message : String(e);
     const errClass = e instanceof Error ? e.constructor.name : "Error";
+    logger.warn("[http-tools] fetch failed", {
+      tool: toolLabel,
+      host,
+      method,
+      durationMs: Date.now() - t0,
+      errorClass: errClass,
+      errorMessage: errMsg,
+    });
     trace?.event("tool.http", {
       url: requestUrl,
       method,
@@ -224,6 +240,15 @@ async function runHttpCall(
   }
 
   const text = await res.text();
+  const durationMs = Date.now() - t0;
+  logger.info("[http-tools] request complete", {
+    tool: toolLabel,
+    host,
+    method,
+    httpStatus: res.status,
+    durationMs,
+    responseBytes: text.length,
+  });
   let parsedBody: unknown = text;
   try {
     parsedBody = text ? JSON.parse(text) : null;

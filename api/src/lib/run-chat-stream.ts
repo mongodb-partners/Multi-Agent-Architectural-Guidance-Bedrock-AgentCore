@@ -1,16 +1,13 @@
 import { createHash } from "node:crypto";
 import { Agent, Message, TextBlock } from "@strands-agents/sdk";
-import { resolveModel } from "../adapters/resolve-model.ts";
-import { toolsForAgent } from "./base-tools.ts";
 import type { ChatStreamPart } from "./chat-stream-types.ts";
 import { getAgent, loadAgentPersona } from "./config-scan.ts";
 import { buildSystemPrompt } from "./prompt.ts";
-import { SkillRegistry } from "./skill-loader.ts";
 import type { ChatMessage } from "./session-store.ts";
 import { logger } from "./logger.ts";
 import { currentTrace } from "./trace-context.ts";
 import { attributeHandoff } from "./handoff-attribution.ts";
-import { getMcpTools } from "../adapters/mongodb-mcp-client.ts";
+import { getAgentTemplate } from "./create-strands-agent.ts";
 
 export type { ChatStreamPart };
 
@@ -20,6 +17,11 @@ export type { ChatStreamPart };
  * it gets discovery-only and lets the model call `activate_skill` if needed.
  */
 const ALWAYS_ACTIVATE_SKILLS = true; // flip to false to force lazy even for specialists
+
+function tracePromptBodyEnabled(): boolean {
+  const v = process.env.TRACE_PROMPT_BODY?.trim().toLowerCase();
+  return v === "1" || v === "true" || v === "yes";
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -55,39 +57,44 @@ export async function* runChatStream(params: {
   }
 
   // -------------------------------------------------------------------------
-  // Phase 1 — Build SkillRegistry (discovery index only at this point)
-  // -------------------------------------------------------------------------
-  const registry = new SkillRegistry(agentConfig.skills);
-
-  // -------------------------------------------------------------------------
-  // Phase 2 — Pre-activate skills for specialist agents
+  // Build (or reuse) the agent template.
   //
   // Orchestrator: skills: [] → nothing to activate; gets discovery section only
-  //   if it ever has skills listed.
+  //   if it ever has skills listed. Template still cacheable.
   // Specialists: activate all allowed skills up front so the model has full
-  //   instructions immediately (they are domain-specific, so the cost is worth it).
-  //   The model can still call activate_skill for any skill it was not pre-loaded.
+  //   instructions immediately. Cached across chats.
+  // The model can still call activate_skill for any skill it was not pre-loaded
+  // when caching is bypassed for that mode.
   // -------------------------------------------------------------------------
   const isOrchestrator = params.agentId === "orchestrator";
+  const preActivateSkills = !isOrchestrator && ALWAYS_ACTIVATE_SKILLS && agentConfig.skills.length > 0;
 
-  if (!isOrchestrator && ALWAYS_ACTIVATE_SKILLS && agentConfig.skills.length > 0) {
-    registry.activateAll();
+  const template = await getAgentTemplate(params.agentId, { preActivateSkills });
+  if (!template) {
+    yield { type: "token", text: `Error: unable to build agent template for '${params.agentId}'.` };
+    return;
+  }
+  const registry = template.registry;
+
+  if (preActivateSkills) {
     for (const block of registry.activatedBlocks) {
       yield { type: "skill_loaded", skillName: block.name };
     }
   }
 
   // -------------------------------------------------------------------------
-  // Build initial system prompt
-  // Phase 1 discovery section + Phase 2 activated blocks (if any)
+  // Build the per-turn system prompt by splicing memoryContext into the
+  // cached base. When no memoryContext is set we reuse the cached string.
   // -------------------------------------------------------------------------
   const persona = loadAgentPersona(params.agentId) ?? "";
-  const systemPrompt = buildSystemPrompt(
-    persona,
-    registry.discoveries,
-    registry.activatedBlocks,
-    params.memoryContext,
-  );
+  const systemPrompt = params.memoryContext?.trim()
+    ? buildSystemPrompt(
+        persona,
+        registry.discoveries,
+        registry.activatedBlocks,
+        params.memoryContext,
+      )
+    : template.systemPromptBase;
 
   const trace = currentTrace();
   if (trace) {
@@ -101,7 +108,7 @@ export async function* runChatStream(params: {
         injectedVia: "system_prompt" as const,
       })),
       totalBytes: Buffer.byteLength(systemPrompt, "utf8"),
-      body: systemPrompt,
+      ...(tracePromptBodyEnabled() ? { body: systemPrompt } : {}),
     });
     for (const b of registry.activatedBlocks) {
       trace.event("skill.activated", {
@@ -115,34 +122,18 @@ export async function* runChatStream(params: {
   }
 
   // -------------------------------------------------------------------------
-  // Strands Agent with tools + seeded history
+  // Strands Agent with cached tools + seeded history
   // -------------------------------------------------------------------------
   try {
-    const model = resolveModel(agentConfig);
-    // In-process tools (skill scripts, HTTP tools, KB retrieve, etc.) plus the
-    // gateway MCP tools (Mongo). Without the second list, Mongo tool names in
-    // the agent persona resolve to nothing and the model can only narrate that
-    // it would like to query — see `mongodb-mcp-client.ts` and the alias logic
-    // there for how the prefixed gateway tool names are exposed under the
-    // unprefixed names the persona references.
-    const inProcessTools = toolsForAgent(agentConfig.tools, registry);
-    const mcpTools = await getMcpTools();
-    if (mcpTools.length === 0) {
-      logger.warn(
-        "[chat-stream] no MCP tools loaded from gateway — Mongo tool calls will fail",
-        { agentId: params.agentId },
-      );
-    }
-    const tools = [...inProcessTools, ...mcpTools];
     const seed = strandsHistory(params.priorTurns);
 
     const strandsAgent = new Agent({
-      model,
+      model: template.model,
       systemPrompt,
-      name: agentConfig.name,
-      id: agentConfig.id,
+      name: template.agentConfig.name,
+      id: template.agentConfig.id,
       printer: false,
-      tools,
+      tools: template.tools,
       messages: seed,
     });
 
@@ -153,6 +144,8 @@ export async function* runChatStream(params: {
     const turnStartTs = Date.now();
     const modelId = agentConfig.model?.trim() ?? "unknown";
     let modelSpanId: string | undefined;
+    let firstModelDeltaRecorded = false;
+    let firstToolCallRecorded = false;
     if (trace) {
       modelSpanId = trace.start("model.request", {
         modelId,
@@ -163,6 +156,12 @@ export async function* runChatStream(params: {
         userMessage: params.userMessage,
       });
     }
+    logger.info("[run-chat-stream] model stream start", {
+      agentId: params.agentId,
+      modelId,
+      toolCount: template.tools.length,
+      priorTurns: params.priorTurns?.length ?? 0,
+    });
 
     const toolSpans = new Map<string, string>(); // toolUseId -> spanId
     const completedToolCalls: Array<{ name: string; toolUseId?: string; durationMs?: number }> = [];
@@ -206,6 +205,15 @@ export async function* runChatStream(params: {
             const t = inner.delta.text;
             if (t) {
               hasYieldedText = true;
+              if (trace && !firstModelDeltaRecorded) {
+                firstModelDeltaRecorded = true;
+                trace.event("latency.checkpoint", {
+                  name: "model.first_delta",
+                  elapsedMs: Date.now() - turnStartTs,
+                  agentId: params.agentId,
+                  eventKind: inner.type,
+                });
+              }
               pushTextDelta(t);
               yield { type: "token", text: t };
             }
@@ -257,6 +265,15 @@ export async function* runChatStream(params: {
         flushTextBatch();
         const toolName = ev.toolUse.name;
         const toolUseId = ev.toolUse.toolUseId;
+        if (trace && !firstToolCallRecorded) {
+          firstToolCallRecorded = true;
+          trace.event("latency.checkpoint", {
+            name: "model.first_tool_call",
+            elapsedMs: Date.now() - turnStartTs,
+            agentId: params.agentId,
+            toolName,
+          });
+        }
         yield { type: "tool_call", tool: toolName, status: "started" };
 
         const reasoningSnapshot = trace?.snapshotPendingText() ?? "";
@@ -389,6 +406,10 @@ export async function* runChatStream(params: {
     }
     flushTextBatch();
     if (trace && modelSpanId) trace.end(modelSpanId);
+    logger.info("[run-chat-stream] model stream done", {
+      agentId: params.agentId,
+      durationMs: Date.now() - turnStartTs,
+    });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     logger.error("[chat-stream] agent stream failed", { agentId: params.agentId, error: msg });

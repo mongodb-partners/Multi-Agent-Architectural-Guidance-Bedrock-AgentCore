@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "path";
+import { logger } from "./logger.ts";
 import { resolveConfigRoot } from "./paths.ts";
 import { httpToolsFileSchema, type HttpToolDefinition, type HttpToolsFile } from "./http-tools-schema.ts";
 
@@ -65,7 +66,7 @@ export function loadHttpToolsFile(force = false): HttpToolsFile {
   try {
     json = JSON.parse(raw);
   } catch (e) {
-    console.warn(`[http-tools] invalid JSON in ${file}:`, e);
+    logger.warn("[http-tools] invalid JSON", { file, error: String(e) });
     const empty: HttpToolsFile = { tools: [] };
     cached = { mtimeMs: 0, data: empty };
     cachedPath = file;
@@ -74,7 +75,7 @@ export function loadHttpToolsFile(force = false): HttpToolsFile {
 
   const parsed = httpToolsFileSchema.safeParse(json);
   if (!parsed.success) {
-    console.warn(`[http-tools] schema errors in ${file}:`, parsed.error.flatten());
+    logger.warn("[http-tools] schema errors", { file, issues: parsed.error.flatten() });
     const empty: HttpToolsFile = { tools: [] };
     cached = { mtimeMs: 0, data: empty };
     cachedPath = file;
@@ -87,11 +88,11 @@ export function loadHttpToolsFile(force = false): HttpToolsFile {
   for (const t of data.tools) {
     const n = t.name.trim();
     if (RESERVED_TOOL_NAMES.has(n)) {
-      console.warn(`[http-tools] skipping reserved name "${n}" in ${file}`);
+      logger.warn("[http-tools] skipping reserved name", { name: n, file });
       continue;
     }
     if (seen.has(n)) {
-      console.warn(`[http-tools] duplicate tool "${n}" in ${file} — keeping first`);
+      logger.warn("[http-tools] duplicate tool — keeping first", { name: n, file });
       continue;
     }
     seen.add(n);

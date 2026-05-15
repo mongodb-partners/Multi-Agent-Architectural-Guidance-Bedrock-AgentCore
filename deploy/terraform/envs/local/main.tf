@@ -80,8 +80,8 @@ module "bedrock_kb" {
 # CloudWatch — log groups for API + MCP (local processes stream here if configured)
 # ══════════════════════════════════════════════════════════════════════════════
 module "cloudwatch" {
-  source         = "../../modules/cloudwatch"
-  project_name   = var.project_name
-  environment    = var.environment
-  retention_days = var.log_retention_days
+  source             = "../../modules/cloudwatch"
+  project_name       = var.project_name
+  environment        = var.environment
+  api_retention_days = var.log_retention_days
 }

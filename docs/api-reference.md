@@ -368,9 +368,11 @@ Errors: `401 UNAUTHORIZED` for missing or malformed Authorization header; `401 I
 
 ## 12. Headers and middleware
 
-- `X-Request-ID` — generated per-request, echoed in error payloads. Use this when reporting issues.
-- `Access-Control-Allow-Origin` — set per `CORS_ORIGINS` env var or `config/environment.yaml`.
-- All log lines include `requestId` for correlation.
+- `X-Request-Id` — generated per-request unless the client sends a valid inbound `X-Request-Id` (alphanumeric, `_`, `-`, 1–64 chars). Echoed on every response; use with support tickets.
+- `X-Trace-Id` — W3C trace id (32 hex chars) for the HTTP server span on routes that run OpenTelemetry middleware (skipped for lightweight `GET`s such as `/health`, `/agents`, `/traces`, etc.). **Distinct** from the persisted product `traceId` in SSE `done` / MongoDB `traces` — both are useful: `X-Trace-Id` joins API access logs and CloudWatch journald streams; product `traceId` joins the Trace Viewer.
+- `traceparent` / `tracestate` — optional inbound W3C context; the API continues the trace when present. Outbound MCP and AgentCore calls inject `traceparent` when a span is active.
+- `Access-Control-Allow-Origin` — set per `CORS_ORIGINS` env var or `config/environment.yaml`. Exposed headers include `X-Request-Id`, `X-Trace-Id`, `traceparent`, `tracestate`.
+- Structured log lines (`api/src/lib/logger.ts`) include `trace_id` / `span_id` / `trace_flags` when inside an active span, plus `service` from `OTEL_SERVICE_NAME`.
 
 ---
 

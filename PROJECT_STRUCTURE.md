@@ -311,7 +311,7 @@ deploy/
         │                       Why: Without PrivateLink, Atlas traffic goes over the public
         │                       internet. PrivateLink keeps all MongoDB traffic inside the VPC.
         │
-        └── atlas-cluster-dns/ ← per-cluster Route 53 private hosted zone + wildcard CNAME
+        └── atlas-privatelink-dns/ ← per-cluster Route 53 private hosted zone + wildcard CNAME — DNS half of Atlas PrivateLink
                                  (envs/ec2 only). One zone per Atlas cluster SRV host, attached
                                  to the shared VPC. Splits per-cluster DNS away from the shared
                                  PrivateLink VPCE so each project owns its own zone without

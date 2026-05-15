@@ -1,5 +1,6 @@
 import type { MiddlewareHandler } from "hono";
 import { verifyBearerJwt } from "../lib/jwt-verify.ts";
+import { logger } from "../lib/logger.ts";
 
 /**
  * Bearer-JWT auth gate. Boot-time `assertJwksAuthConfigured()` (in api/src/index.ts) guarantees
@@ -39,7 +40,16 @@ export const authMiddleware: MiddlewareHandler = async (c, next) => {
     const payload = await verifyBearerJwt(token);
     c.set("jwtPayload", payload);
     c.set("bearerToken", token);
+    logger.audit().info("[auth] jwt verified", {
+      requestId: c.get("requestId") ?? "unknown",
+      sub: payload.sub,
+      iss: payload.iss,
+      exp: payload.exp,
+    });
   } catch {
+    logger.audit().warn("[auth] jwt verification failed", {
+      requestId: c.get("requestId") ?? "unknown",
+    });
     return c.json(
       {
         error: {

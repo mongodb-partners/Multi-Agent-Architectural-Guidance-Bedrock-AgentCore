@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import streamlit as st
+import streamlit.components.v1 as components
 from streamlit_cognito_auth import CognitoAuthenticator, CognitoHostedUIAuthenticator
 
 from lib.config import CognitoUIConfig, UISettings
@@ -87,8 +88,74 @@ def render_cognito_logout(settings: UISettings) -> None:
     if not st.session_state.get("_streamlit_cognito_auth"):
         return
     cfg = settings.cognito
-    if st.button("Sign out (Cognito)", key="cognito_logout"):
+    if st.button("Sign out (Cognito)", key="cognito_logout", use_container_width=True):
         auth = _make_authenticator(cfg)
         auth.logout()
         st.session_state.pop("_streamlit_cognito_auth", None)
         st.rerun()
+
+    # JavaScript-based sticky footer — finds the Sign Out button by text,
+    # measures the sidebar's actual pixel width at runtime, then pins the
+    # container to the bottom-left of the viewport so it never scrolls away.
+    components.html(
+        """
+        <script>
+        (function () {
+            function applyFixedFooter() {
+                var doc = window.parent.document;
+                var sidebar = doc.querySelector('section[data-testid="stSidebar"]');
+                if (!sidebar) { setTimeout(applyFixedFooter, 300); return; }
+
+                // Measure real sidebar width + left offset at runtime
+                var rect = sidebar.getBoundingClientRect();
+                var sidebarW = rect.width;
+                var sidebarL = rect.left;
+
+                // Find the Sign Out button by label text
+                var buttons = sidebar.querySelectorAll('button');
+                var target = null;
+                for (var i = 0; i < buttons.length; i++) {
+                    if (buttons[i].innerText.toLowerCase().indexOf('sign out') !== -1) {
+                        target = buttons[i];
+                        break;
+                    }
+                }
+                if (!target) { setTimeout(applyFixedFooter, 300); return; }
+
+                // Walk up to the element-container wrapper
+                var container = target.closest('.element-container');
+                if (!container) { setTimeout(applyFixedFooter, 300); return; }
+
+                // Add bottom padding to the sidebar scroll area so no content
+                // hides behind the footer
+                var scrollArea = sidebar.querySelector('div');
+                if (scrollArea) scrollArea.style.paddingBottom = '4.5rem';
+
+                // Pin the container to the bottom of the sidebar
+                Object.assign(container.style, {
+                    position:        'fixed',
+                    bottom:          '0',
+                    left:            sidebarL + 'px',
+                    width:           sidebarW + 'px',
+                    zIndex:          '9999',
+                    backgroundColor: 'rgb(14, 17, 23)',
+                    borderTop:       '1px solid rgba(250, 250, 250, 0.15)',
+                    padding:         '0.6rem 1rem 0.9rem',
+                    boxSizing:       'border-box',
+                    margin:          '0'
+                });
+                target.style.width = '100%';
+            }
+
+            // Initial call + retry until sidebar is ready
+            applyFixedFooter();
+
+            // Re-apply on Streamlit re-renders and window resize
+            var observer = new MutationObserver(function () { applyFixedFooter(); });
+            observer.observe(window.parent.document.body, { childList: true, subtree: false });
+            window.parent.addEventListener('resize', applyFixedFooter);
+        })();
+        </script>
+        """,
+        height=0,
+    )

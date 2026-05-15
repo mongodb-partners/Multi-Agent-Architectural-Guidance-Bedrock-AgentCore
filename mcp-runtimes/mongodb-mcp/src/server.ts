@@ -18,9 +18,10 @@ import { z } from "zod";
 // Vendored handlers — bundled into the container under `dist/vendor/` at
 // Docker build time (see Dockerfile). During local typecheck the .mjs files
 // are auto-resolved via tsconfig allowJs.
-import { tools } from "./vendor/handlers.mjs";
+import { tools, redactArgsForLog, redactErrorForLog } from "./vendor/handlers.mjs";
 import { createLambdaTrace } from "./vendor/tracing.mjs";
 import { MongoGuardError } from "./vendor/guards.mjs";
+import { logger } from "./lib/logger.js";
 
 type ToolFn = (args: Record<string, unknown>, trace: unknown) => Promise<unknown>;
 type TraceCollector = {
@@ -94,6 +95,11 @@ function buildError(err: unknown, trace: TraceCollector) {
 }
 
 async function dispatch(toolName: string, args: Record<string, unknown>) {
+  logger.info("mongodb tool invocation", {
+    toolName,
+    argsPreview: JSON.stringify(redactArgsForLog(args)).slice(0, 500),
+  });
+
   const fn = toolMap[toolName];
   const trace = createLambdaTrace() as TraceCollector;
   if (!fn) {
@@ -106,10 +112,11 @@ async function dispatch(toolName: string, args: Record<string, unknown>) {
     const result = await fn(args ?? {}, trace);
     return buildSuccess(result, trace);
   } catch (err) {
-    console.error(
-      "tool error:",
-      err instanceof Error ? `${err.name}: ${err.message.slice(0, 500)}` : String(err),
-    );
+    const redactedErr = redactErrorForLog(err);
+    logger.error("mongodb tool error", {
+      toolName,
+      message: `${redactedErr?.name || "Error"}: ${redactedErr?.message || String(err)}`,
+    });
     return buildError(err, trace);
   }
 }

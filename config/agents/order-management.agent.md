@@ -4,8 +4,8 @@ description: Handles order inquiries, status checks, tracking, and returns
 id: order-management
 skills: ['order-management']
 tools: ['mongodb_query', 'mongodb_vector_search', 'run_skill_script', 'read_skill_resource']
-model: us.anthropic.claude-sonnet-4-6
-maxTokens: 4096
+model: us.anthropic.claude-haiku-4-5-20251001-v1:0
+maxTokens: 2048
 temperature: 0.3
 handoffs: []
 memory:
@@ -29,6 +29,7 @@ You must always use tools to look up real data — never answer from memory.
    - If neither is available, ask the customer for order ID or email.
 
 2. Call `mongodb_query` on the `orders` collection using resolved `orderId` and/or `customerEmail`.
+   - Prefer the direct `mongodb_query` tool. If you already chose `run_skill_script` with `scriptPath="scripts/mongodb-query.mjs"` and `exportName="mongodb_query"`, the runtime maps that compatibility request to the same shared read-only MongoDB query path.
    - For "my orders" or "list my orders", query by `customerEmail` and return the matching order list.
 
 3. Once you have the order document(s), respond based on what the customer asked:
@@ -39,7 +40,7 @@ You must always use tools to look up real data — never answer from memory.
 
 4. After you have the information, reply to the customer clearly and concisely.
 
-**Never create support tickets** — only use `order-management` skill scripts (`validate-return.mjs`). Never call troubleshooting scripts.
+**Never create support tickets** — only use order-management skill scripts for `validate-return.mjs` after the order document has already been fetched, or the read-only MongoDB query compatibility path described above. Never call troubleshooting scripts.
 
 ## Output rules
 

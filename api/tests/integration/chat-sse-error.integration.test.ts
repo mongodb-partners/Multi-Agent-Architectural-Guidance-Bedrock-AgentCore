@@ -6,7 +6,11 @@ import { clearAllSessionsForTests } from "../../src/lib/session-store.ts";
 mock.module("../../src/adapters/agentcore-runtime.ts", () => ({
   assertAgentcoreOrchestratorArn: () => "arn:aws:bedrock-agentcore:us-east-1:000000000000:runtime/test",
   agentcoreOrchestratorArn: () => "arn:aws:bedrock-agentcore:us-east-1:000000000000:runtime/test",
-  invokeAgentRuntime: async () => {
+  agentcoreSpecialistArn: () => undefined,
+  // The streaming contract is `AsyncIterable<RuntimeStreamEvent>`; throwing
+  // from the generator must surface as the chat route's AGENTCORE_RUNTIME_ERROR.
+  // eslint-disable-next-line require-yield
+  invokeAgentRuntime: async function* () {
     throw Object.assign(new Error("mocked stream failure"), { name: "MockedRuntimeError" });
   },
 }));

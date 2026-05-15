@@ -32,7 +32,7 @@ The system is **functionally complete against the core SoW**. The orchestrator +
 | **Web Application (UI)** | ✅ Done | Streamlit on EC2 :8501. |
 | **EC2 Compute** | ✅ Done | t3.medium + EIP. Docker + systemd. |
 | **VPC + private/public subnets** | ✅ Done | 10.0.0.0/16 with 2 public + 2 private subnets. Atlas private zone. |
-| **CloudWatch Logs** | ✅ Done | 3 log groups: `/<project>/<env>/{api, mcp, agentcore}` (e.g. `/mongodb-multiagent/dev/...`). 30-day retention. |
+| **CloudWatch Logs** | ✅ Done | 4 Terraform log groups: `/<project>/<env>/{api, ui, mcp, agentcore}`. API retention **30d** (from `log_retention_days`); **ui / mcp / agentcore placeholders 7d**. On EC2 bootstrap, **amazon-cloudwatch-agent** ships `multiagent-api` + `multiagent-ui` journald → `api` + `ui` groups. |
 | **IAM (per-service roles)** | ✅ Done | EC2 instance profile, Lambda execution role, 4 runtime roles, KB role, Gateway role. |
 | **Secrets Manager** | ✅ Done | `<project>-bedrock-kb-creds-<env>` for KB → Atlas auth. |
 | **Long-term memory in Atlas** | ✅ Wired (primary) | `agent_memory_facts` collection with TTL index (default 30 days in deploy). AgentCore is fallback for LTM failures. |
@@ -80,7 +80,7 @@ That earlier doc captured the system **before** the AgentCore migration. Substan
 | VPC | 🔴 Empty stub | ✅ Full VPC with 4 subnets |
 | Lambda agent tools | 🔴 In-process only | ✅ Lambda MCP (single function) behind the AgentCore Gateway |
 | Voyage AI / SageMaker | 🔴 Not started | 🟢 Active for `products` + `troubleshooting_docs`, defaulting to `voyage-multimodal-3` (the SoW model) |
-| CloudWatch | 🔴 stdout only | ✅ 3 log groups, 30-day retention |
+| CloudWatch | ✅ JSON + OTel fields in API; journald→CW agent on EC2 | ✅ 4 log groups (`api` 30d, `ui`/`mcp`/`agentcore` 7d), EC2 ships API+UI units |
 | EC2 deployment | 🔴 No automation | ✅ Full `deploy.sh` (13 phases) |
 | AgentCore Gateway | 🔴 Not started | ✅ Sole tool path (every runtime uses `MCP_SERVER_URL=AGENTCORE_GATEWAY_URL`) |
 | Cognito | ⚠️ Optional | ⚠️ Optional, provisioned, JWKS-validated |

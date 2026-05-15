@@ -6,7 +6,7 @@ There are three Terraform root configs (and three deploy scripts):
 
 - **Network mode** — `envs/network/` provisions the **shared** VPC + subnets + Atlas PrivateLink Interface VPCE for a region, and publishes the resulting IDs to SSM Parameter Store under `/${SHARED_VPC_NAME}/${AWS_REGION}/`. Run **once per region** with `deploy-network.sh`.
 - **Local mode** — runs the API + UI on your laptop. Used for daily development and demos. Some Terraform-provisioned AWS resources are still required (Bedrock KB, Cognito, Secrets Manager). Does **not** consume the shared network.
-- **EC2 mode** — full cloud deployment. The frozen baseline. Reads the shared VPC's IDs from SSM and provisions the per-project EC2 / AgentCore Runtime / MongoDB MCP Runtime stack on top, plus a per-cluster Route 53 zone for the Atlas SRV hostname and the AWS service VPC endpoints required by the VPC-mode MongoDB MCP runtime (ECR API, ECR Docker, S3 gateway, CloudWatch Logs). The legacy Lambda MongoDB MCP host (and its Terraform module) was deleted in CLIENT_REVIEW Phase 7e. MongoDB MCP is invoked directly as an AgentCore Runtime; the AgentCore Gateway remains available for non-Mongo tools.
+- **EC2 mode** — full cloud deployment. The frozen baseline. Reads the shared VPC's IDs from SSM and provisions the per-project EC2 / AgentCore Runtime / MongoDB MCP Runtime stack on top, plus a per-cluster Route 53 zone for the Atlas SRV hostname and the AWS service VPC endpoints required by the VPC-mode MongoDB MCP runtime (ECR API, ECR Docker, S3 gateway, CloudWatch Logs). Set `TF_VAR_create_agentcore_runtime_vpc_endpoints=false` when those singleton endpoints already exist in the shared VPC; EC2 mode will reuse them and ensure this deployment's security groups can reach them. The legacy Lambda MongoDB MCP host (and its Terraform module) was deleted in CLIENT_REVIEW Phase 7e. MongoDB MCP is invoked directly as an AgentCore Runtime; the AgentCore Gateway remains available for non-Mongo tools.
 
 ---
 
@@ -69,14 +69,16 @@ export TF_VAR_atlas_db_password="..."
 # Your laptop's public IP for Atlas IP allow list
 export TF_VAR_my_ip=$(curl -s https://checkip.amazonaws.com)/32
 
-# Optional: Voyage AI on SageMaker (embedding override). Leave empty to use
-# Bedrock Titan v2 (1024-d). To enable, see configuration-guide.md §3.5:
-#   1. Subscribe at https://aws.amazon.com/marketplace/pp/prodview-xj76cqxng4wyw
-#   2. ./deploy/scripts/setup-voyage-marketplace.sh --model voyage-3-5-lite
-# Then re-run deploy.sh — it provisions the SageMaker endpoint and wires
-# VOYAGE_SAGEMAKER_ENDPOINT into both .env.live and all 4 AgentCore runtimes.
-export VOYAGE_MODEL_PACKAGE_ARN=""
-export VOYAGE_INSTANCE_TYPE="ml.g6.xlarge"  # GPU; CPU instances reject the model package
+# Embeddings. Titan works without a Voyage ARN. To use Voyage, run:
+#   ./deploy/scripts/setup-voyage-marketplace.sh --model voyage-multimodal-3
+# or:
+#   ./deploy/scripts/setup-voyage-marketplace.sh --model voyage-3-5-lite
+export EMBEDDINGS_PROVIDER="titan" # titan | voyage
+export VOYAGE_MODEL_PACKAGE_ARN="" # required only when EMBEDDINGS_PROVIDER=voyage
+export VOYAGE_MARKETPLACE_MODEL="voyage-multimodal-3"
+export VOYAGE_REQUEST_FORMAT="multimodal" # legacy for voyage-3-5-lite
+export VOYAGE_OUTPUT_DIM="1024"
+export VOYAGE_INSTANCE_TYPE="ml.g6.xlarge" # GPU; CPU instances reject the model package
 ```
 
 **Always source this file first:**
@@ -146,6 +148,9 @@ Editable diagram with descriptions: [`diagrams/04-deployment-pipeline.drawio`](d
 | Phase 4 hangs > 15 min on Atlas | Atlas M10 cluster provisioning | Normal. M10 takes 8-12 min on first apply. |
 | Phase 6 fails: "no awsPrivateLink connection string" | Atlas PrivateLink not yet active | Re-run after 60s. Atlas takes a moment to attach the AWS endpoint to the cluster. |
 | Phase 8: "Role validation failed" | IAM trust policy not yet propagated | The `aws_bedrockagentcore_agent_runtime` resource will retry on the next `terraform apply`; if it still fails after 30s, re-run `deploy.sh`. |
+| Terraform fails with duplicate ECR/Logs/S3 VPC endpoint or duplicate endpoint SG rule errors | Shared VPC already has singleton AWS service endpoints or access rules | Set `TF_VAR_create_agentcore_runtime_vpc_endpoints=false` before deploy. EC2 mode reuses the existing endpoints and treats duplicate endpoint access rules as success. |
+| Terraform apply says "Saved plan is stale" | Remote state changed after the plan was created | Re-run `deploy.sh`; the retry wrapper re-plans and applies against current state. |
+| Deploy rejects Voyage model/request format | `VOYAGE_MODEL_PACKAGE_ARN`, `VOYAGE_MARKETPLACE_MODEL`, and `VOYAGE_REQUEST_FORMAT` disagree | Use `setup-voyage-marketplace.sh --model voyage-multimodal-3` for `multimodal`, or `--model voyage-3-5-lite` for `legacy`, then re-source `env.sh`. |
 | API health hangs on `mcpServer` / MCP logs are empty | Missing VPC endpoints for the VPC-mode MongoDB MCP runtime | EC2 mode should create ECR API, ECR Docker, S3 gateway, and CloudWatch Logs endpoints. Apply `envs/ec2` and verify those endpoints are `available`. |
 | Phase 11 health check fails on `agentcore: unreachable` | Known issue — `ListSessions` health probe requires extra IAM | Non-blocking. Functional memory still works. |
 | Deploy exits after Docker push with code 1 | Known `docker-build-push.sh` exit anomaly | Re-run `./deploy/scripts/deploy.sh --auto-approve --skip-docker` to apply/restart with pushed images. |
@@ -245,7 +250,7 @@ source env.sh
 1. AgentCore Gateway → Agent runtimes → MongoDB MCP runtime (native `aws_bedrockagentcore_*` deletes, no shell shim)
 2. EC2 + EIP
 3. Atlas cluster (slow — ~5 min)
-4. Per-cluster Route 53 zone (`atlas-cluster-dns`)
+4. Per-cluster Route 53 zone (`atlas-privatelink-dns`)
 5. Supporting services (Cognito, ECR, KB, Memory, Secrets, CloudWatch)
 6. Optional `bedrock-kb-privatelink` (NLB + VPC Endpoint Service) when `enable_kb_privatelink = true`
 
@@ -312,8 +317,11 @@ aws ssm send-command \
 ```
 
 CloudWatch log groups for full log search:
-- `/<project>/<env>/api` — Hono API (e.g. `/mongodb-multiagent/dev/api`)
-- `/<project>/<env>/agentcore` — AgentCore runtime traces
+
+- `/<project>/<env>/api` — Hono API (JSON lines from the Bun process; on EC2 also fed by **amazon-cloudwatch-agent** from `multiagent-api.service` journald)
+- `/<project>/<env>/ui` — Streamlit UI (journald `multiagent-ui.service` → same agent)
+- `/<project>/<env>/agentcore` — placeholder / optional future centralization (short retention)
+- `/<project>/<env>/mcp` — placeholder for MCP-sidecar style hosts (short retention)
 - `/aws/bedrock-agentcore/runtimes/<mongodb-mcp-runtime-id>/...` — MongoDB MCP runtime (AgentCore-managed log group; the legacy `/<project>/<env>/mcp` Lambda log group is gone post Phase 7e)
 
 ---
@@ -334,6 +342,6 @@ CloudWatch log groups for full log search:
 | [`deploy/terraform/envs/ec2/main.tf`](../deploy/terraform/envs/ec2/main.tf) | Per-project EC2 mode root module (consumes shared VPC via SSM) |
 | [`deploy/terraform/envs/local/main.tf`](../deploy/terraform/envs/local/main.tf) | Local mode root module |
 | [`deploy/terraform/modules/atlas-privatelink/`](../deploy/terraform/modules/atlas-privatelink/) | AWS Interface VPCE + Atlas-side binding + CIDR-scoped SG (envs/network) |
-| [`deploy/terraform/modules/atlas-cluster-dns/`](../deploy/terraform/modules/atlas-cluster-dns/) | Per-cluster Route 53 private zone + wildcard CNAME (envs/ec2) |
+| [`deploy/terraform/modules/atlas-privatelink-dns/`](../deploy/terraform/modules/atlas-privatelink-dns/) | Per-cluster Route 53 private zone + wildcard CNAME — DNS half of Atlas PrivateLink (envs/ec2) |
 | [`deploy/terraform/modules/agentcore-agent-runtime/`](../deploy/terraform/modules/agentcore-agent-runtime/) | The 4-runtime module (CLI-provisioned) |
 | [`deploy-manifest.json`](../deploy-manifest.json) | Output: every ARN/ID/URL/IP from last deploy |

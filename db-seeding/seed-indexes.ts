@@ -132,9 +132,13 @@ function vectorIndexDef(collection: string, indexName: string) {
           numDimensions: EMBEDDING_DIMENSIONS,
           similarity: SIMILARITY,
         },
-        // Allow pre-filtering by category / affectedSkus in knnBeta queries
+        // Allow pre-filtering by fields agents commonly pass with vector search.
         ...(collection === "products"
-          ? [{ type: "filter", path: "category" }, { type: "filter", path: "tags" }]
+          ? [
+              { type: "filter", path: "category" },
+              { type: "filter", path: "tags" },
+              { type: "filter", path: "price" },
+            ]
           : [{ type: "filter", path: "category" }, { type: "filter", path: "affectedSkus" }]),
       ],
     },

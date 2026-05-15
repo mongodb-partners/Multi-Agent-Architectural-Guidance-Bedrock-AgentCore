@@ -1,12 +1,13 @@
 /**
  * AgentCore Runtime invocation adapter.
  *
- * The Hono API always calls InvokeAgentRuntime against the orchestrator
- * runtime ARN; the runtime container handles the full agent loop (Strands
- * Swarm + specialist hand-off) and returns a complete response.
+ * The Hono API always calls `InvokeAgentRuntime` against the orchestrator
+ * runtime ARN. The runtime container responds with `text/event-stream` so
+ * tokens reach the client as soon as Bedrock produces them — no buffering
+ * at any hop.
  *
- * Session management and long-term memory stay in the Hono API — the runtime
- * is stateless and receives full context (priorTurns, memoryContext) on each call.
+ * Session management and long-term memory stay in the Hono API; the runtime
+ * receives full context (priorTurns, memoryContext) on each call.
  */
 
 import {
@@ -14,9 +15,13 @@ import {
   InvokeAgentRuntimeCommand,
 } from "@aws-sdk/client-bedrock-agentcore";
 import { logger } from "../lib/logger.ts";
+import { injectTraceContextToCarrier } from "../lib/otel.ts";
 import type { ChatMessage } from "../lib/session-store.ts";
 import { currentTrace } from "../lib/trace-context.ts";
-import type { TraceEvent } from "../lib/trace-types.ts";
+import {
+  parseRuntimeSseStream,
+  type RuntimeStreamEvent,
+} from "../lib/runtime-sse.ts";
 
 let _client: BedrockAgentCoreClient | null = null;
 
@@ -33,6 +38,16 @@ export function agentcoreOrchestratorArn(): string | undefined {
   // Accept the legacy AGENTCORE_RUNTIME_ARN name for older .env.live files.
   return process.env.AGENTCORE_ORCHESTRATOR_ARN?.trim() ||
     process.env.AGENTCORE_RUNTIME_ARN?.trim() ||
+    undefined;
+}
+
+/** ARN for a specific specialist runtime (used when classifier picks one and
+ *  Phase 2's direct-routing path is enabled). Returns `undefined` for unknown
+ *  specialists. */
+export function agentcoreSpecialistArn(agentId: string): string | undefined {
+  const safeAgentId = agentId.toUpperCase().replace(/[^A-Z0-9]+/g, "_");
+  return process.env[`AGENTCORE_RUNTIME_ARN_${safeAgentId}`]?.trim() ||
+    process.env[`AGENTCORE_${safeAgentId}_ARN`]?.trim() ||
     undefined;
 }
 
@@ -64,32 +79,42 @@ export type RuntimeInvokeParams = {
    * as the Authorization header on outbound AgentCore Gateway MCP calls.
    */
   userJwt?: string;
-};
-
-export type RuntimeInvokeResult = {
-  response: string;
-  agentId: string;
-  handoffs?: string[];
-  /** Nested trace events captured inside the runtime container. */
-  traceEvents?: TraceEvent[];
-  /** AgentCore-side trace id, if the runtime container generated one. */
-  nestedTraceId?: string;
+  /**
+   * Optional override of the runtime ARN. When omitted the orchestrator
+   * runtime ARN is used. Phase 2 routes directly to a specialist by setting
+   * this so the orchestrator hop is skipped entirely.
+   */
+  runtimeArn?: string;
+  /**
+   * Mode tag for the wrapper trace span. Defaults to `ec2_to_orchestrator`.
+   * Use `ec2_to_specialist` when calling a specialist runtime directly.
+   */
+  invokeMode?: "ec2_to_orchestrator" | "ec2_to_specialist";
 };
 
 /**
- * Invoke the AgentCore Runtime and return the complete response.
+ * Invoke the AgentCore Runtime and return its streaming response.
  *
- * runtimeSessionId must be ≥ 33 characters (AgentCore requirement).
- * We pad the sessionId with a fixed suffix if needed.
+ * The returned generator yields `RuntimeStreamEvent`s as the runtime
+ * produces them. The caller is responsible for forwarding `stream` parts to
+ * the client SSE channel and for accumulating `trace` events to splice into
+ * the parent collector via `attachEventsNested(...)` once the stream ends.
+ *
+ * `runtimeSessionId` must be ≥ 33 characters (AgentCore requirement); we
+ * pad it with `0`s when the caller's session id is shorter.
  */
-export async function invokeAgentRuntime(
+export async function* invokeAgentRuntime(
   params: RuntimeInvokeParams,
-): Promise<RuntimeInvokeResult> {
-  const arn = assertAgentcoreOrchestratorArn();
+): AsyncGenerator<RuntimeStreamEvent> {
+  const arn = params.runtimeArn?.trim() || assertAgentcoreOrchestratorArn();
+  const mode = params.invokeMode ?? "ec2_to_orchestrator";
 
   const runtimeSessionId = params.sessionId.length >= 33
     ? params.sessionId
     : params.sessionId.padEnd(33, "0");
+
+  const carrier: Record<string, string> = {};
+  injectTraceContextToCarrier(carrier);
 
   const payloadBody = {
     message: params.message,
@@ -98,8 +123,8 @@ export async function invokeAgentRuntime(
     ...(params.priorTurns?.length ? { priorTurns: params.priorTurns } : {}),
     ...(params.memoryContext ? { memoryContext: params.memoryContext } : {}),
     ...(params.userJwt ? { userJwt: params.userJwt } : {}),
-    // Ask the runtime container to attach trace events into its response.
     captureTrace: true,
+    ...(Object.keys(carrier).length > 0 ? { _trace: carrier } : {}),
   };
   const payload = JSON.stringify(payloadBody);
 
@@ -107,6 +132,7 @@ export async function invokeAgentRuntime(
     arn,
     agentId: params.agentId,
     sessionId: runtimeSessionId,
+    mode,
   });
 
   const trace = currentTrace();
@@ -117,7 +143,7 @@ export async function invokeAgentRuntime(
       region: process.env.AWS_REGION,
       qualifier: "DEFAULT",
       runtimeSessionId,
-      mode: "ec2_to_orchestrator",
+      mode,
       requestBytes: payload.length,
       latencyMs: 0,
       targetAgentId: params.agentId,
@@ -129,7 +155,7 @@ export async function invokeAgentRuntime(
     runtimeSessionId,
     payload,
     contentType: "application/json",
-    accept: "application/json",
+    accept: "text/event-stream",
     qualifier: "DEFAULT",
   });
 
@@ -144,7 +170,7 @@ export async function invokeAgentRuntime(
     if (trace && wrapperId) {
       trace.end(wrapperId, {
         arn,
-        mode: "ec2_to_orchestrator",
+        mode,
         targetAgentId: params.agentId,
         requestBytes: payload.length,
         latencyMs,
@@ -152,73 +178,64 @@ export async function invokeAgentRuntime(
         errorMessage: errMsg,
       });
     }
+    logger.error("[agentcore-runtime] InvokeAgentRuntime failed", {
+      arn,
+      agentId: params.agentId,
+      mode,
+      latencyMs,
+      errorClass: errClass,
+      errorMessage: errMsg,
+    });
     throw err;
   }
 
-  const raw = await res.response?.transformToString();
-  const latencyMs = Date.now() - t0;
-  if (!raw) {
+  const body = res.response;
+  if (!body) {
     if (trace && wrapperId) {
       trace.end(wrapperId, {
         arn,
-        mode: "ec2_to_orchestrator",
+        mode,
         targetAgentId: params.agentId,
         requestBytes: payload.length,
-        latencyMs,
+        latencyMs: Date.now() - t0,
         errorMessage: "empty response",
       });
     }
     throw new Error("Empty response from AgentCore Runtime");
   }
 
-  let data: RuntimeInvokeResult;
+  let responseBytes = 0;
+  let firstByteAt: number | undefined;
   try {
-    data = JSON.parse(raw);
-  } catch {
+    for await (const ev of parseRuntimeSseStream(body as AsyncIterable<Uint8Array>)) {
+      if (firstByteAt === undefined) {
+        firstByteAt = Date.now();
+        trace?.event("latency.checkpoint", {
+          name: "api.runtime.first_frame",
+          elapsedMs: firstByteAt - t0,
+          agentId: params.agentId,
+          eventKind: ev.kind,
+          partType: ev.kind === "stream" ? ev.part.type : undefined,
+        });
+      }
+      responseBytes += JSON.stringify(ev).length;
+      yield ev;
+    }
+  } finally {
+    const latencyMs = Date.now() - t0;
     if (trace && wrapperId) {
       trace.end(wrapperId, {
         arn,
-        mode: "ec2_to_orchestrator",
+        mode,
         targetAgentId: params.agentId,
         requestBytes: payload.length,
-        responseBytes: raw.length,
+        responseBytes,
         latencyMs,
-        errorMessage: "non-JSON response",
-      });
-    }
-    throw new Error(`AgentCore Runtime returned non-JSON: ${raw.slice(0, 200)}`);
-  }
-
-  logger.info("[agentcore-runtime] response received", {
-    agentId: data.agentId,
-    responseLength: data.response?.length,
-    nestedTraceEvents: data.traceEvents?.length,
-  });
-
-  if (trace && wrapperId) {
-    trace.end(wrapperId, {
-      arn,
-      mode: "ec2_to_orchestrator",
-      targetAgentId: params.agentId,
-      requestBytes: payload.length,
-      responseBytes: raw.length,
-      latencyMs,
-      httpStatus: 200,
-    });
-    // Splice nested events into our collector.
-    if (data.traceEvents?.length) {
-      trace.attachEventsNested(data.traceEvents, wrapperId, {
-        logger: { warn: (msg, ctx) => logger.warn(msg, ctx as Record<string, unknown> | undefined) },
-      });
-      trace.event("agentcore.nested_trace", {
-        nestedTraceId: data.nestedTraceId,
-        nestedRuntimeArn: arn,
-        eventCount: data.traceEvents.length,
+        httpStatus: 200,
+        ...(firstByteAt !== undefined ? { timeToFirstByteMs: firstByteAt - t0 } : {}),
       });
     }
   }
-
-  return data;
 }
 
 // Backward-compatible aliases to avoid breaking imports while renaming.
