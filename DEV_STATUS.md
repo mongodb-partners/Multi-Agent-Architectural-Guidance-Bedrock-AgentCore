@@ -9,11 +9,13 @@
 
 | Goal | Command |
 |---|---|
-| **Source AWS + Atlas creds** | `source env.sh && aws sts get-caller-identity` |
-| **Local dev (real Bedrock + Atlas, gateway tools)** | `source env.sh && source .env.live && export ORCHESTRATOR_MODE=swarm && cd api && bun run dev` (`.env.live` carries `AUTH_JWKS_URI` + `AUTH_ISSUER` — the API refuses to start without them) |
+| **Source AWS + Atlas creds** | `source .env && aws sts get-caller-identity` |
+| **Local dev (real Bedrock + Atlas, gateway tools)** | `source .env && source .env.live && export ORCHESTRATOR_MODE=swarm && cd api && bun run dev` (`.env.live` carries `AUTH_JWKS_URI` + `AUTH_ISSUER` — the API refuses to start without them) |
 | **Streamlit UI** | `~/.venvs/multiagent-ui/bin/streamlit run ui/app.py --server.headless true` |
 | **Apply shared network** (once per region) | `./deploy/scripts/deploy-network.sh --auto-approve` |
-| **Deploy to EC2** | `./deploy/scripts/deploy.sh --auto-approve` |
+| **Deploy to EC2** (full infra + agents) | `./deploy/deploy-full-with-privatelink.sh --auto-approve` |
+| **Redeploy API only** (API code/config/env) | `./deploy/deploy-api.sh` |
+| **Redeploy agents only** (no infra change) | `./deploy/deploy-agents.sh --auto-approve` |
 | **Health check** | `curl -s http://$EC2_IP:3000/health \| python3 -m json.tool` |
 | **Open EC2 shell (no SSH)** | `aws ssm start-session --target $EC2_INSTANCE_ID` |
 | **Tear down per-project ec2 only** | `./deploy/scripts/destroy.sh --mode ec2 --auto-approve` |
@@ -54,7 +56,7 @@ For full deployment instructions: [`docs/deployment-guide.md`](docs/deployment-g
 4. Specialists call MongoDB tools (`mongodb_query`, `mongodb_aggregate`, `mongodb_vector_search`) over **MCP directly to the MongoDB MCP AgentCore Runtime** (`mcp-runtimes/mongodb-mcp/`, MCP server protocol, VPC network mode), IAM-authorized via `bedrock-agentcore:InvokeAgentRuntime`. The Gateway remains provisioned for non-Mongo tools, but Mongo no longer registers as a Gateway `mcp_server` target because that target type cannot point at AgentCore Runtime endpoints.
 5. **End-to-end SSE streaming.** Each AgentCore Runtime invocation now opens with `Accept: text/event-stream`; the runtime container writes one of three SSE event types per frame — `event: stream` (a `ChatStreamPart` JSON), `event: trace` (a `TraceEvent` JSON), `event: done` (one final `RuntimeDonePayload`). The Hono API forwards `stream` parts to the client, throttles `model.text_delta_batch` trace forwarding (`TRACE_SSE_THROTTLE_MS`, default 100 ms) so the trace channel never contends with token frames, accumulates all `trace` events, and on `done` splices them under the parent `agentcore.invoke` wrapper via `attachEventsNested(...)`. `latency.checkpoint` trace events mark first runtime frame, first model delta/tool call, and first client token so benchmark output can separate first progress from first visible text.
 6. **Boot-time pre-warm.** Both the API (`api/src/index.ts`) and the runtime container (`api/src/agent-runtime-code.ts`) fire `runStartupPrewarm()` before listening — `Promise.allSettled([getMongoDb, getMcpTools, warmAgentCache])` so the very first chat does not pay the Mongo TLS handshake, the MCP `connect`/`listTools` round-trip, or the per-agent template build on the user's clock.
-7. **Per-chat reconstruction caches.** `resolve-model.ts` reads each agent's `model` / `maxTokens` / `temperature` from `.agent.md` frontmatter and caches one `BedrockModel` per `(agentId, model, maxTokens, temperature, region)`. The orchestrator and order-management agents currently use Haiku for lower routing/order-lookup latency; order-management keeps `maxTokens: 2048` as a conservative cap so status and return responses have room without the old 4096-token budget. `skill-loader.ts` caches `loadSkillInstructions` by mtime. `create-strands-agent.ts` caches `(systemPromptBase, registry, tools, model)` per agentId via `getAgentTemplate(...)` (and exposes `warmAgentCache()` for the boot-time pre-warm). Cache is bypassed for agents that opt into lazy `activate_skill` (orchestrator-style runs with `skills > 0` and `preActivateSkills=false`) so activations from one chat do not leak into the next.
+7. **Per-chat reconstruction caches.** `resolve-model.ts` reads each agent's `model` / `maxTokens` / `temperature` from `.agent.md` frontmatter and caches one `BedrockModel` per `(agentId, model, maxTokens, temperature, region)`. The orchestrator and order-management agents currently use Haiku for lower routing/order-lookup latency; order-management keeps `maxTokens: 2048` as a conservative cap so status and return responses have room without the old 4096-token budget. `skill-loader.ts` caches `loadSkillInstructions` by mtime. `create-strands-agent.ts` caches `(systemPromptBase, registry, tools, model)` per agentId via `getAgentTemplate(...)` (and exposes `warmAgentCache()` for the boot-time pre-warm). Cache is bypassed for agents that opt into lazy `activate_skill` (orchestrator-style runs with `skills > 0` and `preActivateSkills=false`) so activations from one chat do not leak into the next. `deploy-agents.sh` calls `POST /internal/agents/refresh` after runtime updates so the API swaps to the latest config snapshot, refreshes specialist ARN overrides, and clears these caches without an API image rebuild.
 
 `ORCHESTRATOR_MODE` defaults to `swarm` for the orchestrator runtime. Set it to anything else (e.g. `single`) on the orchestrator runtime container to fall back to one-shot routing. The orchestrator runtime path is only reached when `USE_ORCHESTRATOR_RUNTIME=1` is set on the API; otherwise the in-API classifier picks the specialist directly.
 
@@ -98,8 +100,10 @@ Benchmark TTFB before/after with `bun run bench:ttfb` (env: `API_URL`, `BEARER_T
 - ✅ Atlas seeded: 9 products, 12 orders, 7 troubleshooting docs, 10 customers
 - ✅ Deploy retry wrapper re-plans on transient Atlas API failures and Terraform "Saved plan is stale" state drift before retrying apply.
 - ✅ Streamlit UI streams SSE, shows agent handoffs / tool calls / skill loads as badges. Inline **🧠 Reasoning** panel under each assistant reply surfaces the orchestrator's classification reasoning (`agentcore.classification`) and the model's extended-thinking blocks (`model.thinking_block`), and is preserved on history replay.
-- ✅ Tracing: every chat turn emits `TraceEvent`s (see [api-reference.md §13](docs/api-reference.md#13-tracing-endpoints)); persisted to MongoDB `traces` + ring buffer; Streamlit Trace Viewer at `/Trace_Viewer?traceId=…`
-- ✅ Deploy fully automated: `deploy.sh --auto-approve` (~20-25 min)
+- ✅ Tracing: every chat turn emits `TraceEvent`s (see [api-reference.md §14](docs/api-reference.md#14-tracing-endpoints)); persisted to MongoDB `traces` + ring buffer; Streamlit Trace Viewer at `/Trace_Viewer?traceId=…`
+- ✅ Deploy fully automated: `deploy-full-with-privatelink.sh --auto-approve` (~20-25 min)
+- ✅ API-only redeploy: `./deploy/deploy-api.sh` (~3-5 min) — rebuilds/pushes only the API Docker image, regenerates `.env.live` from Terraform outputs (including dynamic specialist ARNs and the API PrivateLink MongoDB URI), restarts only `multiagent-api`, and runs backend smoke. Skips Terraform apply, UI, and AgentCore runtime image/artifact changes.
+- ✅ Agent-only redeploy: `./deploy/deploy-agents.sh --auto-approve` (~3-5 min) — rebuilds code artifact, targeted terraform apply on `module.acr_specialists` + `module.acr_orchestrator`, re-injects dynamic env vars, verifies, calls the API config/cache refresh endpoint, then runs optional smoke. Skips Atlas/EC2/KB/Cognito/API-UI changes and does not restart `multiagent-api`.
 
 ## What's known-yellow
 
@@ -107,15 +111,16 @@ Benchmark TTFB before/after with `bun run bench:ttfb` (env: `API_URL`, `BEARER_T
 - ⚠️ Streamlit Cognito hosted-UI works but cookie persistence + multi-region QA not done.
 - ✅ Persistent short-term sessions are **on by default** when `MONGODB_URI` is set — set `PERSIST_CHAT_SESSIONS=0` (or `=false`) to opt out and keep them in-memory only.
 - ✅ Long-term fact extraction always runs the LLM extractor (Bedrock Haiku via `MEMORY_EXTRACTION_MODEL_ID`, default `us.anthropic.claude-haiku-4-5-20251001-v1:0` — the previous default `us.anthropic.claude-3-5-haiku-20241022-v1:0` is deprecated and now silently AccessDenied on newly granted Bedrock accounts). On a Bedrock failure (throttling / AccessDenied / network) the write is skipped and `memory.long_term_skip` is emitted with `reason: "llm_extractor_failed"` — there is **no regex fallback**, because regex false-positives would silently pollute stored facts. Cap per-turn writes with `MEMORY_EXTRACTION_MAX_FACTS` (default 6). See [`docs/memory-architecture.md`](docs/memory-architecture.md).
+- ✅ **Vector-backed long-term memory**: every accepted fact is embedded at write time (Voyage primary, Bedrock Titan v2 fallback) and stored in `agent_memory_facts` with an `embedding`, an `embeddingModel`, and a `factHash` dedup key — the write uses `bulkWrite` upsert on `{ userId, factHash }` so re-stating the same fact is idempotent. Every chat message is mirrored to a new `chat_messages` collection with the same embedding shape; `DELETE /sessions/:id` cascade-deletes the mirror rows. The chat route reads memory through `readLongTermMemoryContext(userId, message, { agentId })`, which runs **hybrid vector + Atlas Search BM25** across both collections, fuses with Reciprocal Rank Fusion (k=60), applies per-collection weights + exponential recency decay (`MEMORY_RECENCY_HALFLIFE_DAYS`, default 30d), and MMR-diversifies the top-K (`MEMORY_VECTOR_TOPK`, default 6) before injecting as `## Relevant prior context`. Query embedding is bounded by `MEMORY_EMBED_TIMEOUT_MS` (default 5000) and each Atlas leg by `MEMORY_SEARCH_MAX_TIME_MS` (default 8000); if either stalls, the route uses lexical/scoped fallback instead of denying known facts. Other knobs: `MEMORY_VECTOR_FETCHK`, `MEMORY_VECTOR_NUM_CANDIDATES`, `MEMORY_MMR_LAMBDA`, `MEMORY_MIN_SCORE`, `MEMORY_WEIGHT_FACTS`, `MEMORY_WEIGHT_CHAT_MESSAGES`. The two old readers (`readLongTermMemory` / `readSharedLongTermMemory`) still exist as wrappers but the route uses the unified hybrid path.
+- ✅ **Hybrid retrieval also exposed to chat-invoked tools**: `mongodb_vector_search` accepts `hybrid: true`. The API-side wrapper rewrites args and routes to the Mongo MCP runtime's internal-only `mongodb_hybrid_search` handler (it never bypasses MCP for chat tools). The hybrid helper is filtered out of `tools/list` so agents see exactly the same `mongodb_*` surface as before. Atlas Search indexes for `products`, `troubleshooting_docs`, `agent_memory_facts`, and `chat_messages` are created by `db-seeding/seed-indexes.ts`.
 
 ## What's not done (parked or pending)
 
-- ✅ Embeddings provider modes — **explicit**: `EMBEDDINGS_PROVIDER=titan` works without any Voyage ARN and uses Bedrock Titan v2 (1024-d); `EMBEDDINGS_PROVIDER=voyage` provisions SageMaker from `VOYAGE_MODEL_PACKAGE_ARN`. Supported Voyage paths are `voyage-multimodal-3` with `VOYAGE_REQUEST_FORMAT=multimodal` (SoW-aligned) and `voyage-3-5-lite` with `VOYAGE_REQUEST_FORMAT=legacy` + `VOYAGE_OUTPUT_DIM=1024`. Current vector-search data readiness only requires embeddings on `products` and `troubleshooting_docs`; `orders`, `customers`, and empty `agent_memory` do not need embeddings for today's chat flows.
+- ✅ Embeddings provider modes — **explicit**: `EMBEDDINGS_PROVIDER=titan` works without any Voyage ARN and uses Bedrock Titan v2 (1024-d); `EMBEDDINGS_PROVIDER=voyage` provisions SageMaker from `VOYAGE_MODEL_PACKAGE_ARN`. Supported Voyage paths are `voyage-multimodal-3` with `VOYAGE_REQUEST_FORMAT=multimodal` (SoW-aligned) and `voyage-3-5-lite` with `VOYAGE_REQUEST_FORMAT=legacy` + `VOYAGE_OUTPUT_DIM=1024`. Current semantic-search data readiness covers `products`, `troubleshooting_docs`, `agent_memory_facts`, and `chat_messages`; `orders`, `customers`, `chat_sessions`, and `traces` stay structured-only.
 - 🔴 AgentCore Code Interpreter (skill scripts run as `.mjs` imports)
 - 🔴 Multi-tenancy: agents query by user-supplied IDs, not authenticated `customerId`
-- 🔴 Vector-similarity long-term memory recall (currently recency-based, last 5 turns)
 - 🔴 Browser/Streamlit E2E tests (only API smoke E2E exists)
-- 🔴 CI/CD as primary deploy path (workflow exists but `deploy.sh` is the daily driver)
+- 🔴 CI/CD as primary deploy path (workflow exists but `deploy-full-with-privatelink.sh` is the daily driver)
 
 For the full delta vs SoW: [`docs/gap-analysis.md`](docs/gap-analysis.md).
 
@@ -123,9 +128,60 @@ For the full delta vs SoW: [`docs/gap-analysis.md`](docs/gap-analysis.md).
 
 ## Common operations
 
+### Deploying just the API
+
+Use `deploy/deploy-api.sh` when only `api/`, API-bundled `config/`, or API runtime env wiring changed and the existing EC2/AgentCore infrastructure should stay in place.
+
+```bash
+source .env
+./deploy/deploy-api.sh
+
+# Re-sync .env.live and restart API without rebuilding/pushing an image:
+./deploy/deploy-api.sh --skip-docker
+```
+
+**What it skips:** Terraform apply, UI image rebuilds, Streamlit restart, AgentCore runtime artifact rebuilds, MongoDB/Cognito seeding, network/bootstrap.
+
+**What it still refreshes:** `.env.live` with Terraform outputs, the Atlas PrivateLink direct MongoDB URI, and one `AGENTCORE_<SPECIALIST_ID>_ARN` line for each discovered specialist so the in-API classifier can route directly to specialists.
+
+### Deploying just agents (no infra change)
+
+Use `deploy/deploy-agents.sh` whenever only `config/agents/*.agent.md` or `config/skills/` changed.
+
+```bash
+# 1. Edit your agent or skill file (e.g. tweak the order-management persona):
+#    config/agents/order-management.agent.md
+
+# 2. Redeploy agents only (~3-5 min; no EC2/Atlas/KB changes):
+source .env
+./deploy/deploy-agents.sh --auto-approve
+
+# 3. Add a brand-new specialist agent:
+#    a. Create config/agents/<new-id>.agent.md
+#    b. Run deploy-agents.sh — discover_agents picks it up automatically;
+#       terraform creates module.acr_specialists["<new-id>"];
+#       AGENTCORE_RUNTIME_ARN_<NEW_ID> is injected into the orchestrator runtime;
+#       the API generates the orchestrator handoff roster from config/agents.
+./deploy/deploy-agents.sh --auto-approve
+
+# 4. Remove a specialist:
+#    a. Delete config/agents/<id>.agent.md
+#    b. deploy-agents.sh detects the pending terraform destroy and requires
+#       interactive confirmation (override with --allow-destroy).
+./deploy/deploy-agents.sh --auto-approve
+```
+
+**What it skips:** API/UI image rebuilds, `.env.live` regeneration, EC2 service restart, MongoDB/Cognito seeding, network/bootstrap.
+
+**API cache refresh:** after AgentCore runtime env verification, the script posts the current `config/` snapshot plus the Terraform `acr_specialist_arns` map to `POST /internal/agents/refresh`. The endpoint is protected by Cognito auth plus `AGENT_CONFIG_REFRESH_TOKEN` from `.env.live`, then clears agent/config/classifier/template/skill caches. This is what makes agent add/update/delete visible to the API without `deploy-api.sh`.
+
+**Propagation latency:** changes are live immediately for new sessions; warm sessions pick them up within `idle_runtime_session_timeout` (default 15 min).
+
+**Prerequisite:** `deploy-full-with-privatelink.sh` must have been run at least once (`deploy-manifest.json` + `backend.hcl` required).
+
 ### One-time state migration: `atlas-cluster-dns` → `atlas-privatelink-dns` (2026-05-15)
 
-The Terraform module that owns the per-cluster Route 53 private zone was renamed from `atlas-cluster-dns` to `atlas-privatelink-dns` (folder + module block). **Run this once on any pre-existing `envs/ec2` state** before the next `deploy.sh`, otherwise Terraform will plan to destroy the live Route 53 zone + wildcard CNAME and recreate them (brief Atlas resolution outage on the EC2 host).
+The Terraform module that owns the per-cluster Route 53 private zone was renamed from `atlas-cluster-dns` to `atlas-privatelink-dns` (folder + module block). **Run this once on any pre-existing `envs/ec2` state** before the next `deploy-full-with-privatelink.sh`, otherwise Terraform will plan to destroy the live Route 53 zone + wildcard CNAME and recreate them (brief Atlas resolution outage on the EC2 host).
 
 ```bash
 cd deploy/terraform/envs/ec2

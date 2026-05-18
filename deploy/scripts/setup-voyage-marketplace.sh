@@ -9,7 +9,7 @@
 #      polls until you've accepted the EULA.
 #   4. Once subscribed — discovers the model package ARN via SageMaker.
 #   5. Optionally:
-#        - Appends / updates VOYAGE_MODEL_PACKAGE_ARN in env.sh
+#        - Appends / updates VOYAGE_MODEL_PACKAGE_ARN in .env
 #        - Pushes VOYAGE_MODEL_PACKAGE_ARN to GitHub Secrets (for CI)
 #
 # Subscription itself cannot be automated — it requires clicking "Accept Terms"
@@ -20,14 +20,14 @@
 #   ./deploy/scripts/setup-voyage-marketplace.sh --model voyage-3    # specific model
 #   ./deploy/scripts/setup-voyage-marketplace.sh --skip-env --skip-gh
 #
-# One-time. Re-run safely — it's idempotent (won't duplicate env.sh lines).
+# One-time. Re-run safely — it's idempotent (won't duplicate .env lines).
 
 set -euo pipefail
 
 # ── Config ────────────────────────────────────────────────────────────────────
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-ENV_FILE="$REPO_ROOT/env.sh"
+ENV_FILE="$REPO_ROOT/.env"
 
 # Default to the SoW model, but keep voyage-3-5-lite as a supported legacy
 # option for lower-cost/text-only deployments.
@@ -89,17 +89,17 @@ for cmd in aws jq; do
   command -v "$cmd" >/dev/null 2>&1 || err "'$cmd' not found in PATH"
 done
 
-# Load env.sh so AWS creds are available (don't require the user to have sourced it).
+# Load .env so AWS creds are available (don't require the user to have sourced it).
 if [[ -f "$ENV_FILE" ]]; then
   # shellcheck source=/dev/null
   source "$ENV_FILE"
   log "Sourced $ENV_FILE"
 else
-  warn "env.sh not found at $ENV_FILE — relying on current shell's AWS creds"
+  warn ".env not found at $ENV_FILE — relying on current shell's AWS creds"
 fi
 
 ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text 2>/dev/null)" \
-  || err "AWS credentials invalid or expired. Run: source env.sh"
+  || err "AWS credentials invalid or expired. Run: source .env"
 ok "AWS account: $ACCOUNT_ID (region: $AWS_REGION)"
 
 # Optional SoW guard — fail fast on any silent deviation from voyage-multimodal-3.
@@ -192,7 +192,7 @@ if [[ "$PKG_APPROVAL" != "Approved" ]]; then
   warn "Model package is not Approved. Deploy will likely fail."
 fi
 
-# ── Phase 4 — Persist ARN to env.sh ───────────────────────────────────────────
+# ── Phase 4 — Persist ARN to .env ────────────────────────────────────────────
 if [[ "$UPDATE_ENV" == "true" ]]; then
   sep
   log "Phase 4 — Updating $ENV_FILE..."
@@ -217,7 +217,7 @@ if [[ "$UPDATE_ENV" == "true" ]]; then
   }
 
   if [[ ! -f "$ENV_FILE" ]]; then
-    warn "env.sh not found — creating from scratch"
+    warn ".env not found — creating from scratch"
     cat > "$ENV_FILE" <<EOF
 #!/bin/bash
 export EMBEDDINGS_PROVIDER="voyage"
@@ -239,7 +239,7 @@ EOF
     ok "Updated Voyage env vars in $ENV_FILE"
   fi
 else
-  log "Skipped env.sh update (--skip-env)"
+  log "Skipped .env update (--skip-env)"
 fi
 
 # ── Phase 5 — Push to GitHub Secrets (optional) ───────────────────────────────
@@ -267,7 +267,7 @@ echo "  Model:   $MODEL"
 echo "  Region:  $AWS_REGION"
 echo "  ARN:     $ARN"
 echo ""
-echo "  Next: run ./deploy/scripts/deploy.sh — the envs/ec2 stack will now"
+echo "  Next: run ./deploy/deploy-full-with-privatelink.sh — the envs/ec2 stack will now"
 echo "        provision a SageMaker endpoint for Voyage embeddings instead of"
 echo "        falling back to Bedrock Titan."
 echo ""

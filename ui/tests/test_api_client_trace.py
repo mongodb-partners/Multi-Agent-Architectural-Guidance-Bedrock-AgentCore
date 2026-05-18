@@ -45,6 +45,7 @@ class _FakeResp:
         self.status_code = status
         self._body = body
         self.encoding = "utf-8"
+        self.headers: dict[str, str] = {}
 
     def raise_for_status(self) -> None:
         if self.status_code >= 400:

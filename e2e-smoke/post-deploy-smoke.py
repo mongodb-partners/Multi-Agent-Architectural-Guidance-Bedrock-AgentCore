@@ -3,7 +3,7 @@
 
 This script is intentionally outside the unit/integration test tree. It talks
 to the already-deployed API, Cognito, SageMaker, Bedrock KB, and Terraform
-outputs produced by deploy/scripts/deploy.sh.
+outputs produced by deploy/scripts/deploy-project.sh.
 
 Run from the repository root after deployment:
 

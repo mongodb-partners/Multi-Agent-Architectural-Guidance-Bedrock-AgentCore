@@ -7,11 +7,12 @@ The system uses **two memory layers** with different jobs and different backends
 ```mermaid
 flowchart TB
   REQ[POST /chat] --> ST[Short-Term Memory<br/>short-term-memory.ts + session-store.ts]
-  REQ --> LT[Long-Term Memory<br/>long-term-memory.ts]
+  REQ --> LT[Long-Term Memory<br/>long-term-memory.ts<br/>hybrid vector + lexical]
   ST --> STAC[AgentCore Events<br/>SHORT_TERM_MEMORY_BACKEND=agentcore<br/>requires userId]
   ST --> STM[In-memory Map cache<br/>session-store]
-  ST --> STMG[(MongoDB chat_sessions<br/>default-on when MONGODB_URI set<br/>opt-out via PERSIST_CHAT_SESSIONS=0)]
-  LT --> LTMG[(MongoDB agent_memory_facts<br/>PRIMARY)]
+  ST --> STMG[("MongoDB chat_sessions<br/>+ chat_messages mirror<br/>default-on when MONGODB_URI set")]
+  LT --> LTMG[("MongoDB agent_memory_facts<br/>embedding + factHash + TTL<br/>PRIMARY")]
+  LT --> LTCM[("MongoDB chat_messages<br/>vector-searchable mirror<br/>fused at read time")]
   LT --> LTAC[AgentCore Memory Store<br/>fallback]
 ```
 
@@ -73,7 +74,7 @@ The runtime never silently downgrades from AgentCore to the in-memory `Map`: if 
 
 ### What gets stored
 
-The API extracts fact-like snippets from each user message and writes documents like:
+The API extracts fact-like snippets from each user message and upserts documents like:
 
 ```javascript
 {
@@ -81,12 +82,36 @@ The API extracts fact-like snippets from each user message and writes documents 
   agentId,
   fact,
   source: "user",
-  ts
+  ts,
+  factHash,           // sha256(userId | agentId | normalized fact) — dedup key
+  embedding,          // 1024-d Voyage / Bedrock Titan v2 vector (absent if embed failed)
+  embeddingModel      // "voyage" | "bedrock:<modelId>"
 }
 ```
 
 - Collection: `agent_memory_facts`
+- Write op: `bulkWrite` upsert keyed on `{ userId, factHash }`. Re-stating the same fact in a later turn updates nothing (idempotent), so the collection stays clean.
 - TTL index: `MEMORY_TTL_DAYS * 86400` seconds (EC2 deploy sets 30 days)
+- Atlas indexes: `agent_memory_facts-vector-index` (knn) + `agent_memory_facts-text-index` (BM25 on `fact`)
+
+In parallel, every chat message is mirrored to **`chat_messages`** with its own embedding so the long-term retriever can fuse curated facts with the raw conversation history:
+
+```javascript
+{
+  messageId,         // matches ChatMessage.id (unique)
+  sessionId,
+  userId,
+  agentId,           // assistant role only
+  role,              // "user" | "assistant"
+  content,
+  timestamp,
+  ts,                // Date — used for recency decay
+  embedding,
+  embeddingModel
+}
+```
+
+The mirror runs in a microtask after the in-memory session update, so it never sits on the chat hot path. Atlas indexes: `chat_messages-vector-index` + `chat_messages-text-index` (BM25 on `content`). Deleting a session via `DELETE /sessions/:id` cascade-deletes the mirror rows so the user's privacy contract holds.
 
 ### Fact extractor (LLM)
 
@@ -107,15 +132,46 @@ Extraction lives in [`api/src/lib/long-term-memory.ts`](../api/src/lib/long-term
 
 **Trace event** `memory.long_term_write` records `extractorModelId`, `extractorLatencyMs`, and per-candidate `category` + `note`, all visible in the trace UI.
 
-### Read path injected into prompts
+### Read path: hybrid vector + lexical retrieval
 
-When `agent.memory.longTerm=true` and `userId` is known:
+When `agent.memory.longTerm=true` and `userId` is known, the chat route calls a single retriever:
 
-- read shared user facts (`readSharedLongTermMemory(userId)`) across all agents
-- read agent-scoped facts (`readLongTermMemory(userId, agentId)`)
-- prepend both into system prompt as memory context
+```ts
+await readLongTermMemoryContext(userId, body.message, { agentId, priorTurns });
+```
 
-This is why specialist flows can personalize from facts learned in a different specialist session.
+Implementation: [`api/src/lib/long-term-memory.ts → readLongTermMemoryContext`](../api/src/lib/long-term-memory.ts). For low latency the retrieval runs **directly against MongoDB** (it is an internal API code path, not a chat-invoked tool) using the shared primitives in [`api/src/lib/vector-retrieval.ts`](../api/src/lib/vector-retrieval.ts):
+
+1. **Embed the query** in query-mode (`embedQueryText`). On embed failure the retriever falls back to lexical-only mode rather than returning nothing.
+2. **Run two `$vectorSearch` + two `$search` legs in parallel** across `agent_memory_facts` (curated user facts) and `chat_messages` (raw conversation history), each scoped by `{ userId }`.
+3. **Fuse with Reciprocal Rank Fusion (k=60)** across the four ranked lists. RRF works on rank position, not raw score — it neatly handles the cosine-vs-BM25 distribution mismatch.
+4. **Apply per-collection weight** (`MEMORY_WEIGHT_FACTS=1.5` favors curated facts) and **exponential recency decay** (`MEMORY_RECENCY_HALFLIFE_DAYS=30`).
+5. **MMR diversify** the top hits (`MEMORY_MMR_LAMBDA=0.7`) to avoid stacking near-duplicate facts.
+6. Render the merged top-K (`MEMORY_VECTOR_TOPK=6`) as a "## Relevant prior context" block and prepend to the system prompt.
+
+The retriever emits a single `memory.scoped_read` trace event (event name preserved for UI compat) enriched with `mode`, `retrieval.vectorHits`, `retrieval.lexicalHits`, `retrieval.perCollection`, and embedding metadata so the Trace Viewer can show what was fused.
+
+This is why specialist flows can personalize from facts learned in a different specialist session — facts are retrieved by **semantic relevance to the current user message** rather than by agentId alone.
+
+### Tuning knobs (long-term retrieval)
+
+| Variable | Purpose | Default |
+|---|---|---|
+| `MEMORY_VECTOR_TOPK` | Final number of hits injected after RRF+MMR | `6` |
+| `MEMORY_VECTOR_FETCHK` | Per-leg over-fetch before merge | `24` |
+| `MEMORY_VECTOR_NUM_CANDIDATES` | `$vectorSearch.numCandidates` width | `200` |
+| `MEMORY_SEARCH_MAX_TIME_MS` | Timeout per Atlas vector/BM25 aggregation leg | `8000` |
+| `MEMORY_EMBED_TIMEOUT_MS` | Query embedding timeout before lexical fallback | `5000` |
+| `MEMORY_RECENCY_HALFLIFE_DAYS` | Exponential decay half-life. 0 disables decay | `30` |
+| `MEMORY_MMR_LAMBDA` | 1 = pure relevance, 0 = pure diversity | `0.7` |
+| `MEMORY_MIN_SCORE` | Drop merged items below this RRF score | `0` |
+| `MEMORY_WEIGHT_FACTS` | Multiplier on `agent_memory_facts` RRF score | `1.5` |
+| `MEMORY_WEIGHT_CHAT_MESSAGES` | Multiplier on `chat_messages` RRF score | `1` |
+| `MEMORY_TRACE_VALUES` | When `1`, write fact text into the trace event | unset |
+
+### Chat-invoked Mongo tools (boundary preserved)
+
+Long-term memory uses direct Mongo for efficiency, but **chat-invoked Mongo tools always route through the Mongo MCP runtime** ([`mcp-runtimes/mongodb-mcp/src/vendor/handlers.mjs`](../mcp-runtimes/mongodb-mcp/src/vendor/handlers.mjs)). That includes the new hybrid path: when the model sets `hybrid: true` on a `mongodb_vector_search` call, the API-side wrapper in [`api/src/adapters/mongodb-mcp-client.ts → VectorSearchEmbedTool`](../api/src/adapters/mongodb-mcp-client.ts) rewrites the args and invokes the runtime's `mongodb_hybrid_search` helper — the API never bypasses MCP for chat tools.
 
 ---
 
@@ -136,9 +192,9 @@ This drives identity-aware prompts like:
 
 ## 4. What Memory Currently Does Not Do
 
-- No vector-similarity recall over memory facts (recall is rule-based + recency-oriented).
-- No full memory summarization/consolidation pipeline.
+- No full memory summarization/consolidation pipeline (the retriever leans on RRF + MMR + recency decay; there is no nightly job that rewrites facts).
 - No hard PII classifier before memory write. The LLM extractor is prompt-instructed to skip ephemeral / non-personal text and label what it stores by category, but it is not a PII guard.
+- Embedding failures are non-fatal: the row is still written and remains reachable through the lexical (BM25) leg. Production should alert on repeated `embeddedCount < factsExtracted.length` in `memory.long_term_write` rather than blocking the chat turn.
 
 ---
 
@@ -179,9 +235,15 @@ db.agent_memory_facts.find({ userId: "<userId>" }).sort({ ts: -1 }).limit(20)
 | File | Purpose |
 |---|---|
 | [`api/src/lib/short-term-memory.ts`](../api/src/lib/short-term-memory.ts) | AgentCore short-term read/write |
-| [`api/src/lib/session-store.ts`](../api/src/lib/session-store.ts) | Fallback chat session cache + optional Mongo persistence |
+| [`api/src/lib/session-store.ts`](../api/src/lib/session-store.ts) | Fallback chat session cache + optional Mongo persistence + chat_messages mirror |
 | [`api/src/lib/chat-sessions-collection.ts`](../api/src/lib/chat-sessions-collection.ts) | `chat_sessions` collection access |
-| [`api/src/lib/long-term-memory.ts`](../api/src/lib/long-term-memory.ts) | Long-term facts read/write and storage fallback logic |
+| [`api/src/lib/chat-messages-collection.ts`](../api/src/lib/chat-messages-collection.ts) | `chat_messages` vector-searchable mirror (indexes, persist, cascade delete) |
+| [`api/src/lib/long-term-memory.ts`](../api/src/lib/long-term-memory.ts) | Long-term facts read/write, hybrid retrieval orchestrator, AgentCore fallback |
+| [`api/src/lib/vector-retrieval.ts`](../api/src/lib/vector-retrieval.ts) | Shared retrieval primitives: pipeline builders, RRF, MMR, recency decay |
+| [`api/src/lib/embed-query.ts`](../api/src/lib/embed-query.ts) | `embedQueryText` (query mode) + `embedDocumentText` (write mode) |
 | [`api/src/lib/llm-fact-extractor.ts`](../api/src/lib/llm-fact-extractor.ts) | Bedrock-backed LLM fact extractor (tool-forced JSON output) |
 | [`api/src/lib/auth-user-context.ts`](../api/src/lib/auth-user-context.ts) | Authenticated identity enrichment for prompts |
 | [`api/src/routes/chat.ts`](../api/src/routes/chat.ts) | End-to-end read/write hook integration |
+| [`api/src/adapters/mongodb-mcp-client.ts`](../api/src/adapters/mongodb-mcp-client.ts) | `mongodb_vector_search` wrapper + hybrid routing through the MCP runtime |
+| [`mcp-runtimes/mongodb-mcp/src/vendor/handlers.mjs`](../mcp-runtimes/mongodb-mcp/src/vendor/handlers.mjs) | `mongodb_vector_search` + `mongodb_hybrid_search` MCP runtime handlers |
+| [`db-seeding/seed-indexes.ts`](../db-seeding/seed-indexes.ts) | Atlas vector + Search indexes for all four collections |

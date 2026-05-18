@@ -19,6 +19,7 @@ The API is a Hono server (TypeScript on Bun) listening on port `3000`. It expose
 | DELETE | `/sessions/:id` | Delete a session |
 | GET | `/agents` | List all loaded agents |
 | GET | `/agents/:id` | Get one agent's full config |
+| POST | `/internal/agents/refresh` | Deploy-only agent config/cache refresh |
 | GET | `/skills` | List all loaded skills |
 | GET | `/http-tools` | List configured HTTP tools and their environment-bound URLs |
 | GET | `/demo-prompts` | Suggested chat prompts from `config/demo-prompts.yaml` (public) |
@@ -295,7 +296,35 @@ Returns all loaded agent configs (parsed from `config/agents/*.agent.md`).
 
 ---
 
-## 8. `GET /skills`
+## 8. `POST /internal/agents/refresh`
+
+Deploy-only endpoint used by `deploy/deploy-agents.sh` after AgentCore runtime updates. It lets the API pick up agent add/update/delete changes without rebuilding the API image or restarting `multiagent-api`.
+
+Auth requirements:
+- Valid Bearer JWT, same as other protected endpoints.
+- `X-Agent-Config-Refresh-Token` matching `AGENT_CONFIG_REFRESH_TOKEN` in `.env.live`.
+
+Request body:
+
+```json
+{
+  "files": {
+    "agents/order-management.agent.md": "...",
+    "skills/order-management/SKILL.md": "..."
+  },
+  "specialistArns": {
+    "order-management": "arn:aws:bedrock-agentcore:..."
+  }
+}
+```
+
+The API writes the snapshot to an internal runtime config directory, switches `resolveConfigRoot()` to that snapshot, refreshes the specialist ARN override map, clears agent/config/classifier/template/skill caches, refreshes HTTP tools, and pre-warms agent templates.
+
+This endpoint is not intended for UI/client use.
+
+---
+
+## 9. `GET /skills`
 
 Returns all loaded skills with their tool counts:
 
@@ -317,7 +346,7 @@ Returns all loaded skills with their tool counts:
 
 ---
 
-## 9. `GET /http-tools`
+## 10. `GET /http-tools`
 
 Returns the HTTP tool registry — useful for debugging which tool URLs are wired vs unset.
 
@@ -341,7 +370,7 @@ When `HTTP_TOOLS_MOCK=1`, all tools return mock payloads regardless of `urlConfi
 
 ---
 
-## 10. Authentication
+## 11. Authentication
 
 JWKS auth is **always required** — the API refuses to start without `AUTH_JWKS_URI` + `AUTH_ISSUER`.
 
@@ -355,7 +384,7 @@ Errors: `401 UNAUTHORIZED` for missing or malformed Authorization header; `401 I
 
 ---
 
-## 11. Rate limiting
+## 12. Rate limiting
 
 | Variable | Default | Purpose |
 |---|---|---|
@@ -366,7 +395,7 @@ Errors: `401 UNAUTHORIZED` for missing or malformed Authorization header; `401 I
 
 ---
 
-## 12. Headers and middleware
+## 13. Headers and middleware
 
 - `X-Request-Id` — generated per-request unless the client sends a valid inbound `X-Request-Id` (alphanumeric, `_`, `-`, 1–64 chars). Echoed on every response; use with support tickets.
 - `X-Trace-Id` — W3C trace id (32 hex chars) for the HTTP server span on routes that run OpenTelemetry middleware (skipped for lightweight `GET`s such as `/health`, `/agents`, `/traces`, etc.). **Distinct** from the persisted product `traceId` in SSE `done` / MongoDB `traces` — both are useful: `X-Trace-Id` joins API access logs and CloudWatch journald streams; product `traceId` joins the Trace Viewer.
@@ -376,7 +405,7 @@ Errors: `401 UNAUTHORIZED` for missing or malformed Authorization header; `401 I
 
 ---
 
-## 13. Tracing endpoints
+## 14. Tracing endpoints
 
 When `TRACING_ENABLED=1` (default), every `POST /chat` turn produces a `Trace`
 document with one `TraceEvent` per discrete step (model request, tool call,
@@ -414,8 +443,8 @@ Highlights:
 |---|---|
 | `chat.turn.start` / `chat.turn.end` | Boundary of a single user turn |
 | `auth.context_build` | Authenticated user context resolution |
-| `memory.scoped_read` / `memory.shared_read` | Long-term memory read into the system prompt |
-| `memory.long_term_write` / `memory.long_term_skip` | Long-term memory write outcome |
+| `memory.scoped_read` / `memory.shared_read` | Long-term memory read into the system prompt. The `scoped_read` payload now carries hybrid-retrieval enrichments (`mode`, `embeddingSource`, `embeddingModel`, `retrieval.{topK, fetchK, vectorHits, lexicalHits, rrfMergedCount, perCollection[]}`) so the Trace Viewer can show what was fused. Event names preserved for UI compat. |
+| `memory.long_term_write` / `memory.long_term_skip` | Long-term memory write outcome. `long_term_write` now reports `op: "bulkWrite"`, plus `duplicatesSkipped`, `embeddedCount`, and `embeddingModel` for vector-aware persistence. |
 | `prompt.assembled` | Final system prompt (persona + memory + skills) |
 | `model.request` / `model.usage` / `model.stop` | Bedrock model call boundary + token usage |
 | `model.text_delta_batch` / `model.thinking_block` | Token stream and stripped XML thinking blocks |
@@ -424,7 +453,7 @@ Highlights:
 | `tool.http` / `tool.mcp` | Specialised tool events for HTTP- and MCP-flavoured tools |
 | `handoff.decision` | Orchestrator → specialist routing decision (with attribution) |
 | `agent.activate` | A node became active in the Swarm graph |
-| `mongo.*` | MongoDB intent / query / plan / result / diagnostic / vector_search / schema |
+| `mongo.*` | MongoDB intent / query / plan / result / diagnostic / vector_search / schema. `mongo.vector_search` includes query-vector preview, score summary/histogram, and compact `documentPreviews[]` metadata for the retrieved source documents; Streamlit uses those previews for chat-side source pills and the Trace Viewer vector panel. |
 | `agentcore.invoke` / `agentcore.nested_trace` / `agentcore.classification` | AgentCore Runtime hops (with nested-trace splicing) |
 | `error` | Surfaced as a child event with `parentId` pointing to the failing span |
 
@@ -442,7 +471,7 @@ Env knobs:
 
 ---
 
-## 14. Critical files reference
+## 15. Critical files reference
 
 | File | Purpose |
 |---|---|
@@ -451,6 +480,7 @@ Env knobs:
 | [`api/src/routes/trace.ts`](../api/src/routes/trace.ts) | Trace fetch routes |
 | [`api/src/routes/health.ts`](../api/src/routes/health.ts) | `/health` |
 | [`api/src/routes/agents.ts`](../api/src/routes/agents.ts) | `/agents` introspection |
+| [`api/src/routes/agent-config-refresh.ts`](../api/src/routes/agent-config-refresh.ts) | Deploy-only `/internal/agents/refresh` cache/config refresh |
 | [`api/src/lib/trace-types.ts`](../api/src/lib/trace-types.ts) | `TraceEvent` discriminated union (source of truth) |
 | [`api/src/lib/trace-collector.ts`](../api/src/lib/trace-collector.ts) | Per-turn collector, byte-cap, cost summary, nested splice |
 | [`api/src/lib/trace-store.ts`](../api/src/lib/trace-store.ts) | Ring buffer + MongoDB persistence |

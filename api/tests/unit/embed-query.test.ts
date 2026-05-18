@@ -22,8 +22,9 @@ let voyageImpl: (
   text: string,
   endpoint: string,
   inputType?: "query" | "document",
+  abortSignal?: AbortSignal,
 ) => Promise<unknown> = async () => ({ status: "ok", embedding: [0.1, 0.2], model: "voyage-stub" });
-let bedrockImpl: (text: string, modelId: string) => Promise<unknown> = async () => ({
+let bedrockImpl: (text: string, modelId: string, abortSignal?: AbortSignal) => Promise<unknown> = async () => ({
   status: "ok",
   embedding: [0.3, 0.4],
   modelId: "bedrock-stub",

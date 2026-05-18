@@ -45,9 +45,9 @@ In direct-code mode, the deployed entrypoint is `agent-runtime-code.js` (bundled
 - `module.acr_order_management`
 - `module.acr_product_recommendation`
 
-`deploy/terraform/envs/ec2/outputs.tf` exposes runtime ARNs/IDs consumed by `deploy/scripts/deploy.sh`.
+`deploy/terraform/envs/ec2/outputs.tf` exposes runtime ARNs/IDs consumed by `deploy/scripts/deploy-project.sh`.
 
-`deploy/scripts/deploy.sh` now builds and uploads the AgentCore code artifact before Terraform apply:
+`deploy/scripts/deploy-project.sh` now builds and uploads the AgentCore code artifact before Terraform apply:
 
 - TypeScript entrypoint is bundled with esbuild
 - zip is uploaded to `s3://<shared-bucket>/artifacts/agentcore-runtime/<git-sha>/deployment_package.zip`

@@ -62,7 +62,7 @@
         </mxCell>
 
         <!-- Atlas -->
-        <mxCell id="atlas" value="🍃 MongoDB Atlas M10&#xa;Database: bedrock_agents&#xa;Collections: orders · products · customers · troubleshooting_docs · agent_memory" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5f5e3;strokeColor=#27ae60;fontSize=12;fontStyle=1;" vertex="1" parent="1">
+        <mxCell id="atlas" value="🍃 MongoDB Atlas M10&#xa;Database: bedrock_agents&#xa;Collections: orders · products · customers · troubleshooting_docs · agent_memory_facts · chat_messages" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5f5e3;strokeColor=#27ae60;fontSize=12;fontStyle=1;" vertex="1" parent="1">
           <mxGeometry x="260" y="590" width="680" height="70" as="geometry"/>
         </mxCell>
 

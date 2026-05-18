@@ -158,9 +158,11 @@ override.tf.json
 *_override.tf.json
 # Terraform runtime-generated files (created by deploy scripts at apply time)
 **/*.tfplan
+**/.tfplan*
 **/*.binary
 **/backend.hcl
 **/terraform.tfvars
+deploy/terraform/envs/ec2/agents.auto.tfvars.json
 # Per-module runtime state (Bedrock KB, AgentCore Memory, AgentCore Gateway)
 deploy/terraform/modules/**/.kb-state.json
 deploy/terraform/modules/**/.memory-state.json
@@ -196,7 +198,8 @@ test-results/
 # Deploy / destroy script artifacts (written at repo root by deploy.sh + destroy.sh)
 destroy-reports/
 deploy-reports/
-deploy-manifest.json
+deploy-manifest*.json
+.agent-config-refresh-token
 # Troubleshooting infra script — persisted bucket / run state (not Terraform tfstate)
 .infra-state.sh
 

@@ -42,7 +42,7 @@ sep
 
 command -v aws >/dev/null || { echo "aws CLI not found" >&2; exit 1; }
 aws sts get-caller-identity --query Account --output text >/dev/null 2>&1 \
-  || { echo "AWS credentials invalid — source env.sh first" >&2; exit 1; }
+  || { echo "AWS credentials invalid — source .env first" >&2; exit 1; }
 
 # ── 1. Everything the Resource Groups Tagging API knows about ───────────────
 echo "  Tagged AWS resources (via resourcegroupstaggingapi):"

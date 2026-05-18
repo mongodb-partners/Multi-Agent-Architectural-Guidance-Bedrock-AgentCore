@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# deploy.sh — EC2 deployment (envs/ec2 terraform)
+# deploy-project.sh — EC2 deployment (envs/ec2 terraform)
 #
 # Usage:
-#   ./deploy/scripts/deploy.sh [--auto-approve] [--skip-docker] [--env-file <path>]
+#   ./deploy/scripts/deploy-project.sh [--auto-approve] [--skip-docker] [--env-file <path>]
 #
 # What it does:
 #   Phase 1  — Validate prerequisites (aws, terraform, bun, python3, zip,
 #              docker — docker only when --skip-docker is NOT passed)
-#   Phase 2  — Source env.sh, verify AWS + Atlas credentials
+#   Phase 2  — Source .env, verify AWS + Atlas credentials
 #   Phase 3  — Bootstrap shared S3 bucket (once)
 #   Phase 4  — Generate backend.hcl + terraform.tfvars for envs/ec2
 #   Phase 5  — terraform apply (envs/ec2):
@@ -39,13 +39,18 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 TF_ROOT="$REPO_ROOT/deploy/terraform"
 TF_DIR="$TF_ROOT/envs/ec2"
 BOOTSTRAP_DIR="$TF_ROOT/bootstrap"
-ENV_FILE="$REPO_ROOT/env.sh"
+ENV_FILE="$REPO_ROOT/.env"
 AUTO_APPROVE=false
 SKIP_DOCKER=false
+
+# Source shared agent helpers (discover_agents, write_specialist_agents_tfvars,
+# build_and_upload_code_artifact, update_runtime_env_dynamic, etc.)
+# shellcheck source=deploy/scripts/_agents-common.sh
+source "$SCRIPT_DIR/_agents-common.sh"
 AWS_REGION="${AWS_REGION:-us-east-1}"
 ENVIRONMENT="${ENVIRONMENT:-dev}"
 PROJECT_NAME="${PROJECT_NAME:-multiagent-mongodb-framework}"
-# DB user + DB name follow the same project+env convention as env.sh — Mongo
+# DB user + DB name follow the same project+env convention as .env — Mongo
 # identifiers can't contain "-" so the project name is underscore-normalized.
 # Always derive both from PROJECT_NAME + ENVIRONMENT when they're not already
 # exported, so a stale value from a prior shell never silently leaks into
@@ -237,19 +242,19 @@ log "Phase 2 — Loading credentials from $ENV_FILE..."
 source "$ENV_FILE"
 
 export TF_VAR_atlas_db_password="${TF_VAR_atlas_db_password:-${TF_VAR_mongodb_password:-}}"
-[[ -n "${TF_VAR_atlas_db_password:-}" ]] || err "Atlas DB password not set. Set TF_VAR_mongodb_password in env.sh"
+[[ -n "${TF_VAR_atlas_db_password:-}" ]] || err "Atlas DB password not set. Set TF_VAR_mongodb_password in .env"
 
 export TF_VAR_atlas_project_id="${TF_VAR_atlas_project_id:-${TF_VAR_mongodb_atlas_project_id:-}}"
-[[ -n "${TF_VAR_atlas_project_id:-}" ]] || err "Atlas Project ID not set. Set TF_VAR_mongodb_atlas_project_id in env.sh"
+[[ -n "${TF_VAR_atlas_project_id:-}" ]] || err "Atlas Project ID not set. Set TF_VAR_mongodb_atlas_project_id in .env"
 
 export TF_VAR_atlas_public_key="${MONGODB_ATLAS_PUBLIC_KEY:-}"
 export TF_VAR_atlas_private_key="${MONGODB_ATLAS_PRIVATE_KEY:-}"
-[[ -n "${TF_VAR_atlas_public_key:-}" ]]  || err "MONGODB_ATLAS_PUBLIC_KEY not set in env.sh"
-[[ -n "${TF_VAR_atlas_private_key:-}" ]] || err "MONGODB_ATLAS_PRIVATE_KEY not set in env.sh"
+[[ -n "${TF_VAR_atlas_public_key:-}" ]]  || err "MONGODB_ATLAS_PUBLIC_KEY not set in .env"
+[[ -n "${TF_VAR_atlas_private_key:-}" ]] || err "MONGODB_ATLAS_PRIVATE_KEY not set in .env"
 
-[[ -n "${AWS_ACCESS_KEY_ID:-}" ]] || err "AWS_ACCESS_KEY_ID not set. Re-authenticate and update env.sh"
+[[ -n "${AWS_ACCESS_KEY_ID:-}" ]] || err "AWS_ACCESS_KEY_ID not set. Re-authenticate and update .env"
 ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text 2>/dev/null) \
-  || err "AWS credentials invalid or expired. Re-authenticate and update env.sh"
+  || err "AWS credentials invalid or expired. Re-authenticate and update .env"
 ok "AWS account: $ACCOUNT_ID"
 ok "Atlas project: $TF_VAR_atlas_project_id"
 
@@ -265,9 +270,9 @@ case "$_ATLAS_HTTP" in
   200)
     _ATLAS_NAME=$(python3 -c "import json; d=json.load(open('/tmp/.atlas_check.json')); print(d.get('name','?'))" 2>/dev/null || echo "?")
     ok "Atlas API keys valid — project: ${_ATLAS_NAME}" ;;
-  401) err "Atlas API keys invalid (HTTP 401). Check MONGODB_ATLAS_PUBLIC_KEY / MONGODB_ATLAS_PRIVATE_KEY in env.sh" ;;
+  401) err "Atlas API keys invalid (HTTP 401). Check MONGODB_ATLAS_PUBLIC_KEY / MONGODB_ATLAS_PRIVATE_KEY in .env" ;;
   403) err "Atlas API keys valid but forbidden (HTTP 403). Verify the key has Project Owner role." ;;
-  404) err "Atlas project not found (HTTP 404). Check TF_VAR_mongodb_atlas_project_id in env.sh" ;;
+  404) err "Atlas project not found (HTTP 404). Check TF_VAR_mongodb_atlas_project_id in .env" ;;
   000) warn "Atlas API unreachable (curl failed) — check network. Proceeding." ;;
   *)   warn "Atlas API returned HTTP $_ATLAS_HTTP — unexpected. Proceeding cautiously." ;;
 esac
@@ -300,7 +305,7 @@ case "$EMBEDDINGS_PROVIDER" in
     if [[ -z "$VOYAGE_ARN" ]]; then
       err "EMBEDDINGS_PROVIDER=voyage but VOYAGE_MODEL_PACKAGE_ARN is empty.
        Run: ./deploy/scripts/setup-voyage-marketplace.sh   (one-time, opens Marketplace)
-       Then re-source env.sh and re-run this script."
+       Then re-source .env and re-run this script."
     fi
     # Marketplace ARN tail format:
     #   arn:aws:sagemaker:<region>:<vendor>:model-package/<package-name>
@@ -349,7 +354,7 @@ case "$EMBEDDINGS_PROVIDER" in
     ;;
   "")
     err "EMBEDDINGS_PROVIDER is not set — refusing to deploy with an implicit default.
-       Set one of the following in env.sh (or your shell) and re-source it:
+       Set one of the following in .env (or your shell) and re-source it:
          export EMBEDDINGS_PROVIDER=voyage   # SoW-aligned, requires Marketplace subscription
          export EMBEDDINGS_PROVIDER=titan    # explicit deviation, Bedrock Titan v2"
     ;;
@@ -363,7 +368,7 @@ export EMBEDDINGS_MODEL_ID
 export EMBEDDINGS_SOW_ALIGNED
 export VOYAGE_ENDPOINT_SUFFIX
 
-# Re-read SHARED_VPC_NAME after sourcing env.sh so an env.sh override wins.
+# Re-read SHARED_VPC_NAME after sourcing .env so a .env override wins.
 SHARED_VPC_NAME="${SHARED_VPC_NAME:-shared-network}"
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -469,30 +474,17 @@ agentcore_code_artifact_prefix    = "${AGENTCORE_CODE_ARTIFACT_PREFIX}"
 EOF
 ok "terraform.tfvars written"
 
-# Build + upload AgentCore direct-code artifact before apply so runtimes can be created.
-if [[ "$AGENTCORE_RUNTIME_DEPLOYMENT_MODE" == "code" ]]; then
-  sep
-  log "Phase 4b — Building AgentCore direct-code artifact (TS -> JS) and uploading to S3..."
-  # Ensure devDependencies (esbuild) are installed before invoking the build script.
-  # Use --frozen-lockfile so CI / fresh checkouts get a deterministic install,
-  # falling back to a regular install when no lockfile exists yet.
-  if [[ -f "$REPO_ROOT/api/bun.lockb" || -f "$REPO_ROOT/api/bun.lock" ]]; then
-    (cd "$REPO_ROOT/api" && bun install --frozen-lockfile)
-  else
-    (cd "$REPO_ROOT/api" && bun install)
-  fi
-  (cd "$REPO_ROOT/api" && bun run build:agentcore-code)
-  ARTIFACT_ZIP="$REPO_ROOT/api/dist/agentcore-deployment.zip"
-  ARTIFACT_STAGE_DIR="$REPO_ROOT/api/dist/agentcore-package"
-  rm -f "$ARTIFACT_ZIP"
-  rm -rf "$ARTIFACT_STAGE_DIR"
-  mkdir -p "$ARTIFACT_STAGE_DIR/config"
-  cp "$REPO_ROOT/api/dist/agent-runtime-code.js" "$ARTIFACT_STAGE_DIR/agent-runtime-code.js"
-  cp -R "$REPO_ROOT/config/." "$ARTIFACT_STAGE_DIR/config/"
-  (cd "$ARTIFACT_STAGE_DIR" && zip -r "../agentcore-deployment.zip" . >/dev/null)
-  aws s3 cp "$ARTIFACT_ZIP" "s3://${SHARED_BUCKET}/${AGENTCORE_CODE_ARTIFACT_PREFIX}" --region "$AWS_REGION" >/dev/null
-  ok "Uploaded AgentCore code artifact: s3://${SHARED_BUCKET}/${AGENTCORE_CODE_ARTIFACT_PREFIX}"
-fi
+# ── Phase 4a — Discover agents + write agents.auto.tfvars.json ────────────────
+sep
+log "Phase 4a — Discovering agents from config/agents/..."
+discover_agents
+validate_handoff_consistency "warn"
+write_specialist_agents_tfvars
+
+# ── Phase 4b — Build + upload AgentCore direct-code artifact ──────────────────
+sep
+log "Phase 4b — Building + uploading AgentCore direct-code artifact..."
+build_and_upload_code_artifact
 
 # ══════════════════════════════════════════════════════════════════════════════
 # PHASE 4d — Pre-apply: build + push the mongodb-mcp runtime image
@@ -595,12 +587,10 @@ load_tf_outputs() {
   AGENTCORE_GATEWAY_URL=$(terraform output -raw agentcore_gateway_url 2>/dev/null || echo "")
   AGENTCORE_ORCHESTRATOR_ARN=$(terraform output -raw acr_orchestrator_arn 2>/dev/null || echo "")
   AGENTCORE_ORCHESTRATOR_ID=$(terraform output -raw acr_orchestrator_id 2>/dev/null || echo "")
-  AGENTCORE_TROUBLESHOOTING_ARN=$(terraform output -raw acr_troubleshooting_arn 2>/dev/null || echo "")
-  AGENTCORE_TROUBLESHOOTING_ID=$(terraform output -raw acr_troubleshooting_id 2>/dev/null || echo "")
-  AGENTCORE_ORDER_MANAGEMENT_ARN=$(terraform output -raw acr_order_management_arn 2>/dev/null || echo "")
-  AGENTCORE_ORDER_MANAGEMENT_ID=$(terraform output -raw acr_order_management_id 2>/dev/null || echo "")
-  AGENTCORE_PRODUCT_RECOMMENDATION_ARN=$(terraform output -raw acr_product_recommendation_arn 2>/dev/null || echo "")
-  AGENTCORE_PRODUCT_RECOMMENDATION_ID=$(terraform output -raw acr_product_recommendation_id 2>/dev/null || echo "")
+  # Load specialist ARNs + IDs from the for_each map outputs.
+  # The list of specialist IDs comes from discover_agents (config/agents/*.agent.md),
+  # so no agent IDs are hardcoded here.
+  load_specialist_outputs_from_tf
   ATLAS_PRIVATELINK_ENDPOINT_ID=$(terraform output -raw atlas_privatelink_endpoint_id 2>/dev/null || echo "")
   CW_API_LOG_GROUP=$(terraform output -raw cloudwatch_api_log_group 2>/dev/null || echo "/${PROJECT_NAME}/${ENVIRONMENT}/api")
   CW_UI_LOG_GROUP=$(terraform output -raw cloudwatch_ui_log_group 2>/dev/null || echo "/${PROJECT_NAME}/${ENVIRONMENT}/ui")
@@ -610,7 +600,9 @@ load_tf_outputs
 
 # Runtime outputs are file-backed by create-runtime scripts and can be empty
 # immediately after apply in some edge cases. Refresh outputs once if needed.
-if [[ -z "$AGENTCORE_ORCHESTRATOR_ARN" || -z "$AGENTCORE_ORDER_MANAGEMENT_ARN" || -z "$AGENTCORE_TROUBLESHOOTING_ARN" || -z "$AGENTCORE_PRODUCT_RECOMMENDATION_ARN" ]]; then
+if [[ -z "$AGENTCORE_ORCHESTRATOR_ARN" ]] || \
+   ! python3 -c "import json,sys; d=json.loads(sys.argv[1]); sys.exit(0 if d else 1)" \
+     "$(terraform output -json acr_specialist_arns 2>/dev/null || echo '{}')" 2>/dev/null; then
   warn "AgentCore runtime outputs incomplete after apply; running refresh-only apply to rehydrate outputs..."
   terraform apply -refresh-only -auto-approve -input=false >/dev/null 2>&1 || true
   load_tf_outputs
@@ -620,15 +612,15 @@ fi
 [[ -n "$ECR_API_REPO" ]]  || err "ECR API repo URL not in outputs."
 [[ -n "$ATLAS_MONGO_HOST" ]] || err "Atlas host not in outputs."
 [[ -n "$AGENTCORE_ORCHESTRATOR_ARN" ]] || err "AGENTCORE_ORCHESTRATOR_ARN output is empty after apply/refresh."
-[[ -n "$AGENTCORE_TROUBLESHOOTING_ARN" ]] || err "Troubleshooting runtime ARN output is empty after apply/refresh."
-[[ -n "$AGENTCORE_ORDER_MANAGEMENT_ARN" ]] || err "Order-management runtime ARN output is empty after apply/refresh."
-[[ -n "$AGENTCORE_PRODUCT_RECOMMENDATION_ARN" ]] || err "Product-recommendation runtime ARN output is empty after apply/refresh."
 [[ -n "$AGENTCORE_ORCHESTRATOR_ID" ]] || err "AGENTCORE_ORCHESTRATOR_ID output is empty after apply/refresh."
-[[ -n "$AGENTCORE_TROUBLESHOOTING_ID" ]] || err "Troubleshooting runtime ID output is empty after apply/refresh."
-[[ -n "$AGENTCORE_ORDER_MANAGEMENT_ID" ]] || err "Order-management runtime ID output is empty after apply/refresh."
 [[ -n "$MONGODB_MCP_RUNTIME_ARN" ]] || err "MongoDB MCP runtime ARN output is empty after apply/refresh."
 [[ -n "$MONGODB_MCP_RUNTIME_ENDPOINT" ]] || err "MongoDB MCP runtime endpoint output is empty after apply/refresh."
-[[ -n "$AGENTCORE_PRODUCT_RECOMMENDATION_ID" ]] || err "Product-recommendation runtime ID output is empty after apply/refresh."
+# Validate each discovered specialist has a runtime ARN in the map outputs.
+for _spec_id in "${SPECIALIST_IDS[@]:-}"; do
+  [[ -n "$(specialist_runtime_arn "$_spec_id")" ]] \
+    || err "AgentCore runtime ARN for specialist '${_spec_id}' is empty after apply/refresh."
+done
+unset _spec_id
 
 if [[ "$EMBEDDINGS_PROVIDER" == "voyage" ]]; then
   [[ -n "$VOYAGE_ENDPOINT" ]] || err "EMBEDDINGS_PROVIDER=voyage but Terraform output voyage_endpoint_name is empty."
@@ -702,6 +694,17 @@ if [[ "$SEED_NEEDED" == "yes" ]]; then
 else
   ok "MongoDB already seeded — skipping first-time seed step"
 fi
+
+log "Reconciling MongoDB indexes (safe to re-run)..."
+(
+  cd "$REPO_ROOT"
+  MONGODB_URI="$MONGODB_URI" \
+    MONGODB_DB="$ATLAS_DB_NAME" \
+    WAIT_FOR_ATLAS_SEARCH_INDEXES=1 \
+    EMBEDDING_DIMENSIONS="${EMBEDDING_DIMENSIONS:-1024}" \
+    bun db-seeding/seed-indexes.ts
+)
+ok "MongoDB indexes verified (seed-indexes)"
 
 # ══════════════════════════════════════════════════════════════════════════════
 # PHASE 5c — API MongoDB URI normalization (Atlas awsPrivateLink direct URI)
@@ -851,229 +854,22 @@ if [[ -n "$AGENTCORE_ORCHESTRATOR_ID" ]]; then
   sep
   log "Phase 6b — Updating AgentCore Runtime environment variables..."
 
-  # Gateway stays available for non-Mongo tools. MongoDB MCP calls use the
-  # dedicated mongodb-mcp AgentCore Runtime directly because Gateway mcpServer
-  # targets cannot point at AgentCore Runtime endpoints.
   if [[ -z "${AGENTCORE_GATEWAY_URL:-}" ]]; then
     err "AGENTCORE_GATEWAY_URL is empty. Provision the AgentCore Gateway first (terraform apply)."
   fi
 
-  DYNAMIC_ENV_BASE=$(MONGODB_URI="$MONGODB_URI" ATLAS_DB_NAME="$ATLAS_DB_NAME" BEDROCK_KB_ID="$BEDROCK_KB_ID" \
-    AGENTCORE_MEMORY_STORE_ID="$AGENTCORE_MEMORY_STORE_ID" AGENTCORE_GATEWAY_URL="$AGENTCORE_GATEWAY_URL" \
-    MONGODB_MCP_RUNTIME_ARN="$MONGODB_MCP_RUNTIME_ARN" MONGODB_MCP_RUNTIME_ENDPOINT="$MONGODB_MCP_RUNTIME_ENDPOINT" \
-    VOYAGE_ENDPOINT="$VOYAGE_ENDPOINT" python3 -c "
-import json, os
-env = {
-  'AWS_REGION':               os.environ['AWS_REGION'],
-  'SHORT_TERM_MEMORY_BACKEND':'agentcore',
-  'PERSIST_CHAT_SESSIONS':    '1',
-  'MEMORY_TTL_DAYS':          '30',
-  'LOG_LEVEL':                'info',
-  'MONGODB_URI':              os.environ.get('MONGODB_URI',''),
-  'MONGODB_DB':               os.environ['ATLAS_DB_NAME'],
-  'BEDROCK_KB_ID':            os.environ.get('BEDROCK_KB_ID',''),
-  'AGENTCORE_MEMORY_STORE_ID':os.environ.get('AGENTCORE_MEMORY_STORE_ID',''),
-  'MCP_SERVER_URL':           os.environ['AGENTCORE_GATEWAY_URL'],
-  'AGENTCORE_GATEWAY_URL':    os.environ['AGENTCORE_GATEWAY_URL'],
-  'MONGODB_MCP_RUNTIME_ARN':  os.environ.get('MONGODB_MCP_RUNTIME_ARN',''),
-  'MONGODB_MCP_RUNTIME_ENDPOINT': os.environ.get('MONGODB_MCP_RUNTIME_ENDPOINT',''),
-  'EMBEDDING_MODEL_ID':       'amazon.titan-embed-text-v2:0',
-  # Explicit provider switch — propagated from deploy.sh so the API logs and
-  # CloudWatch can confirm whether the running stack is using Voyage or the
-  # documented Titan deviation.
-  'EMBEDDINGS_PROVIDER':      os.environ.get('EMBEDDINGS_PROVIDER',''),
-  # When VOYAGE_SAGEMAKER_ENDPOINT is set, the API + runtimes prefer Voyage AI
-  # over the Bedrock Titan fallback. Skipped here when the endpoint isn't
-  # provisioned (Voyage Marketplace ARN not set), so the Titan path stays live.
-  'VOYAGE_SAGEMAKER_ENDPOINT':os.environ.get('VOYAGE_ENDPOINT',''),
-  'VOYAGE_OUTPUT_DIM':        '1024',
-  # Request envelope selected by the deployment guard: multimodal for
-  # voyage-multimodal-3, legacy for voyage-3.5-lite / older text-only listings.
-  'VOYAGE_REQUEST_FORMAT':    os.environ.get('VOYAGE_REQUEST_FORMAT','multimodal'),
-}
-# AWS CLI env format: {\"KEY\": \"VAL\"}
-print(json.dumps({k: str(v) for k,v in env.items() if v}))
-")
+  export AWS_REGION MONGODB_URI ATLAS_DB_NAME BEDROCK_KB_ID \
+         AGENTCORE_MEMORY_STORE_ID AGENTCORE_GATEWAY_URL \
+         MONGODB_MCP_RUNTIME_ARN MONGODB_MCP_RUNTIME_ENDPOINT \
+         VOYAGE_ENDPOINT EMBEDDINGS_PROVIDER VOYAGE_REQUEST_FORMAT \
+         AGENTCORE_RUNTIME_DEPLOYMENT_MODE SHARED_BUCKET AGENTCORE_CODE_ARTIFACT_PREFIX \
+         ECR_RUNTIME_REPO
 
-  DYNAMIC_ENV_ORCHESTRATOR=$(DYNAMIC_ENV_BASE="$DYNAMIC_ENV_BASE" \
-    AGENTCORE_TROUBLESHOOTING_ARN="$AGENTCORE_TROUBLESHOOTING_ARN" \
-    AGENTCORE_ORDER_MANAGEMENT_ARN="$AGENTCORE_ORDER_MANAGEMENT_ARN" \
-    AGENTCORE_PRODUCT_RECOMMENDATION_ARN="$AGENTCORE_PRODUCT_RECOMMENDATION_ARN" \
-    python3 -c "
-import json, os
-base = json.loads(os.environ['DYNAMIC_ENV_BASE'])
-base['ORCHESTRATOR_MODE'] = 'runtime'
-specialists = {
-  'AGENTCORE_RUNTIME_ARN_TROUBLESHOOTING': os.environ.get('AGENTCORE_TROUBLESHOOTING_ARN',''),
-  'AGENTCORE_RUNTIME_ARN_ORDER_MANAGEMENT': os.environ.get('AGENTCORE_ORDER_MANAGEMENT_ARN',''),
-  'AGENTCORE_RUNTIME_ARN_PRODUCT_RECOMMENDATION': os.environ.get('AGENTCORE_PRODUCT_RECOMMENDATION_ARN',''),
-}
-for k, v in specialists.items():
-  if v:
-    base[k] = v
-print(json.dumps(base))
-")
-
-  ECR_RUNTIME_IMAGE="${ECR_RUNTIME_REPO}:latest"
-
-  update_runtime_env() {
-    local runtime_id="$1"
-    local env_json="$2"
-    local runtime_label="$3"
-    local role_arn
-    role_arn=$(aws bedrock-agentcore-control get-agent-runtime \
-      --region "$AWS_REGION" \
-      --agent-runtime-id "$runtime_id" \
-      --query "roleArn" --output text 2>/dev/null || echo "")
-
-    if [[ -z "$role_arn" || "$role_arn" == "None" ]]; then
-      err "Could not resolve roleArn for ${runtime_label} (${runtime_id})"
-    fi
-
-    if [[ "$AGENTCORE_RUNTIME_DEPLOYMENT_MODE" == "container" ]]; then
-      aws bedrock-agentcore-control update-agent-runtime \
-        --region "$AWS_REGION" \
-        --agent-runtime-id "$runtime_id" \
-        --agent-runtime-artifact "{\"containerConfiguration\":{\"containerUri\":\"${ECR_RUNTIME_IMAGE}\"}}" \
-        --role-arn "$role_arn" \
-        --network-configuration '{"networkMode":"PUBLIC"}' \
-        --environment-variables "$env_json" \
-        --output json > /dev/null 2>&1 \
-        && ok "Updated ${runtime_label} runtime env vars" \
-        || err "Failed to update ${runtime_label} runtime env vars"
-    else
-      aws bedrock-agentcore-control update-agent-runtime \
-        --region "$AWS_REGION" \
-        --agent-runtime-id "$runtime_id" \
-        --agent-runtime-artifact "{\"codeConfiguration\":{\"code\":{\"s3\":{\"bucket\":\"${SHARED_BUCKET}\",\"prefix\":\"${AGENTCORE_CODE_ARTIFACT_PREFIX}\"}},\"runtime\":\"NODE_22\",\"entryPoint\":[\"agent-runtime-code.js\"]}}" \
-        --role-arn "$role_arn" \
-        --network-configuration '{"networkMode":"PUBLIC"}' \
-        --environment-variables "$env_json" \
-        --output json > /dev/null 2>&1 \
-        && ok "Updated ${runtime_label} runtime env vars + code artifact" \
-        || err "Failed to update ${runtime_label} runtime env vars/code artifact"
-    fi
-  }
-
-  verify_runtime_env() {
-    local runtime_id="$1"
-    local runtime_label="$2"
-    local expected_agent_id="$3"
-    local must_be_orchestrator="$4"
-    local expected_gw_url="${AGENTCORE_GATEWAY_URL:-}"
-    local expected_mcp_runtime_arn="${MONGODB_MCP_RUNTIME_ARN:-}"
-    local expected_mcp_runtime_endpoint="${MONGODB_MCP_RUNTIME_ENDPOINT:-}"
-    local env_json
-    local attempt
-    for attempt in $(seq 1 12); do
-      env_json=$(aws bedrock-agentcore-control get-agent-runtime \
-        --region "$AWS_REGION" \
-        --agent-runtime-id "$runtime_id" \
-        --query "environmentVariables" \
-        --output json 2>/dev/null || echo "{}")
-
-      if python3 - <<'PY' "$env_json" "$runtime_label" "$expected_agent_id" "$must_be_orchestrator" "$expected_gw_url" "$expected_mcp_runtime_arn" "$expected_mcp_runtime_endpoint"
-import json, sys
-env = json.loads(sys.argv[1] or "{}")
-label = sys.argv[2]
-expected_agent = sys.argv[3]
-is_orch = sys.argv[4] == "yes"
-expected_gw_url = sys.argv[5]
-expected_mcp_runtime_arn = sys.argv[6]
-expected_mcp_runtime_endpoint = sys.argv[7]
-
-def fail(msg: str) -> None:
-    raise SystemExit(f"{label}: {msg}")
-
-if env.get("AGENT_ID") != expected_agent:
-    fail(f"AGENT_ID expected {expected_agent}, got {env.get('AGENT_ID')}")
-
-# Gateway remains configured for non-Mongo tools; MongoDB MCP uses the direct
-# AgentCore Runtime endpoint.
-mcp_url = env.get("MCP_SERVER_URL")
-if not mcp_url:
-    fail("MCP_SERVER_URL missing (required for AgentCore Gateway)")
-if not expected_gw_url:
-    fail("AGENTCORE_GATEWAY_URL not exported to verifier (deploy.sh bug)")
-if mcp_url != expected_gw_url:
-    fail(f"MCP_SERVER_URL != AGENTCORE_GATEWAY_URL (got '{mcp_url}', expected '{expected_gw_url}')")
-if not expected_mcp_runtime_arn:
-    fail("MONGODB_MCP_RUNTIME_ARN not exported to verifier (deploy.sh bug)")
-if not expected_mcp_runtime_endpoint:
-    fail("MONGODB_MCP_RUNTIME_ENDPOINT not exported to verifier (deploy.sh bug)")
-if env.get("MONGODB_MCP_RUNTIME_ARN") != expected_mcp_runtime_arn:
-    fail("MONGODB_MCP_RUNTIME_ARN missing or mismatched")
-if env.get("MONGODB_MCP_RUNTIME_ENDPOINT") != expected_mcp_runtime_endpoint:
-    fail("MONGODB_MCP_RUNTIME_ENDPOINT missing or mismatched")
-
-if env.get("SHORT_TERM_MEMORY_BACKEND") != "agentcore":
-    fail(f"SHORT_TERM_MEMORY_BACKEND expected agentcore, got {env.get('SHORT_TERM_MEMORY_BACKEND')}")
-if is_orch:
-    if env.get("ORCHESTRATOR_MODE") != "runtime":
-        fail(f"ORCHESTRATOR_MODE expected runtime, got {env.get('ORCHESTRATOR_MODE')}")
-    for k in (
-        "AGENTCORE_RUNTIME_ARN_TROUBLESHOOTING",
-        "AGENTCORE_RUNTIME_ARN_ORDER_MANAGEMENT",
-        "AGENTCORE_RUNTIME_ARN_PRODUCT_RECOMMENDATION",
-    ):
-        if not env.get(k):
-            fail(f"{k} missing")
-print("ok")
-PY
-      then
-        return 0
-      fi
-      sleep 5
-    done
-    return 1
-  }
-
-  # Specialists: base dynamic env + AGENT_ID
-  DYNAMIC_ENV_TROUBLESHOOTING=$(DYNAMIC_ENV_BASE="$DYNAMIC_ENV_BASE" python3 -c "
-import json, os
-env = json.loads(os.environ['DYNAMIC_ENV_BASE'])
-env['AGENT_ID'] = 'troubleshooting'
-print(json.dumps(env))
-")
-  DYNAMIC_ENV_ORDER_MANAGEMENT=$(DYNAMIC_ENV_BASE="$DYNAMIC_ENV_BASE" python3 -c "
-import json, os
-env = json.loads(os.environ['DYNAMIC_ENV_BASE'])
-env['AGENT_ID'] = 'order-management'
-print(json.dumps(env))
-")
-  DYNAMIC_ENV_PRODUCT_RECOMMENDATION=$(DYNAMIC_ENV_BASE="$DYNAMIC_ENV_BASE" python3 -c "
-import json, os
-env = json.loads(os.environ['DYNAMIC_ENV_BASE'])
-env['AGENT_ID'] = 'product-recommendation'
-print(json.dumps(env))
-")
-
-  # Orchestrator: base dynamic env + specialist runtime ARNs
-  DYNAMIC_ENV_ORCHESTRATOR=$(DYNAMIC_ENV_ORCHESTRATOR="$DYNAMIC_ENV_ORCHESTRATOR" python3 -c "
-import json, os
-env = json.loads(os.environ['DYNAMIC_ENV_ORCHESTRATOR'])
-env['AGENT_ID'] = 'orchestrator'
-print(json.dumps(env))
-")
-
-  update_runtime_env "$AGENTCORE_ORCHESTRATOR_ID" "$DYNAMIC_ENV_ORCHESTRATOR" "orchestrator"
-
-  [[ -n "$AGENTCORE_TROUBLESHOOTING_ID" && "$AGENTCORE_TROUBLESHOOTING_ID" != "None" ]] && \
-    update_runtime_env "$AGENTCORE_TROUBLESHOOTING_ID" "$DYNAMIC_ENV_TROUBLESHOOTING" "troubleshooting"
-  [[ -n "$AGENTCORE_ORDER_MANAGEMENT_ID" && "$AGENTCORE_ORDER_MANAGEMENT_ID" != "None" ]] && \
-    update_runtime_env "$AGENTCORE_ORDER_MANAGEMENT_ID" "$DYNAMIC_ENV_ORDER_MANAGEMENT" "order-management"
-  [[ -n "$AGENTCORE_PRODUCT_RECOMMENDATION_ID" && "$AGENTCORE_PRODUCT_RECOMMENDATION_ID" != "None" ]] && \
-    update_runtime_env "$AGENTCORE_PRODUCT_RECOMMENDATION_ID" "$DYNAMIC_ENV_PRODUCT_RECOMMENDATION" "product-recommendation"
+  build_dynamic_env_base
+  update_runtime_env_dynamic
 
   log "Phase 6c — Verifying runtime environment variables..."
-  verify_runtime_env "$AGENTCORE_ORCHESTRATOR_ID" "orchestrator" "orchestrator" "yes" \
-    || err "Runtime env verification failed for orchestrator"
-  verify_runtime_env "$AGENTCORE_TROUBLESHOOTING_ID" "troubleshooting" "troubleshooting" "no" \
-    || err "Runtime env verification failed for troubleshooting"
-  verify_runtime_env "$AGENTCORE_ORDER_MANAGEMENT_ID" "order-management" "order-management" "no" \
-    || err "Runtime env verification failed for order-management"
-  verify_runtime_env "$AGENTCORE_PRODUCT_RECOMMENDATION_ID" "product-recommendation" "product-recommendation" "no" \
-    || err "Runtime env verification failed for product-recommendation"
+  verify_runtime_env_dynamic
   ok "Runtime env verification passed"
 fi
 
@@ -1082,6 +878,7 @@ fi
 # ══════════════════════════════════════════════════════════════════════════════
 sep
 log "Phase 7 — Writing .env.live and copying to EC2 via SSM..."
+ensure_agent_config_refresh_token
 
 if [[ -n "$VOYAGE_ENDPOINT" ]]; then
   # Best-effort: derive the model package id from VOYAGE_MODEL_PACKAGE_ARN
@@ -1103,6 +900,7 @@ cat > "$REPO_ROOT/.env.live" <<EOF
 # Tools:     MongoDB MCP direct AgentCore Runtime; Gateway for non-Mongo tools
 # NOTE: plain KEY=VALUE only — no export, no quotes, no declare -x
 ORCHESTRATOR_MODE=runtime
+AGENT_CONFIG_REFRESH_TOKEN=${AGENT_CONFIG_REFRESH_TOKEN}
 
 # MongoDB Atlas
 MONGODB_URI=${MONGODB_URI}
@@ -1125,9 +923,19 @@ EMBEDDING_MODEL_ID=amazon.titan-embed-text-v2:0
 AGENTCORE_MEMORY_STORE_ID=${AGENTCORE_MEMORY_STORE_ID}
 AGENTCORE_GATEWAY_URL=${AGENTCORE_GATEWAY_URL}
 AGENTCORE_ORCHESTRATOR_ARN=${AGENTCORE_ORCHESTRATOR_ARN}
-AGENTCORE_ORDER_MANAGEMENT_ARN=${AGENTCORE_ORDER_MANAGEMENT_ARN}
-AGENTCORE_PRODUCT_RECOMMENDATION_ARN=${AGENTCORE_PRODUCT_RECOMMENDATION_ARN}
-AGENTCORE_TROUBLESHOOTING_ARN=${AGENTCORE_TROUBLESHOOTING_ARN}
+EOF
+# Append one AGENTCORE_<UPPER>_ARN line per discovered specialist so that
+# agentcoreSpecialistArn() in api/src/adapters/agentcore-runtime.ts can pick
+# them up via the legacy AGENTCORE_<UPPER>_ARN env-var fallback path.
+# This replaces the former hardcoded three-line block and works for any number
+# of specialist agents defined in config/agents/*.agent.md.
+for _spec_id in "${SPECIALIST_IDS[@]:-}"; do
+  _upper_id="$(printf '%s' "$_spec_id" | tr '[:lower:]-' '[:upper:]_')"
+  _spec_arn="$(specialist_runtime_arn "$_spec_id")"
+  [[ -n "$_spec_arn" ]] && echo "AGENTCORE_${_upper_id}_ARN=${_spec_arn}" >> "$REPO_ROOT/.env.live"
+done
+unset _spec_id _upper_id _spec_arn
+cat >> "$REPO_ROOT/.env.live" <<EOF
 
 # Tool hosting — Gateway remains for non-Mongo tools; MongoDB MCP calls go
 # directly to the dedicated AgentCore Runtime.
@@ -1408,6 +1216,7 @@ sep
 log "Phase 9b — Deterministic backend smoke validation..."
 SMOKE_SESSION_ID="deploy-smoke-$(date +%s)"
 EC2_API_URL="http://${EC2_IP}:3000"
+BACKEND_SMOKE_SCRIPT="${SCRIPT_DIR}/backend-smoke.py"
 SMOKE_ID_TOKEN=$(aws cognito-idp initiate-auth \
   --region "$AWS_REGION" \
   --client-id "$COGNITO_CLIENT_ID" \
@@ -1417,142 +1226,11 @@ SMOKE_ID_TOKEN=$(aws cognito-idp initiate-auth \
   --output text 2>/dev/null || echo "")
 [[ -n "$SMOKE_ID_TOKEN" && "$SMOKE_ID_TOKEN" != "None" ]] || err "Could not obtain Cognito IdToken for smoke user ${COGNITO_SMOKE_USER_EMAIL}"
 
-python3 - <<'PY' "$EC2_API_URL" "$SMOKE_SESSION_ID" "$SMOKE_ID_TOKEN"
-import http.client, json, sys, time, urllib.error, urllib.request
-api = sys.argv[1].rstrip("/")
-sid = sys.argv[2]
-id_token = sys.argv[3]
-
-def post_chat(message: str) -> str:
-    headers = {"Content-Type": "application/json"}
-    if id_token:
-        headers["Authorization"] = f"Bearer {id_token}"
-    req = urllib.request.Request(
-        f"{api}/chat",
-        data=json.dumps({"sessionId": sid, "message": message}).encode(),
-        headers=headers,
-    )
-    last_error = None
-    for attempt in range(1, 4):
-        try:
-            with urllib.request.urlopen(req, timeout=180) as r:
-                return r.read().decode("utf-8", "replace")
-        except (http.client.IncompleteRead, http.client.HTTPException, TimeoutError, urllib.error.URLError) as exc:
-            last_error = exc
-            # Right after EC2 service restart, the first SSE request can lose the
-            # chunked terminator while the API/AgentCore runtime is still warming.
-            # Retry transport-level failures only; semantic validation below
-            # still requires token/handoff/done events and real Mongo/MCP traces.
-            if attempt == 3:
-                break
-            time.sleep(5 * attempt)
-    raise SystemExit(f"SSE smoke validation failed: chat stream transport error after retries: {last_error}")
-
-def parse_turn_end(body: str) -> dict:
-    """Pull the chat.turn.end trace event out of the SSE body, return its summary.
-
-    We rely on this rather than substring matching the model output so the
-    smoke test cannot pass when the runtime silently degrades to "narrate
-    what I would have done" mode (see history: gateway JWT scope, MCP tool
-    name aliasing, run-chat-stream missing getMcpTools, and Lambda
-    parseEvent — all of which produced fluent SSE streams with zero real
-    tool calls).
-    """
-    for raw in body.split("\n\n"):
-        lines = raw.strip().splitlines()
-        evt = next((l[7:].strip() for l in lines if l.startswith("event: ")), "")
-        if evt != "trace":
-            continue
-        data_line = next((l[5:].lstrip() for l in lines if l.startswith("data:")), "")
-        if not data_line:
-            continue
-        try:
-            payload = json.loads(data_line)
-        except json.JSONDecodeError:
-            continue
-        if payload.get("type") == "chat.turn.end":
-            return payload.get("payload", {}).get("summary", {}) or {}
-    return {}
-
-first = post_chat("I need to return an item from a delivered order!")
-second = post_chat("Order ORD-1003 for alex@example.com. Please start the return.")
-
-def check_sse(body: str) -> tuple[bool, bool, bool]:
-    has_token = "event: token" in body
-    has_handoff = "event: handoff" in body
-    has_done = "event: done" in body
-    return has_token, has_handoff, has_done
-
-t1, h1, d1 = check_sse(first)
-t2, h2, d2 = check_sse(second)
-if not (t1 and d1 and t2 and h2 and d2):
-    raise SystemExit("SSE smoke validation failed: missing token/handoff/done events")
-if "event: error" in first or "event: error" in second:
-    raise SystemExit("SSE smoke validation failed: error event present")
-
-# Substantive check: the second turn must actually pull the real order document
-# from Atlas (otherwise the agent is just narrating). The seeded dataset lists
-# ORD-1003 as a delivered Compact Widget order — assert at least one of those
-# identifiers is in the response, and that the chat.turn.end summary shows the
-# AgentCore Runtime reported a non-empty response.
-second_summary = parse_turn_end(second)
-if not second_summary:
-    raise SystemExit("SSE smoke validation failed: chat.turn.end summary missing for second turn")
-if (second_summary.get("agentcoreRuntimeMs") or 0) <= 0:
-    raise SystemExit("SSE smoke validation failed: agentcoreRuntimeMs <= 0 (Hono never called the runtime)")
-if (second_summary.get("bytesOut") or 0) <= 0:
-    raise SystemExit("SSE smoke validation failed: bytesOut == 0 (runtime returned an empty response)")
-
-# An order question must always reach the order-management specialist runtime.
-# In the optimized path the Hono API classifies and invokes that specialist
-# directly, producing exactly one AgentCore hop. When USE_ORCHESTRATOR_RUNTIME=1
-# is set, the legacy orchestrator-runtime path may produce two hops. Either is
-# valid, but zero means Hono never invoked AgentCore.
-hops = second_summary.get("agentcoreHops") or 0
-if hops < 1:
-    raise SystemExit(
-        f"SSE smoke validation failed: agentcoreHops={hops} < 1 for an "
-        "order question (expected Hono → specialist, or legacy "
-        "Hono → orchestrator → specialist when USE_ORCHESTRATOR_RUNTIME=1)."
-    )
-# Substantive tool counters must reflect at least one Mongo query and one MCP
-# call. Without the counter rollup in `attachEventsNested(...)`, every nested
-# tool/mongo/mcp event is invisible to the summary even when present in
-# events[] — exactly the trace-summary regression that masked itself behind
-# successful SSE streams.
-if (second_summary.get("mongoQueries") or 0) <= 0:
-    raise SystemExit("SSE smoke validation failed: mongoQueries == 0 — counter rollup or Mongo path broken")
-if (second_summary.get("mcpCalls") or 0) <= 0:
-    raise SystemExit("SSE smoke validation failed: mcpCalls == 0 — gateway MCP path or counter rollup broken")
-
-# The seeded dataset for ORD-1003 always contains "Compact Widget" or "SKU-1"
-# in the order document. If neither shows up in the model's response after
-# asking about the order, the agent did not successfully read Atlas — most
-# likely the gateway MCP path is broken (JWT scope, tool-name alias, or
-# Lambda parseEvent envelope) even though SSE looks healthy.
-def has_order_data(body: str) -> bool:
-    needles = ("Compact Widget", "SKU-1", "29.99")
-    return any(n in body for n in needles)
-
-if not has_order_data(second):
-    raise SystemExit(
-        "SSE smoke validation failed: response for ORD-1003 lacks any seeded "
-        "order field (Compact Widget / SKU-1 / 29.99). The MCP tool path is "
-        "almost certainly broken — check AgentCore Runtime logs for "
-        "'no MCP tools loaded' and Lambda logs for 'Unrecognized event shape'."
-    )
-
-if id_token:
-    req = urllib.request.Request(
-        f"{api}/sessions/{sid}",
-        headers={"Authorization": f"Bearer {id_token}"},
-    )
-    with urllib.request.urlopen(req, timeout=30) as r:
-        session_doc = json.loads(r.read().decode("utf-8", "replace"))
-    if not session_doc.get("userId"):
-        raise SystemExit("Auth propagation failed: session.userId missing under Cognito auth")
-print("smoke_ok")
-PY
+python3 "$BACKEND_SMOKE_SCRIPT" \
+  --api-url "$EC2_API_URL" \
+  --session-id "$SMOKE_SESSION_ID" \
+  --id-token "$SMOKE_ID_TOKEN" \
+  --check-session-user
 ok "Backend smoke validation passed"
 
 sep

@@ -57,12 +57,36 @@ const mongodbVectorSearchInputSchema = {
   numCandidates: z.number().int().optional(),
   limit: z.number().int().optional(),
   filter: z.record(z.string(), z.unknown()).optional(),
+  minScore: z.number().optional(),
 };
 
 const mongodbAggregateInputSchema = {
   collection: z.string(),
   pipeline: z.array(z.record(z.string(), z.unknown())),
   limit: z.number().int().optional(),
+};
+
+/**
+ * Schema for the runtime-internal `mongodb_hybrid_search` helper. This tool is
+ * NOT advertised to agents (the API-side `wrapGatewayTool` filters it out of
+ * `tools/list`); it is invoked exclusively by `VectorSearchEmbedTool` when the
+ * wrapper opts into hybrid mode. The fusion logic lives in
+ * `vendor/handlers.mjs` so any future host (Lambda rollback, etc.) inherits
+ * the same semantics for free.
+ */
+const mongodbHybridSearchInputSchema = {
+  collection: z.string(),
+  vectorIndex: z.string(),
+  lexicalIndex: z.string(),
+  lexicalPath: z.string(),
+  queryText: z.string(),
+  queryVector: z.array(z.number()),
+  path: z.string().optional(),
+  filter: z.record(z.string(), z.unknown()).optional(),
+  limit: z.number().int().optional(),
+  fetchK: z.number().int().optional(),
+  numCandidates: z.number().int().optional(),
+  minScore: z.number().optional(),
 };
 
 function buildSuccess(result: unknown, trace: TraceCollector) {
@@ -157,6 +181,17 @@ export function mcpServerCreate(): McpServer {
       inputSchema: mongodbAggregateInputSchema,
     },
     async (args) => dispatch("mongodb_aggregate", args as Record<string, unknown>),
+  );
+
+  server.registerTool(
+    "mongodb_hybrid_search",
+    {
+      title: "MongoDB hybrid search (internal)",
+      description:
+        "INTERNAL — API-side wrapper helper. Runs vector + lexical retrieval and fuses with Reciprocal Rank Fusion. Not exposed to agents; chat tools call mongodb_vector_search and the API-side wrapper routes hybrid=true calls here.",
+      inputSchema: mongodbHybridSearchInputSchema,
+    },
+    async (args) => dispatch("mongodb_hybrid_search", args as Record<string, unknown>),
   );
 
   return server;

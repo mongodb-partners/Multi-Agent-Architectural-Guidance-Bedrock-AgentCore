@@ -24,6 +24,7 @@ import {
 } from "../lib/runtime-sse.ts";
 
 let _client: BedrockAgentCoreClient | null = null;
+let specialistArnOverrides: Record<string, string> | undefined;
 
 function getClient(): BedrockAgentCoreClient {
   if (!_client) {
@@ -45,10 +46,16 @@ export function agentcoreOrchestratorArn(): string | undefined {
  *  Phase 2's direct-routing path is enabled). Returns `undefined` for unknown
  *  specialists. */
 export function agentcoreSpecialistArn(agentId: string): string | undefined {
+  const override = specialistArnOverrides?.[agentId]?.trim();
+  if (override) return override;
   const safeAgentId = agentId.toUpperCase().replace(/[^A-Z0-9]+/g, "_");
   return process.env[`AGENTCORE_RUNTIME_ARN_${safeAgentId}`]?.trim() ||
     process.env[`AGENTCORE_${safeAgentId}_ARN`]?.trim() ||
     undefined;
+}
+
+export function setAgentcoreSpecialistArnOverrides(arns: Record<string, string> | undefined): void {
+  specialistArnOverrides = arns ? { ...arns } : undefined;
 }
 
 /**

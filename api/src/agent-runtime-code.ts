@@ -27,6 +27,7 @@ import {
 } from "@aws-sdk/client-bedrock-agentcore";
 import { runChatStream } from "./lib/run-chat-stream.ts";
 import { runSwarmChatStream } from "./lib/swarm-chat-stream.ts";
+import { classifyAgent } from "./lib/agent-classifier.ts";
 import { logger } from "./lib/logger.ts";
 import { assertEmbeddingsProvider } from "./lib/assert-embeddings-provider.ts";
 import type { ChatMessage } from "./lib/session-store.ts";
@@ -227,19 +228,31 @@ async function* handleOrchestrator(
   let reasoning: string | undefined;
   const classifyStart = Date.now();
 
-  // Run the swarm only as a classifier — its own tokens are suppressed.
-  // We yield nothing to the caller until a specialist is selected.
-  for await (const part of runSwarmChatStream({
-    userMessage: message,
-    priorTurns,
-    memoryContext,
-  })) {
-    if (part.type === "handoff") {
-      targetAgentId = part.to;
-      reasoning = part.label || undefined;
-      break;
+  // Use the same generated config/agents classifier as the Hono API direct
+  // routing path. Swarm remains available as a fallback for unexpected
+  // classifier misses, but the primary route must not rely on a hardcoded
+  // orchestrator handoff list.
+  const classification = await classifyAgent({ message, priorTurns });
+  if (classification && classification.agentId !== "orchestrator") {
+    targetAgentId = classification.agentId;
+    reasoning = classification.reasoning || classification.source;
+  }
+
+  if (!targetAgentId) {
+    // Fallback to the legacy swarm classifier path. Its own tokens are
+    // suppressed; we only need the first specialist handoff.
+    for await (const part of runSwarmChatStream({
+      userMessage: message,
+      priorTurns,
+      memoryContext,
+    })) {
+      if (part.type === "handoff") {
+        targetAgentId = part.to;
+        reasoning = part.label || undefined;
+        break;
+      }
+      if (part.type === "stream_error") throw new Error(part.message);
     }
-    if (part.type === "stream_error") throw new Error(part.message);
   }
 
   if (collector && targetAgentId) {

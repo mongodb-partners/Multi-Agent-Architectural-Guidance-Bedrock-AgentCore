@@ -8,7 +8,7 @@
 # and cannot do.
 #
 # Usage:
-#   source env.sh
+#   source .env
 #   bash deploy/scripts/probe-resources.sh               # fast probes (~5 min)
 #   bash deploy/scripts/probe-resources.sh --with-ec2    # + full VPC+EC2 CRUD (~5 min)
 #   bash deploy/scripts/probe-resources.sh --with-cluster # + Atlas M10 CRUD (~20 min)
@@ -52,18 +52,18 @@ done
 # ─── Load env ────────────────────────────────────────────────────────────────
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-[[ -f "$REPO_ROOT/env.sh" ]] && source "$REPO_ROOT/env.sh"
+[[ -f "$REPO_ROOT/.env" ]] && source "$REPO_ROOT/.env"
 
 for v in AWS_REGION PROJECT_NAME ENVIRONMENT ATLAS_DB_USER ATLAS_DB_NAME \
           TF_VAR_atlas_project_id TF_VAR_atlas_db_password \
           MONGODB_ATLAS_PUBLIC_KEY MONGODB_ATLAS_PRIVATE_KEY; do
-  [[ -z "${!v:-}" ]] && { echo "ERROR: $v not set — source env.sh first" >&2; exit 1; }
+  [[ -z "${!v:-}" ]] && { echo "ERROR: $v not set — source .env first" >&2; exit 1; }
 done
 
 # ─── Pre-flight ──────────────────────────────────────────────────────────────
 hdr "Pre-flight"
 ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text 2>/dev/null) \
-  || { echo "ERROR: AWS STS failed — source env.sh"; exit 1; }
+  || { echo "ERROR: AWS STS failed — source .env"; exit 1; }
 ok "AWS STS — account=$ACCOUNT_ID region=$AWS_REGION"
 
 ATLAS_HTTP=$(curl -s -o /tmp/.atlas.json -w "%{http_code}" \

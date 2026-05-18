@@ -6,7 +6,7 @@
  *
  *   1. Heuristic — token-overlap scoring of the user message against each
  *      agent's `description`, `handoffs[].label`, and `handoffs[].prompt`
- *      (drawn from the orchestrator's frontmatter). Sub-millisecond, no
+ *      (synthesized from `config/agents/*.agent.md`). Sub-millisecond, no
  *      network. When the top score clears `HEURISTIC_MIN_SCORE` and there
  *      is a clear winner (margin over 2nd place), we accept it.
  *
@@ -93,9 +93,9 @@ function rememberInCache(message: string, decision: CachedDecision): void {
 }
 
 /**
- * Build the candidate index from the orchestrator's `handoffs` frontmatter.
- * Any agent that is in the orchestrator's list of allowed handoffs (and that
- * has a configured runtime ARN env var) is a routable specialist.
+ * Build the candidate index from the orchestrator's generated handoff roster.
+ * Any non-orchestrator `.agent.md` config becomes a routable specialist once
+ * deploy-agents has created and injected its runtime ARN env var.
  */
 type Candidate = {
   agentId: string;
@@ -113,7 +113,7 @@ function buildCandidates(): Candidate[] {
   // Invalidate cache when the listAgents output changes; this is cheap because
   // listAgents is itself mtime-cached.
   const versionKey = listAgents()
-    .map((a) => a.id)
+    .map((a) => `${a.id}:${a.name}:${a.description}`)
     .join("|");
   if (_candidatesCache && _candidatesAgentVersion === versionKey) return _candidatesCache;
 
@@ -336,10 +336,15 @@ export async function classifyAgent(input: {
   return undefined;
 }
 
-/** Test-only: clear caches between runs. */
-export function resetAgentClassifierCacheForTests(): void {
+/** Clear classifier decision/candidate caches after a config refresh. */
+export function clearAgentClassifierCache(): void {
   cache.clear();
   _candidatesCache = null;
   _candidatesAgentVersion = undefined;
+}
+
+/** Test-only: clear caches between runs. */
+export function resetAgentClassifierCacheForTests(): void {
+  clearAgentClassifierCache();
   _bedrockClient = null;
 }

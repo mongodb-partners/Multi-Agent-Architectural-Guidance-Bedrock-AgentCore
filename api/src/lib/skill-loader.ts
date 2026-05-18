@@ -50,10 +50,14 @@ function parseSkillFrontmatter(
 type DiscoveryCache = { value: SkillDiscovery[]; mtimeMs: number };
 let skillDiscoveryCache: DiscoveryCache | null = null;
 
-/** Invalidate skill discovery cache (for tests that modify skill directories). */
-export function clearSkillDiscoveryCacheForTests(): void {
+/** Invalidate skill discovery and body caches after a config refresh. */
+export function clearSkillCaches(): void {
   skillDiscoveryCache = null;
+  skillBodyCache.clear();
 }
+
+/** Invalidate skill discovery cache (for tests that modify skill directories). */
+export const clearSkillDiscoveryCacheForTests = clearSkillCaches;
 
 /** Scan all SKILL.md files and return lightweight discovery records. Cached by skills dir mtime. */
 export function listSkillDiscovery(): SkillDiscovery[] {
@@ -109,9 +113,7 @@ export function loadSkillInstructions(skillName: string): string | undefined {
 }
 
 /** Test helper: drop the SKILL.md body cache. */
-export function clearSkillInstructionsCacheForTests(): void {
-  skillBodyCache.clear();
-}
+export const clearSkillInstructionsCacheForTests = clearSkillCaches;
 
 // ---------------------------------------------------------------------------
 // Phase 3 — On-demand resources (references/, scripts/)

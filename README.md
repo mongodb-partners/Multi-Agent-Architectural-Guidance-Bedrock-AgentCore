@@ -10,7 +10,7 @@ The Hono API is a thin proxy in front of an AgentCore Runtime, so it requires AW
 
 ```bash
 # 0. One-time: AWS creds + Atlas keys + a deployed AgentCore Runtime
-source env.sh && source .env.live   # exports AGENTCORE_ORCHESTRATOR_ARN, AWS creds, etc.
+source .env && source .env.live   # exports AGENTCORE_ORCHESTRATOR_ARN, AWS creds, etc.
 
 # Terminal 1 — API
 export PATH="$HOME/.bun/bin:$PATH"   # if bun is not on PATH
@@ -37,7 +37,7 @@ All deploys are driven from your local shell. GitHub is used **only to preserve 
 |---|---|---|
 | `deploy/scripts/deploy-network.sh` | Shared VPC + subnets + Atlas PrivateLink Interface VPCE + SSM-published IDs. **Run once per region.** | First time per region, or when changing VPC CIDR. |
 | `deploy/scripts/deploy-local.sh` | Atlas M10 + Bedrock KB + Cognito + Secrets Manager. Runs API + UI on `localhost`. | Day-to-day development. |
-| `deploy/scripts/deploy.sh` | Per-project EC2 stack: consumes shared VPC via SSM, provisions EC2 + ECR + Lambda MCP + AgentCore Memory + AgentCore Gateway + per-cluster Route 53 (+ optional Voyage AI SageMaker). | Full POC stack on EC2. |
+| `deploy/deploy-full-with-privatelink.sh` | **Main entrypoint** — runs `deploy-network.sh` (if network not yet deployed) then `deploy-project.sh`. Provisions EC2 + ECR + AgentCore Memory + AgentCore Gateway + per-cluster Route 53 (+ optional Voyage AI SageMaker). | Full POC stack on EC2. |
 | `deploy/scripts/destroy.sh` | Tears down one environment (`--mode local`, `--mode ec2`, or `--mode network`). | Cleanup. |
 
 ### One-time setup
@@ -56,26 +56,24 @@ aws iam attach-user-policy \
 
 The policy covers every AWS service the stack touches (EC2, VPC, ECR, Lambda, Bedrock, AgentCore, SageMaker, S3, Cognito, Secrets Manager, SSM, CloudWatch, Route 53) with **scoped IAM** — no `iam:*` wildcard, and an explicit Deny on privilege escalation (user/group/access-key mutations, SAML/OIDC providers, account password policy). See [`deploy/iam/README.md`](deploy/iam/README.md) for the full rationale and what the policy cannot do by design.
 
-Generate an access key for this user — you'll paste it into `env.sh` below.
+Generate an access key for this user — you'll paste it into `.env` below.
 
 **2. MongoDB Atlas API key.** In Atlas → Organization → Access Manager → API Keys, create a key with **Organization Project Creator** role. Also grab your Org ID and Project ID.
 
-**3. Create your local `env.sh`.** This file holds every secret and override; it is gitignored. A complete template with inline documentation lives at [`sample-env.sh`](sample-env.sh):
+**3. Fill in your `.env`.** This file is committed to the repo and holds every credential and override. Open it and populate the required values:
 
 ```bash
-cp sample-env.sh env.sh
-chmod 600 env.sh
-# edit env.sh and fill in the REQUIRED values
+# edit .env and fill in the REQUIRED values
 ```
 
-Only six variables are actually required — AWS access key + secret, Atlas public + private key, Atlas project ID, and the MongoDB user password you want created. Everything else (region, project name, instance type, Voyage AI ARN) has a sensible default and is commented out in the template.
+Only six variables are actually required — AWS access key + secret, Atlas public + private key, Atlas project ID, and the MongoDB user password you want created. Everything else (region, project name, instance type, Voyage AI ARN) has a sensible default and is commented out.
 
 ### Verify access before deploying
 
 Before running a full deploy, use `probe-resources.sh` to verify this AWS account can create and delete every resource the stack needs. It creates each resource with the exact name terraform would use, validates it, deletes it, then prints an access matrix.
 
 ```bash
-source env.sh
+source .env
 
 # Fast check (~5 min) — all resources except VPC, EC2, Atlas cluster, KB
 bash deploy/scripts/probe-resources.sh
@@ -116,21 +114,21 @@ bash deploy/scripts/probe-resources.sh --all
 ### Every deploy afterwards
 
 ```bash
-source env.sh
+source .env
 ./deploy/scripts/deploy-network.sh --auto-approve  # once per region (shared VPC + Atlas PL VPCE)
 ./deploy/scripts/deploy-local.sh --auto-approve    # local dev
 # or
-./deploy/scripts/deploy.sh --auto-approve          # full EC2 POC (consumes shared VPC via SSM)
+./deploy/deploy-full-with-privatelink.sh --auto-approve  # full EC2 POC (auto-provisions network if needed)
 ```
 
-`deploy.sh` fails fast with a clear "run deploy-network.sh first" message if it cannot find the shared VPC's SSM parameters under `/${SHARED_VPC_NAME}/${AWS_REGION}/`.
+`deploy-full-with-privatelink.sh` checks SSM for an existing VPC and only runs `deploy-network.sh` if needed, then always runs `deploy-project.sh`.
 
-Pulling new code? Re-read [`sample-env.sh`](sample-env.sh) — if new variables appear, copy them into your `env.sh` and re-`source`. The scripts fail fast with a clear error if a required variable is missing.
+Pulling new code? Re-check `.env` — if new variables appear, add them and re-`source`. The scripts fail fast with a clear error if a required variable is missing.
 
 To tear down:
 
 ```bash
-source env.sh
+source .env
 ./deploy/scripts/destroy.sh --mode local   --auto-approve   # local resources only
 ./deploy/scripts/destroy.sh --mode ec2     --auto-approve   # one project; leaves shared VPC + Atlas PL alone
 ./deploy/scripts/destroy.sh --mode network --auto-approve   # shared VPC + Atlas PL — only after every ec2 env in the region is gone
@@ -144,7 +142,7 @@ Bedrock Titan embeddings are the default and work everywhere. To use Voyage AI i
 ./deploy/scripts/setup-voyage-marketplace.sh
 ```
 
-It walks you through the one-time Marketplace subscription, discovers the model package ARN via `aws sagemaker list-model-packages`, and appends `VOYAGE_MODEL_PACKAGE_ARN` to your `env.sh` automatically.
+It walks you through the one-time Marketplace subscription, discovers the model package ARN via `aws sagemaker list-model-packages`, and appends `VOYAGE_MODEL_PACKAGE_ARN` to your `.env` automatically.
 
 ### Architecture notes
 
@@ -152,8 +150,8 @@ Full architecture rationale, module tree, and apply-order cheat sheet live in [`
 
 - **Three Terraform root configs, not conditional flags** — `envs/network/` (shared per region), `envs/local/`, and `envs/ec2/` (per project) are separate root modules with separate state keys in the same S3 bucket.
 - **Shared network is consumed via SSM** — `envs/network` publishes VPC ID, subnet IDs, Atlas PL VPCE ID, and the PrivateLink DNS hostname under `/${SHARED_VPC_NAME}/${AWS_REGION}/`; `envs/ec2` reads them with `data "aws_ssm_parameter"`. No `terraform_remote_state` cross-state coupling.
-- **EC2 shell is SSM only** — no port 22, no SSH keys. `deploy.sh` uses `aws ssm send-command` to push `.env.live` and restart services.
-- **Atlas PrivateLink lives in the shared network env** — local mode bypasses it and uses the public SRV endpoint with your laptop IP added to the Atlas access list (see `TF_VAR_my_ip` in `sample-env.sh`). The per-cluster Route 53 zone (cluster SRV host → VPCE) is created in `envs/ec2` so each project owns its DNS without colliding.
+- **EC2 shell is SSM only** — no port 22, no SSH keys. `deploy-project.sh` uses `aws ssm send-command` to push `.env.live` and restart services.
+- **Atlas PrivateLink lives in the shared network env** — local mode bypasses it and uses the public SRV endpoint with your laptop IP added to the Atlas access list (see `TF_VAR_my_ip` in `.env`). The per-cluster Route 53 zone (cluster SRV host → VPCE) is created in `envs/ec2` so each project owns its DNS without colliding.
 
 ---
 
@@ -236,8 +234,8 @@ At runtime the agent's system prompt is assembled as: **persona + loaded skill i
 ```yaml
 memory:
   longTerm: true
-  # Optional: override the collection name (default: agent_memory)
-  longTermCollection: agent_memory
+  # Optional: override the collection name (default: agent_memory_facts)
+  longTermCollection: agent_memory_facts
 ```
 
 **Step 2 — ensure the caller is authenticated.** Memory is keyed by the JWT `sub` claim (`userId`). Auth is mandatory: the API refuses to boot without `AUTH_JWKS_URI` + `AUTH_ISSUER` (see [Authentication](docs/api-reference.md#authentication)) and every protected request must carry a valid Bearer JWT.
@@ -251,30 +249,33 @@ MONGODB_URI=mongodb+srv://user:pass@cluster.mongodb.net
 MONGODB_DB=mongodb_multiagent_dev
 ```
 
-The TTL index on `agent_memory` is **auto-created on the first production write** (90-day expiry). No manual `createIndex` step is required. To use a different TTL, set `MEMORY_TTL_DAYS` before starting the API:
+TTL indexes on `agent_memory_facts` and `chat_messages` are **auto-created on the first production write** (90-day expiry; production deploy default is 30 days via `MEMORY_TTL_DAYS=30`). Vector + Atlas Search (BM25) indexes are seeded by `db-seeding/seed-indexes.ts`.
+
+**Step 4 — tune retrieval** (optional — full table in [`docs/memory-architecture.md`](docs/memory-architecture.md)):
 
 ```bash
-MEMORY_TTL_DAYS=30   # default: 90
-```
-
-**Step 4 — tune injection** (optional):
-
-```bash
-MEMORY_INJECT_TURNS=5   # how many past turns to prepend (default: 5)
+MEMORY_VECTOR_TOPK=6                  # how many items to inject (default: 6)
+MEMORY_VECTOR_FETCHK=24               # over-fetch per leg before fusion
+MEMORY_RECENCY_HALFLIFE_DAYS=30       # exponential recency decay
+MEMORY_MMR_LAMBDA=0.7                 # MMR diversification weight
+MEMORY_WEIGHT_FACTS=1.5               # RRF weight for agent_memory_facts
+MEMORY_WEIGHT_CHAT_MESSAGES=1.0       # RRF weight for chat_messages
 ```
 
 #### What gets stored
 
-Each completed assistant turn stores `{ userId, agentId, userMessage[0..2000], assistantReply[0..4000], ts }`. On the next request for the same `userId` + `agentId`, the API fetches the last `MEMORY_INJECT_TURNS` records and prepends:
+- **`agent_memory_facts`** — LLM-extracted facts of the form `{ userId, agentId, fact, source, ts, factHash, embedding?, embeddingModel? }`. Each fact is embedded with `embedDocumentText`, content-hashed (`factHash`), and `bulkWrite` upserted on `{ userId, factHash }` so duplicates collapse.
+- **`chat_messages`** — A vector-searchable mirror of each chat turn `{ messageId, sessionId, userId?, agentId?, role, content, timestamp, ts, embedding?, embeddingModel? }`, written by a microtask so the chat hot path never waits on the embedder. `DELETE /sessions/:id` cascade-deletes the mirror.
+
+On each new turn `readLongTermMemoryContext(userId, message, { agentId })` runs a hybrid `$vectorSearch` + `$search` (BM25) across both collections, fuses the results with Reciprocal Rank Fusion, applies recency decay and MMR diversification, and prepends:
 
 ```
-## Context from previous sessions (long-term memory)
-[2024-01-15] User: … / Assistant: …
----
-[2024-01-16] User: … / Assistant: …
+## Relevant prior context
+- [fact] User prefers concise replies.
+- [chat 2024-01-15] User: … / Assistant: …
 ```
 
-**Future:** PII-filtered fact extraction + vector embedding for semantic recall instead of recency-based retrieval. See [`TASKS.md`](TASKS.md) Phase 5.
+If the embedder is unavailable on a given write, the row is persisted without `embedding` and the lexical (BM25) leg still surfaces it; vector recall returns when the embedding provider is healthy again.
 
 ---
 
@@ -315,7 +316,7 @@ You are a [role]. Your job is to [purpose].
 | `maxTokens` | No | Default: 4096 |
 | `temperature` | No | Default: 0.7 |
 | `memory.shortTerm` | No | Enable in-session history replay (default: true) |
-| `memory.longTerm` | No | Write/read cross-session memory in `agent_memory` (requires `userId` from JWT `sub`) |
+| `memory.longTerm` | No | Hybrid vector + BM25 retrieval over `agent_memory_facts` + `chat_messages` (requires `userId` from JWT `sub`) |
 | `handoffs` | No | Agents this agent can delegate to (omit when empty) |
 
 Omit **`maxTokens`**, **`temperature`** (when 0.7 is fine), and **`handoffs`** when you do not need to override defaults.
@@ -391,7 +392,8 @@ api/            ← Bun + Hono API server (SSE streaming, optional JWT/JWKS, rat
   Dockerfile    ← production image (build from **repo root**; embeds `config/`)
   src/
     lib/        ← skill loader, prompt builder, Strands agent factory, tools, jwt-verify,
-    |             logger (LOG_LEVEL → JSON lines), long-term-memory (agent_memory read/write)
+    |             logger (LOG_LEVEL → JSON lines), long-term-memory + vector-retrieval +
+    |             chat-messages-collection (hybrid LTM over agent_memory_facts + chat_messages)
     routes/     ← chat, agents, skills, sessions, health, http-tools (metadata)
     middleware/ ← auth (Bearer + optional JWKS), rate-limit, request-id
     adapters/   ← resolve-model (BedrockModel), agentcore-runtime, bedrock-retrieval, mongodb-mcp-client
@@ -405,11 +407,12 @@ ui/             ← Streamlit chat interface (Python)
   pages/        ← multipage UI (e.g. **Sessions** — list, open in chat, delete)
   lib/          ← settings, API client, sidebar, chat panel
 
-sample-env.sh   ← committed template; copy to `env.sh` (gitignored) and fill in secrets
+.env            ← credentials + project identity (fill in before first deploy)
 
 deploy/
+  deploy-full-with-privatelink.sh ← main entrypoint: auto-provisions network if needed, then runs deploy-project.sh
   scripts/
-    deploy.sh                       ← per-project EC2 POC: consumes shared VPC, provisions EC2 + Lambda + AgentCore
+    deploy-project.sh               ← per-project EC2 POC: consumes shared VPC, provisions EC2 + AgentCore
     deploy-network.sh               ← shared VPC + Atlas PrivateLink VPCE (run once per region; SSM-publishes IDs)
     deploy-local.sh                 ← localhost API/UI against Atlas + Bedrock KB (no EC2)
     destroy.sh                      ← teardown; `--mode local|ec2|network` required, `--with-bootstrap` optional
@@ -483,12 +486,12 @@ Full deploy commands (driven from your laptop — no CI):
 
 - **Shared network (per region, run once):** `./deploy/scripts/deploy-network.sh --auto-approve` (VPC + subnets + Atlas PrivateLink VPCE + SSM publishers)
 - **Local dev stack:** `./deploy/scripts/deploy-local.sh --auto-approve` (Atlas + Bedrock KB; API + UI on `localhost`)
-- **Full EC2 POC:** `./deploy/scripts/deploy.sh --auto-approve` (consumes shared VPC via SSM, adds EC2, Lambda MCP, AgentCore Memory + Gateway, per-cluster Route 53)
+- **Full EC2 POC:** `./deploy/deploy-full-with-privatelink.sh --auto-approve` (auto-provisions shared VPC if needed, then EC2 + AgentCore Memory + Gateway, per-cluster Route 53)
 - **Tear down:** `./deploy/scripts/destroy.sh --mode local --auto-approve`, `--mode ec2`, or `--mode network` (only after every per-project `--mode ec2` in the region is destroyed). Add `--with-bootstrap` to also remove the shared S3 state bucket + DynamoDB lock table.
 - **Build both images:** `./deploy/scripts/docker-build.sh` (optional **`TAG=mytag`**)
 - **Push to ECR:** `./deploy/scripts/docker-push-ecr.sh` (requires **`AWS_ACCOUNT_ID`**, **`AWS_REGION`**; optional **`SOURCE_TAG`**, **`ECR_PREFIX`**, **`TAG`** — see [`docs/deployment-guide.md`](docs/deployment-guide.md#step-5--build-and-push-application-images))
 
-All four deploy/destroy scripts source `env.sh` from the repo root — see the [Deployment](#deployment-run-from-your-laptop--no-ci-pipeline) section at the top for the one-time setup (IAM policy, Atlas API key, `sample-env.sh` → `env.sh`).
+All deploy/destroy scripts source `.env` from the repo root — see the [Deployment](#deployment-run-from-your-laptop--no-ci-pipeline) section at the top for the one-time setup (IAM policy, Atlas API key, fill in `.env`).
 
 ---
 

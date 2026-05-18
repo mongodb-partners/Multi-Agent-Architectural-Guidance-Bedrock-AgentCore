@@ -219,30 +219,69 @@ resource "aws_bedrockagentcore_gateway_target" "lambda" {
 
 # =============================================================================
 # Gateway target — AgentCore Runtime MCP server variant (P1-1 active path).
-# The runtime advertises its own tools via `tools/list`, so we don't supply a
-# tool schema here — Gateway just proxies MCP requests to the runtime endpoint
-# using the gateway's IAM role (granted bedrock-agentcore:InvokeAgentRuntime
-# above).
+#
+# PROVIDER NOTE: aws_bedrockagentcore_gateway_target.credential_provider_configuration
+# with gateway_iam_role {} does NOT produce the correct API shape for mcpServer
+# targets. The AWS API requires credentialProvider.iamCredentialProvider.service
+# and .region, which the current TF provider does not emit. Until the provider
+# is fixed upstream, we use a null_resource + local-exec to call the AWS CLI
+# directly (idempotent: checks for existing target by name before creating).
+#
+# Upstream bug:  https://github.com/hashicorp/terraform-provider-aws/issues/47628
+# Fix PR (open): https://github.com/hashicorp/terraform-provider-aws/pull/47457
+#   (adds optional `service` and `region` to gateway_iam_role {}; 1 approval,
+#    clean, last updated 2026-05-15 — expected in provider ~6.43.x / 6.44.x)
+# TODO: once that PR ships, replace this null_resource with
+#   aws_bedrockagentcore_gateway_target + gateway_iam_role { service = "bedrock-agentcore" }
+#   and import existing state. See docs/analysis-null-resource-agentcore-gateway.md.
 # =============================================================================
 
-resource "aws_bedrockagentcore_gateway_target" "mcp_server" {
+resource "null_resource" "mcp_server_gateway_target" {
   count = local.has_mcp_server_target ? 1 : 0
 
-  name               = local.target_name
-  gateway_identifier = aws_bedrockagentcore_gateway.this.gateway_id
-  description        = "MongoDB MCP tools (AgentCore Runtime mcp-runtimes/mongodb-mcp)"
-
-  credential_provider_configuration {
-    gateway_iam_role {}
+  triggers = {
+    gateway_id = aws_bedrockagentcore_gateway.this.gateway_id
+    endpoint   = var.mcp_server_endpoint
+    region     = var.aws_region
+    name       = local.target_name
   }
 
-  target_configuration {
-    mcp {
-      mcp_server {
-        endpoint = var.mcp_server_endpoint
-      }
-    }
+  provisioner "local-exec" {
+    interpreter = ["/bin/bash", "-c"]
+    command     = <<-SHELL
+      set -euo pipefail
+      GW="${aws_bedrockagentcore_gateway.this.gateway_id}"
+      NAME="${local.target_name}"
+      ENDPOINT="${var.mcp_server_endpoint}"
+      REGION="${var.aws_region}"
+
+      # Idempotency: skip creation if a target with this name already exists
+      EXISTING=$(aws bedrock-agentcore-control list-gateway-targets \
+        --gateway-identifier "$GW" \
+        --region "$REGION" \
+        --query "items[?name=='$NAME'].targetId" \
+        --output text 2>/dev/null || true)
+
+      if [[ -n "$EXISTING" ]]; then
+        echo "[agentcore-gateway] MCP target '$NAME' already exists (id=$EXISTING) — skipping create"
+        exit 0
+      fi
+
+      echo "[agentcore-gateway] Creating MCP server target '$NAME' on gateway $GW …"
+      aws bedrock-agentcore-control create-gateway-target \
+        --region "$REGION" \
+        --gateway-identifier "$GW" \
+        --name "$NAME" \
+        --description "MongoDB MCP tools (AgentCore Runtime mcp-runtimes/mongodb-mcp)" \
+        --target-configuration "{\"mcp\":{\"mcpServer\":{\"endpoint\":\"$ENDPOINT\"}}}" \
+        --credential-provider-configurations \
+          "[{\"credentialProviderType\":\"GATEWAY_IAM_ROLE\",\"credentialProvider\":{\"iamCredentialProvider\":{\"service\":\"bedrock-agentcore\",\"region\":\"$REGION\"}}}]" \
+        --output json
+    SHELL
   }
 
-  depends_on = [aws_iam_role_policy.gateway_invoke_mcp_runtime]
+  depends_on = [
+    aws_bedrockagentcore_gateway.this,
+    aws_iam_role_policy.gateway_invoke_mcp_runtime,
+  ]
 }

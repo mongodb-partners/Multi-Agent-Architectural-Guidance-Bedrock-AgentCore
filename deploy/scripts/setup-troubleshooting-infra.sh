@@ -16,7 +16,7 @@
 #   curl (system), python3 (system), bun (https://bun.sh)
 #
 # Usage:
-#   source env.sh                                         # load credentials
+#   source .env                                           # load credentials
 #   bash deploy/scripts/setup-troubleshooting-infra.sh   # run
 #
 # Outputs:
@@ -111,14 +111,14 @@ export PATH="$(dirname "$BUN_CMD"):$PATH"
 
 # AWS credentials
 AWS_ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text 2>/dev/null)" \
-  || die "AWS credentials not set or expired. Source env.sh first."
+  || die "AWS credentials not set or expired. Source .env first."
 success "AWS account: $AWS_ACCOUNT_ID  region: $AWS_REGION"
 
 # Atlas credentials
-[[ -n "$ATLAS_PROJECT_ID" ]]  || die "ATLAS_PROJECT_ID not set (expected from env.sh TF_VAR_mongodb_atlas_project_id)"
-[[ -n "$ATLAS_PUBLIC_KEY" ]]  || die "ATLAS_PUBLIC_KEY not set (expected from env.sh MONGODB_ATLAS_PUBLIC_KEY)"
-[[ -n "$ATLAS_PRIVATE_KEY" ]] || die "ATLAS_PRIVATE_KEY not set (expected from env.sh MONGODB_ATLAS_PRIVATE_KEY)"
-[[ -n "$DB_PASSWORD" ]]       || die "DB_PASSWORD not set (expected from env.sh TF_VAR_mongodb_password)"
+[[ -n "$ATLAS_PROJECT_ID" ]]  || die "ATLAS_PROJECT_ID not set (expected from .env TF_VAR_mongodb_atlas_project_id)"
+[[ -n "$ATLAS_PUBLIC_KEY" ]]  || die "ATLAS_PUBLIC_KEY not set (expected from .env MONGODB_ATLAS_PUBLIC_KEY)"
+[[ -n "$ATLAS_PRIVATE_KEY" ]] || die "ATLAS_PRIVATE_KEY not set (expected from .env MONGODB_ATLAS_PRIVATE_KEY)"
+[[ -n "$DB_PASSWORD" ]]       || die "DB_PASSWORD not set (expected from .env TF_VAR_mongodb_password)"
 success "Atlas project: $ATLAS_PROJECT_ID"
 
 ATLAS_BASE="https://cloud.mongodb.com/api/atlas/v2"
@@ -834,7 +834,7 @@ export LOG_LEVEL=info
 ENVEOF
 
 success ".env.live written to $ENV_FILE"
-info  "  NOTE: AWS STS session tokens expire. Refresh from env.sh when they do."
+info  "  NOTE: AWS STS session tokens expire. Refresh from .env when they do."
 
 # =============================================================================
 # SUMMARY

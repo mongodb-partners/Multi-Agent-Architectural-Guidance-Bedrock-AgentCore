@@ -2,7 +2,7 @@
 
 ## 1. Solution Overview
 
-A **configuration-driven multi-agent customer PoC platform** built around a Bun/Hono API, a Streamlit UI, the **Strands Agents SDK**, and MongoDB-backed tools. In the current repository, agents run directly inside the API process; short-term session history lives in an in-memory store or optional MongoDB `chat_sessions`, and long-term memory is stored as recent conversation turns in MongoDB `agent_memory`. The SOW target extends this baseline with **Bedrock AgentCore Runtime/Gateway**, broader AWS networking and observability, and production container hosting. New specialist behavior is primarily added through `.agent.md` and `SKILL.md` files, as long as it can reuse the existing base tools.
+A **configuration-driven multi-agent customer PoC platform** built around a Bun/Hono API, a Streamlit UI, the **Strands Agents SDK**, and MongoDB-backed tools. In the current repository, agents run directly inside the API process; short-term session history lives in an in-memory store or optional MongoDB `chat_sessions`, and long-term memory is stored in MongoDB as LLM-extracted facts (`agent_memory_facts`) and a vector-searchable mirror of each chat turn (`chat_messages`), retrieved with a hybrid `$vectorSearch` + `$search` (BM25) pipeline. The SOW target extends this baseline with **Bedrock AgentCore Runtime/Gateway**, broader AWS networking and observability, and production container hosting. New specialist behavior is primarily added through `.agent.md` and `SKILL.md` files, as long as it can reuse the existing base tools.
 
 ---
 
@@ -101,7 +101,7 @@ flowchart TD
 
     subgraph MemoryModel ["Current memory model"]
         ShortTerm["Short-term session replay\nsession-store Map or chat_sessions"]
-        LongTerm["Long-term turn history\nrecent user / assistant pairs in agent_memory"]
+        LongTerm["Long-term hybrid retrieval\nLLM-extracted facts in agent_memory_facts +\nchat-turn mirror in chat_messages\n($vectorSearch + $search BM25, RRF + MMR + recency)"]
     end
 
     Products --> Vector
@@ -124,11 +124,11 @@ flowchart TD
 | **API runtime** | Bun (TypeScript, ES2022), Hono v4, Zod validation |
 | **Agent runtime** | Strands Agents SDK — `Agent`, `Swarm`, `BedrockModel`, hosted on Bedrock AgentCore Runtime |
 | **UI** | Streamlit (Python 3.12), multipage (Chat + Sessions), SSE streaming, `streamlit-cognito-auth` |
-| **Data access** | MongoDB Atlas — `orders`, `products`, `troubleshooting_docs`, `support_tickets`, `agent_memory`, optional `chat_sessions` |
+| **Data access** | MongoDB Atlas — `orders`, `products`, `troubleshooting_docs`, `support_tickets`, `agent_memory_facts`, `chat_messages`, optional `chat_sessions` |
 | **Tools** | `mongodb_query`, `mongodb_vector_search`, `bedrock_kb_retrieve`, `generate_embedding`, `read_skill_resource`, `run_skill_script`, `create_support_ticket` |
 | **Retrieval prerequisites** | Atlas vector search needs embeddings + an Atlas vector index; Bedrock KB needs AWS credentials + `BEDROCK_KB_ID` |
 | **Short-term sessions** | In-memory `session-store`; optional Mongo `chat_sessions` when `PERSIST_CHAT_SESSIONS=1` and `MONGODB_URI` are set |
-| **Long-term memory** | Mongo `agent_memory` storing recent user/assistant turns with a TTL; injected as prompt context |
+| **Long-term memory** | Mongo `agent_memory_facts` (LLM-extracted facts) + `chat_messages` (vector-searchable chat-turn mirror) with TTL; hybrid `$vectorSearch` + `$search` (BM25) retrieval with RRF / weights / recency decay / MMR injected as prompt context |
 | **Auth** | Optional Bearer JWT verification via `jose`; unauthenticated mode also supported |
 | **Infra in repo** | Docker / Compose; Terraform bootstrap + IAM / Secrets / Bedrock KB lifecycle |
 
@@ -162,7 +162,7 @@ In code today, the Hono API always invokes the AgentCore Orchestrator Runtime vi
 1. `POST /chat` receives `{ message, sessionId, agentId? }`; when `agentId` is omitted the route defaults to `orchestrator`.
 2. Auth middleware verifies the Bearer token against the Cognito JWKS and extracts `jwt.sub` as `userId`.
 3. The API appends the user turn to `session-store` (in-memory `Map`; mirrored to Mongo `chat_sessions` when `MONGODB_URI` is set).
-4. If the selected agent has `memory.longTerm: true` and a `userId` is present, the route reads facts from Mongo `agent_memory_facts` and passes them into the prompt builder as `memoryContext`.
+4. If the selected agent has `memory.longTerm: true` and a `userId` is present, the route calls `readLongTermMemoryContext(userId, message, { agentId })`, which embeds the message and runs hybrid `$vectorSearch` + `$search` (BM25) across `agent_memory_facts` and `chat_messages` (RRF-fused, weighted, recency-decayed, MMR-diversified) and passes the result into the prompt builder as `memoryContext`.
 5. The route invokes the AgentCore Orchestrator Runtime via `InvokeAgentRuntimeCommand`, forwarding the user's JWT in the payload as `userJwt` plus session/agent metadata.
 6. Inside the orchestrator runtime: `ORCHESTRATOR_MODE=swarm` runs Strands Swarm; otherwise the runtime picks one specialist and invokes its runtime ARN directly via `InvokeAgentRuntime`.
 7. Specialist runtimes call MongoDB MCP tools directly against the MongoDB MCP AgentCore Runtime via `InvokeAgentRuntime`; that runtime executes the MongoDB driver call against Atlas via PrivateLink. Non-Mongo MCP tools remain Gateway-hosted.
@@ -176,9 +176,9 @@ In code today, the Hono API always invokes the AgentCore Orchestrator Runtime vi
 | Tier | Mechanism | Storage | Scope |
 |---|---|---|---|
 | **Short-term** | Per-turn chat transcript replayed each turn | AgentCore short-term events (primary, when authenticated); in-memory `Map` + Mongo `chat_sessions` (default-on when `MONGODB_URI` is set) as the cache/fallback | Per session |
-| **Long-term** | LLM-extracted user facts injected as `## Context from previous sessions` | Mongo `agent_memory_facts` (primary, TTL `MEMORY_TTL_DAYS`); AgentCore Memory store as fallback. Capped by `MEMORY_INJECT_TURNS` injected facts. | Per `userId` × `agentId` |
+| **Long-term** | Hybrid vector + BM25 retrieval injected as `## Relevant prior context` | Mongo `agent_memory_facts` (LLM-extracted facts, embedded at write time, deduped on `factHash`) + `chat_messages` (vector-searchable chat-turn mirror written by a microtask). Both TTL `MEMORY_TTL_DAYS`; AgentCore Memory store as fallback. Final top-K capped by `MEMORY_VECTOR_TOPK`. | Per `userId` × `agentId` |
 
-Long-term recall is fact-based: the LLM extractor (`api/src/lib/llm-fact-extractor.ts`) reads the latest user/assistant turn and writes categorized fact strings via Bedrock `ConverseCommand`. Vector recall over those facts is on the roadmap; today recall is recency-ordered.
+Long-term recall is **hybrid**: the LLM extractor (`api/src/lib/llm-fact-extractor.ts`) distills facts on write; the retriever ([`api/src/lib/long-term-memory.ts`](../api/src/lib/long-term-memory.ts) + [`api/src/lib/vector-retrieval.ts`](../api/src/lib/vector-retrieval.ts)) embeds the incoming query and fuses `$vectorSearch` + `$search` (BM25) across both collections with **Reciprocal Rank Fusion**, collection weights, **exponential recency decay**, and **MMR diversification**. Embedding failures are non-fatal — the lexical leg keeps recall working until the embedder is back.
 
 ---
 
@@ -186,7 +186,7 @@ Long-term recall is fact-based: the LLM extractor (`api/src/lib/llm-fact-extract
 
 **Current repository path**
 
-- `deploy/scripts/deploy.sh` provisions the full AWS stack: VPC + PrivateLink, MongoDB MCP AgentCore Runtime, AgentCore Runtimes (orchestrator + 3 specialists), AgentCore Gateway, AgentCore Memory store, Bedrock KB, Cognito, and an EC2 host running the API + Streamlit UI under systemd.
+- `./deploy/deploy-full-with-privatelink.sh` provisions the full AWS stack: VPC + PrivateLink, MongoDB MCP AgentCore Runtime, AgentCore Runtimes (orchestrator + 3 specialists), AgentCore Gateway, AgentCore Memory store, Bedrock KB, Cognito, and an EC2 host running the API + Streamlit UI under systemd.
 - `docker compose up --build` starts the API + Streamlit UI locally pointed at the deployed AgentCore Orchestrator runtime (`AGENTCORE_ORCHESTRATOR_ARN` is asserted at startup).
 
 **Infrastructure currently implemented in Terraform**
@@ -211,7 +211,7 @@ Long-term recall is fact-based: the LLM extractor (`api/src/lib/llm-fact-extract
 - **Config-over-code:** Every agent persona, routing rule, skill body, and HTTP integration lives in version-controlled markdown. New domains ship with zero TypeScript changes and no Lambda deploys (unless new infra is needed).
 - **AgentCore-hosted MCP tools:** MongoDB MCP runs in a dedicated AgentCore Runtime with IAM invocation; the AgentCore Gateway remains the path for non-Mongo MCP tools. No agent runtime opens a MongoDB driver directly.
 - **Unified Atlas data layer:** Operational queries, optional Atlas vector search, chat-session persistence, long-term agent memory, and support tickets can all sit in one Atlas deployment.
-- **Two memory horizons:** Short-term session replay and long-term `agent_memory` are intentionally separate, keeping the current implementation simple and inspectable.
+- **Two memory horizons:** Short-term session replay and long-term hybrid retrieval over `agent_memory_facts` + `chat_messages` are intentionally separate, keeping the current implementation simple and inspectable.
 - **Optional advanced retrieval:** Vector search and Bedrock KB are both opt-in capabilities that only become active when their indexes and environment variables are provisioned.
 - **Typed SSE contract:** The API emits a well-defined event vocabulary (`token`, `agent_active`, `handoff`, `tool_call`, `skill_loaded`, `done`, `error`), decoupling the streaming backend from any future UI replacement.
 
@@ -263,4 +263,4 @@ Dana Patel's **ORD-3002** (Compact Widget SKU-1, status: `return_requested`, ord
 
 > *"I'm back — last time we talked about a lighter gadget option. What did you suggest?"*
 
-Casey Morgan (premium tier) discussed Pro Gadget preferences in a prior authenticated session. On returning, the API can read Casey's recent `agent_memory` turns for that same `userId × agentId` pair and inject them into the system prompt. In that setup, the Product Recommendation agent has enough seeded catalog context to continue the conversation around lighter alternatives such as **SKU-8 Pro Gadget Lite**. The exact wording and ranking remain model-driven.
+Casey Morgan (premium tier) discussed Pro Gadget preferences in a prior authenticated session. On returning, the API can read Casey's facts and prior chat-message context for that same `userId × agentId` pair (hybrid `$vectorSearch` + `$search` over `agent_memory_facts` + `chat_messages`) and inject them into the system prompt. In that setup, the Product Recommendation agent has enough seeded catalog context to continue the conversation around lighter alternatives such as **SKU-8 Pro Gadget Lite**. The exact wording and ranking remain model-driven.

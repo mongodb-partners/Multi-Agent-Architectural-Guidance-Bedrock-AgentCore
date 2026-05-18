@@ -2,18 +2,17 @@
  * Trace retrieval endpoints.
  *
  * Auth ownership matrix (auth is always required — see api/src/middleware/auth.ts):
- *  - When the trace has a `userId`, the caller's JWT `sub` must match — otherwise the
- *    response is 404 (treat unauthorized as "not found" to avoid leaking the existence
- *    of someone else's trace).
- *  - Traces written before user scoping was wired (no `userId` on the document) are
- *    treated as unscoped and visible to any authenticated caller. New traces always
- *    carry a `userId`.
+ *  - The caller's JWT `sub` must exactly match `trace.userId`. Traces with no
+ *    `userId` are denied (returned as 404) to any caller — the same treatment as
+ *    a foreign-owned trace.  This closes the legacy-unscoped bypass and enforces
+ *    the SOW requirement that jwt.sub is the sole tenant key everywhere.
  *
  * Endpoints:
  *  - `GET /traces/:traceId`        — fetch a complete trace document.
  *  - `GET /trace`                  — query by `sessionId` + `messageId`.
  *  - `GET /trace/mongo`            — narrower lens of mongo.* events
  *    (cheaper for the dashboard's MongoDB panel).
+ *  - `GET /traces`                 — recent traces for the authenticated user only.
  */
 
 import { Hono, type Context } from "hono";
@@ -36,11 +35,16 @@ const MONGO_TYPES = new Set([
   "mongo.schema",
 ] as const);
 
+/**
+ * Strict ownership: the trace must be explicitly bound to `userId` and that
+ * userId must match the caller's JWT sub. Traces with no userId are denied —
+ * the same as a foreign-owned trace — so unscoped legacy rows are not leaked
+ * to any authenticated user.
+ */
 function userOwnsTrace(trace: Trace | undefined, userId: string | undefined): boolean {
   if (!trace) return false;
-  if (!trace.userId) return true; // unscoped legacy trace — readable by any authenticated caller
   if (!userId) return false;
-  return trace.userId === userId;
+  return !!trace.userId && trace.userId === userId;
 }
 
 function notFound(c: Context, requestId: string) {
@@ -122,11 +126,20 @@ traceRoutes.get("/trace/mongo", async (c) => {
   });
 });
 
-/** Lightweight listing for the sidebar metrics. */
+/** Lightweight listing for the sidebar metrics — scoped to the authenticated user. */
 traceRoutes.get("/traces", async (c) => {
   const userId = c.get("jwtPayload")?.sub;
+  const requestId = c.get("requestId") ?? "unknown";
+  if (!userId) {
+    return c.json(
+      { error: { code: "UNAUTHORIZED", message: "Authenticated user required.", requestId } },
+      401,
+    );
+  }
   const limit = Math.max(1, Math.min(100, Number(c.req.query("limit") ?? 25)));
-  const all = await listRecentTraces(limit);
+  // Pass userId into the store so both the ring-buffer and Mongo queries are
+  // pre-filtered; userOwnsTrace is a final safety-net for any stale ring entries.
+  const all = await listRecentTraces(limit, userId);
   const visible = all.filter((t) => userOwnsTrace(t, userId));
   return c.json({
     traces: visible.map((t) => ({

@@ -316,8 +316,9 @@ Cluster, database user, PrivateLink wiring, indexes, and secrets.
 | `mongodbatlas_database_user` | `readWrite` on the project+env-derived DB (e.g. `mongodb_multiagent_dev`) |
 | `mongodbatlas_privatelink_endpoint` | Atlas-side PrivateLink service |
 | `mongodbatlas_privatelink_endpoint_service` | Links to AWS VPC endpoint |
-| `mongodbatlas_search_index` (vector) × 2 | `products`, `troubleshooting_docs` — 1024 dims, cosine similarity |
-| Standard indexes | `orders` (orderId, customerId+createdAt, status), `agent_memory` (userId+createdAt, TTL on ts), `chat_sessions` (sessionId, userId+lastMessageAt, TTL on expiresAt), `support_tickets` (ticketId, userId+createdAt, status) |
+| `mongodbatlas_search_index` (vector) × 4 | `products`, `troubleshooting_docs`, `agent_memory_facts`, `chat_messages` — 1024 dims, cosine similarity |
+| `mongodbatlas_search_index` (BM25 / Atlas Search) × 4 | Same four collections — text fields used by the hybrid retriever's lexical leg |
+| Standard indexes | `orders` (orderId, customerId+createdAt, status), `agent_memory_facts` (userId+ts, unique `{userId, factHash}`, TTL on ts), `chat_messages` (`sessionId+timestamp`, unique `messageId`, `userId+ts`, TTL on ts), `chat_sessions` (sessionId, userId+lastMessageAt, TTL on expiresAt), `support_tickets` (ticketId, userId+createdAt, status) |
 | `aws_secretsmanager_secret` | Atlas connection URI (PrivateLink hostname) + credentials |
 
 **Key outputs:** `mongodb_connection_string_secret_arn`, `mongodb_db_name`
@@ -493,7 +494,7 @@ Wired from module outputs → Secrets Manager → ECS task definition `secrets` 
 | `AGENTCORE_ORCHESTRATOR_ARN` | AgentCore Runtime module output (asserted at API startup) |
 | `AGENTCORE_GATEWAY_URL` | AgentCore Gateway module output |
 | `MONGODB_URI` | Secrets Manager ← Atlas module |
-| `MONGODB_DB` | `<project>_<env>` (e.g. `mongodb_multiagent_dev`); project+env-derived (underscored) by `env.sh` |
+| `MONGODB_DB` | `<project>_<env>` (e.g. `mongodb_multiagent_dev`); project+env-derived (underscored) by `.env` |
 | `MONGODB_ALLOW_WRITE` | `true` |
 | `PERSIST_CHAT_SESSIONS` | `1` |
 | `AUTH_JWKS_URI` | Cognito module output (**required** — `assertJwksAuthConfigured()` boot guard) |

@@ -49,6 +49,30 @@ module "mongodb_atlas" {
   project_tag      = var.project_name
 }
 
+# Atlas Search indexes that belong to application data are reconciled through
+# the idempotent db-seeding script so local and EC2 environments use the same
+# index definitions.
+resource "null_resource" "seed_mongodb_indexes" {
+  triggers = {
+    cluster_name      = module.mongodb_atlas.cluster_name
+    db_name           = var.atlas_db_name
+    seed_indexes_sha1 = filesha1("${path.module}/../../../../db-seeding/seed-indexes.ts")
+  }
+
+  provisioner "local-exec" {
+    command = "bun ${path.module}/../../../../db-seeding/seed-indexes.ts"
+
+    environment = {
+      MONGODB_URI                   = module.mongodb_atlas.connection_string
+      MONGODB_DB                    = var.atlas_db_name
+      EMBEDDING_DIMENSIONS          = "1024"
+      WAIT_FOR_ATLAS_SEARCH_INDEXES = "1"
+    }
+  }
+
+  depends_on = [module.mongodb_atlas]
+}
+
 # ══════════════════════════════════════════════════════════════════════════════
 # Bedrock Knowledge Base — Titan embeddings, points at Atlas cluster
 # ══════════════════════════════════════════════════════════════════════════════
@@ -74,6 +98,21 @@ module "bedrock_kb" {
   embed_model_id           = var.embed_model_id
   kb_docs_path             = "${path.module}/../../../kb-docs"
   ensure_collection_script = "${path.module}/../../../../db-seeding/ensure-collection.ts"
+}
+
+# ══════════════════════════════════════════════════════════════════════════════
+# AgentCore Memory — short-term conversation event store
+# Provisioned in the local env so that AGENTCORE_MEMORY_STORE_ID is available
+# to locally-run API processes (set SHORT_TERM_MEMORY_BACKEND=agentcore).
+# AgentCore runtimes and gateway are ec2-only; memory is lightweight and
+# has no VPC/runtime dependency.
+# ══════════════════════════════════════════════════════════════════════════════
+module "agentcore_memory" {
+  source       = "../../modules/agentcore-memory"
+  aws_region   = var.aws_region
+  project_name = var.project_name
+  environment  = var.environment
+  tags         = local.common_tags
 }
 
 # ══════════════════════════════════════════════════════════════════════════════

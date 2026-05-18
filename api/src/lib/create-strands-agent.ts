@@ -136,10 +136,13 @@ export async function warmAgentCache(): Promise<void> {
   );
 }
 
-/** Test-only: clear the per-process template cache. */
-export function resetAgentTemplateCacheForTests(): void {
+/** Clear the per-process template cache after a config refresh. */
+export function clearAgentTemplateCache(): void {
   templateCache.clear();
 }
+
+/** Test-only: clear the per-process template cache. */
+export const resetAgentTemplateCacheForTests = clearAgentTemplateCache;
 
 export async function createConfiguredStrandsAgent(
   agentId: string,

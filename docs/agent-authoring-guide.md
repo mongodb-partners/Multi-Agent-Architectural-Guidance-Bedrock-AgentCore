@@ -371,8 +371,8 @@ Before committing an agent definition, verify:
 
 1. Create `config/skills/<domain>/SKILL.md` with domain instructions (see [Skills Authoring Guide](skills-authoring-guide.md))
 2. Create `config/agents/<name>.agent.md` referencing that skill
-3. Add a handoff entry in `config/agents/orchestrator.agent.md` pointing to the new agent
-4. Save the file — the next API request picks up the new agent (no restart needed)
+3. Save the file — the next API request picks up the new agent in the generated orchestrator roster (no restart needed)
+4. Run `./deploy/deploy-agents.sh --auto-approve` when the deployed AgentCore runtimes need the new specialist
 
 No code changes are required unless the new agent needs a tool that does not already exist in the registry.
 
@@ -391,7 +391,7 @@ bun test                             # unit + integration tests
 To test interactively against a deployed AgentCore Orchestrator runtime:
 
 ```bash
-source env.sh && source .env.live   # exports AGENTCORE_ORCHESTRATOR_ARN
+source .env && source .env.live   # exports AGENTCORE_ORCHESTRATOR_ARN
 cd api && bun run dev               # starts the local API
 cd ui && streamlit run app.py       # starts the Streamlit UI (separate terminal)
 ```
@@ -412,11 +412,11 @@ The orchestrator picks the agent whose `description` best matches the user's mes
 
 Fix: Make each agent's `description` precise and distinct. Include the specific entities or actions it handles. Avoid generic phrases like "helps users with questions".
 
-**2. The orchestrator has no handoff for the agent**
+**2. The agent description is not enough for routing**
 
-The orchestrator can only route to agents listed in its `handoffs`. If you add a new agent but forget to add it to `orchestrator.agent.md`, it will never receive messages.
+The orchestrator roster is generated from every non-orchestrator `.agent.md`. If the agent exists but messages do not reach it, the generated routing corpus probably lacks distinctive words for that domain.
 
-Fix: Always add a handoff entry to `orchestrator.agent.md` when adding a new agent.
+Fix: Make the agent's `name`, `description`, and first part of its body precise and distinct. Include the specific entities, symptoms, actions, or product area it handles.
 
 **3. The orchestrator is answering directly instead of routing**
 
@@ -437,7 +437,7 @@ Agent files are plain text and tracked in git. Treat changes to `.agent.md` file
 - **Minor edits** (tone, wording) — update in place, bump a comment at the top, deploy
 - **Skill changes** (adding or removing a skill) — test in dev first, the change alters the full system prompt
 - **Handoff changes** — verify both ends: the agent being added to and the orchestrator routing to it
-- **Removing an agent** — remove it from `config/agents/`, remove its handoff from `orchestrator.agent.md`, and from the `handoffs` of any agent that points to it
+- **Removing an agent** — remove it from `config/agents/` and from the `handoffs` of any non-orchestrator agent that explicitly points to it
 
 There is no built-in versioning for agent files. Use git tags or PR descriptions to document what changed and why. Include conversation log evidence when changing an agent in response to observed failures.
 

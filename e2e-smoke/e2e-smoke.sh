@@ -18,7 +18,7 @@ set -uo pipefail
 PROJECT_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$PROJECT_ROOT"
 
-# ── resolve API_URL and Cognito creds from .env.live / env.sh
+# ── resolve API_URL and Cognito creds from .env.live / .env
 if [[ -f .env.live ]]; then
   API_URL="$(grep '^STREAMLIT_API_URL=' .env.live | sed 's/STREAMLIT_API_URL=//' | sed 's:/$::' )"
   COGNITO_CLIENT_ID="$(grep '^STREAMLIT_COGNITO_CLIENT_ID=' .env.live | sed 's/STREAMLIT_COGNITO_CLIENT_ID=//')"
@@ -181,11 +181,12 @@ print(n, ','.join(sorted(map(str,src))), ','.join(sorted(map(str,dims))), 'yes' 
   TXT=$(tokens_text /tmp/e2e_om.sse)
   echo "  reply (first 250 chars): ${TXT:0:250}"
 
-  # ─── 6. Long-term memory across sessions ──────────────────────────────────
+  # ─── 6. Long-term memory across sessions (hybrid vector + BM25) ──────────
   echo ""
-  echo "═══ 6. Long-term memory (cross-session recall) ═══"
+  echo "═══ 6. Long-term memory (cross-session hybrid recall) ═══"
   SID1="e2e-mem1-$(date +%s)"
-  chat "product-recommendation" "$SID1" "I have a peanut allergy, please remember that for future product suggestions" /tmp/e2e_mem1.sse
+  MEM_ALLERGEN="lychee"
+  chat "product-recommendation" "$SID1" "I have a ${MEM_ALLERGEN} allergy, please remember that for future product suggestions" /tmp/e2e_mem1.sse
   # Assert turn 1 actually committed a long-term write (writer is fail-closed:
   # if Bedrock model access is missing it emits memory.long_term_skip instead).
   MEM_WRITE=$(extract /tmp/e2e_mem1.sse memory.long_term_write | head -1)
@@ -193,22 +194,61 @@ print(n, ','.join(sorted(map(str,src))), ','.join(sorted(map(str,dims))), 'yes' 
   if [[ -n "$MEM_SKIP" ]]; then
     REASON=$(echo "$MEM_SKIP" | python3 -c "import json,sys; print(json.load(sys.stdin).get('reason','?'))")
     assert "memory.long_term_write emitted" 0 "skip reason=$REASON"
-  else
+  elif [[ -n "$MEM_WRITE" ]]; then
     assert "memory.long_term_write emitted" "$([ -n "$MEM_WRITE" ] && echo 1 || echo 0)"
+    # New: assert bulkWrite op + embeddedCount + embeddingModel are reported.
+    # These appeared with the hybrid retrieval refactor — older payloads said op=insertMany.
+    OP=$(echo "$MEM_WRITE" | python3 -c "import json,sys; print(json.load(sys.stdin).get('op',''))" 2>/dev/null || echo "")
+    EMB=$(echo "$MEM_WRITE" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('embeddedCount',''))" 2>/dev/null || echo "")
+    DUP=$(echo "$MEM_WRITE" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('duplicatesSkipped',''))" 2>/dev/null || echo "")
+    MDL=$(echo "$MEM_WRITE" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('embeddingModel',''))" 2>/dev/null || echo "")
+    assert "memory.long_term_write op=bulkWrite" "$([ "$OP" = "bulkWrite" ] && echo 1 || echo 0)" "op=$OP"
+    assert "memory.long_term_write payload has embeddedCount + duplicatesSkipped + embeddingModel" \
+      "$([ -n "$EMB" ] && [ -n "$DUP" ] && [ -n "$MDL" ] && echo 1 || echo 0)" \
+      "embedded=$EMB duplicates=$DUP model=$MDL"
+  else
+    # Runtime mode intentionally performs long-term fact extraction after `done`
+    # so it does not hold the SSE response open. In that mode the write trace
+    # may not appear in this stream; the recall assertion below is the live
+    # end-to-end proof that LTM persistence/retrieval works.
+    echo "  note  memory.long_term_write trace not in SSE stream (post-done async writer); recall assertion proves persistence"
   fi
-  sleep 6   # allow async memory write to land in Mongo before the next read
-  SID2="e2e-mem2-$(date +%s)"
-  chat "product-recommendation" "$SID2" "What did I tell you about allergies?" /tmp/e2e_mem2.sse
-  TXT=$(tokens_text /tmp/e2e_mem2.sse)
-  echo "  recall reply: ${TXT:0:300}"
-  # Must mention 'peanut' AND must NOT be a denial. Plain `grep allerg` matches
+  # Poll instead of a fixed sleep — the write is async (microtask + bulkWrite + embed).
+  # Try up to 8 attempts × 2s each (16s) before declaring the fact unrecallable.
+  MEM_HIT=0; MEM_DENIAL=0; RECALL_TXT=""; SCOPED_READ=""
+  for attempt in 1 2 3 4 5 6 7 8; do
+    SID2="e2e-mem2-$(date +%s)-${attempt}"
+    chat "product-recommendation" "$SID2" "What did I tell you about ${MEM_ALLERGEN} allergies?" /tmp/e2e_mem2.sse
+    RECALL_TXT=$(tokens_text /tmp/e2e_mem2.sse)
+    SCOPED_READ=$(extract /tmp/e2e_mem2.sse memory.scoped_read | head -1)
+    MEM_HIT=$(echo "$RECALL_TXT" | grep -qi "$MEM_ALLERGEN" && echo 1 || echo 0)
+    MEM_DENIAL=$(echo "$RECALL_TXT" | grep -qiE "don't have|no information|haven't mentioned|don't recall|no allergies" && echo 1 || echo 0)
+    if [[ "$MEM_HIT" = "1" && "$MEM_DENIAL" = "0" ]]; then
+      echo "  recall hit on attempt ${attempt}"
+      break
+    fi
+    sleep 2
+  done
+  echo "  recall reply (last attempt, first 300 chars): ${RECALL_TXT:0:300}"
+  # Must mention the run's allergen AND must NOT be a denial. Plain `grep allerg` matches
   # "no allergies in your profile" — false positive that hid the fact extractor
   # being broken in an earlier iteration.
-  MEM_HIT=$(echo "$TXT" | grep -qi 'peanut' && echo 1 || echo 0)
-  MEM_DENIAL=$(echo "$TXT" | grep -qiE "don't have|no information|haven't mentioned|don't recall|no allergies" && echo 1 || echo 0)
-  assert "memory.recalls peanut allergy (positive, not a denial)" \
+  assert "memory.recalls ${MEM_ALLERGEN} allergy (positive, not a denial)" \
     "$([ "$MEM_HIT" = "1" ] && [ "$MEM_DENIAL" = "0" ] && echo 1 || echo 0)" \
     "hit=$MEM_HIT denial=$MEM_DENIAL"
+  # Soft-assert hybrid retrieval shape: the new memory.scoped_read payload should carry
+  # `mode: "hybrid"` and a `retrieval` object. Warn-only — older runtimes still satisfy
+  # the recall test above without the enrichment.
+  if [[ -n "$SCOPED_READ" ]]; then
+    MODE=$(echo "$SCOPED_READ" | python3 -c "import json,sys; print(json.load(sys.stdin).get('mode',''))" 2>/dev/null || echo "")
+    HAS_RETRIEVAL=$(echo "$SCOPED_READ" | python3 -c "import json,sys; print(1 if isinstance(json.load(sys.stdin).get('retrieval'), dict) else 0)" 2>/dev/null || echo 0)
+    if [[ "$MODE" = "hybrid" && "$HAS_RETRIEVAL" = "1" ]]; then
+      echo "  ✓ memory.scoped_read carries mode=hybrid + retrieval{...} (hybrid path is live)"
+    else
+      echo "  ⚠ memory.scoped_read missing hybrid enrichment (mode=$MODE, retrieval=$HAS_RETRIEVAL) — older runtime or vector indexes not seeded"
+      warn=$((warn+1))
+    fi
+  fi
 fi
 
 # ─── Summary ─────────────────────────────────────────────────────────────────
@@ -219,5 +259,11 @@ echo "  FAIL: $fail"
 echo "  WARN: $warn"
 echo ""
 for c in "${checks[@]}"; do echo "  $c"; done
+
+if [[ "${RUN_LTM_DEEP:-0}" == "1" || "${RUN_LTM_DEEP:-}" == "true" ]]; then
+  echo ""
+  echo "═══ Optional LTM deep smoke (RUN_LTM_DEEP=${RUN_LTM_DEEP}) ═══"
+  bash "$PROJECT_ROOT/e2e-smoke/ltm/ltm-smoke.sh" || fail=$((fail+1))
+fi
 
 [[ $fail -eq 0 ]] && exit 0 || exit 1

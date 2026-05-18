@@ -122,6 +122,31 @@ export type MemoryReadPayload = {
   latencyMs: number;
   backend: "mongodb" | "agentcore_memory_store";
   primaryFailed?: boolean;
+  // ---- Hybrid retrieval enrichments (optional; only present for vector path) ----
+  /** Retrieval mode used: pure vector, pure lexical, or fused. */
+  mode?: "hybrid" | "vector" | "lexical";
+  /** Raw query string (redacted unless MEMORY_TRACE_VALUES=1). */
+  queryText?: string;
+  /** Embedding provider for the query embedding. */
+  embeddingSource?: "voyage" | "bedrock" | string;
+  /** Provider id for the query embedding. */
+  embeddingModel?: string;
+  /** Per-leg counts and per-collection telemetry for the hybrid retriever. */
+  retrieval?: {
+    topK: number;
+    fetchK: number;
+    vectorHits: number;
+    lexicalHits: number;
+    rrfMergedCount: number;
+    perCollection: Array<{
+      collection: string;
+      vectorReturned: number;
+      lexicalReturned: number;
+      error?: string;
+    }>;
+  };
+  retrievalErrorClass?: string;
+  retrievalErrorMessage?: string;
 };
 
 export type MemoryLongTermWritePayload = {
@@ -146,8 +171,14 @@ export type MemoryLongTermWritePayload = {
   }>;
   factsExtracted: string[];
   collection: "agent_memory_facts";
-  op: "insertMany" | "skip";
+  op: "insertMany" | "bulkWrite" | "skip";
   docsInserted: number;
+  /** Number of accepted facts already present (matched on `factHash`, skipped by upsert). */
+  duplicatesSkipped?: number;
+  /** Number of accepted facts that received an embedding before write. */
+  embeddedCount?: number;
+  /** Embedding model id (`"voyage"` | `"bedrock:<modelId>"`). */
+  embeddingModel?: string;
   primaryBackend: "mongodb";
   primaryOutcome: "persisted" | "skipped" | "failed";
   primaryErrorClass?: string;
@@ -390,6 +421,7 @@ export type MongoDiagnosticPayload = {
 };
 
 export type MongoVectorSearchPayload = {
+  collection?: string;
   embeddingSource: "voyage" | "bedrock" | string;
   embeddingModelId?: string;
   queryText: string;
@@ -401,6 +433,19 @@ export type MongoVectorSearchPayload = {
   scoreSummary?: { min: number; max: number; avg: number };
   histogram?: number[];
   recallWithoutFilter?: number;
+  /** True when the wrapper routed through `mongodb_hybrid_search` (vector + lexical RRF). */
+  hybrid?: boolean;
+  documentPreviews?: Array<{
+    rank: number;
+    collection?: string;
+    id?: string;
+    score?: number;
+    title?: string;
+    snippet?: string;
+    sourceUrl?: string;
+    sources?: string[];
+    fields?: Record<string, string | number | boolean | null>;
+  }>;
 };
 
 export type MongoSchemaPayload = {

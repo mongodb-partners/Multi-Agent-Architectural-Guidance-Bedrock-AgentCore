@@ -23,7 +23,7 @@
 #   were hardcoded BEFORE the project+env rename — do not extend.
 #
 # Usage:
-#   source env.sh
+#   source .env
 #   bash deploy/scripts/teardown-troubleshooting-infra.sh
 # =============================================================================
 set -euo pipefail
@@ -70,7 +70,7 @@ fi
 
 # Verify AWS credentials
 AWS_ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text 2>/dev/null)" \
-  || { echo -e "${RED}❌${NC}  AWS credentials not set or expired. Source env.sh first." >&2; exit 1; }
+  || { echo -e "${RED}❌${NC}  AWS credentials not set or expired. Source .env first." >&2; exit 1; }
 info "AWS account: $AWS_ACCOUNT_ID  region: $AWS_REGION"
 
 echo ""

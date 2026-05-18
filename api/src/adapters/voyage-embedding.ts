@@ -86,6 +86,7 @@ export async function voyageGenerateEmbedding(
   text: string,
   endpointName: string,
   inputType: VoyageInputType = "document",
+  abortSignal?: AbortSignal,
 ): Promise<JSONValue> {
   const body = buildVoyageRequestBody(text, inputType);
 
@@ -96,7 +97,7 @@ export async function voyageGenerateEmbedding(
     Body: Buffer.from(body),
   });
 
-  const res = await getClient().send(cmd);
+  const res = await getClient().send(cmd, abortSignal ? { abortSignal } : undefined);
   const decoded = JSON.parse(new TextDecoder().decode(res.Body)) as {
     data: { embedding: number[]; index: number }[];
     model: string;

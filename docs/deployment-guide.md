@@ -31,9 +31,9 @@ You need a MongoDB Atlas Organization with:
 
 ---
 
-## 2. The `env.sh` file (credentials and project identity)
+## 2. The `.env` file (credentials and project identity)
 
-Everything starts with [`mongodb-aws-bedrock-multi-agent-framework/env.sh`](../env.sh). This file is **gitignored** and contains live credentials. Sample values are in [`sample-env.sh`](../sample-env.sh).
+Everything starts with [`.env`](../.env) at the repo root. This file is committed to the repo and contains live credentials — fill in the required values before the first deploy.
 
 ```bash
 # AWS
@@ -60,7 +60,7 @@ export TF_VAR_mongodb_atlas_project_id="..."
 export TF_VAR_atlas_project_id="$TF_VAR_mongodb_atlas_project_id"
 
 # Atlas DB
-# Both names are project+env-derived in env.sh — no need to set them by hand.
+# Both names are project+env-derived in .env — no need to set them by hand.
 # For PROJECT_NAME=mongodb-multiagent and ENVIRONMENT=dev they resolve to:
 #   ATLAS_DB_USER="mongodb_multiagent_dev_user"
 #   ATLAS_DB_NAME="mongodb_multiagent_dev"
@@ -84,7 +84,7 @@ export VOYAGE_INSTANCE_TYPE="ml.g6.xlarge" # GPU; CPU instances reject the model
 **Always source this file first:**
 
 ```bash
-source mongodb-aws-bedrock-multi-agent-framework/env.sh
+source mongodb-aws-bedrock-multi-agent-framework/.env
 aws sts get-caller-identity   # confirms credentials are live
 ```
 
@@ -92,22 +92,77 @@ aws sts get-caller-identity   # confirms credentials are live
 
 ## 3. EC2 deployment (the main path)
 
-This is what `deploy/scripts/deploy.sh` does. **Two commands** the first time per region — the shared network has to exist before any per-project EC2 stack can plan:
+This is what `deploy/deploy-full-with-privatelink.sh` does. It handles both phases automatically — running `deploy-network.sh` only when the shared VPC does not yet exist in SSM, then `deploy-project.sh`:
 
 ```bash
 cd mongodb-aws-bedrock-multi-agent-framework
-source env.sh
+source .env
 
+# Handles everything: network (first time) + project stack
+./deploy/deploy-full-with-privatelink.sh --auto-approve
+```
+
+Alternatively, run the phases manually:
+
+```bash
 # Once per region (creates shared VPC + Atlas PL VPCE; publishes IDs to SSM)
 ./deploy/scripts/deploy-network.sh --auto-approve
 
 # Per project (consumes shared VPC via SSM)
-./deploy/scripts/deploy.sh --auto-approve
+./deploy/scripts/deploy-project.sh --auto-approve
 ```
 
-`deploy.sh` runs a Phase 3b precheck against `/${SHARED_VPC_NAME}/${AWS_REGION}/vpc_id` SSM and **fails fast** with `Run ./deploy/scripts/deploy-network.sh first` if the shared network has not been applied yet.
+`deploy-project.sh` runs a Phase 3b precheck against `/${SHARED_VPC_NAME}/${AWS_REGION}/vpc_id` SSM and **fails fast** with `Run ./deploy/scripts/deploy-network.sh first` if the shared network has not been applied yet.
 
-Total time: ~5 min for `deploy-network.sh` + ~20-25 min for `deploy.sh` (Atlas M10 cluster creation is the slowest step at ~10 min). Subsequent per-project deploys in the same region skip `deploy-network.sh` entirely.
+Total time: ~5 min for `deploy-network.sh` + ~20-25 min for `deploy-project.sh` (Atlas M10 cluster creation is the slowest step at ~10 min). `deploy-full-with-privatelink.sh` skips `deploy-network.sh` automatically on subsequent runs when the VPC already exists.
+
+### 3.0 Agent-only redeployment (partial deploy)
+
+When only `config/agents/*.agent.md` or `config/skills/` change — no infra, API, or UI changes — use `deploy/deploy-agents.sh`. It skips Atlas, EC2, KB, Cognito, Docker image builds, `.env.live` sync, and API restart.
+
+```bash
+source .env
+./deploy/deploy-agents.sh --auto-approve
+```
+
+**What it does (~3-5 min):**
+1. Discovers agents from `config/agents/*.agent.md` (`id: orchestrator` is the orchestrator; all others are specialists)
+2. Generates the orchestrator handoff roster from the discovered specialists at runtime
+3. Writes `deploy/terraform/envs/ec2/agents.auto.tfvars.json` (drives `module.acr_specialists` `for_each`)
+4. Rebuilds the AgentCore code artifact zip and uploads to S3
+5. `terraform apply -target=module.acr_specialists -target=module.acr_orchestrator`
+6. Injects dynamic env vars into all runtimes; verifies them
+7. Calls `POST /internal/agents/refresh` on the live API with the current config snapshot and specialist ARN map, so the in-API classifier drops deleted agents and sees new/updated agents without rebuilding the API image
+8. Optional smoke test against the live EC2 API
+
+**Adding a new specialist agent** end-to-end:
+1. Create `config/agents/<new-id>.agent.md`.
+2. Run `./deploy/deploy-agents.sh --auto-approve` — terraform provisions `module.acr_specialists["<new-id>"]`; env injection adds `AGENTCORE_RUNTIME_ARN_<NEW_ID>` to the orchestrator, and the API refresh endpoint swaps in the generated handoff roster.
+
+**Removing a specialist:** delete the `.agent.md` and re-run. The script detects the pending terraform destroy and requires typed confirmation (bypass with `--allow-destroy`).
+
+**Prerequisite:** `deploy-full-with-privatelink.sh` must have been run at least once (`deploy-manifest.json` + `backend.hcl` required).
+
+**One-time bootstrap for older deployments:** if the live API predates `POST /internal/agents/refresh`, run `./deploy/deploy-api.sh` once. After that, agent add/update/delete changes should not require an API image rebuild.
+
+### 3.0b API-only redeployment (partial deploy)
+
+When only API code, API-bundled config, or API runtime env wiring changes — no Terraform, UI, or AgentCore runtime changes — use `deploy/deploy-api.sh`.
+
+```bash
+source .env
+./deploy/deploy-api.sh
+```
+
+**What it does (~3-5 min):**
+1. Reads existing Terraform outputs; it does not run `terraform apply`
+2. Discovers the current `config/agents/*.agent.md` roster
+3. Builds and pushes only the API Docker image to ECR
+4. Regenerates `.env.live`, including the API PrivateLink MongoDB URI and all `AGENTCORE_<SPECIALIST_ID>_ARN` values
+5. Syncs `.env.live` to EC2 with SSM, pulls only the API image, and restarts only `multiagent-api`
+6. Runs the deterministic backend smoke
+
+Use `./deploy/deploy-api.sh --skip-docker` to only re-sync env and restart the API after an already-pushed image.
 
 ### 3.1 Deployment phases (current script)
 
@@ -143,17 +198,17 @@ Editable diagram with descriptions: [`diagrams/04-deployment-pipeline.drawio`](d
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| `aws sts get-caller-identity` fails | Stale credentials | Re-source `env.sh`, re-issue keys if needed |
+| `aws sts get-caller-identity` fails | Stale credentials | Re-source `.env`, re-issue keys if needed |
 | Phase 4 fails with `Operation not allowed` on Bedrock | Model access not granted | Bedrock console → Model Access → request Anthropic Claude Sonnet 4.6 (use-case form, ~15 min) |
 | Phase 4 hangs > 15 min on Atlas | Atlas M10 cluster provisioning | Normal. M10 takes 8-12 min on first apply. |
 | Phase 6 fails: "no awsPrivateLink connection string" | Atlas PrivateLink not yet active | Re-run after 60s. Atlas takes a moment to attach the AWS endpoint to the cluster. |
-| Phase 8: "Role validation failed" | IAM trust policy not yet propagated | The `aws_bedrockagentcore_agent_runtime` resource will retry on the next `terraform apply`; if it still fails after 30s, re-run `deploy.sh`. |
+| Phase 8: "Role validation failed" | IAM trust policy not yet propagated | The `aws_bedrockagentcore_agent_runtime` resource will retry on the next `terraform apply`; if it still fails after 30s, re-run `deploy-full-with-privatelink.sh`. |
 | Terraform fails with duplicate ECR/Logs/S3 VPC endpoint or duplicate endpoint SG rule errors | Shared VPC already has singleton AWS service endpoints or access rules | Set `TF_VAR_create_agentcore_runtime_vpc_endpoints=false` before deploy. EC2 mode reuses the existing endpoints and treats duplicate endpoint access rules as success. |
-| Terraform apply says "Saved plan is stale" | Remote state changed after the plan was created | Re-run `deploy.sh`; the retry wrapper re-plans and applies against current state. |
-| Deploy rejects Voyage model/request format | `VOYAGE_MODEL_PACKAGE_ARN`, `VOYAGE_MARKETPLACE_MODEL`, and `VOYAGE_REQUEST_FORMAT` disagree | Use `setup-voyage-marketplace.sh --model voyage-multimodal-3` for `multimodal`, or `--model voyage-3-5-lite` for `legacy`, then re-source `env.sh`. |
+| Terraform apply says "Saved plan is stale" | Remote state changed after the plan was created | Re-run `deploy-full-with-privatelink.sh`; the retry wrapper re-plans and applies against current state. |
+| Deploy rejects Voyage model/request format | `VOYAGE_MODEL_PACKAGE_ARN`, `VOYAGE_MARKETPLACE_MODEL`, and `VOYAGE_REQUEST_FORMAT` disagree | Use `setup-voyage-marketplace.sh --model voyage-multimodal-3` for `multimodal`, or `--model voyage-3-5-lite` for `legacy`, then re-source `.env`. |
 | API health hangs on `mcpServer` / MCP logs are empty | Missing VPC endpoints for the VPC-mode MongoDB MCP runtime | EC2 mode should create ECR API, ECR Docker, S3 gateway, and CloudWatch Logs endpoints. Apply `envs/ec2` and verify those endpoints are `available`. |
 | Phase 11 health check fails on `agentcore: unreachable` | Known issue — `ListSessions` health probe requires extra IAM | Non-blocking. Functional memory still works. |
-| Deploy exits after Docker push with code 1 | Known `docker-build-push.sh` exit anomaly | Re-run `./deploy/scripts/deploy.sh --auto-approve --skip-docker` to apply/restart with pushed images. |
+| Deploy exits after Docker push with code 1 | Known `docker-build-push.sh` exit anomaly | Re-run `./deploy/deploy-full-with-privatelink.sh --auto-approve --skip-docker` to apply/restart with pushed images. |
 
 ---
 
@@ -165,7 +220,7 @@ Runs the API + UI on your laptop. Useful for daily dev. Still uses real AWS for 
 
 ```bash
 cd mongodb-aws-bedrock-multi-agent-framework
-source env.sh
+source .env
 aws sts get-caller-identity
 
 # First time: provision the supporting AWS resources
@@ -187,7 +242,7 @@ It does NOT create EC2, AgentCore runtimes, MongoDB MCP runtime, or Atlas. To ru
 
 ```bash
 cd mongodb-aws-bedrock-multi-agent-framework
-source env.sh && source .env.live   # exports AGENTCORE_ORCHESTRATOR_ARN + AWS creds
+source .env && source .env.live   # exports AGENTCORE_ORCHESTRATOR_ARN + AWS creds
 export PATH="$HOME/.bun/bin:$PATH"
 cd api && bun run dev
 ```
@@ -207,7 +262,7 @@ Open `http://localhost:8501`.
 After your initial deploy, most code changes don't need a fresh Terraform apply. The fast update path:
 
 ```bash
-source env.sh
+source .env
 
 # 1. Build + push new images (~2 min)
 ./deploy/scripts/docker-build-push.sh "$ECR_API_REPO" "$ECR_UI_REPO" "$AWS_REGION"
@@ -236,7 +291,7 @@ Total time: 3-5 minutes.
 ## 6. Tearing it down
 
 ```bash
-source env.sh
+source .env
 
 # 1. Per-project ec2 stack (always do this first when winding down a project)
 ./deploy/scripts/destroy.sh --mode ec2 --auto-approve
@@ -267,7 +322,7 @@ aws s3 rb s3://bedrock-ma-use1-dev-483874864688
 
 ## 7. Verifying a deploy is healthy
 
-After `deploy.sh` completes:
+After `deploy-full-with-privatelink.sh` completes:
 
 ```bash
 EC2_IP=$(jq -r '.ec2_instance_public_ip' deploy-manifest.json)
@@ -330,11 +385,14 @@ CloudWatch log groups for full log search:
 
 | File | Purpose |
 |---|---|
-| [`env.sh`](../env.sh) | Live credentials + project identity (gitignored) |
-| [`sample-env.sh`](../sample-env.sh) | Template for `env.sh` |
+| [`.env`](../.env) | Live credentials + project identity (fill in before first deploy) |
 | [`.env.live`](../.env.live) | Generated by Phase 9. Holds runtime config (gitignored). |
+| [`deploy/deploy-full-with-privatelink.sh`](../deploy/deploy-full-with-privatelink.sh) | **Main entrypoint** — provisions network (if needed) then project stack |
 | [`deploy/scripts/deploy-network.sh`](../deploy/scripts/deploy-network.sh) | Shared VPC + Atlas PrivateLink VPCE (run once per region) |
-| [`deploy/scripts/deploy.sh`](../deploy/scripts/deploy.sh) | Per-project EC2 deploy orchestrator |
+| [`deploy/scripts/deploy-project.sh`](../deploy/scripts/deploy-project.sh) | Per-project EC2 deploy orchestrator (full infra + agents) |
+| [`deploy/deploy-api.sh`](../deploy/deploy-api.sh) | API-only redeploy — rebuilds/pushes API image, syncs `.env.live`, restarts `multiagent-api`, runs backend smoke. Skips Terraform/UI/AgentCore runtime changes. |
+| [`deploy/deploy-agents.sh`](../deploy/deploy-agents.sh) | Agent-only redeploy — rebuilds artifact, targeted tf apply on runtime modules, env injection, API config/cache refresh. Skips Atlas/EC2/KB/Docker/API restart. |
+| [`deploy/scripts/_agents-common.sh`](../deploy/scripts/_agents-common.sh) | Shared helper sourced by `deploy-project.sh` and `deploy-agents.sh` (not run directly) |
 | [`deploy/scripts/deploy-local.sh`](../deploy/scripts/deploy-local.sh) | Local mode supporting infra |
 | [`deploy/scripts/destroy.sh`](../deploy/scripts/destroy.sh) | Tear down (`--mode local`/`ec2`/`network`) |
 | [`deploy/scripts/docker-build-push.sh`](../deploy/scripts/docker-build-push.sh) | Code-only image rebuild |

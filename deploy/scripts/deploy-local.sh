@@ -6,7 +6,7 @@
 #
 # What it does:
 #   Phase 1 — Validate prerequisites (aws, terraform, bun, python3)
-#   Phase 2 — Source env.sh, verify AWS + Atlas credentials
+#   Phase 2 — Source .env, verify AWS + Atlas credentials
 #   Phase 3 — Bootstrap shared S3 bucket + DynamoDB lock table (once)
 #   Phase 4 — Generate backend.hcl + terraform.tfvars (local mode: no EC2, no Voyage AI)
 #   Phase 5 — terraform apply:
@@ -22,7 +22,7 @@
 # Embedding: Bedrock Titan (EMBEDDING_MODEL_ID) — no SageMaker needed
 # EC2:       Not created — app runs on localhost
 #
-# For EC2 + Voyage AI deployment: ./deploy/scripts/deploy.sh
+# For EC2 + Voyage AI deployment: ./deploy/deploy-full-with-privatelink.sh
 
 set -euo pipefail
 
@@ -33,7 +33,7 @@ TF_DIR="$TF_ROOT/envs/local"
 BOOTSTRAP_DIR="$TF_ROOT/bootstrap"
 LOG_DIR="$REPO_ROOT/logs"
 
-ENV_FILE="$REPO_ROOT/env.sh"
+ENV_FILE="$REPO_ROOT/.env"
 AUTO_APPROVE=false
 SKIP_SEED=false
 
@@ -114,7 +114,7 @@ log "Phase 2 — Loading credentials from $ENV_FILE..."
 [[ -f "$ENV_FILE" ]] || err "env file not found: $ENV_FILE"
 source "$ENV_FILE"
 
-# ── Required variables — ALL must be set in env.sh, no silent defaults ──────
+# ── Required variables — ALL must be set in .env, no silent defaults ──────
 _REQUIRED_VARS=(
   AWS_REGION
   AWS_ACCESS_KEY_ID
@@ -133,12 +133,12 @@ for _v in "${_REQUIRED_VARS[@]}"; do
   [[ -n "${!_v:-}" ]] || _missing+=("$_v")
 done
 if [[ ${#_missing[@]} -gt 0 ]]; then
-  err "The following required variables are not set in env.sh — add them before running:
+  err "The following required variables are not set in .env — add them before running:
 $(printf '    %s\n' "${_missing[@]}")"
 fi
 ok "All required variables present (region=$AWS_REGION, env=$ENVIRONMENT, project=$PROJECT_NAME)"
 ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text 2>/dev/null) \
-  || err "AWS credentials invalid or expired. Re-authenticate and update env.sh"
+  || err "AWS credentials invalid or expired. Re-authenticate and update .env"
 ok "AWS account: $ACCOUNT_ID"
 ok "Atlas project: $TF_VAR_atlas_project_id"
 
@@ -154,9 +154,9 @@ case "$_ATLAS_HTTP" in
   200)
     _ATLAS_NAME=$(python3 -c "import json; d=json.load(open('/tmp/.atlas_check.json')); print(d.get('name','?'))" 2>/dev/null || echo "?")
     ok "Atlas API keys valid — project: ${_ATLAS_NAME}" ;;
-  401) err "Atlas API keys invalid (HTTP 401). Check MONGODB_ATLAS_PUBLIC_KEY / MONGODB_ATLAS_PRIVATE_KEY in env.sh" ;;
+  401) err "Atlas API keys invalid (HTTP 401). Check MONGODB_ATLAS_PUBLIC_KEY / MONGODB_ATLAS_PRIVATE_KEY in .env" ;;
   403) err "Atlas API keys valid but forbidden (HTTP 403). Verify the key has Project Owner role." ;;
-  404) err "Atlas project not found (HTTP 404). Check TF_VAR_mongodb_atlas_project_id in env.sh" ;;
+  404) err "Atlas project not found (HTTP 404). Check TF_VAR_mongodb_atlas_project_id in .env" ;;
   000) warn "Atlas API unreachable (curl failed) — check network. Proceeding." ;;
   *)   warn "Atlas API returned HTTP $_ATLAS_HTTP — unexpected. Proceeding cautiously." ;;
 esac
@@ -361,7 +361,7 @@ log "Installing API dependencies..."
 cd "$REPO_ROOT/api" && bun install --silent
 
 # Local mode always runs tools in-process — no MCP sidecar, no AgentCore Gateway.
-# Gateway-routed tools live in the ec2 env (deploy.sh).
+# Gateway-routed tools live in the ec2 env (deploy-project.sh).
 
 # Start API
 log "Starting API (Hono/Bun :3000)..."
@@ -427,7 +427,7 @@ echo ""
 echo "  Logs  : tail -f logs/api.log"
 echo "  Stop  : kill \$(cat logs/api.pid) \$(cat logs/ui.pid)"
 echo ""
-echo "  For EC2 + Voyage AI: ./deploy/scripts/deploy.sh"
+echo "  For EC2 + Voyage AI: ./deploy/deploy-full-with-privatelink.sh"
 
 # ══════════════════════════════════════════════════════════════════════════════
 # PHASE 10 — Write resource manifest JSON

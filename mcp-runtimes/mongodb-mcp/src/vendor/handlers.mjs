@@ -333,16 +333,29 @@ async function mongodb_query(rawArgs, trace) {
   return result;
 }
 
+/**
+ * Default kNN candidate width for `$vectorSearch`. Atlas guidance says
+ * `numCandidates >= 10 * limit`; with limit=5 the prior default of 100 only
+ * gave us 20x headroom and was a real source of recall drops on collections
+ * with skewed embedding distributions (e.g. cluster boundaries between
+ * troubleshooting categories). Bumped to 200 so the default top-5 sits at
+ * 40× headroom — still well inside the 1000 cap and within Atlas's M30
+ * latency budget.
+ */
+const DEFAULT_NUM_CANDIDATES = 200;
+const MAX_NUM_CANDIDATES = 1000;
+
 async function mongodb_vector_search(args, trace) {
   const {
     collection,
     index,
     queryVector,
     path = "embedding",
-    numCandidates = 100,
+    numCandidates = DEFAULT_NUM_CANDIDATES,
     limit,
     filter,
     database,
+    minScore,
   } = args || {};
 
   assertCollection(collection);
@@ -361,8 +374,10 @@ async function mongodb_vector_search(args, trace) {
   const lim = clampLimit(limit, 5, MAX_LIMIT);
   const cand =
     Number.isFinite(numCandidates) && numCandidates > 0
-      ? Math.min(Math.floor(numCandidates), 1000)
-      : 100;
+      ? Math.min(Math.floor(numCandidates), MAX_NUM_CANDIDATES)
+      : DEFAULT_NUM_CANDIDATES;
+  const minScoreNum =
+    Number.isFinite(minScore) && minScore > 0 ? Number(minScore) : undefined;
 
   const client = await getClient();
   const db = client.db(DEFAULT_DB);
@@ -380,10 +395,12 @@ async function mongodb_vector_search(args, trace) {
     },
   };
 
-  const docs = await db
-    .collection(collection)
-    .aggregate([vectorStage, { $addFields: { _score: { $meta: "vectorSearchScore" } } }])
-    .toArray();
+  const pipeline = [vectorStage, { $addFields: { _score: { $meta: "vectorSearchScore" } } }];
+  if (minScoreNum !== undefined) {
+    pipeline.push({ $match: { _score: { $gte: minScoreNum } } });
+  }
+
+  const docs = await db.collection(collection).aggregate(pipeline).toArray();
 
   trace.event("mongo.result", {
     docCount: docs.length,
@@ -393,6 +410,196 @@ async function mongodb_vector_search(args, trace) {
   });
 
   return { count: docs.length, documents: docs };
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// mongodb_hybrid_search — vector + lexical fusion with Reciprocal Rank Fusion
+//
+// Used by the API-side `VectorSearchEmbedTool` wrapper when the caller (or the
+// agent persona) opts into hybrid mode via `hybrid: true`. The wrapper still
+// goes through the Mongo MCP runtime so the boundary rule ("chat-invoked Mongo
+// tools must execute through the MCP runtime") is preserved. This handler is
+// NOT advertised in the agent-visible tool list — it is a runtime helper only.
+//
+// Inputs:
+//   collection         string (required)
+//   queryText          string (required, used for the lexical leg)
+//   queryVector        number[] (required, used for the vector leg)
+//   vectorIndex        string (required)
+//   lexicalIndex       string (required)
+//   lexicalPath        string (required) — text-indexed field for $search
+//   path               string (default "embedding")
+//   filter             object — optional; rendered into $vectorSearch.filter
+//                              AND into the compound.filter clauses of $search
+//   limit              integer (default 5)
+//   fetchK             integer (default 32) — per-leg over-fetch before merge
+//   numCandidates      integer (default DEFAULT_NUM_CANDIDATES)
+//   minScore           number  — drop merged items below this rrfScore
+//
+// Returns:
+//   { count, documents: [{ ... , _score, _sources: ["vector"|"lexical", ...] }] }
+//
+// Each document carries the merged RRF score and the list of legs it appeared
+// in. The API-side wrapper extracts these to build its `mongo.vector_search`
+// trace event.
+// ──────────────────────────────────────────────────────────────────────────────
+
+const HYBRID_RRF_K = 60;
+
+async function mongodb_hybrid_search(args, trace) {
+  const {
+    collection,
+    queryText,
+    queryVector,
+    vectorIndex,
+    lexicalIndex,
+    lexicalPath,
+    path = "embedding",
+    filter,
+    limit,
+    fetchK,
+    numCandidates,
+    minScore,
+    database,
+  } = args || {};
+
+  assertCollection(collection);
+  assertNoDatabaseOverride(database, DEFAULT_DB);
+  if (!vectorIndex || typeof vectorIndex !== "string") {
+    throw new MongoGuardError("mongodb_hybrid_search: 'vectorIndex' is required", "invalid_index");
+  }
+  if (!lexicalIndex || typeof lexicalIndex !== "string") {
+    throw new MongoGuardError("mongodb_hybrid_search: 'lexicalIndex' is required", "invalid_index");
+  }
+  if (!lexicalPath || typeof lexicalPath !== "string") {
+    throw new MongoGuardError("mongodb_hybrid_search: 'lexicalPath' is required", "invalid_path");
+  }
+  if (!Array.isArray(queryVector) || queryVector.length === 0) {
+    throw new MongoGuardError(
+      "mongodb_hybrid_search: 'queryVector' must be a non-empty array",
+      "invalid_vector",
+    );
+  }
+  if (typeof queryText !== "string" || !queryText.trim()) {
+    throw new MongoGuardError(
+      "mongodb_hybrid_search: 'queryText' must be a non-empty string",
+      "invalid_query",
+    );
+  }
+  assertSafeFilter(filter, "filter");
+
+  const lim = clampLimit(limit, 5, MAX_LIMIT);
+  const fK = Number.isFinite(fetchK) && fetchK > 0 ? Math.min(Math.floor(fetchK), MAX_LIMIT) : 32;
+  const cand =
+    Number.isFinite(numCandidates) && numCandidates > 0
+      ? Math.min(Math.floor(numCandidates), MAX_NUM_CANDIDATES)
+      : Math.max(DEFAULT_NUM_CANDIDATES, fK * 10);
+  const minScoreNum =
+    Number.isFinite(minScore) && minScore > 0 ? Number(minScore) : undefined;
+
+  const client = await getClient();
+  const db = client.db(DEFAULT_DB);
+  const t0 = Date.now();
+  trace.event("mongo.intent", { collection });
+
+  const vectorStage = {
+    $vectorSearch: {
+      index: vectorIndex,
+      path,
+      queryVector,
+      numCandidates: cand,
+      limit: fK,
+      ...(filter ? { filter } : {}),
+    },
+  };
+  const vectorPromise = db
+    .collection(collection)
+    .aggregate([vectorStage, { $addFields: { _score: { $meta: "vectorSearchScore" } } }])
+    .toArray();
+
+  const compound = { must: [{ text: { query: queryText, path: lexicalPath } }] };
+  if (filter && typeof filter === "object") {
+    const clauses = [];
+    for (const [field, value] of Object.entries(filter)) {
+      if (Array.isArray(value)) {
+        clauses.push({ in: { path: field, value } });
+        continue;
+      }
+      if (value && typeof value === "object" && Array.isArray(value.$in)) {
+        clauses.push({ in: { path: field, value: value.$in } });
+        continue;
+      }
+      clauses.push({ equals: { path: field, value } });
+    }
+    if (clauses.length > 0) compound.filter = clauses;
+  }
+  const lexicalPromise = db
+    .collection(collection)
+    .aggregate([
+      { $search: { index: lexicalIndex, compound } },
+      { $addFields: { _score: { $meta: "searchScore" } } },
+      { $limit: fK },
+    ])
+    .toArray()
+    .catch((err) => {
+      // Lexical leg failure shouldn't kill hybrid — log via trace and return [].
+      trace.event("mongo.diagnostic", {
+        ranProbes: 0,
+        budgetMs: 0,
+        offendingClause: undefined,
+        valueTypeWarnings: [],
+        index_missing_suggested: lexicalIndex,
+        schemaMismatch: false,
+        hybridLegFailed: "lexical",
+        errorMessage: err instanceof Error ? err.message : String(err),
+      });
+      return [];
+    });
+
+  const [vectorDocs, lexicalDocs] = await Promise.all([vectorPromise, lexicalPromise]);
+
+  // RRF merge over the two ranked lists.
+  const merged = new Map();
+  const ingest = (docs, source) => {
+    for (let i = 0; i < docs.length; i++) {
+      const d = docs[i];
+      const key = String(d._id);
+      const contribution = 1 / (HYBRID_RRF_K + (i + 1));
+      const existing = merged.get(key);
+      if (existing) {
+        existing._score += contribution;
+        if (!existing._sources.includes(source)) existing._sources.push(source);
+      } else {
+        merged.set(key, { ...d, _score: contribution, _sources: [source] });
+      }
+    }
+  };
+  ingest(vectorDocs, "vector");
+  ingest(lexicalDocs, "lexical");
+
+  let fused = Array.from(merged.values()).sort((a, b) => b._score - a._score);
+  if (minScoreNum !== undefined) {
+    fused = fused.filter((d) => d._score >= minScoreNum);
+  }
+  fused = fused.slice(0, lim);
+
+  trace.event("mongo.result", {
+    docCount: fused.length,
+    latencyMs: Date.now() - t0,
+    status: fused.length === 0 ? "empty" : "ok",
+    sampleDocs: fused.slice(0, 3),
+    perStageReturned: [vectorDocs.length, lexicalDocs.length],
+  });
+
+  return {
+    count: fused.length,
+    documents: fused,
+    meta: {
+      vectorCount: vectorDocs.length,
+      lexicalCount: lexicalDocs.length,
+      rrfMergedCount: merged.size,
+    },
+  };
 }
 
 async function mongodb_aggregate(args, trace) {
@@ -419,7 +626,22 @@ async function mongodb_aggregate(args, trace) {
   return { count: sliced.length, documents: sliced };
 }
 
-export const tools = { mongodb_query, mongodb_vector_search, mongodb_aggregate };
+export const tools = {
+  mongodb_query,
+  mongodb_vector_search,
+  mongodb_aggregate,
+  mongodb_hybrid_search,
+};
+
+/**
+ * Tool names that exist purely as MCP runtime helpers for API-side wrappers
+ * (e.g. the `VectorSearchEmbedTool` hybrid path). They MUST be filtered out
+ * before the MCP `tools/list` is shown to an agent — chat-invoked tools must
+ * be model-callable by name from the agent persona, and these are not. The
+ * API-side `wrapGatewayTool` enforces the same filter in case the runtime
+ * advertises them.
+ */
+export const INTERNAL_ONLY_TOOL_NAMES = new Set(["mongodb_hybrid_search"]);
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Tool schemas — published to the AgentCore Gateway as the MCP runtime's
@@ -467,6 +689,7 @@ export const toolSchemas = [
         numCandidates: { type: "integer" },
         limit: { type: "integer" },
         filter: { type: "object" },
+        minScore: { type: "number" },
       },
       required: ["collection", "index", "queryVector"],
     },
@@ -482,6 +705,36 @@ export const toolSchemas = [
         limit: { type: "integer" },
       },
       required: ["collection", "pipeline"],
+    },
+  },
+  {
+    name: "mongodb_hybrid_search",
+    description:
+      "INTERNAL — API-side wrapper helper. Runs vector + lexical retrieval against an Atlas collection and fuses with Reciprocal Rank Fusion. Not exposed to agents directly; chat tools must call mongodb_vector_search (which will route to this handler when hybrid=true).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        collection: { type: "string" },
+        vectorIndex: { type: "string" },
+        lexicalIndex: { type: "string" },
+        lexicalPath: { type: "string" },
+        queryText: { type: "string" },
+        queryVector: { type: "array", items: { type: "number" } },
+        path: { type: "string" },
+        filter: { type: "object" },
+        limit: { type: "integer" },
+        fetchK: { type: "integer" },
+        numCandidates: { type: "integer" },
+        minScore: { type: "number" },
+      },
+      required: [
+        "collection",
+        "vectorIndex",
+        "lexicalIndex",
+        "lexicalPath",
+        "queryText",
+        "queryVector",
+      ],
     },
   },
 ];

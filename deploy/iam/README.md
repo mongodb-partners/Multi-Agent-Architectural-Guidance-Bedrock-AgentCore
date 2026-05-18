@@ -124,7 +124,7 @@ Explorer and you can enumerate/clean up after each policy-testing pass.
 ```bash
 # 1. attach current policy.json to peerislands-terraform (see "How to apply")
 # 2. deploy
-source env.sh && ./deploy/scripts/deploy.sh --auto-approve
+source .env && ./deploy/deploy-full-with-privatelink.sh --auto-approve
 
 # 3. verify what was created (filters by Project tag)
 ./deploy/scripts/list-resources.sh
@@ -157,6 +157,6 @@ Tags start showing in Cost Explorer ~24h after activation. Filter with
 | Atlas cluster | `tags { key = "Project", value = … }` block on `mongodbatlas_cluster.main` |
 | S3 bootstrap bucket (pre-state) | `default_tags` in `bootstrap/main.tf` |
 
-To rename the tag value, set `PROJECT_NAME` in `env.sh` *before* the first
+To rename the tag value, set `PROJECT_NAME` in `.env` *before* the first
 deploy. Renaming after resources exist requires either a re-tag pass (AWS
 Tag Editor → Find resources → Edit tags) or a destroy + redeploy.

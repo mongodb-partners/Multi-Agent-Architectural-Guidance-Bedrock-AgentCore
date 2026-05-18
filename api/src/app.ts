@@ -15,6 +15,7 @@ import { sessionsRoutes } from "./routes/sessions.ts";
 import { httpToolsMetaRoutes } from "./routes/http-tools-meta.ts";
 import { traceRoutes } from "./routes/trace.ts";
 import { demoPromptsRoutes } from "./routes/demo-prompts.ts";
+import { agentConfigRefreshRoutes } from "./routes/agent-config-refresh.ts";
 
 export function createApp(): Hono {
   const app = new Hono();
@@ -65,6 +66,7 @@ export function createApp(): Hono {
   protectedApp.route("/", sessionsRoutes);
   protectedApp.route("/", httpToolsMetaRoutes);
   protectedApp.route("/", traceRoutes);
+  protectedApp.route("/", agentConfigRefreshRoutes);
 
   app.route("/", protectedApp);
 

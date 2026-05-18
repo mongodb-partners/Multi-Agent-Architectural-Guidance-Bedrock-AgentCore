@@ -6,10 +6,10 @@
  * when CLASSIFIER_BACKEND=heuristic is set. Cache hits must be honored.
  *
  * Note: which exact agent the heuristic picks for a given message depends
- * on the orchestrator's `handoffs[]` corpus, so test prompts here were
- * empirically chosen to score decisively against the current
- * `config/agents/orchestrator.agent.md`. If those frontmatter labels/prompts
- * change materially, regenerate the prompts via:
+ * on the generated specialist roster from `config/agents/*.agent.md`, so test
+ * prompts here were empirically chosen to score decisively against the current
+ * specialist descriptions/instructions. If those configs change materially,
+ * regenerate the prompts via:
  *   bun -e 'import("./src/lib/agent-classifier.ts").then(({classifyAgent}) => …)'
  */
 
@@ -60,11 +60,10 @@ describe("agent-classifier — heuristic", () => {
     expect(r?.source).toBe("heuristic");
   });
 
-  test("ambiguous message (all three specialists mention 'order') falls through", async () => {
-    // "Where is my order ORD-1234?" — every orchestrator handoff prompt
-    // mentions "order", so no candidate beats the others by the required
-    // margin. With Haiku disabled, classifyAgent must return undefined.
-    const r = await classifyAgent({ message: "Where is my order ORD-1234?" });
+  test("generic message falls through when no specialist corpus matches", async () => {
+    // With Haiku disabled, a generic message with no domain terms must return
+    // undefined instead of forcing a weak heuristic match.
+    const r = await classifyAgent({ message: "blorple quazzle floom" });
     expect(r).toBeUndefined();
   });
 
@@ -119,7 +118,7 @@ describe("agent-classifier — cache", () => {
   });
 
   test("ambiguous fall-through results are NOT cached (so a future Haiku-enabled call still fires)", async () => {
-    const msg = "Where is my order ORD-1234?";
+    const msg = "blorple quazzle floom";
     const a = await classifyAgent({ message: msg });
     const b = await classifyAgent({ message: msg });
     expect(a).toBeUndefined();

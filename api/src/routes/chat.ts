@@ -16,8 +16,7 @@ import {
   useAgentcoreShortTermMemory,
 } from "../lib/short-term-memory.ts";
 import {
-  readLongTermMemory,
-  readSharedLongTermMemory,
+  readLongTermMemoryContext,
   writeLongTermMemory,
 } from "../lib/long-term-memory.ts";
 import { logger } from "../lib/logger.ts";
@@ -29,6 +28,7 @@ import { buildAuthenticatedUserContext } from "../lib/auth-user-context.ts";
 import { TraceCollector, tracingEnabled } from "../lib/trace-collector.ts";
 import { withTrace } from "../lib/trace-context.ts";
 import { withGatewayJwt } from "../lib/gateway-auth-context.ts";
+import { withCurrentUserId } from "../lib/user-id-context.ts";
 import { persistTrace } from "../lib/trace-store.ts";
 import { classifyAgent } from "../lib/agent-classifier.ts";
 import type { TraceEvent } from "../lib/trace-types.ts";
@@ -163,36 +163,41 @@ chatRoutes.post("/chat", async (c) => {
       })
     : undefined;
 
-  // Build auth + memory context. The three lookups are independent — run
-  // them in parallel so we shave one RTT off TTFB compared to awaiting
-  // each in sequence.
+  // Build auth + memory context. The two lookups are independent — run them
+  // in parallel so we shave one RTT off TTFB compared to awaiting each in
+  // sequence. Long-term memory is retrieved via hybrid vector + lexical
+  // search against `agent_memory_facts` and `chat_messages` in a single
+  // direct-Mongo call (see `readLongTermMemoryContext` in
+  // `lib/long-term-memory.ts`).
   let memoryContext: string | undefined;
   if (userId) {
     const contextUserId = userId;
     const contextAgent = requestedAgent;
     const buildContext = async (): Promise<void> => {
       const wantsScoped = Boolean(contextAgent.memory?.longTerm);
-      const [authCtx, shared, scoped] = await Promise.all([
+      const [authCtx, ltm] = await Promise.all([
         buildAuthenticatedUserContext(
           contextUserId,
           c.get("jwtPayload"),
           c.get("bearerToken"),
         ),
-        readSharedLongTermMemory(contextUserId),
-        wantsScoped ? readLongTermMemory(contextUserId, requestedAgentId) : Promise.resolve(null),
+        wantsScoped
+          ? readLongTermMemoryContext(contextUserId, body.message, {
+              agentId: requestedAgentId,
+              sessionId: body.sessionId,
+              priorTurns,
+            })
+          : Promise.resolve(null),
       ]);
 
       const blocks: string[] = [];
       if (authCtx) blocks.push(authCtx);
-      if (shared) blocks.push(`## Shared User Facts\n\n${shared}`);
-      if (wantsScoped && scoped) {
-        blocks.push(`## ${requestedAgentId} Memory\n\n${scoped}`);
-        if (shared || scoped) {
-          reqLog.debug("[chat] injecting long-term memory", {
-            userId,
-            agentId: requestedAgentId,
-          });
-        }
+      if (wantsScoped && ltm) {
+        blocks.push(`## Relevant prior context\n\n${ltm}`);
+        reqLog.debug("[chat] injecting long-term memory", {
+          userId,
+          agentId: requestedAgentId,
+        });
       }
       if (blocks.length > 0) memoryContext = blocks.join("\n\n");
     };
@@ -281,13 +286,15 @@ chatRoutes.post("/chat", async (c) => {
       agentId: routeAgentId,
     });
 
-    // Scope the caller's JWT for the entire turn so the AgentCore Runtime
-    // forwards it (as `userJwt`) and any in-process MCP transport can inject
-    // it as `Authorization: Bearer <jwt>` on outbound Gateway calls.
+    // Scope the caller's JWT and verified userId for the entire turn so:
+    //  - AgentCore Runtime forwards the JWT (as `userJwt`)
+    //  - In-process MCP transport injects it as `Authorization: Bearer <jwt>`
+    //  - MongoDB MCP callTool wrapper injects jwt.sub into every query filter
     const bearerToken = c.get("bearerToken") as string | undefined;
     const runWithTrace = <T>(fn: () => Promise<T>): Promise<T> => {
       const traced = () => (collector ? withTrace(collector, fn) : fn());
-      return Promise.resolve(withGatewayJwt(bearerToken, traced));
+      const withJwt = () => withGatewayJwt(bearerToken, traced);
+      return Promise.resolve(withCurrentUserId(userId, withJwt));
     };
 
     await runWithTrace(async () => {

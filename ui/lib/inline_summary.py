@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import json
 from typing import Iterable
 
 import streamlit as st
@@ -35,6 +36,7 @@ class TurnSummary:
     degraded: bool = False
     classifications: list[dict] = field(default_factory=list)
     thinking_blocks: list[str] = field(default_factory=list)
+    vector_searches: list[dict] = field(default_factory=list)
 
     def has_signal(self) -> bool:
         return bool(
@@ -48,6 +50,7 @@ class TurnSummary:
             or self.memory_facts_written
             or self.classifications
             or self.thinking_blocks
+            or self.vector_searches
             or self.trace_id
         )
 
@@ -78,10 +81,112 @@ def _model_cost(model_id: str, in_tok: int, out_tok: int) -> float | None:
     return (in_tok / 1_000_000) * pi + (out_tok / 1_000_000) * po
 
 
+_DOC_PREVIEW_CHARS = 180
+_URL_FIELDS = ("sourceUrl", "url", "uri", "articleUrl")
+
+
+def _short_text(value: object, max_chars: int = _DOC_PREVIEW_CHARS) -> str | None:
+    if value is None:
+        return None
+    text = value if isinstance(value, str) else json.dumps(value, default=str)
+    text = text.strip()
+    if not text:
+        return None
+    return text if len(text) <= max_chars else f"{text[:max_chars]}..."
+
+
+def _list_text(value: object, max_chars: int = 80) -> list[str]:
+    if isinstance(value, list):
+        return [text for item in value if (text := _short_text(item, max_chars))]
+    text = _short_text(value, max_chars)
+    return [text] if text else []
+
+
+def _first_url(doc: dict) -> str | None:
+    for key in _URL_FIELDS:
+        value = doc.get(key)
+        if isinstance(value, str) and value.startswith(("http://", "https://")):
+            return value
+    return None
+
+
+def _doc_preview_from_sample(doc: dict, rank: int, collection: str | None = None) -> dict:
+    fields = {}
+    for key in (
+        "sku",
+        "category",
+        "brand",
+        "status",
+        "orderId",
+        "customerEmail",
+        "docId",
+        "source",
+        "sourceUrl",
+        "url",
+        "uri",
+        "articleUrl",
+        "role",
+        "sessionId",
+        "messageId",
+    ):
+        if key in doc:
+            fields[key] = doc.get(key)
+
+    title = next(
+        (
+            _short_text(doc.get(key), 120)
+            for key in ("title", "name", "sku", "code", "fact", "_id", "id", "docId")
+            if doc.get(key)
+        ),
+        None,
+    )
+    snippet = next(
+        (
+            _short_text(doc.get(key))
+            for key in ("content", "fact", "description", "summary", "body", "text", "answer")
+            if doc.get(key)
+        ),
+        None,
+    )
+    sources = [
+        *_list_text(doc.get("_sources")),
+        *_list_text(doc.get("source")),
+        *_list_text(doc.get("sourceUrl")),
+        *_list_text(doc.get("url")),
+        *_list_text(doc.get("uri")),
+        *_list_text(doc.get("articleUrl")),
+        *_list_text(doc.get("path")),
+    ]
+    deduped_sources = list(dict.fromkeys(sources))
+    return {
+        "rank": rank,
+        "collection": collection,
+        "id": _short_text(doc.get("_id") or doc.get("id") or doc.get("docId") or doc.get("messageId") or doc.get("sku"), 120),
+        "score": doc.get("_score"),
+        "title": title,
+        "snippet": snippet,
+        "sources": deduped_sources,
+        "sourceUrl": _first_url(doc),
+        "fields": fields,
+    }
+
+
+def _sample_doc_previews(result_payload: dict | None, collection: str | None) -> list[dict]:
+    sample_docs = result_payload.get("sampleDocs") if isinstance(result_payload, dict) else None
+    if not isinstance(sample_docs, list):
+        return []
+    return [
+        _doc_preview_from_sample(doc, i + 1, collection)
+        for i, doc in enumerate(sample_docs[:5])
+        if isinstance(doc, dict)
+    ]
+
+
 def aggregate_summary(events: Iterable[TraceEvent]) -> TurnSummary:
     s = TurnSummary()
     cost_total = 0.0
     saw_unknown_model = False
+    last_mongo_result: dict | None = None
     for ev in events:
         p = ev.payload or {}
         t = ev.type
@@ -121,11 +226,31 @@ def aggregate_summary(events: Iterable[TraceEvent]) -> TurnSummary:
                     "status": str(p.get("status") or "ok"),
                 }
             )
+            last_mongo_result = p
 
         elif t == "skill.activated":
             name = str(p.get("name") or "")
             if name and name not in s.skills_activated:
                 s.skills_activated.append(name)
+
+        elif t == "mongo.vector_search":
+            collection = p.get("collection") if isinstance(p.get("collection"), str) else None
+            previews = p.get("documentPreviews")
+            if not isinstance(previews, list):
+                previews = []
+            normalized = [pp for pp in previews if isinstance(pp, dict)]
+            if not normalized:
+                normalized = _sample_doc_previews(last_mongo_result, collection)
+            scores = p.get("scores")
+            s.vector_searches.append(
+                {
+                    "collection": collection,
+                    "query_text": p.get("queryText"),
+                    "hybrid": bool(p.get("hybrid")),
+                    "hit_count": len(scores) if isinstance(scores, list) else len(normalized),
+                    "previews": normalized,
+                }
+            )
 
         elif t == "memory.scoped_read" or t == "memory.shared_read":
             s.memory_facts_read += int(p.get("entryCount") or 0)
@@ -191,6 +316,143 @@ def _tile(label: str, value: str, *, hint: str | None = None) -> None:
 
 
 _THINKING_PREVIEW_CHARS = 280
+
+
+def _preview_url(preview: dict) -> str | None:
+    for value in (
+        preview.get("sourceUrl"),
+        preview.get("url"),
+        preview.get("uri"),
+        preview.get("articleUrl"),
+    ):
+        if isinstance(value, str) and value.startswith(("http://", "https://")):
+            return value
+    fields = preview.get("fields")
+    if isinstance(fields, dict):
+        for key in _URL_FIELDS:
+            value = fields.get(key)
+            if isinstance(value, str) and value.startswith(("http://", "https://")):
+                return value
+    sources = preview.get("sources")
+    if isinstance(sources, list):
+        for value in sources:
+            if isinstance(value, str) and value.startswith(("http://", "https://")):
+                return value
+    return None
+
+
+def _preview_title(preview: dict) -> str:
+    return (
+        _short_text(preview.get("title"), 80)
+        or _short_text(preview.get("id"), 80)
+        or "document"
+    )
+
+
+def _markdown_text(value: object) -> str:
+    text = _short_text(value, 180) or ""
+    return (
+        text.replace("\\", "\\\\")
+        .replace("`", "\\`")
+        .replace("*", "\\*")
+        .replace("_", "\\_")
+        .replace("[", "\\[")
+        .replace("]", "\\]")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+    )
+
+
+def _vector_search_signature(search: dict) -> str:
+    previews = search.get("previews")
+    preview_bits: list[str] = []
+    if isinstance(previews, list):
+        for preview in previews[:5]:
+            if isinstance(preview, dict):
+                preview_bits.append(
+                    "|".join(
+                        str(preview.get(key) or "")
+                        for key in ("rank", "collection", "id", "title", "score")
+                    )
+                )
+    return json.dumps(
+        {
+            "collection": search.get("collection"),
+            "query_text": search.get("query_text"),
+            "hybrid": bool(search.get("hybrid")),
+            "hit_count": search.get("hit_count"),
+            "previews": preview_bits,
+        },
+        sort_keys=True,
+        default=str,
+    )
+
+
+def _dedupe_vector_searches(searches: list[dict]) -> list[dict]:
+    seen: set[str] = set()
+    out: list[dict] = []
+    for search in searches:
+        if not isinstance(search, dict):
+            continue
+        sig = _vector_search_signature(search)
+        if sig in seen:
+            continue
+        seen.add(sig)
+        out.append(search)
+    return out
+
+
+def _render_vector_sources_panel(s: TurnSummary) -> None:
+    if not s.vector_searches:
+        return
+
+    for search in _dedupe_vector_searches(s.vector_searches):
+        collection = search.get("collection")
+        collection_label = f" on `{collection}`" if collection else ""
+        hit_count = int(search.get("hit_count") or 0)
+        hit_label = "hit" if hit_count == 1 else "hits"
+        if search.get("hybrid"):
+            header = f"Hybrid sources from vector + lexical fusion - {hit_count} {hit_label}{collection_label}"
+        else:
+            header = f"Sources from vector search - {hit_count} {hit_label}{collection_label}"
+        st.caption(header)
+
+        previews = search.get("previews")
+        linked = 0
+        if isinstance(previews, list) and previews:
+            for idx, preview in enumerate(previews[:5], 1):
+                if not isinstance(preview, dict):
+                    continue
+                rank = preview.get("rank") if isinstance(preview.get("rank"), int) else idx
+                title = _preview_title(preview)
+                score = preview.get("score")
+                score_label = f" - {float(score):.2f}" if isinstance(score, (int, float)) else ""
+                url = _preview_url(preview)
+                has_url = bool(url)
+                label = f"#{rank} {title}{score_label}"
+                st.markdown(f"- {_markdown_text(label)}")
+                if url:
+                    st.caption(f"URL: {url}")
+                if snippet := _short_text(preview.get("snippet"), 160):
+                    st.caption(snippet)
+                fields = preview.get("fields")
+                if isinstance(fields, dict) and fields:
+                    field_bits = [
+                        f"{key}={_short_text(value, 80)}"
+                        for key, value in list(fields.items())[:5]
+                        if value is not None and _short_text(value, 80)
+                    ]
+                    if field_bits:
+                        st.caption("Fields: " + ", ".join(field_bits))
+                if has_url:
+                    linked += 1
+        elif hit_count == 0:
+            st.caption("No vector-search documents were returned.")
+        else:
+            st.caption("No source document preview was recorded for these hits.")
+
+        if hit_count > 0 and linked == 0:
+            st.caption("No source URL recorded; showing collection and document identifiers when available.")
 
 
 def _render_reasoning_panel(s: TurnSummary) -> None:
@@ -265,6 +527,7 @@ def render_inline_summary(
         return
 
     _ = raw_events  # Metrics and raw events intentionally live only in Trace Viewer.
+    _render_vector_sources_panel(s)
     tid = trace_id or trace_id_from_url(trace_url)
     if tid and st.button("View full trace →", key=f"view_full_trace_{tid}"):
         open_trace_viewer(tid)

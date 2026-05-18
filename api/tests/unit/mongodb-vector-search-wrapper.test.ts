@@ -28,7 +28,9 @@ import { TextBlock, ToolResultBlock } from "@strands-agents/sdk";
 import {
   VECTOR_SEARCH_TOOL_SPEC,
   VectorSearchEmbedTool,
+  extractDocumentPreviewsFromResult,
   extractScoresFromResult,
+  isInternalOnlyMcpTool,
   scoreHistogram,
   summarizeScores,
   transformVectorSearchArgs,
@@ -155,6 +157,62 @@ describe("transformVectorSearchArgs", () => {
     if (!out.ok) expect(out.code).toBe("missing_index");
   });
 
+  test("hybrid: true rewrites args to mongodb_hybrid_search shape with defaults inferred", async () => {
+    const out = await transformVectorSearchArgs(
+      {
+        collection: "products",
+        queryText: "noise cancelling",
+        hybrid: true,
+        limit: 3,
+        fetchK: 16,
+        minScore: 0.05,
+      },
+      stubEmbed([7, 8, 9]),
+    );
+    expect(out.ok).toBe(true);
+    if (!out.ok) return;
+    expect(out.mode).toBe("hybrid");
+    expect(out.targetToolName).toBe("mongodb_hybrid_search");
+    expect(out.args.collection).toBe("products");
+    expect(out.args.vectorIndex).toBe("products-vector-index");
+    expect(out.args.lexicalIndex).toBe("products-text-index");
+    expect(out.args.lexicalPath).toBe("name");
+    expect(out.args.queryText).toBe("noise cancelling");
+    expect(out.args.queryVector).toEqual([7, 8, 9]);
+    expect(out.args.limit).toBe(3);
+    expect(out.args.fetchK).toBe(16);
+    expect(out.args.minScore).toBeCloseTo(0.05, 6);
+    // Should NOT carry the pure-vector `index` field.
+    expect(out.args).not.toHaveProperty("index");
+  });
+
+  test("hybrid: true requires queryText (queryVector alone is rejected with missing_query)", async () => {
+    const out = await transformVectorSearchArgs(
+      {
+        collection: "products",
+        hybrid: true,
+        queryVector: [1, 2, 3],
+      },
+      stubEmbed(),
+    );
+    expect(out.ok).toBe(false);
+    if (!out.ok) expect(out.code).toBe("missing_query");
+  });
+
+  test("hybrid: true on an unknown collection without lexical defaults returns missing_lexical_index", async () => {
+    const out = await transformVectorSearchArgs(
+      {
+        collection: "ad_hoc_collection",
+        queryText: "x",
+        hybrid: true,
+        indexName: "ad-hoc-vector",
+      },
+      stubEmbed(),
+    );
+    expect(out.ok).toBe(false);
+    if (!out.ok) expect(out.code).toBe("missing_lexical_index");
+  });
+
   test("propagates the embedder's structured error to the caller", async () => {
     const embed = async (): Promise<EmbedResult> => ({
       ok: false,
@@ -192,6 +250,51 @@ describe("score extraction helpers", () => {
       ],
     });
     expect(extractScoresFromResult(block)).toEqual([0.92, 0.81, 0.55]);
+  });
+
+  test("extractDocumentPreviewsFromResult keeps compact source/doc metadata", () => {
+    const block = new ToolResultBlock({
+      toolUseId: "tu",
+      status: "success",
+      content: [
+        new TextBlock(
+          JSON.stringify({
+            count: 2,
+            documents: [
+              { _id: "p1", sku: "SKU-1", name: "Compact Widget", source: "products", _score: 0.92 },
+              {
+                _id: "ts-1",
+                title: "HW-900 fault",
+                content: "Hardware fault troubleshooting article.",
+                _sources: ["vector", "lexical"],
+                _score: 0.81,
+              },
+            ],
+          }),
+        ),
+      ],
+    });
+
+    expect(extractDocumentPreviewsFromResult(block, "products")).toEqual([
+      expect.objectContaining({
+        rank: 1,
+        collection: "products",
+        id: "p1",
+        title: "Compact Widget",
+        score: 0.92,
+        sources: ["products"],
+        fields: expect.objectContaining({ sku: "SKU-1", source: "products" }),
+      }),
+      expect.objectContaining({
+        rank: 2,
+        collection: "products",
+        id: "ts-1",
+        title: "HW-900 fault",
+        score: 0.81,
+        snippet: "Hardware fault troubleshooting article.",
+        sources: ["vector", "lexical"],
+      }),
+    ]);
   });
 
   test("extractScoresFromResult tolerates non-JSON / missing _score", () => {
@@ -233,6 +336,19 @@ describe("VECTOR_SEARCH_TOOL_SPEC", () => {
     expect(schema.properties.queryVector).toBeDefined();
     expect(schema.required).not.toContain("queryVector");
     expect(schema.properties.indexName).toBeDefined();
+  });
+});
+
+describe("isInternalOnlyMcpTool", () => {
+  test("flags mongodb_hybrid_search (direct + gateway-prefixed forms) as internal", () => {
+    expect(isInternalOnlyMcpTool("mongodb_hybrid_search")).toBe(true);
+    expect(isInternalOnlyMcpTool("mongodb-mcp___mongodb_hybrid_search")).toBe(true);
+  });
+
+  test("passes through agent-visible tools", () => {
+    expect(isInternalOnlyMcpTool("mongodb_query")).toBe(false);
+    expect(isInternalOnlyMcpTool("mongodb-mcp___mongodb_vector_search")).toBe(false);
+    expect(isInternalOnlyMcpTool("read_skill_resource")).toBe(false);
   });
 });
 
@@ -378,6 +494,11 @@ describe("VectorSearchEmbedTool.stream — full embed-then-call path", () => {
     const payload = ev!.payload as Record<string, unknown>;
     expect(payload.embeddingSource).toBe("model_supplied");
     expect(payload.scores).toEqual([0.92, 0.74]);
+    expect(payload.collection).toBe("products");
+    expect(payload.documentPreviews).toEqual([
+      expect.objectContaining({ rank: 1, collection: "products", title: "a", score: 0.92 }),
+      expect.objectContaining({ rank: 2, collection: "products", title: "b", score: 0.74 }),
+    ]);
     const summary = payload.scoreSummary as { min: number; max: number; avg: number };
     expect(summary.min).toBeCloseTo(0.74, 5);
     expect(summary.max).toBeCloseTo(0.92, 5);
@@ -419,6 +540,132 @@ describe("VectorSearchEmbedTool.stream — full embed-then-call path", () => {
     const ev = collector.getEvents().find((e) => e.type === "mongo.vector_search");
     expect(ev).toBeDefined();
     expect((ev!.payload as Record<string, unknown>).embeddingSource).toBe("none");
+  });
+
+  test("hybrid: true routes to the hybrid underlying tool with mongodb_hybrid_search args shape", async () => {
+    const vectorCalls: unknown[] = [];
+    const hybridCalls: unknown[] = [];
+    const makeStub = (sink: unknown[]) =>
+      function (ctx: { toolUse: { toolUseId: string; input: unknown } }) {
+        sink.push(ctx.toolUse.input);
+        const result = new ToolResultBlock({
+          toolUseId: ctx.toolUse.toolUseId,
+          status: "success",
+          content: [new TextBlock(JSON.stringify({ count: 0, documents: [] }))],
+        });
+        return (async function* () {
+          return result;
+        })();
+      };
+    const vectorUnderlying = {
+      name: "mongodb-mcp___mongodb_vector_search",
+      description: "v",
+      toolSpec: { name: "v", description: "v", inputSchema: { type: "object" as const } },
+      stream: makeStub(vectorCalls),
+    };
+    const hybridUnderlying = {
+      name: "mongodb_hybrid_search",
+      description: "h",
+      toolSpec: { name: "h", description: "h", inputSchema: { type: "object" as const } },
+      stream: makeStub(hybridCalls),
+    };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const tool = new VectorSearchEmbedTool(vectorUnderlying as any, hybridUnderlying as any);
+    const collector = new TraceCollector({
+      sessionId: "s",
+      messageId: "m",
+      agentId: "product-recommendation",
+    });
+
+    const ctx = {
+      toolUse: {
+        toolUseId: "tu-h",
+        name: "mongodb_vector_search",
+        input: {
+          collection: "products",
+          queryText: "noise cancelling headphones",
+          hybrid: true,
+          queryVector: [0.1, 0.2, 0.3, 0.4],
+          limit: 5,
+        },
+      },
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      agent: {} as any,
+    };
+
+    await withTrace(collector, async () => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const gen = tool.stream(ctx as any);
+      let nx = await gen.next();
+      while (!nx.done) nx = await gen.next();
+    });
+
+    expect(vectorCalls).toHaveLength(0);
+    expect(hybridCalls).toHaveLength(1);
+    const forwarded = hybridCalls[0] as Record<string, unknown>;
+    expect(forwarded.collection).toBe("products");
+    expect(forwarded.vectorIndex).toBe("products-vector-index");
+    expect(forwarded.lexicalIndex).toBe("products-text-index");
+    expect(forwarded.lexicalPath).toBe("name");
+    expect(forwarded.queryText).toBe("noise cancelling headphones");
+    expect(forwarded.queryVector).toEqual([0.1, 0.2, 0.3, 0.4]);
+    // Must NOT leak the pure-vector args shape into the hybrid call.
+    expect(forwarded).not.toHaveProperty("index");
+
+    const ev = collector.getEvents().find((e) => e.type === "mongo.vector_search");
+    expect((ev!.payload as Record<string, unknown>).hybrid).toBe(true);
+  });
+
+  test("hybrid: true with no hybrid helper available surfaces a structured hybrid_unsupported error", async () => {
+    const vectorUnderlying = {
+      name: "mongodb-mcp___mongodb_vector_search",
+      description: "v",
+      toolSpec: { name: "v", description: "v", inputSchema: { type: "object" as const } },
+      stream: () =>
+        (async function* () {
+          return new ToolResultBlock({
+            toolUseId: "x",
+            status: "success",
+            content: [new TextBlock("{}")],
+          });
+        })(),
+    };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const tool = new VectorSearchEmbedTool(vectorUnderlying as any);
+    const collector = new TraceCollector({
+      sessionId: "s",
+      messageId: "m",
+      agentId: "product-recommendation",
+    });
+    const ctx = {
+      toolUse: {
+        toolUseId: "tu-h2",
+        name: "mongodb_vector_search",
+        input: {
+          collection: "products",
+          queryText: "x",
+          // Pass queryVector so the transform doesn't try to hit the (absent)
+          // SageMaker embed endpoint — the assertion under test is purely
+          // about the missing hybrid helper, not about embed failures.
+          queryVector: [0.1, 0.2],
+          hybrid: true,
+        },
+      },
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      agent: {} as any,
+    };
+    const result = (await withTrace(collector, async () => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const gen = tool.stream(ctx as any);
+      let nx = await gen.next();
+      while (!nx.done) nx = await gen.next();
+      return nx.value as ToolResultBlock;
+    })) as ToolResultBlock;
+    expect(result.status).toBe("error");
+    const parsed = JSON.parse(
+      (result.content[0] as { text: string }).text,
+    ) as Record<string, unknown>;
+    expect(parsed.code).toBe("hybrid_unsupported");
   });
 
   test("toolSpec exposes the queryText-friendly schema (not the lambda's queryVector schema)", () => {

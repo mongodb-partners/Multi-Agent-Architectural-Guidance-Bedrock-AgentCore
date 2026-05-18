@@ -68,7 +68,7 @@
           <mxGeometry x="580" y="466" width="330" height="130" as="geometry"/>
         </mxCell>
 
-        <mxCell id="lt-mg" value="MongoDB agent_memory&#xa;(local dev fallback)&#xa;&#xa;AGENTCORE_MEMORY_STORE_ID not set&#xa;TTL index: MEMORY_TTL_DAYS × 86400s&#xa;Default TTL: 90 days" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#9673a6;fontSize=11;align=left;" vertex="1" parent="1">
+        <mxCell id="lt-mg" value="MongoDB agent_memory_facts + chat_messages&#xa;(long-term hybrid memory)&#xa;&#xa;TTL index: MEMORY_TTL_DAYS × 86400s&#xa;Vector + BM25 indexes seeded by seed-indexes.ts&#xa;Default TTL: 90 days" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#9673a6;fontSize=11;align=left;" vertex="1" parent="1">
           <mxGeometry x="920" y="466" width="240" height="130" as="geometry"/>
         </mxCell>
 

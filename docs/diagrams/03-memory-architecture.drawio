@@ -78,7 +78,7 @@
           <mxGeometry x="820" y="450" width="370" height="200" as="geometry" />
         </mxCell>
 
-        <mxCell id="lt-mongo" value="MongoDB agent_memory (local fallback)&#xa;&#xa;collection: agent_memory&#xa;TTL index on ts (default 90 days)&#xa;query: find({userId, agentId})&#xa;.sort(ts: -1).limit(MEMORY_INJECT_TURNS)&#xa;&#xa;Used when AGENTCORE_MEMORY_STORE_ID&#xa;is not set (local dev)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#9673a6;fontSize=11;" vertex="1" parent="1">
+        <mxCell id="lt-mongo" value="MongoDB long-term hybrid memory&#xa;&#xa;collections: agent_memory_facts + chat_messages&#xa;TTL index on ts (default 90 days)&#xa;hybrid: $vectorSearch + $search BM25&#xa;RRF + recency decay + MMR&#xa;&#xa;Direct Mongo path for API-owned LTM reads/writes" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#9673a6;fontSize=11;" vertex="1" parent="1">
           <mxGeometry x="1210" y="450" width="370" height="200" as="geometry" />
         </mxCell>
 

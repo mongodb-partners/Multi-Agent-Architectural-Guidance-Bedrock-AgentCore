@@ -77,7 +77,7 @@ Observed handoff examples in live validation:
 
 ### What this means
 
-- Every runtime uses `MCP_SERVER_URL = AGENTCORE_GATEWAY_URL` (set by `deploy.sh`).
+- Every runtime uses `MCP_SERVER_URL = AGENTCORE_GATEWAY_URL` (set by `deploy-project.sh`).
 - The Strands `Agent` calls MCP tools (`mongodb_query`, `mongodb_vector_search`, `mongodb_aggregate`) over StreamableHTTP against the Gateway.
 - The Gateway authenticates the caller's Cognito JWT (forwarded from the Hono API in the AgentCore Runtime invocation payload) and routes the MCP call to its target Lambda (`lambda/mongodb-mcp/index.mjs`).
 - That Lambda executes the MongoDB driver call against Atlas via VPC + PrivateLink.
@@ -154,7 +154,7 @@ Notes:
 
 ### Deploy flow
 
-- `deploy/scripts/deploy.sh --auto-approve [--skip-docker]`
+- `./deploy/deploy-full-with-privatelink.sh --auto-approve [--skip-docker]`
 - Key phases:
   1. Terraform apply
   2. First-time seed check (idempotent)
@@ -172,8 +172,8 @@ Runtime-critical variables:
 - `AGENTCORE_RUNTIME_ARN_TROUBLESHOOTING`
 - `AGENTCORE_RUNTIME_ARN_ORDER_MANAGEMENT`
 - `AGENTCORE_RUNTIME_ARN_PRODUCT_RECOMMENDATION`
-- `AGENTCORE_GATEWAY_URL` and `MCP_SERVER_URL` (set by `deploy.sh`; gateway-only path)
-- `LAMBDA_MCP_FUNCTION_NAME` (used by `deploy.sh` to wire the Gateway target Lambda)
+- `AGENTCORE_GATEWAY_URL` and `MCP_SERVER_URL` (set by `deploy-project.sh`; gateway-only path)
+- `LAMBDA_MCP_FUNCTION_NAME` (used by `deploy-project.sh` to wire the Gateway target Lambda)
 - `AGENTCORE_MEMORY_STORE_ID`
 - `MONGODB_DB`
 - `AWS_REGION`
@@ -208,7 +208,7 @@ Validated on live EC2 endpoint:
 
 ## 11) Risks and Watch Items
 
-- Runtime env drift if manual updates are done outside `deploy.sh`
+- Runtime env drift if manual updates are done outside `deploy-project.sh`
 - Lambda cold-start latency may affect first tool call
 - Long generated responses can still vary by model behavior/prompting
 

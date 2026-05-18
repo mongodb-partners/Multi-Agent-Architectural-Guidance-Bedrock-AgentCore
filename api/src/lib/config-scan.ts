@@ -39,13 +39,14 @@ export type SkillListItem = {
 // ---------------------------------------------------------------------------
 
 type FileCache<T> = { value: T; mtimeMs: number };
+type VersionedCache<T> = { value: T; version: string };
 
 /** Cache for individual agent file parse results, keyed by absolute path. */
 const agentDetailCache = new Map<string, FileCache<AgentDetail | null>>();
 const agentPersonaCache = new Map<string, FileCache<string | undefined>>();
 
 /** Cache for the agents directory listing. */
-let agentListCache: FileCache<AgentListItem[]> | null = null;
+let agentListCache: VersionedCache<AgentListItem[]> | null = null;
 
 function fileMtimeMs(filePath: string): number {
   try {
@@ -55,20 +56,28 @@ function fileMtimeMs(filePath: string): number {
   }
 }
 
-function dirMtimeMs(dirPath: string): number {
+function agentsDirVersion(dirPath: string): string {
   try {
-    return fs.statSync(dirPath).mtimeMs;
+    return fs
+      .readdirSync(dirPath)
+      .filter((f) => f.endsWith(".agent.md"))
+      .sort()
+      .map((file) => `${file}:${fileMtimeMs(path.join(dirPath, file))}`)
+      .join("|");
   } catch {
-    return -1;
+    return "";
   }
 }
 
-/** Invalidate all config caches (used by tests that write new agent files). */
-export function clearConfigCacheForTests(): void {
+/** Invalidate all config caches after a config refresh. */
+export function clearConfigCache(): void {
   agentDetailCache.clear();
   agentPersonaCache.clear();
   agentListCache = null;
 }
+
+/** Invalidate all config caches (used by tests that write new agent files). */
+export const clearConfigCacheForTests = clearConfigCache;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -116,6 +125,56 @@ function parseAgentDetail(filePath: string): AgentDetail | null {
   };
 }
 
+function isOrchestrator(agentId: string): boolean {
+  return agentId === "orchestrator";
+}
+
+function handoffPromptForAgent(agent: AgentDetail): string {
+  const parts = [agent.description.trim()];
+  if (agent.skills.length > 0) parts.push(`Skills: ${agent.skills.join(", ")}.`);
+  if (agent.tools.length > 0) parts.push(`Tools: ${agent.tools.join(", ")}.`);
+  const personaExcerpt = loadAgentPersona(agent.id)?.replace(/\s+/g, " ").trim().slice(0, 1000);
+  if (personaExcerpt) parts.push(`Instructions excerpt: ${personaExcerpt}`);
+  return parts.filter(Boolean).join(" ");
+}
+
+function dynamicHandoffsForOrchestrator(orchestratorId = "orchestrator"): AgentDetail["handoffs"] {
+  return listAgents()
+    .filter((agent) => agent.id !== orchestratorId)
+    .map((agent) => getAgent(agent.id))
+    .filter((agent): agent is AgentDetail => Boolean(agent))
+    .map((agent) => ({
+      label: agent.name,
+      agent: agent.id,
+      prompt: handoffPromptForAgent(agent),
+    }));
+}
+
+function withDynamicHandoffs(detail: AgentDetail): AgentDetail {
+  if (!isOrchestrator(detail.id)) return detail;
+  return {
+    ...detail,
+    handoffs: dynamicHandoffsForOrchestrator(detail.id),
+  };
+}
+
+function withDynamicSpecialistRoster(agentId: string, persona: string | undefined): string | undefined {
+  if (!isOrchestrator(agentId) || !persona) return persona;
+  const handoffs = dynamicHandoffsForOrchestrator(agentId);
+  if (handoffs.length === 0) return persona;
+
+  const roster = handoffs
+    .map((h) => `- **${h.agent}** (${h.label}): ${h.prompt ?? ""}`.trim())
+    .join("\n");
+  return (
+    `${persona}\n\n` +
+    `## Available specialist agents (generated from config/agents)\n\n` +
+    `Route only to one of these current specialist agent IDs. This roster is generated ` +
+    `at runtime from \`config/agents/*.agent.md\`, so newly added specialists are ` +
+    `available without editing this file.\n\n${roster}`
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -124,8 +183,8 @@ export function listAgents(): AgentListItem[] {
   const dir = agentsDir();
   if (!fs.existsSync(dir)) return [];
 
-  const currentMtime = dirMtimeMs(dir);
-  if (agentListCache && agentListCache.mtimeMs === currentMtime) {
+  const currentVersion = agentsDirVersion(dir);
+  if (agentListCache && agentListCache.version === currentVersion) {
     return agentListCache.value;
   }
 
@@ -137,7 +196,7 @@ export function listAgents(): AgentListItem[] {
     if (detail) out.push({ id: detail.id, name: detail.name, description: detail.description });
   }
   const sorted = out.sort((a, b) => a.id.localeCompare(b.id));
-  agentListCache = { value: sorted, mtimeMs: currentMtime };
+  agentListCache = { value: sorted, version: currentVersion };
   logger.debug("[agents] list cache refreshed", { count: sorted.length });
   return sorted;
 }
@@ -149,13 +208,13 @@ export function getAgent(agentId: string): AgentDetail | undefined {
   const currentMtime = fileMtimeMs(target);
   const cached = agentDetailCache.get(target);
   if (cached && cached.mtimeMs === currentMtime) {
-    return cached.value ?? undefined;
+    return cached.value ? withDynamicHandoffs(cached.value) : undefined;
   }
 
   const detail = parseAgentDetail(target);
   agentDetailCache.set(target, { value: detail, mtimeMs: currentMtime });
   if (detail) logger.debug("[agents] detail cache refreshed", { agentId });
-  return detail ?? undefined;
+  return detail ? withDynamicHandoffs(detail) : undefined;
 }
 
 /** Persona (markdown body after YAML frontmatter), cached by file mtime. */
@@ -166,14 +225,14 @@ export function loadAgentPersona(agentId: string): string | undefined {
   const currentMtime = fileMtimeMs(target);
   const cached = agentPersonaCache.get(target);
   if (cached && cached.mtimeMs === currentMtime) {
-    return cached.value;
+    return withDynamicSpecialistRoster(agentId, cached.value);
   }
 
   const raw = fs.readFileSync(target, "utf8");
   const { content } = matter(raw);
   const persona = content.trim() || undefined;
   agentPersonaCache.set(target, { value: persona, mtimeMs: currentMtime });
-  return persona;
+  return withDynamicSpecialistRoster(agentId, persona);
 }
 
 export function listSkills(): SkillListItem[] {

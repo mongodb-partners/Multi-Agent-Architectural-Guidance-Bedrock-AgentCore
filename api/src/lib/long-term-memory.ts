@@ -17,12 +17,21 @@
  * false-positives would silently store wrong "facts" on every Bedrock blip.
  */
 
+import { createHash } from "node:crypto";
 import {
   BedrockAgentCoreClient,
   CreateEventCommand,
   ListEventsCommand,
 } from "@aws-sdk/client-bedrock-agentcore";
+import type { AnyBulkWriteOperation } from "mongodb";
 import { getMongoDb } from "../lib/mongo-client.ts";
+import { embedDocumentText, embedQueryText } from "./embed-query.ts";
+import {
+  hybridRetrieve,
+  type HybridCollectionSpec,
+  type MergedHit,
+} from "./vector-retrieval.ts";
+import { chatMessagesCollectionName } from "./chat-messages-collection.ts";
 import {
   extractFactsWithLlm,
   type FactCandidate,
@@ -160,7 +169,20 @@ type MemoryFact = {
   fact: string;
   source: "user" | "assistant";
   ts: string;
+  /** Stable content fingerprint used as the dedup key for `bulkWrite` upsert. */
+  factHash: string;
+  /** Voyage / Bedrock embedding for vector retrieval. Absent when no provider configured. */
+  embedding?: number[];
+  /** Provider id used to compute `embedding` (`"voyage"` | `"bedrock:<modelId>"`). */
+  embeddingModel?: string;
 };
+
+export function computeFactHash(userId: string, agentId: string, fact: string): string {
+  const normalized = fact.normalize("NFKC").trim().toLowerCase().replace(/\s+/g, " ");
+  return createHash("sha256")
+    .update(`${userId}|${agentId}|${normalized}`)
+    .digest("hex");
+}
 
 async function ensureTtlIndex(db: Awaited<ReturnType<typeof getMongoDb>>): Promise<void> {
   if (ttlIndexEnsured || !db) return;
@@ -246,6 +268,12 @@ type MongoWriteFactsResult = {
   accepted: string[];
   considered: FactCandidate[];
   inserted: number;
+  /** Number of facts that already existed (matched on `factHash`); deduped at upsert time. */
+  duplicates: number;
+  /** Number of facts embedded successfully (the rest were stored without `embedding`). */
+  embeddedCount: number;
+  /** Embedding model id (Voyage or `bedrock:<modelId>`). */
+  embeddingModel?: string;
   priorEntryCount: number | null;
   newEntryCount: number | null;
   ttlExpiresAt: string;
@@ -278,6 +306,8 @@ async function mongoWriteFacts(turn: MemoryTurn): Promise<MongoWriteFactsResult>
       accepted: [],
       considered: [],
       inserted: 0,
+      duplicates: 0,
+      embeddedCount: 0,
       priorEntryCount: null,
       newEntryCount: null,
       ttlExpiresAt,
@@ -294,6 +324,8 @@ async function mongoWriteFacts(turn: MemoryTurn): Promise<MongoWriteFactsResult>
       accepted,
       considered,
       inserted: 0,
+      duplicates: 0,
+      embeddedCount: 0,
       priorEntryCount: null,
       newEntryCount: null,
       ttlExpiresAt,
@@ -308,19 +340,60 @@ async function mongoWriteFacts(turn: MemoryTurn): Promise<MongoWriteFactsResult>
       accepted,
       considered,
       inserted: 0,
+      duplicates: 0,
+      embeddedCount: 0,
       priorEntryCount: null,
       newEntryCount: null,
       ttlExpiresAt,
       ...extractorMeta,
     };
   }
-  const docs: MemoryFact[] = accepted.map((fact) => ({
-    userId: turn.userId,
-    agentId: turn.agentId,
-    fact,
-    source: "user",
-    ts: turn.ts,
-  }));
+
+  // Embed each accepted fact in parallel using the document-mode embedder.
+  // Failures don't block persistence — the row is stored without `embedding`.
+  // Vector retrieval won't surface it until an embedding is present; lexical
+  // search still will, and the trace payload exposes the degraded write.
+  const embedSettled = await Promise.all(
+    accepted.map(async (fact) => {
+      const r = await embedDocumentText(fact);
+      if (!r.ok) {
+        logger.warn("[memory] fact embedding failed; storing fact without vector", {
+          userId: turn.userId,
+          agentId: turn.agentId,
+          code: r.code,
+          message: r.message,
+        });
+        return null;
+      }
+      return r;
+    }),
+  );
+  const embeddingModel = embedSettled.find((r) => r && r.ok)?.modelId;
+  const embeddedCount = embedSettled.filter((r) => r !== null).length;
+
+  const ops: AnyBulkWriteOperation<MemoryFact>[] = accepted.map((fact, i) => {
+    const factHash = computeFactHash(turn.userId, turn.agentId, fact);
+    const emb = embedSettled[i];
+    const doc: MemoryFact = {
+      userId: turn.userId,
+      agentId: turn.agentId,
+      fact,
+      source: "user",
+      ts: turn.ts,
+      factHash,
+      ...(emb && emb.ok
+        ? { embedding: emb.vector, embeddingModel: emb.modelId }
+        : {}),
+    };
+    return {
+      updateOne: {
+        filter: { userId: turn.userId, factHash },
+        update: { $setOnInsert: doc },
+        upsert: true,
+      },
+    };
+  });
+
   let priorEntryCount: number | null = null;
   let newEntryCount: number | null = null;
   try {
@@ -330,14 +403,24 @@ async function mongoWriteFacts(turn: MemoryTurn): Promise<MongoWriteFactsResult>
   } catch {
     /* best-effort */
   }
+
+  let inserted = 0;
+  let duplicates = 0;
   try {
-    await db.collection(FACTS_COLLECTION).insertMany(docs);
+    const res = await db
+      .collection<MemoryFact>(FACTS_COLLECTION)
+      .bulkWrite(ops, { ordered: false });
+    inserted = res.upsertedCount ?? 0;
+    duplicates = accepted.length - inserted;
   } catch (err) {
     return {
       outcome: "failed",
       accepted,
       considered,
       inserted: 0,
+      duplicates: 0,
+      embeddedCount,
+      embeddingModel,
       priorEntryCount,
       newEntryCount,
       ttlExpiresAt,
@@ -357,7 +440,10 @@ async function mongoWriteFacts(turn: MemoryTurn): Promise<MongoWriteFactsResult>
     outcome: "persisted",
     accepted,
     considered,
-    inserted: docs.length,
+    inserted,
+    duplicates,
+    embeddedCount,
+    embeddingModel,
     priorEntryCount,
     newEntryCount,
     ttlExpiresAt,
@@ -454,6 +540,8 @@ export async function writeLongTermMemory(
       accepted: [],
       considered: [],
       inserted: 0,
+      duplicates: 0,
+      embeddedCount: 0,
       priorEntryCount: null,
       newEntryCount: null,
       ttlExpiresAt: "",
@@ -536,8 +624,11 @@ export async function writeLongTermMemory(
     })),
     factsExtracted: includeValues ? result.accepted : result.accepted.map(() => "<redacted>"),
     collection: "agent_memory_facts",
-    op: result.outcome === "persisted" ? "insertMany" : "skip",
+    op: result.outcome === "persisted" ? "bulkWrite" : "skip",
     docsInserted: result.inserted,
+    duplicatesSkipped: result.duplicates,
+    embeddedCount: result.embeddedCount,
+    embeddingModel: result.embeddingModel,
     primaryBackend: "mongodb",
     primaryOutcome: result.outcome,
     primaryErrorClass: result.errorClass,
@@ -663,6 +754,364 @@ export async function readLongTermMemory(
     primaryFailed,
   });
   return null;
+}
+
+// ---------------------------------------------------------------------------
+// Hybrid retrieval (vector + lexical) — direct Mongo path for low latency
+// ---------------------------------------------------------------------------
+
+/** Indices created in db-seeding/seed-indexes.ts. Kept here so retrieval and
+ *  the seeder stay in lockstep. */
+const MEMORY_VECTOR_INDEX = "agent_memory_facts-vector-index";
+const MEMORY_LEXICAL_INDEX = "agent_memory_facts-text-index";
+const CHAT_MESSAGES_VECTOR_INDEX = "chat_messages-vector-index";
+const CHAT_MESSAGES_LEXICAL_INDEX = "chat_messages-text-index";
+
+function memoryTopK(): number {
+  return Math.max(1, Number(process.env.MEMORY_VECTOR_TOPK ?? 6));
+}
+
+function memoryFetchK(): number {
+  return Math.max(memoryTopK(), Number(process.env.MEMORY_VECTOR_FETCHK ?? 24));
+}
+
+function memoryNumCandidates(): number {
+  return Math.max(50, Number(process.env.MEMORY_VECTOR_NUM_CANDIDATES ?? 200));
+}
+
+function memoryRecencyHalfLifeDays(): number {
+  const raw = Number(process.env.MEMORY_RECENCY_HALFLIFE_DAYS ?? 30);
+  return Number.isFinite(raw) ? raw : 30;
+}
+
+function memoryMmrLambda(): number {
+  const raw = Number(process.env.MEMORY_MMR_LAMBDA ?? 0.7);
+  if (!Number.isFinite(raw)) return 0.7;
+  return Math.max(0, Math.min(1, raw));
+}
+
+function memoryMinScore(): number {
+  const raw = Number(process.env.MEMORY_MIN_SCORE ?? 0);
+  return Number.isFinite(raw) ? Math.max(0, raw) : 0;
+}
+
+function memoryWeightFacts(): number {
+  const raw = Number(process.env.MEMORY_WEIGHT_FACTS ?? 1.5);
+  return Number.isFinite(raw) ? raw : 1.5;
+}
+
+function memoryWeightChatMessages(): number {
+  const raw = Number(process.env.MEMORY_WEIGHT_CHAT_MESSAGES ?? 1);
+  return Number.isFinite(raw) ? raw : 1;
+}
+
+function memorySearchMaxTimeMs(): number {
+  const raw = Number(process.env.MEMORY_SEARCH_MAX_TIME_MS ?? 8000);
+  return Number.isFinite(raw) && raw > 0 ? raw : 8000;
+}
+
+function memoryEmbedTimeoutMs(): number {
+  const raw = Number(process.env.MEMORY_EMBED_TIMEOUT_MS ?? 5000);
+  return Number.isFinite(raw) && raw > 0 ? raw : 5000;
+}
+
+const FALLBACK_STOPWORDS = new Set([
+  "about",
+  "after",
+  "before",
+  "could",
+  "did",
+  "does",
+  "have",
+  "tell",
+  "that",
+  "this",
+  "what",
+  "when",
+  "where",
+  "with",
+  "you",
+  "your",
+]);
+
+function fallbackKeywordRegex(queryText: string): RegExp | undefined {
+  const parts = queryText
+    .toLowerCase()
+    .normalize("NFKC")
+    .match(/[a-z0-9]{4,}/g)
+    ?.map((w) => (w.length > 6 ? w.slice(0, 6) : w))
+    .filter((w) => !FALLBACK_STOPWORDS.has(w));
+  const unique = Array.from(new Set(parts ?? [])).slice(0, 8);
+  if (unique.length === 0) return undefined;
+  return new RegExp(unique.map((w) => escapeRegExp(w)).join("|"), "i");
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+async function fallbackReadFactsByKeyword(
+  db: NonNullable<Awaited<ReturnType<typeof getMongoDb>>>,
+  userId: string,
+  agentId: string | undefined,
+  queryText: string,
+  limit: number,
+): Promise<string[]> {
+  const regex = fallbackKeywordRegex(queryText);
+  const filter: Record<string, unknown> = { userId };
+  if (agentId) filter.agentId = agentId;
+  if (regex) filter.fact = regex;
+
+  let docs = await db
+    .collection<MemoryFact>(FACTS_COLLECTION)
+    .find(filter)
+    .sort({ ts: -1 })
+    .limit(limit)
+    .toArray();
+
+  // If there are no keyword hits (or no useful keyword), fall back to a small
+  // recent-facts window rather than injecting nothing after a vector/search
+  // failure. This preserves recall during Atlas index build/outage windows.
+  if (docs.length === 0 && regex) {
+    const recentFilter: Record<string, unknown> = { userId };
+    if (agentId) recentFilter.agentId = agentId;
+    docs = await db
+      .collection<MemoryFact>(FACTS_COLLECTION)
+      .find(recentFilter)
+      .sort({ ts: -1 })
+      .limit(limit)
+      .toArray();
+  }
+
+  return docs.map((d) => String(d.fact ?? "").trim()).filter(Boolean);
+}
+
+/**
+ * Build the formatted "Relevant prior context" block that chat.ts injects
+ * into the system prompt. Runs hybrid retrieval across `agent_memory_facts`
+ * (curated user facts) and `chat_messages` (raw conversation history).
+ *
+ * Returns `null` when:
+ *   - no `userId` is provided,
+ *   - MongoDB is not configured (no `MONGODB_URI`),
+ *   - the query embedding fails AND lexical search returns nothing,
+ *   - retrieval succeeds but yields zero hits.
+ *
+ * Emits exactly one trace event: `memory.scoped_read` (kept for UI compat)
+ * with the new hybrid retrieval payload fields populated. The agent-scoped
+ * filter is applied when an `agentId` is passed so per-agent facts are
+ * preferred without losing access to cross-agent user-level facts.
+ */
+export async function readLongTermMemoryContext(
+  userId: string,
+  queryText: string,
+  opts: { agentId?: string; sessionId?: string; priorTurns?: Array<{ role: string; content?: string }> } = {},
+): Promise<string | null> {
+  if (!userId) return null;
+  const trimmedQuery = (queryText ?? "").trim();
+  if (!trimmedQuery) return null;
+
+  const trace = currentTrace();
+  const includeValues = memoryTraceValuesEnabled();
+  const t0 = Date.now();
+  const topK = memoryTopK();
+  const fetchK = memoryFetchK();
+  const collectionsQueried = [FACTS_COLLECTION, chatMessagesCollectionName()];
+
+  const db = await getMongoDb();
+  if (!db) {
+    trace?.event("memory.scoped_read", {
+      scope: "scoped",
+      userId,
+      agentId: opts.agentId,
+      facts: [],
+      entryCount: 0,
+      bytesInjected: 0,
+      collectionsQueried,
+      injectionPoint: "system_prompt",
+      latencyMs: Date.now() - t0,
+      backend: "mongodb",
+      primaryFailed: true,
+      mode: "hybrid",
+      retrieval: {
+        topK,
+        fetchK,
+        vectorHits: 0,
+        lexicalHits: 0,
+        rrfMergedCount: 0,
+        perCollection: [],
+      },
+    });
+    return null;
+  }
+
+  // Embed the query in query-mode. If it fails or stalls, fall back to
+  // lexical-only so LTM recall never blocks the chat turn on SageMaker/Bedrock.
+  const embedTimeoutMs = memoryEmbedTimeoutMs();
+  const embedAbort = new AbortController();
+  const embedTimer = setTimeout(() => embedAbort.abort(), embedTimeoutMs);
+  const embed = await embedQueryText(trimmedQuery, embedAbort.signal)
+    .catch((err) => ({
+      ok: false as const,
+      code: "bedrock_failed" as const,
+      message: err instanceof Error ? err.message : String(err),
+    }))
+    .finally(() => clearTimeout(embedTimer));
+  const mode: "hybrid" | "lexical" = embed.ok ? "hybrid" : "lexical";
+  const queryVector = embed.ok ? embed.vector : [];
+  if (!embed.ok) {
+    logger.warn("[memory] query embedding failed; falling back to lexical-only retrieval", {
+      userId,
+      code: embed.code,
+      message: embed.message,
+    });
+  }
+
+  const collections: HybridCollectionSpec[] = [
+    {
+      collection: FACTS_COLLECTION,
+      vectorIndex: MEMORY_VECTOR_INDEX,
+      vectorPath: "embedding",
+      lexicalIndex: MEMORY_LEXICAL_INDEX,
+      lexicalPath: "fact",
+      filter: { userId },
+      weight: memoryWeightFacts(),
+    },
+    {
+      collection: chatMessagesCollectionName(),
+      vectorIndex: CHAT_MESSAGES_VECTOR_INDEX,
+      vectorPath: "embedding",
+      lexicalIndex: CHAT_MESSAGES_LEXICAL_INDEX,
+      lexicalPath: "content",
+      // Raw assistant replies often include denials or summaries that can
+      // poison later recall. For LTM retrieval, user-authored messages are the
+      // durable source of truth for conversational details.
+      filter: { userId, role: "user" },
+      weight: memoryWeightChatMessages(),
+    },
+  ];
+
+  let retrievalErr: { class: string; message: string } | undefined;
+  let items: MergedHit[] = [];
+  let meta: { mode: "hybrid" | "vector" | "lexical"; vectorHits: number; lexicalHits: number; rrfMergedCount: number; perCollection: Array<{ collection: string; vectorReturned: number; lexicalReturned: number; error?: string }> } = {
+    mode,
+    vectorHits: 0,
+    lexicalHits: 0,
+    rrfMergedCount: 0,
+    perCollection: [],
+  };
+  try {
+    const res = await hybridRetrieve(db, {
+      queryText: trimmedQuery,
+      queryVector,
+      collections,
+      fetchK,
+      topK,
+      numCandidates: memoryNumCandidates(),
+      minScore: memoryMinScore(),
+      mmrLambda: memoryMmrLambda(),
+      recencyHalfLifeDays: memoryRecencyHalfLifeDays(),
+      recencyTsField: "ts",
+      mode,
+      maxTimeMS: memorySearchMaxTimeMs(),
+    });
+    items = opts.sessionId
+      ? res.items.filter(
+          (hit) =>
+            hit.collection !== chatMessagesCollectionName() ||
+            String(hit.doc?.sessionId ?? "") !== opts.sessionId,
+        )
+      : res.items;
+    meta = res.meta;
+  } catch (err) {
+    retrievalErr = {
+      class: err instanceof Error ? err.constructor.name : "Error",
+      message: err instanceof Error ? err.message : String(err),
+    };
+    logger.warn("[memory] hybrid retrieval failed", {
+      userId,
+      error: retrievalErr.message,
+    });
+  }
+
+  let fallbackLines: string[] = [];
+  if (items.length === 0) {
+    try {
+      fallbackLines = (await fallbackReadFactsByKeyword(
+        db,
+        userId,
+        opts.agentId,
+        trimmedQuery,
+        topK,
+      )).map((fact) => `- ${fact}`);
+      if (fallbackLines.length > 0) {
+        logger.warn("[memory] hybrid retrieval returned no promptable facts; used scoped keyword fallback", {
+          userId,
+          agentId: opts.agentId,
+          count: fallbackLines.length,
+        });
+      }
+    } catch (err) {
+      logger.warn("[memory] fallback memory read failed", {
+        userId,
+        agentId: opts.agentId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  // Render block (curated facts as bullets; chat messages as quoted lines
+  // tagged with role + date so the model knows what it's looking at).
+  const lines: string[] = [];
+  for (const hit of items) {
+    const isFact = hit.collection === FACTS_COLLECTION;
+    if (isFact) {
+      const fact = String(hit.doc?.fact ?? "").trim();
+      if (fact) lines.push(`- ${fact}`);
+      continue;
+    }
+    const role = String(hit.doc?.role ?? "");
+    const content = String(hit.doc?.content ?? "").trim();
+    const ts = String(hit.doc?.timestamp ?? hit.doc?.ts ?? "");
+    if (!content) continue;
+    const date = ts ? ts.slice(0, 10) : "unknown";
+    lines.push(`- [${date} ${role}] ${content.slice(0, 400)}`);
+  }
+  if (lines.length === 0 && fallbackLines.length > 0) {
+    lines.push(...fallbackLines);
+  }
+  const formatted = lines.join("\n");
+  const bytesInjected = formatted ? Buffer.byteLength(formatted, "utf8") : 0;
+
+  trace?.event("memory.scoped_read", {
+    scope: "scoped",
+    userId,
+    agentId: opts.agentId,
+    facts: includeValues ? lines : lines.map(() => "<redacted>"),
+    entryCount: lines.length,
+    bytesInjected,
+    collectionsQueried,
+    injectionPoint: "system_prompt",
+    latencyMs: Date.now() - t0,
+    backend: "mongodb",
+    primaryFailed: Boolean(retrievalErr),
+    mode,
+    queryText: includeValues ? trimmedQuery : "<redacted>",
+    embeddingSource: embed.ok ? embed.source : undefined,
+    embeddingModel: embed.ok ? embed.modelId : undefined,
+    retrieval: {
+      topK,
+      fetchK,
+      vectorHits: meta.vectorHits,
+      lexicalHits: meta.lexicalHits,
+      rrfMergedCount: meta.rrfMergedCount,
+      perCollection: meta.perCollection,
+    },
+    retrievalErrorClass: retrievalErr?.class,
+    retrievalErrorMessage: retrievalErr?.message,
+  });
+
+  return formatted || null;
 }
 
 /**

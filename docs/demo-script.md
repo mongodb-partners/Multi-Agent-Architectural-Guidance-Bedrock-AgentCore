@@ -16,11 +16,11 @@ Ensure AWS creds are fresh and both services are running.
 
 ```bash
 # 1. Verify creds
-source env.sh && aws sts get-caller-identity
+source .env && aws sts get-caller-identity
 
 # 2. Start stack (kill old processes first)
 lsof -ti:3000,8501 | xargs kill -9 2>/dev/null
-source env.sh && source .env.live && export PATH=”$HOME/.bun/bin:$PATH”
+source .env && source .env.live && export PATH=”$HOME/.bun/bin:$PATH”
 cd api && nohup bun run dev > ../logs/api.log 2>&1 &
 ~/.venvs/multiagent-ui/bin/streamlit run ui/app.py --server.headless true &
 
@@ -161,7 +161,7 @@ Use this after a demo session so someone else can **run it again** and **explain
 
 | # | Topic | They should be able to… |
 |---|--------|-------------------------|
-| 1 | **Run the stack** | Source `env.sh` + `.env.live`, then start API (`bun run dev` in `api/`) and UI (`streamlit run app.py` in `ui/`) pointing at the deployed AgentCore Orchestrator runtime. |
+| 1 | **Run the stack** | Source `.env` + `.env.live`, then start API (`bun run dev` in `api/`) and UI (`streamlit run app.py` in `ui/`) pointing at the deployed AgentCore Orchestrator runtime. |
 | 2 | **Swarm vs single** | Toggle `ORCHESTRATOR_MODE=swarm` on the orchestrator runtime, pick **orchestrator** vs a specialist in the UI, and state what changes (handoffs vs direct agent). |
 | 3 | **Where config lives** | Open `config/agents/*.agent.md` (persona + `handoffs` + `tools`) and `config/skills/*/SKILL.md` (domain instructions + progressive disclosure). |
 | 4 | **Tool path** | All Mongo tools resolve to MCP calls against the MongoDB MCP AgentCore Runtime (`MONGODB_MCP_RUNTIME_ARN` / `MONGODB_MCP_RUNTIME_ENDPOINT`); Gateway remains for non-Mongo tools. |

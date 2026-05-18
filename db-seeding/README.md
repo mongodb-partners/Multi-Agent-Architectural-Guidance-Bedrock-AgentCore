@@ -10,11 +10,11 @@ MongoDB seed scripts for the Bedrock Multi-Agent demo stack. Each script is stan
 | `seed-products.ts` | `products` | 9 SKUs across home / electronics / outdoor |
 | `seed-troubleshooting.ts` | `troubleshooting_docs` | 7 diagnostic articles (power, connectivity, HW fault, firmware, smart-home) |
 | `seed-orders.ts` | `orders` | 12 orders covering all status variants per customer |
-| `seed-indexes.ts` | all + `agent_memory` + `chat_sessions` | Regular indexes + Atlas vector search indexes + TTL on agent_memory; **`chat_sessions`** unique `sessionId` + `userId`/`updatedAt` (collection name overridable via **`CHAT_SESSIONS_COLLECTION`**) |
-| `seed-embeddings.ts` | `products`, `troubleshooting_docs` | Backfills `embedding` field via Bedrock; requires AWS creds |
+| `seed-indexes.ts` | all + `agent_memory_facts` + `chat_sessions` + `chat_messages` | Regular indexes (including unique `{userId, factHash}` for write-side dedup) + Atlas **vector** indexes for `products`, `troubleshooting_docs`, `agent_memory_facts`, `chat_messages` + Atlas **Search (BM25)** indexes for the same four collections (used by `mongodb_hybrid_search` and the LTM hybrid retriever) + TTL on `agent_memory_facts`. Collection name overridable via **`CHAT_SESSIONS_COLLECTION`** and **`CHAT_MESSAGES_COLLECTION`**. |
+| `seed-embeddings.ts` | `products`, `troubleshooting_docs` | Backfills `embedding` field via Voyage or Bedrock; requires AWS creds. `agent_memory_facts` and `chat_messages` embeddings are populated at write time by the API and need no separate seed step. |
 | `seed-all.ts` | all (except embeddings) | Runs all of the above in order; run once per environment |
 
-**Runtime collection `chat_sessions`:** optional **`seed-indexes.ts`** creates indexes (including unique `sessionId`) so ops can provision ahead of the API. When the API runs with **`PERSIST_CHAT_SESSIONS=1`**, it still ensures the unique `sessionId` index on first use if missing (same database as `MONGODB_DB`).
+**Runtime collections `chat_sessions` + `chat_messages` + `agent_memory_facts`:** all three are also auto-ensured by the API on first write (`session-store.ts`, `chat-messages-collection.ts`, `long-term-memory.ts`). Seeding here is for cold starts where you want the indexes ready before the first request.
 
 ## Quick start
 
@@ -43,10 +43,12 @@ MONGODB_URI=... bun db-seeding/seed-products.ts
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `MONGODB_URI` | *(required)* | Atlas connection string |
-| `MONGODB_DB` | `<project>_<env>` (e.g. `mongodb_multiagent_dev`) | Target database name; project+env-derived by `env.sh` |
-| `MEMORY_TTL_DAYS` | `90` | TTL for `agent_memory` documents (days) |
-| `EMBEDDING_DIMENSIONS` | `1536` | Vector index dimensions (must match your embedding model) |
+| `MONGODB_DB` | `<project>_<env>` (e.g. `mongodb_multiagent_dev`) | Target database name; project+env-derived by `.env` |
+| `MEMORY_TTL_DAYS` | `90` | TTL for `agent_memory_facts` documents (days) |
+| `CHAT_MESSAGES_COLLECTION` | `chat_messages` | Override the vector-searchable chat message mirror name |
+| `EMBEDDING_DIMENSIONS` | `1024` | Vector index dimensions (must match your embedding model) |
 | `VECTOR_SIMILARITY` | `cosine` | `cosine` \| `euclidean` \| `dotProduct` |
+| `WAIT_FOR_ATLAS_SEARCH_INDEXES` | `0` | Set to `1` in deploy flows to wait until Atlas Search/vector indexes are queryable |
 | `EMBEDDING_MODEL_ID` | `amazon.titan-embed-text-v2:0` | Bedrock model for embeddings |
 | `EMBED_BATCH_DELAY_MS` | `200` | Delay between embedding API calls (throttle) |
 | `AWS_REGION` | `us-east-1` | Required for `seed-embeddings.ts` |
@@ -78,4 +80,4 @@ On a local/Community MongoDB server the script prints the JSON definition and sk
 
 ## When to run
 
-These seed scripts target the live Atlas deployment behind the AgentCore Gateway's MCP target Lambda. Run them once after `deploy/scripts/deploy.sh` provisions the cluster, and again whenever you change the `db-seeding/` fixtures.
+These seed scripts target the live Atlas deployment behind the AgentCore Gateway's MCP target Lambda. `deploy/scripts/deploy-project.sh` and `deploy/deploy-api.sh` now re-run `seed-indexes.ts` idempotently so newly added Atlas Search/vector indexes are reconciled even when data seeding is skipped.

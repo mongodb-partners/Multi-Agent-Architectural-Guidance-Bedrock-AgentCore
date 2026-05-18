@@ -52,13 +52,32 @@ export type EmbedErrorCode =
  * `EMBEDDING_MODEL_ID` is set. Bedrock failure is hard and surfaces as an
  * error to the caller.
  */
-export async function embedQueryText(text: string): Promise<EmbedResult> {
+export async function embedQueryText(text: string, abortSignal?: AbortSignal): Promise<EmbedResult> {
+  return embedWithInputType(text, "query", abortSignal);
+}
+
+/**
+ * Write-side embedder. Same provider order as `embedQueryText` (Voyage primary,
+ * Bedrock fallback) but passes `input_type: "document"` to Voyage so the
+ * resulting vectors land in the same semantic space as the offline seed
+ * pipeline (see `db-seeding/seed-embeddings.ts`). Use this for indexing/save
+ * paths — facts, chat messages — and `embedQueryText` for query-time embedding.
+ */
+export async function embedDocumentText(text: string, abortSignal?: AbortSignal): Promise<EmbedResult> {
+  return embedWithInputType(text, "document", abortSignal);
+}
+
+async function embedWithInputType(
+  text: string,
+  inputType: "query" | "document",
+  abortSignal?: AbortSignal,
+): Promise<EmbedResult> {
   const trimmed = (text ?? "").trim();
   if (!trimmed) {
     return {
       ok: false,
       code: "no_provider_configured",
-      message: "queryText is empty",
+      message: "embedding input text is empty",
     };
   }
 
@@ -66,17 +85,19 @@ export async function embedQueryText(text: string): Promise<EmbedResult> {
 
   if (isVoyageConfigured()) {
     try {
-      const r = await voyageGenerateEmbedding(trimmed, getVoyageEndpoint(), "query");
+      const r = await voyageGenerateEmbedding(trimmed, getVoyageEndpoint(), inputType, abortSignal);
       const v = extractEmbedding(r);
       if (v) {
         return { ok: true, source: "voyage", modelId: v.modelId ?? "voyage", vector: v.embedding };
       }
       logger.warn("[embed-query] voyage returned unrecognized shape, falling back", {
         sample: previewJson(r),
+        inputType,
       });
     } catch (err) {
       logger.warn("[embed-query] voyage call threw, falling back", {
         error: err instanceof Error ? err.message : String(err),
+        inputType,
       });
     }
     if (!bedrockModelId) {
@@ -99,7 +120,7 @@ export async function embedQueryText(text: string): Promise<EmbedResult> {
   }
 
   try {
-    const r = await bedrockGenerateEmbedding(trimmed, bedrockModelId);
+    const r = await bedrockGenerateEmbedding(trimmed, bedrockModelId, abortSignal);
     const v = extractEmbedding(r);
     if (v) {
       return { ok: true, source: "bedrock", modelId: v.modelId ?? bedrockModelId, vector: v.embedding };

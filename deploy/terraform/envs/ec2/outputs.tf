@@ -62,16 +62,27 @@ output "agentcore_memory_arn" { value = module.agentcore_memory.memory_arn }
 # directly through the dedicated AgentCore Runtime endpoint.
 output "agentcore_gateway_id" { value = module.agentcore_gateway.gateway_id }
 output "agentcore_gateway_url" { value = module.agentcore_gateway.gateway_mcp_url }
-# Agent Runtimes — orchestrator + 3 specialists
+# Agent Runtimes — orchestrator (hardcoded) + specialists (for_each map)
 output "acr_orchestrator_arn" { value = module.acr_orchestrator.runtime_arn }
 output "acr_orchestrator_id" { value = module.acr_orchestrator.runtime_id }
 output "acr_orchestrator_role_arn" { value = module.acr_orchestrator.runtime_role_arn }
-output "acr_troubleshooting_arn" { value = module.acr_troubleshooting.runtime_arn }
-output "acr_troubleshooting_id" { value = module.acr_troubleshooting.runtime_id }
-output "acr_order_management_arn" { value = module.acr_order_management.runtime_arn }
-output "acr_order_management_id" { value = module.acr_order_management.runtime_id }
-output "acr_product_recommendation_arn" { value = module.acr_product_recommendation.runtime_arn }
-output "acr_product_recommendation_id" { value = module.acr_product_recommendation.runtime_id }
+# Map outputs (preferred by deploy-agents.sh and the refactored deploy.sh)
+output "acr_specialist_arns" {
+  value       = { for k, m in module.acr_specialists : k => m.runtime_arn }
+  description = "Map of specialist agent id → AgentCore Runtime ARN. Consumed by deploy.sh / deploy-agents.sh to inject AGENTCORE_RUNTIME_ARN_<UPPER> env vars into the orchestrator runtime."
+}
+output "acr_specialist_ids" {
+  value       = { for k, m in module.acr_specialists : k => m.runtime_id }
+  description = "Map of specialist agent id → AgentCore Runtime ID. Consumed by deploy.sh / deploy-agents.sh to call update-agent-runtime per specialist."
+}
+# Legacy named outputs kept for backward compatibility — backed by the for_each map.
+# Empty string when the specialist is not present in var.specialist_agents.
+output "acr_troubleshooting_arn" { value = try(module.acr_specialists["troubleshooting"].runtime_arn, "") }
+output "acr_troubleshooting_id" { value = try(module.acr_specialists["troubleshooting"].runtime_id, "") }
+output "acr_order_management_arn" { value = try(module.acr_specialists["order-management"].runtime_arn, "") }
+output "acr_order_management_id" { value = try(module.acr_specialists["order-management"].runtime_id, "") }
+output "acr_product_recommendation_arn" { value = try(module.acr_specialists["product-recommendation"].runtime_arn, "") }
+output "acr_product_recommendation_id" { value = try(module.acr_specialists["product-recommendation"].runtime_id, "") }
 output "agentcore_runtime_deployment_mode" { value = var.agentcore_runtime_deployment_mode }
 output "agentcore_code_artifact_prefix" { value = var.agentcore_code_artifact_prefix }
 # Backward-compatible aliases (map old single-runtime outputs to orchestrator).

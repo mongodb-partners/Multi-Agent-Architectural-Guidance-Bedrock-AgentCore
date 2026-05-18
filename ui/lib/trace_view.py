@@ -12,6 +12,7 @@ Tier hierarchy:
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 from collections import defaultdict
@@ -37,6 +38,172 @@ def _as_int(value: Any, default: int = 0) -> int:
         return int(value or default)
     except (TypeError, ValueError):
         return default
+
+
+_TRIMMED_MARKER_RE = re.compile(r"^\[trimmed\s+([0-9]+)B\]$")
+
+
+def _render_jsonish(value: Any, *, empty_label: str | None = None) -> None:
+    """Render trace payload values without handing raw strings to st.json."""
+    if value is None:
+        if empty_label:
+            st.caption(empty_label)
+        return
+
+    if isinstance(value, (dict, list)):
+        st.json(value)
+        return
+
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            if empty_label:
+                st.caption(empty_label)
+            return
+
+        trimmed = _TRIMMED_MARKER_RE.match(text)
+        if trimmed:
+            st.caption(f"Large raw trace detail was shortened for display ({int(trimmed.group(1)):,} bytes).")
+            return
+
+        if text[0] in "{[":
+            try:
+                parsed = json.loads(text)
+            except json.JSONDecodeError:
+                parsed = None
+            if isinstance(parsed, (dict, list)):
+                st.json(parsed)
+                return
+
+        st.code(text, language=None)
+        return
+
+    st.code(str(value), language=None)
+
+
+def _trace_events_dropped(trace: dict) -> int:
+    summary = trace.get("summary") if isinstance(trace.get("summary"), dict) else {}
+    return max(_as_int(trace.get("eventsDropped")), _as_int(summary.get("eventsDropped")))
+
+
+def _trace_is_truncated(trace: dict) -> bool:
+    summary = trace.get("summary") if isinstance(trace.get("summary"), dict) else {}
+    return bool(trace.get("truncated") or summary.get("degraded") or _trace_events_dropped(trace))
+
+
+_VECTOR_SCORE_BINS = [
+    "0.00-0.19",
+    "0.20-0.39",
+    "0.40-0.59",
+    "0.60-0.79",
+    "0.80-1.00",
+]
+
+
+def _short_text(value: Any, max_chars: int = 180) -> str | None:
+    if value is None:
+        return None
+    text = value if isinstance(value, str) else json.dumps(value, default=str)
+    text = text.strip()
+    if not text:
+        return None
+    return text if len(text) <= max_chars else f"{text[:max_chars]}…"
+
+
+def _doc_sources(doc: dict) -> list[str]:
+    values: list[str] = []
+    for key in ("sources", "_sources", "source", "url", "uri", "path"):
+        raw = doc.get(key)
+        if isinstance(raw, list):
+            values.extend(_short_text(v, 80) for v in raw)
+        else:
+            values.append(_short_text(raw, 80))
+    seen: set[str] = set()
+    out: list[str] = []
+    for value in values:
+        if value and value not in seen:
+            seen.add(value)
+            out.append(value)
+    return out
+
+
+def _doc_preview_from_sample(doc: dict, rank: int, collection: str | None = None) -> dict:
+    fields = {}
+    for key in ("sku", "category", "brand", "status", "orderId", "customerEmail", "docId", "source", "url", "role"):
+        if key in doc:
+            fields[key] = doc.get(key)
+    title = next(
+        (_short_text(doc.get(key), 120) for key in ("title", "name", "sku", "code", "fact", "_id", "id", "docId") if doc.get(key)),
+        None,
+    )
+    snippet = next(
+        (_short_text(doc.get(key)) for key in ("content", "fact", "description", "summary", "body", "text", "answer") if doc.get(key)),
+        None,
+    )
+    return {
+        "rank": rank,
+        "collection": collection,
+        "id": _short_text(doc.get("_id") or doc.get("id") or doc.get("docId") or doc.get("messageId") or doc.get("sku"), 120),
+        "score": doc.get("_score"),
+        "title": title,
+        "snippet": snippet,
+        "sources": _doc_sources(doc),
+        "fields": fields,
+    }
+
+
+def _nearest_vector_result_payload(events: list[dict], vector_event: dict) -> dict:
+    try:
+        idx = events.index(vector_event)
+    except ValueError:
+        return {}
+    for candidate in reversed(events[:idx]):
+        if candidate.get("type") == "mongo.vector_search":
+            break
+        if candidate.get("type") == "mongo.result":
+            payload = _payload(candidate)
+            if payload.get("sampleDocs"):
+                return payload
+    return {}
+
+
+def _vector_document_previews(vector_payload: dict, result_payload: dict) -> list[dict]:
+    previews = vector_payload.get("documentPreviews")
+    if isinstance(previews, list) and previews:
+        return [p for p in previews if isinstance(p, dict)]
+    sample_docs = result_payload.get("sampleDocs") if isinstance(result_payload, dict) else None
+    if isinstance(sample_docs, list):
+        collection = vector_payload.get("collection")
+        return [
+            _doc_preview_from_sample(doc, i + 1, collection if isinstance(collection, str) else None)
+            for i, doc in enumerate(sample_docs[:5])
+            if isinstance(doc, dict)
+        ]
+    return []
+
+
+def _render_vector_document_previews(previews: list[dict]) -> None:
+    if not previews:
+        st.caption("No retrieved document/source preview was recorded for this vector search.")
+        return
+    st.caption("Retrieved sources / documents")
+    for i, doc in enumerate(previews[:5], 1):
+        rank = _as_int(doc.get("rank"), i)
+        title = _short_text(doc.get("title"), 120) or _short_text(doc.get("id"), 120) or "document"
+        score = doc.get("score")
+        score_label = f" · score {float(score):.3f}" if isinstance(score, (int, float)) else ""
+        collection = doc.get("collection")
+        collection_label = f" · `{collection}`" if collection else ""
+        st.markdown(f"**#{rank} {title}**{collection_label}{score_label}")
+        sources = doc.get("sources")
+        if isinstance(sources, list) and sources:
+            st.caption("Sources: " + ", ".join(f"`{src}`" for src in sources[:4]))
+        snippet = _short_text(doc.get("snippet"))
+        if snippet:
+            st.caption(snippet)
+        fields = doc.get("fields")
+        if isinstance(fields, dict) and fields:
+            _render_jsonish(fields)
 
 
 def _completed_span_count(events: list[dict]) -> int:
@@ -203,8 +370,10 @@ def render_summary_header(trace: dict) -> None:
         )
     if tiles:
         st.markdown("".join(tiles), unsafe_allow_html=True)
-    if summary.get("degraded"):
-        st.warning("This trace was byte-capped — some low-priority events were dropped.")
+    if _trace_is_truncated(trace):
+        dropped = _trace_events_dropped(trace)
+        suffix = f" ({dropped} event(s) dropped)" if dropped else ""
+        st.warning(f"This trace was byte-capped — some payload details were trimmed or events were dropped{suffix}.")
 
 
 # ---------------------------------------------------------------------------
@@ -288,7 +457,7 @@ def render_prompt_and_skills(events: list[dict]) -> None:
         activated = pp.get("activatedSkills") or []
         if activated:
             with st.expander(f"Prompt-injected skills ({len(activated)})", expanded=False):
-                st.json(activated)
+                _render_jsonish(activated)
     if skills:
         with st.expander(f"Skill activations ({len(skills)})", expanded=False):
             for s in skills:
@@ -391,7 +560,7 @@ def render_mongo_dashboard(events: list[dict]) -> None:
         return
     st.markdown('<div class="trace-section-title">MongoDB</div>', unsafe_allow_html=True)
     if intents:
-        with st.expander(f"Search intent ({len(intents)})", expanded=False):
+        with st.expander(f"Collections used ({len(intents)})", expanded=False):
             for intent in intents:
                 ip = _payload(intent)
                 st.markdown(f"- Collection `{ip.get('collection', '?')}`")
@@ -403,8 +572,8 @@ def render_mongo_dashboard(events: list[dict]) -> None:
                     st.caption(f"Skill instruction: {ip.get('skillInstructionSnippet')}")
     # Pair query+result by index — they're emitted in order.
     for i, q in enumerate(queries):
-        qp = q.get("payload") or {}
-        rp = (results[i].get("payload") if i < len(results) else None) or {}
+        qp = _payload(q)
+        rp = _payload(results[i]) if i < len(results) else {}
         emoji = {"ok": "✅", "empty": "∅", "error": "❌"}.get(rp.get("status", ""), "·")
         with st.expander(
             f"{emoji} #{i + 1} {qp.get('op')} on `{qp.get('collection')}` — "
@@ -416,7 +585,7 @@ def render_mongo_dashboard(events: list[dict]) -> None:
                 st.code(json.dumps(cfilter, indent=2, default=str), language="json")
             if rp.get("sampleDocs"):
                 st.caption("Sample documents")
-                st.json(rp["sampleDocs"])
+                _render_jsonish(rp["sampleDocs"])
             if rp.get("status") == "error":
                 st.error(rp.get("errorMessage") or "MongoDB error")
             # Match this query's diagnostic and plan, if present.
@@ -441,41 +610,85 @@ def render_mongo_dashboard(events: list[dict]) -> None:
                         st.caption(f"⚠️ {w.get('kind')} on `{w.get('field')}` — {w.get('detail')}")
 
     for v in vectors:
-        vp = v.get("payload") or {}
+        vp = _payload(v)
         embed_src = vp.get("embeddingSource") or "?"
         embed_model = vp.get("embeddingModelId")
         embed_label = f"{embed_src}" + (f" ({embed_model})" if embed_model else "")
+        collection_label = f" on `{vp.get('collection')}`" if vp.get("collection") else ""
+        scores = vp.get("scores")
+        hit_count = len(scores) if isinstance(scores, list) else 0
         with st.expander(
-            f"🧭 vector_search — embed via {embed_label} — {len(vp.get('scores') or [])} hit(s)",
+            f"🧭 vector_search{collection_label} — embed via {embed_label} — {hit_count} hit(s)",
             expanded=False,
         ):
-            st.caption(f"Query: {vp.get('queryText')}")
+            if vp.get("queryText") is not None:
+                query_text = vp.get("queryText")
+                if isinstance(query_text, str):
+                    st.caption(f"Query: {query_text}")
+                else:
+                    st.caption("Query")
+                    _render_jsonish(query_text)
             preview = vp.get("queryVectorPreview")
-            if preview:
+            if isinstance(preview, dict):
                 head = preview.get("head") or []
                 tail = preview.get("tail") or []
-                head_str = ", ".join(f"{x:.4f}" for x in head)
-                tail_str = ", ".join(f"{x:.4f}" for x in tail)
-                preview_str = f"{head_str}, …, {tail_str}" if tail else head_str
-                st.caption(f"Vector ({preview.get('length')} dims): [{preview_str}]")
+                if isinstance(head, list) and isinstance(tail, list):
+                    head_str = ", ".join(f"{float(x):.4f}" for x in head if isinstance(x, (int, float)))
+                    tail_str = ", ".join(f"{float(x):.4f}" for x in tail if isinstance(x, (int, float)))
+                    preview_str = f"{head_str}, …, {tail_str}" if tail_str else head_str
+                    if preview_str:
+                        st.caption(f"Vector ({preview.get('length')} dims): [{preview_str}]")
+                else:
+                    st.caption("Vector preview")
+                    _render_jsonish(preview)
+            elif preview:
+                st.caption("Vector preview")
+                _render_jsonish(preview)
             tune_bits = []
             if vp.get("limit") is not None:
                 tune_bits.append(f"limit={vp['limit']}")
             if vp.get("numCandidates") is not None:
                 tune_bits.append(f"numCandidates={vp['numCandidates']}")
             if vp.get("filter"):
-                tune_bits.append(f"filter={json.dumps(vp['filter'], default=str)}")
+                vfilter = vp["filter"]
+                if isinstance(vfilter, (dict, list)):
+                    tune_bits.append(f"filter={json.dumps(vfilter, default=str)}")
+                else:
+                    tune_bits.append("filter recorded separately")
             if tune_bits:
                 st.caption(" · ".join(tune_bits))
-            if vp.get("scoreSummary"):
+            if vp.get("filter") and not isinstance(vp.get("filter"), (dict, list)):
+                st.caption("Filter")
+                _render_jsonish(vp.get("filter"))
+            if isinstance(vp.get("scoreSummary"), dict):
                 ss = vp["scoreSummary"]
-                st.caption(f"Scores — min {ss.get('min', 0):.3f}, max {ss.get('max', 0):.3f}, avg {ss.get('avg', 0):.3f}")
-            if vp.get("histogram"):
+                try:
+                    st.caption(
+                        f"Scores — min {float(ss.get('min', 0)):.3f}, "
+                        f"max {float(ss.get('max', 0)):.3f}, avg {float(ss.get('avg', 0)):.3f}"
+                    )
+                except (TypeError, ValueError):
+                    st.caption("Score summary")
+                    _render_jsonish(ss)
+            elif vp.get("scoreSummary"):
+                st.caption("Score summary")
+                _render_jsonish(vp.get("scoreSummary"))
+            if isinstance(vp.get("histogram"), list) and vp.get("histogram"):
                 hist = vp["histogram"]
                 cols = st.columns(len(hist))
                 for j, count in enumerate(hist):
                     with cols[j]:
-                        st.metric(f"bin {j + 1}", count)
+                        label = _VECTOR_SCORE_BINS[j] if j < len(_VECTOR_SCORE_BINS) else f"bin {j + 1}"
+                        st.metric(label, count if isinstance(count, (int, float)) else str(count))
+                st.caption(
+                    "Explicit classification criteria: each retrieved score is bucketed by fixed similarity range; "
+                    "higher bins mean closer vector matches."
+                )
+            elif vp.get("histogram"):
+                st.caption("Score histogram")
+                _render_jsonish(vp.get("histogram"))
+            result_payload = _nearest_vector_result_payload(events, v)
+            _render_vector_document_previews(_vector_document_previews(vp, result_payload))
 
     if schemas:
         with st.expander(f"Schema samples ({len(schemas)})", expanded=False):
@@ -485,7 +698,7 @@ def render_mongo_dashboard(events: list[dict]) -> None:
                     f"**{sp.get('collection')}** — {sp.get('estimatedDocumentCount', 0)} estimated docs"
                 )
                 if sp.get("fields"):
-                    st.json([{"name": f.get("name"), "type": f.get("type")} for f in sp["fields"][:30]])
+                    _render_jsonish([{"name": f.get("name"), "type": f.get("type")} for f in sp["fields"][:30]])
 
 
 # ---------------------------------------------------------------------------
@@ -525,10 +738,10 @@ def render_tool_calls(events: list[dict]) -> None:
         with st.expander(f"🔧 `{name}` — {duration or 0} ms", expanded=False):
             if (info.get("start") or {}).get("input"):
                 st.caption("Input")
-                st.json((info["start"] or {}).get("input"))
+                _render_jsonish((info["start"] or {}).get("input"))
             if end.get("result") is not None:
                 st.caption("Result")
-                st.json(end["result"])
+                _render_jsonish(end["result"])
             if end.get("error"):
                 st.error(end["error"].get("message") or "Tool error")
     for h in https:
@@ -538,7 +751,7 @@ def render_tool_calls(events: list[dict]) -> None:
             f"{emoji} HTTP {hp.get('method')} {hp.get('url')}", expanded=False
         ):
             if hp.get("body"):
-                st.json(hp["body"])
+                _render_jsonish(hp["body"])
             if hp.get("responseSnippet"):
                 st.caption(f"Response (first {len(hp.get('responseSnippet', ''))} chars)")
                 st.code(hp["responseSnippet"], language=None)
@@ -552,9 +765,9 @@ def render_tool_calls(events: list[dict]) -> None:
             expanded=False,
         ):
             if mp.get("args") is not None:
-                st.json(mp["args"])
+                _render_jsonish(mp["args"])
             if mp.get("result") is not None:
-                st.json(mp["result"])
+                _render_jsonish(mp["result"])
             if mp.get("errorMessage"):
                 st.error(mp["errorMessage"])
 
@@ -595,7 +808,7 @@ def render_agentcore(events: list[dict]) -> None:
             if ip.get("errorMessage"):
                 st.error(f"{ip.get('errorClass')}: {ip.get('errorMessage')}")
             if ip.get("payload"):
-                st.json(ip["payload"])
+                _render_jsonish(ip["payload"])
     for nm in nested_meta:
         np = nm.get("payload") or {}
         st.caption(
@@ -704,10 +917,10 @@ def render_developer_details(trace: dict) -> None:
     with st.expander("Developer details — raw events", expanded=False):
         events = trace.get("events") or []
         st.caption(
-            f"{len(events)} event(s) · degraded={bool((trace.get('summary') or {}).get('degraded'))}"
-            f" · dropped={trace.get('eventsDropped', 0)}"
+            f"{len(events)} event(s) · degraded={_trace_is_truncated(trace)}"
+            f" · dropped={_trace_events_dropped(trace)}"
         )
-        st.json(events)
+        _render_jsonish(events)
 
 
 def render_trace_meta(trace: dict) -> None:

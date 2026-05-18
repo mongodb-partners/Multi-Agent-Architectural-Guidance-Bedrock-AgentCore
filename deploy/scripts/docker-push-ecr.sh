@@ -5,13 +5,13 @@
 #     and ${PROJECT_NAME}-ui-${ENVIRONMENT}
 #
 # Usage:
-#   source env.sh                                    # supplies PROJECT_NAME + ENVIRONMENT
+#   source .env                                      # supplies PROJECT_NAME + ENVIRONMENT
 #   export AWS_ACCOUNT_ID=123456789012
 #   # ECR_REPO_API / ECR_REPO_UI default to ${PROJECT_NAME}-{api,ui}-${ENVIRONMENT}
 #   TAG=$(git rev-parse --short HEAD) ./deploy/scripts/docker-push-ecr.sh
 #
 # This is a manual helper for ad-hoc pushes. The orchestrated path is
-# `deploy/scripts/deploy.sh` Phase 5.5, which reads the actual repo URLs from
+# `deploy/scripts/deploy-project.sh` Phase 5.5, which reads the actual repo URLs from
 # Terraform output instead of recomputing them here.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -19,8 +19,8 @@ cd "$ROOT"
 
 : "${AWS_ACCOUNT_ID:?Set AWS_ACCOUNT_ID}"
 : "${AWS_REGION:?Set AWS_REGION}"
-: "${PROJECT_NAME:?Set PROJECT_NAME (matches deploy.sh / env.sh)}"
-: "${ENVIRONMENT:?Set ENVIRONMENT (matches deploy.sh / env.sh)}"
+: "${PROJECT_NAME:?Set PROJECT_NAME (matches deploy-project.sh / .env)}"
+: "${ENVIRONMENT:?Set ENVIRONMENT (matches deploy-project.sh / .env)}"
 
 # Images are expected tagged locally as multi-agent-api:${SOURCE_TAG} / multi-agent-streamlit:${SOURCE_TAG}
 # (e.g. run deploy/scripts/docker-build.sh first; default SOURCE_TAG=local).

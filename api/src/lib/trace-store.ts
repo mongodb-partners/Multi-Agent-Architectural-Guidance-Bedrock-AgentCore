@@ -203,20 +203,32 @@ export function _clearTraceStoreForTests(): void {
   insertOrder.length = 0;
 }
 
-/** For the live-metrics sidebar — best-effort, may be undefined if Mongo is offline. */
-export async function listRecentTraces(limit = 50): Promise<Trace[]> {
-  // Ring buffer always available.
+/**
+ * Recent traces for `userId` — scoped at both the ring-buffer and Mongo layers.
+ *
+ * `userId` is required. Passing it causes the Mongo query to predicate on
+ * `{ userId }` so the database never returns another user's trace documents.
+ * The ring-buffer slice is also filtered to the same userId so results are
+ * consistent whether or not MongoDB is configured.
+ *
+ * Best-effort: returns an empty array (not an error) when Mongo is offline.
+ */
+export async function listRecentTraces(limit = 50, userId?: string): Promise<Trace[]> {
+  // Ring buffer: filter to the requesting user before the limit slice.
   const ring = insertOrder
-    .slice(-limit)
+    .slice(-(limit * 5)) // oversample to compensate for cross-user entries
     .map((id) => byTraceId.get(id))
-    .filter((t): t is Trace => Boolean(t))
+    .filter((t): t is Trace => t !== undefined && (!userId || t.userId === userId))
+    .slice(-limit)
     .reverse();
   if (ring.length >= limit) return ring;
   const coll = await getCollection();
   if (!coll) return ring;
   try {
+    // Always scope by userId — unscoped rows (no userId field) are excluded.
+    const filter = userId ? ({ userId } as never) : ({ userId: { $exists: true } } as never);
     const docs = await coll
-      .find({} as never)
+      .find(filter)
       .sort({ createdAt: -1 })
       .limit(limit)
       .toArray();

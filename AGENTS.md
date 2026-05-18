@@ -35,7 +35,7 @@ Authoritative plan: [`ACTION_PLAN.md`](ACTION_PLAN.md). Day-to-day checklist: [`
 | `config/environment.yaml` | Environment defaults (expand as needed) |
 | `config/demo-prompts.yaml` | Sidebar "Try a prompt" entries surfaced by the Streamlit UI |
 | `docs/` | Architecture, API, deployment, authoring guides |
-| `e2e-smoke/` | Post-deploy live AWS smoke tests; run `python3 e2e-smoke/post-deploy-smoke.py` after `deploy/scripts/deploy.sh` to verify health, KB PrivateLink, Voyage/SageMaker alignment, and all agents |
+| `e2e-smoke/` | Post-deploy live AWS smoke tests; run `python3 e2e-smoke/post-deploy-smoke.py` after `./deploy/deploy-full-with-privatelink.sh` to verify health, KB PrivateLink, Voyage/SageMaker alignment, and all agents |
 
 [`ACTION_PLAN.md`](ACTION_PLAN.md) still describes an `apps/` / `packages/` layout; the **implemented** layout is **`api/` + `ui/` + `deploy/`** until a workspace refactor. Prefer editing what exists; update `TASKS.md` when you add new top-level dirs.
 
@@ -61,8 +61,18 @@ cd ui && pip install -r requirements.txt && streamlit run app.py
 # Terraform (optional)
 cd deploy/terraform && terraform init && terraform validate
 
-# Post-deploy live smoke tests (after deploy/scripts/deploy.sh)
-source env.sh && python3 e2e-smoke/post-deploy-smoke.py
+# Post-deploy live smoke tests (after ./deploy/deploy-full-with-privatelink.sh)
+source .env && python3 e2e-smoke/post-deploy-smoke.py
+
+# Agent-only redeploy (when only config/agents/*.agent.md or config/skills/ changed)
+# Rebuilds + uploads the code artifact, targeted terraform apply on runtime modules,
+# re-injects dynamic env vars, refreshes the API agent cache, runs a minimal agent smoke.
+# Skips API/UI images and EC2 restart.
+./deploy/deploy-agents.sh [--auto-approve] [--skip-smoke]
+
+# API-only redeploy (when api/ code or API-bundled config changed)
+# Rebuilds/pushes only the API image, refreshes .env.live, restarts multiagent-api, runs backend smoke.
+./deploy/deploy-api.sh [--skip-docker] [--skip-smoke]
 
 # Docker — full stack (mock model + fixtures; no AWS required)
 docker compose up --build
@@ -96,7 +106,7 @@ The `memory.shortTerm` frontmatter flag is parsed but has no additional runtime 
 
 ### Long-term memory
 
-Keyed by **`userId`** (JWT `sub` claim) and **`agentId`**. Activated only when both are present. Implementation: `api/src/lib/long-term-memory.ts`.
+Keyed by **`userId`** (JWT `sub` claim) and **`agentId`**. Activated only when both are present. Implementation: `api/src/lib/long-term-memory.ts`. Retrieval is **hybrid vector + lexical** across `agent_memory_facts` (LLM-curated facts) and `chat_messages` (vector-searchable mirror of every chat message) fused with Reciprocal Rank Fusion; see `api/src/lib/vector-retrieval.ts` for the shared primitives. Writes embed each accepted fact with `embedDocumentText` and upsert on a `factHash` dedup key so re-stating a fact is idempotent.
 
 **Enable on an agent:**
 
@@ -111,17 +121,22 @@ memory:
 | Variable | Purpose |
 |----------|---------|
 | `MONGODB_URI` | MongoDB Atlas connection string |
-| `MONGODB_DB` | Database name. Project+env-derived (underscored) by `env.sh`, e.g. `mongodb_multiagent_dev` |
+| `MONGODB_DB` | Database name. Project+env-derived (underscored) by `.env`, e.g. `mongodb_multiagent_dev` |
 | `AUTH_JWKS_URI` | JWKS endpoint (e.g. Cognito pool). **Required** — `assertJwksAuthConfigured()` refuses to boot the API without it. |
 | `AUTH_ISSUER` | Token issuer URL (e.g. Cognito pool URL). **Required** for the same reason. |
-| `MEMORY_INJECT_TURNS` | Past turns to inject into system prompt (default: `5`) |
+| `MEMORY_INJECT_TURNS` | Past turns to inject (legacy reader fallback; default `5`) |
+| `MEMORY_VECTOR_TOPK` | Top-K hits after RRF + MMR (default `6`) |
+| `MEMORY_VECTOR_FETCHK` | Per-leg over-fetch before merge (default `24`) |
+| `MEMORY_VECTOR_NUM_CANDIDATES` | `$vectorSearch.numCandidates` width (default `200`) |
+| `MEMORY_SEARCH_MAX_TIME_MS` | Server/client timeout for each Atlas vector/BM25 aggregation leg (default `8000`) |
+| `MEMORY_EMBED_TIMEOUT_MS` | Query embedding timeout before lexical fallback (default `5000`) |
+| `MEMORY_RECENCY_HALFLIFE_DAYS` | Exponential recency decay half-life; `0` disables (default `30`) |
+| `MEMORY_MMR_LAMBDA` | 1 = pure relevance, 0 = pure diversity (default `0.7`) |
+| `MEMORY_WEIGHT_FACTS` | Multiplier on `agent_memory_facts` RRF score (default `1.5`) |
+| `MEMORY_WEIGHT_CHAT_MESSAGES` | Multiplier on `chat_messages` RRF score (default `1`) |
+| `CHAT_MESSAGES_COLLECTION` | Override the vector-searchable chat-message mirror name (default `chat_messages`) |
 
-**One-time MongoDB setup** (create TTL index):
-
-```js
-// mongosh or Atlas Data Explorer
-db.agent_memory.createIndex({ ts: 1 }, { expireAfterSeconds: 7776000 }) // 90 days
-```
+**One-time MongoDB setup:** run `bun db-seeding/seed-indexes.ts` once per environment. It creates the TTL index on `agent_memory_facts`, the unique `{ userId, factHash }` dedup index, vector indexes for `agent_memory_facts` / `chat_messages` / `products` / `troubleshooting_docs`, and the matching Atlas Search (BM25) indexes used by the hybrid retriever. The API also auto-ensures the TTL + base indexes lazily on first write — manual `createIndex` is only needed for clusters where the seeder cannot run.
 
 **Dev / local mode (`DEV_MOCK_BACKENDS=1`):** uses an in-process `Map` — no MongoDB or auth needed. Memory persists within one server run only. To exercise the full read/write flow locally, supply any non-empty Bearer token (JWKS not required when unset):
 
@@ -137,13 +152,17 @@ cd api && bun run dev
 **Data flow per turn:**
 
 1. `POST /chat` arrives → `userId = c.get("jwtPayload")?.sub`
-2. If `agent.memory.longTerm && userId`: call `readLongTermMemory(userId, agentId)` → formatted string
-3. Pass `memoryContext` into `buildSystemPrompt(…)` → prepended as `## Context from previous sessions`
-4. Stream completes successfully → `writeLongTermMemory(userId, agentId, userMessage, assistantReply)`
+2. If `agent.memory.longTerm && userId`: call `readLongTermMemoryContext(userId, message, { agentId })` → hybrid vector + BM25 retrieval across `agent_memory_facts` and `chat_messages`, fused with RRF (k=60), weighted, recency-decayed, MMR-diversified.
+3. Result is prepended to the system prompt as `## Relevant prior context` (alongside the auth-context block from `buildAuthenticatedUserContext`).
+4. Every chat message is mirrored to `chat_messages` with an embedding via a microtask, so persistence never sits on the TTFB clock. `DELETE /sessions/:id` cascade-deletes the mirror.
+5. Stream completes successfully → `writeLongTermMemory(userId, agentId, userMessage, assistantReply)` extracts facts with the LLM, embeds each fact, and `bulkWrite` upserts on `{ userId, factHash }` so duplicates collapse.
 
-**Collection schema:** `{ userId, agentId, userMessage, assistantReply, ts: ISOString }`
+**Collection schemas:**
 
-**Limits:** `userMessage` capped at 2 000 chars, `assistantReply` at 4 000 chars before storage. Mock store capped at 20 entries per `userId:agentId` key.
+- `agent_memory_facts`: `{ userId, agentId, fact, source, ts, factHash, embedding?, embeddingModel? }`
+- `chat_messages`: `{ messageId, sessionId, userId?, agentId?, role, content, timestamp, ts, embedding?, embeddingModel? }`
+
+**Limits:** `userMessage` capped at 2 000 chars, `assistantReply` at 4 000 chars before storage. Embedding failures are non-fatal — the row lands without `embedding` and the lexical (BM25) leg still surfaces it; vector recall returns when the embedding provider is healthy and a future write touches the same `factHash`.
 
 ---
 
@@ -154,18 +173,18 @@ cd api && bun run dev
 - Skill loading: `api/src/lib/skill-loader.ts` (activated skill bodies + `read_skill_resource`).
 - Agent metadata + persona: `api/src/lib/config-scan.ts`, `api/src/lib/prompt.ts`, `api/src/lib/schemas.ts`. `AgentDetail` exposes the `memory` object (shortTerm / longTerm flags).
 - System prompt assembly: `api/src/lib/prompt.ts` — `buildSystemPrompt(persona, discoveries, activated, memoryContext?)`. Long-term memory injected before skill sections.
-- Long-term memory: `api/src/lib/long-term-memory.ts` — `readLongTermMemory` / `writeLongTermMemory` against MongoDB `agent_memory` collection (or in-process mock map when **`DEV_MOCK_BACKENDS=1`**). Activated in `POST /chat` when agent has `memory.longTerm: true` and `userId` is known.
+- Long-term memory: `api/src/lib/long-term-memory.ts` — `readLongTermMemoryContext` (hybrid vector + BM25 retrieval across `agent_memory_facts` + `chat_messages`, fused with RRF / weights / recency / MMR) and `writeLongTermMemory` (LLM fact extraction → embed → `bulkWrite` upsert on `{ userId, factHash }`). Shared retrieval primitives live in `api/src/lib/vector-retrieval.ts`. Activated in `POST /chat` when agent has `memory.longTerm: true` and `userId` is known. AgentCore Memory Store remains the fallback when MongoDB writes fail. When `MONGODB_URI` is unset (e.g. **`DEV_MOCK_BACKENDS=1`**), `getMongoDb()` returns `null` and the retriever short-circuits to `null` memory context.
 - Base tools: `api/src/lib/base-tools.ts` (includes per-skill `http-tools.json` under `config/skills/<skill>/`).
 - HTTP tools metadata: `api/src/routes/http-tools-meta.ts` (`GET /http-tools`).
 - Auth: `api/src/middleware/auth.ts` + `api/src/lib/jwt-verify.ts` — JWKS auth is mandatory. `assertJwksAuthConfigured()` runs at boot in `api/src/index.ts` and refuses to start without **`AUTH_JWKS_URI`** + **`AUTH_ISSUER`**. Every protected request is required to carry a valid Bearer JWT verified with **`jose`**; JWT `sub` is stored in `c.get("jwtPayload")?.sub` and used for session userId scoping. There is no `ALLOW_UNAUTHENTICATED` / `REQUIRE_AUTH=false` bypass.
 - Session userId scoping: `api/src/lib/session-store.ts` carries `userId?`; `api/src/routes/sessions.ts` filters `GET /sessions` by user and enforces `DELETE` ownership.
 - Structured logging: `api/src/lib/logger.ts` — JSON lines, level controlled by **`LOG_LEVEL`** (`error`|`warn`|`info`|`debug`; default `info`). Used across config-scan, skill-loader, mongo-data, base-tools, app error handler, chat/swarm streams.
 - HTTP + SSE: `api/src/routes/chat.ts`.
-- Tracing: `api/src/lib/trace-types.ts` (event union), `api/src/lib/trace-collector.ts` (per-turn collector + cost summary + byte cap + nested splice), `api/src/lib/trace-context.ts` (`AsyncLocalStorage`), `api/src/lib/trace-store.ts` (ring buffer + MongoDB persistence with TTL), `api/src/routes/trace.ts` (`GET /traces/:id`, `GET /trace`, `GET /trace/mongo`, `GET /traces`). UI: `ui/lib/inline_summary.py` (per-turn card), `ui/pages/2_Trace_Viewer.py` (full dashboard).
+- Tracing: `api/src/lib/trace-types.ts` (event union), `api/src/lib/trace-collector.ts` (per-turn collector + cost summary + byte cap + nested splice), `api/src/lib/trace-context.ts` (`AsyncLocalStorage`), `api/src/lib/trace-store.ts` (ring buffer + MongoDB persistence with TTL), `api/src/routes/trace.ts` (`GET /traces/:id`, `GET /trace`, `GET /trace/mongo`, `GET /traces`). UI: `ui/lib/inline_summary.py` (per-turn card), `ui/pages/2_Trace_Viewer.py` (full dashboard). Streamlit chat surfaces vector-search source previews via browser-native `title=` tooltips; treat `mongo.vector_search.documentPreviews[]` as the user-visible source-preview contract.
 
-Still open (see `TASKS.md` + `DEV_STATUS.md`): **AgentCore** (gateway, durable sessions, code interpreter — SDK smoke-tested via `bun run validate:agentcore`); production Atlas vector / Bedrock KB / embedding backends (beyond **`DEV_MOCK_BACKENDS`** stubs); **persistent** sessions across restarts; **ECS/ALB** rollout automation beyond container images + scripts.
+Still open (see `TASKS.md` + `DEV_STATUS.md`): **AgentCore Code Interpreter** (skill scripts still run as `.mjs` imports); customer-scoped multi-tenancy on operational collections; browser/Streamlit E2E; CI/CD as the primary deploy path; **ECS/ALB** rollout automation beyond container images + scripts.
 
-Implemented: Streamlit **Cognito** (`streamlit-cognito-auth`, `ui/lib/cognito_gate.py`) — hosted UI or embedded login when `STREAMLIT_COGNITO_POOL_ID` + `CLIENT_ID` are set; Bearer = Cognito access token. TTL index on `agent_memory` is **auto-created** on the first production write (no manual step). `config/environment.yaml` is parsed by `api/src/lib/environment-config.ts` for `api.port` / `api.corsOrigins` defaults.
+Implemented: Streamlit **Cognito** (`streamlit-cognito-auth`, `ui/lib/cognito_gate.py`) — hosted UI or embedded login when `STREAMLIT_COGNITO_POOL_ID` + `CLIENT_ID` are set; Bearer = Cognito access token. TTL indexes on `agent_memory_facts` and `chat_messages` are auto-created on first production write; Atlas Vector Search + BM25 indexes for those collections are seeded by `db-seeding/seed-indexes.ts`. `config/environment.yaml` is parsed by `api/src/lib/environment-config.ts` for `api.port` / `api.corsOrigins` defaults.
 
 ---
 

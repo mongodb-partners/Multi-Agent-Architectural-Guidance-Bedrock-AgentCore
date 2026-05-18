@@ -6,7 +6,7 @@
 #
 # What it does:
 #   Phase 1 — Validate prereqs (aws, terraform, python3)
-#   Phase 2 — Source env.sh, verify AWS + Atlas credentials
+#   Phase 2 — Source .env, verify AWS + Atlas credentials
 #   Phase 3 — Bootstrap shared S3 state bucket (idempotent — same as deploy.sh)
 #   Phase 4 — Generate backend.hcl + terraform.tfvars for envs/network.
 #             State key:  ${SHARED_VPC_NAME}/${AWS_REGION}/network/terraform.tfstate
@@ -20,7 +20,7 @@
 # This script is run ONCE per (account, region) — multiple per-project
 # deploy.sh invocations all consume the same SSM-published values.
 #
-# State location uses SHARED_VPC_NAME from env.sh (default: "shared-network")
+# State location uses SHARED_VPC_NAME from .env (default: "shared-network")
 # so the path is operator-controlled, not hardcoded in terraform.
 
 set -euo pipefail
@@ -31,7 +31,7 @@ TF_ROOT="$REPO_ROOT/deploy/terraform"
 TF_DIR="$TF_ROOT/envs/network"
 BOOTSTRAP_DIR="$TF_ROOT/bootstrap"
 
-ENV_FILE="$REPO_ROOT/env.sh"
+ENV_FILE="$REPO_ROOT/.env"
 AUTO_APPROVE=false
 AWS_REGION="${AWS_REGION:-us-east-1}"
 ENVIRONMENT="${ENVIRONMENT:-dev}"
@@ -113,7 +113,7 @@ log "Phase 2 — Loading credentials from $ENV_FILE..."
 # shellcheck source=/dev/null
 source "$ENV_FILE"
 
-# Re-read env vars in case env.sh redefined them
+# Re-read env vars in case .env redefined them
 AWS_REGION="${AWS_REGION:-us-east-1}"
 ENVIRONMENT="${ENVIRONMENT:-dev}"
 PROJECT_NAME="${PROJECT_NAME:-multiagent-mongodb-framework}"
@@ -121,14 +121,14 @@ SHARED_VPC_NAME="${SHARED_VPC_NAME:-shared-network}"
 VPC_CIDR="${VPC_CIDR:-10.0.0.0/16}"
 
 export TF_VAR_atlas_project_id="${TF_VAR_atlas_project_id:-${TF_VAR_mongodb_atlas_project_id:-}}"
-[[ -n "${TF_VAR_atlas_project_id:-}" ]] || err "Atlas Project ID not set. Set TF_VAR_mongodb_atlas_project_id in env.sh"
+[[ -n "${TF_VAR_atlas_project_id:-}" ]] || err "Atlas Project ID not set. Set TF_VAR_mongodb_atlas_project_id in .env"
 
 export TF_VAR_atlas_public_key="${MONGODB_ATLAS_PUBLIC_KEY:-}"
 export TF_VAR_atlas_private_key="${MONGODB_ATLAS_PRIVATE_KEY:-}"
-[[ -n "${TF_VAR_atlas_public_key:-}" ]]  || err "MONGODB_ATLAS_PUBLIC_KEY not set in env.sh"
-[[ -n "${TF_VAR_atlas_private_key:-}" ]] || err "MONGODB_ATLAS_PRIVATE_KEY not set in env.sh"
+[[ -n "${TF_VAR_atlas_public_key:-}" ]]  || err "MONGODB_ATLAS_PUBLIC_KEY not set in .env"
+[[ -n "${TF_VAR_atlas_private_key:-}" ]] || err "MONGODB_ATLAS_PRIVATE_KEY not set in .env"
 
-[[ -n "${AWS_ACCESS_KEY_ID:-}" ]] || err "AWS_ACCESS_KEY_ID not set. Re-authenticate and update env.sh"
+[[ -n "${AWS_ACCESS_KEY_ID:-}" ]] || err "AWS_ACCESS_KEY_ID not set. Re-authenticate and update .env"
 ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text 2>/dev/null) \
   || err "AWS credentials invalid or expired."
 ok "AWS account: $ACCOUNT_ID"
@@ -262,5 +262,5 @@ echo ""
 echo "  SSM prefix      : /${SHARED_VPC_NAME}/${AWS_REGION}/"
 echo "  State key       : ${SHARED_VPC_NAME}/${AWS_REGION}/network/terraform.tfstate"
 echo ""
-echo "  Next: ./deploy/scripts/deploy.sh   (per-project ec2 deploy reads SSM here)"
+echo "  Next: ./deploy/deploy-full-with-privatelink.sh   (or ./deploy/scripts/deploy-project.sh directly)"
 sep

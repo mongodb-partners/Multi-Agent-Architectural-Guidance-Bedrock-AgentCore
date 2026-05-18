@@ -397,7 +397,7 @@ The **`GET /skills`** endpoint returns the discovery index (name + description) 
 To exercise a skill end-to-end, point the API at a deployed AgentCore Orchestrator runtime:
 
 ```bash
-source env.sh && source .env.live   # exports AGENTCORE_ORCHESTRATOR_ARN
+source .env && source .env.live   # exports AGENTCORE_ORCHESTRATOR_ARN
 export AWS_REGION=us-east-1
 cd api && bun run dev
 ```
@@ -434,7 +434,7 @@ Changes to `description` are high-impact — the orchestrator uses this field to
 ## Observability while authoring
 
 While you iterate, every chat turn against your skill produces a
-[trace](api-reference.md#13-tracing-endpoints). The Streamlit Trace
+[trace](api-reference.md#14-tracing-endpoints). The Streamlit Trace
 Viewer shows, per turn:
 
 - `skill.activated` — which skills were loaded into the prompt (so you can
@@ -460,6 +460,6 @@ and env knobs (`MONGO_TRACE_DIAGNOSTIC`, `MONGO_TRACE_EXPLAIN`, etc.).
 
 - [Configuration Guide](configuration-guide.md) — how to wire skills to agents
 - [Architecture](architecture.md) — how the skill loader works at runtime
-- [API reference](api-reference.md#13-tracing-endpoints) — trace event types
+- [API reference](api-reference.md#14-tracing-endpoints) — trace event types
 - [Demo / trace UI guide](demo-mode-guide.md) — UI walkthrough
 - [agentskills.io specification](https://agentskills.io/specification) — upstream specification

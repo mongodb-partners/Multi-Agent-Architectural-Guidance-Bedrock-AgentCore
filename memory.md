@@ -71,7 +71,7 @@ Two more field-name mismatches that hid the bug for a while: `mongo.result.docCo
 3. **`run-chat-stream.ts` constructs `Agent` without MCP tools.** `toolsForAgent(...)` returns only in-process tools by design (Mongo tools come from the gateway). A `new Agent({ tools: toolsForAgent(...) })` ships a Mongo-less agent. Both `run-chat-stream.ts` and `create-strands-agent.ts` must `await getMcpTools()` and spread the result into `tools`. **Pinned by:** the same `agent-construction-invariants.test.ts` — every `new Agent(` site in `api/src` must be on an allow-list and must reference `getMcpTools(`. A new `Agent` constructor anywhere else fails the test until the author justifies it.
 4. **Lambda `parseEvent` envelope mismatch.** AgentCore Gateway invokes the Lambda with the raw tool args as `event` and the prefixed tool name on `context.clientContext.custom.bedrockAgentCoreToolName` (lowercase `custom` on Node — confirmed empirically; AWS docs only show the Python `client_context.custom["…"]` shape). Probing only the uppercase `Custom` field — or only matching `event.toolName` / `event.tool_name` / `event.body` — falls through to `throw new Error("Unrecognized event shape")` and the gateway returns 502. **Pinned by:** `tests/unit/lambda-parse-event.test.ts` (the lowercase-`custom` case is the regression test).
 
-**Smoke test that catches all four:** `deploy.sh` Phase 8 runs a real `/chat` against ORD-1003 and asserts the response contains `Compact Widget` / `SKU-1` / `29.99` (fields that only exist if the Mongo tool actually returned the seeded order document). SSE-event-presence-only smoke would pass on all four failure modes.
+**Smoke test that catches all four:** `deploy.sh` Phase 8 runs a real `/chat` against ORD-2002 and asserts the trace summary includes Mongo/MCP counters plus a response containing `TRK-2002-US` / `Pro Gadget` / `89.99` (fields that only exist if the Mongo tool actually returned the seeded order document). Avoid reusing the fixed smoke user's frequently discussed ORD-1003 return fixture here — long-term memory can make the model answer from remembered context and skip the Mongo tool. SSE-event-presence-only smoke would pass on all four failure modes.
 
 **Code:** `api/src/agent-runtime-code.ts` (1), `api/src/adapters/mongodb-mcp-client.ts` (2), `api/src/lib/run-chat-stream.ts` + `api/src/lib/create-strands-agent.ts` (3), `lambda/mongodb-mcp/index.mjs` (4).
 
@@ -167,6 +167,20 @@ A `memory.long_term_skip` trace event with `reason: "llm_extractor_failed"` is e
 **Regression check:** After a fresh deploy, run two consecutive `/chat` turns against an agent with `memory.longTerm: true` (e.g. `product-recommendation`). Turn 1 says "I have a peanut allergy". Wait 5s. Turn 2 (same Cognito user, new sessionId) asks "what allergies do I have?". The reply must mention "peanut". If it says "I don't have any information", check `docker logs multiagent-api --tail 200 | grep "LLM fact extractor failed"` first — the issue is almost always model access, not the wiring.
 
 **Code:** `api/src/lib/llm-fact-extractor.ts` (`DEFAULT_LLM_EXTRACTOR_MODEL_ID`). Operational override: `MEMORY_EXTRACTION_MODEL_ID` env var on the API process (not the AgentCore Runtime — the extractor runs in the API container).
+
+---
+
+## AgentCore Gateway — `gateway_iam_role {}` does not work for `mcpServer` targets (TF provider gap)
+
+**Symptom:** `terraform apply` on `aws_bedrockagentcore_gateway_target` with `credential_provider_configuration { gateway_iam_role {} }` fails immediately with `ValidationException: IamCredentialProvider is required for mcpServer targets using IAM authentication`.
+
+**Cause:** AWS Terraform provider ≤ 6.45.0 emits an incomplete API payload for `gateway_iam_role {}` — it sends `credentialProviderType: GATEWAY_IAM_ROLE` without the required nested `credentialProvider.iamCredentialProvider.{service, region}` fields. The lambda target variant is unaffected. This is an upstream provider bug.
+
+**Workaround (in place):** `modules/agentcore-gateway/main.tf` uses `null_resource` + `local-exec` to call `aws bedrock-agentcore-control create-gateway-target` directly with the correct JSON shape. The script is idempotent (checks for existing target by name before creating).
+
+**Rule:** When upgrading the AWS provider, test `terraform apply -target=module.agentcore_gateway` against a real endpoint. If the provider has added `service` + `region` attributes to the `gateway_iam_role` block, replace the `null_resource` with the native `aws_bedrockagentcore_gateway_target` resource and remove the `null_resource` workaround.
+
+**Files:** `deploy/terraform/modules/agentcore-gateway/main.tf` (lines 220–279), `docs/analysis/deploy-test-results.md` §4.1.
 
 ---
 

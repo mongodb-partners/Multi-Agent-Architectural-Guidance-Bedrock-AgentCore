@@ -8,7 +8,7 @@
 #   ./deploy/scripts/destroy.sh --mode ec2     --with-bootstrap   # also deletes shared S3
 #
 # What it does:
-#   1. Sources env.sh (or --env-file) for AWS + Atlas creds
+#   1. Sources .env (or --env-file) for AWS + Atlas creds
 #   2. Writes backend.hcl + terraform.tfvars for the chosen env
 #   3. terraform init -backend-config=backend.hcl
 #   4. terraform destroy (the chosen env's state)
@@ -33,14 +33,14 @@ TF_ROOT="$REPO_ROOT/deploy/terraform"
 BOOTSTRAP_DIR="$TF_ROOT/bootstrap"
 REPORTS_DIR="$REPO_ROOT/destroy-reports"
 
-ENV_FILE="$REPO_ROOT/env.sh"
+ENV_FILE="$REPO_ROOT/.env"
 MODE=""
 AUTO_APPROVE=false
 WITH_BOOTSTRAP=false
 AWS_REGION="${AWS_REGION:-us-east-1}"
 ENVIRONMENT="${ENVIRONMENT:-dev}"
 PROJECT_NAME="${PROJECT_NAME:-multiagent-mongodb-framework}"
-# DB user + DB name follow the same project+env convention as env.sh so a
+# DB user + DB name follow the same project+env convention as .env so a
 # stale ATLAS_DB_USER / ATLAS_DB_NAME from a prior shell does not clobber the
 # tfvars file. Mongo identifiers can't contain "-", so underscore-normalize.
 _PROJECT_SLUG="${PROJECT_NAME//-/_}"
@@ -69,8 +69,8 @@ done
 TF_DIR="$TF_ROOT/envs/$MODE"
 [[ -d "$TF_DIR" ]] || { echo "✗ env dir not found: $TF_DIR" >&2; exit 1; }
 
-# STATE_KEY is computed *after* env.sh is sourced (see below) so that any
-# AWS_REGION / ENVIRONMENT / SHARED_VPC_NAME override in env.sh wins over the
+# STATE_KEY is computed *after* .env is sourced (see below) so that any
+# AWS_REGION / ENVIRONMENT / SHARED_VPC_NAME override in .env wins over the
 # pre-source defaults declared at the top of this file.
 
 log()  { echo "  [destroy:$MODE] $*"; }
@@ -98,10 +98,10 @@ log "Loading credentials from $ENV_FILE..."
 source "$ENV_FILE"
 
 export TF_VAR_atlas_db_password="${TF_VAR_atlas_db_password:-${TF_VAR_mongodb_password:-}}"
-[[ -n "${TF_VAR_atlas_db_password:-}" ]] || err "Atlas DB password not set in env.sh"
+[[ -n "${TF_VAR_atlas_db_password:-}" ]] || err "Atlas DB password not set in .env"
 
 export TF_VAR_atlas_project_id="${TF_VAR_atlas_project_id:-${TF_VAR_mongodb_atlas_project_id:-}}"
-[[ -n "${TF_VAR_atlas_project_id:-}" ]] || err "Atlas Project ID not set in env.sh"
+[[ -n "${TF_VAR_atlas_project_id:-}" ]] || err "Atlas Project ID not set in .env"
 
 export TF_VAR_atlas_public_key="${MONGODB_ATLAS_PUBLIC_KEY:-}"
 export TF_VAR_atlas_private_key="${MONGODB_ATLAS_PRIVATE_KEY:-}"
@@ -113,9 +113,9 @@ ok "AWS account: $ACCOUNT_ID"
 
 SHARED_BUCKET="${PROJECT_NAME}-${ENVIRONMENT}-${ACCOUNT_ID}"
 
-# Re-default SHARED_VPC_NAME after sourcing env.sh so a missing env.sh entry
+# Re-default SHARED_VPC_NAME after sourcing .env so a missing .env entry
 # falls back to the canonical value, and recompute STATE_KEY from post-source
-# variables so an env.sh override of ENVIRONMENT / AWS_REGION / SHARED_VPC_NAME
+# variables so a .env override of ENVIRONMENT / AWS_REGION / SHARED_VPC_NAME
 # is honored.
 SHARED_VPC_NAME="${SHARED_VPC_NAME:-shared-network}"
 case "$MODE" in

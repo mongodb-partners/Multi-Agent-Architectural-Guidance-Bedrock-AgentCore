@@ -72,6 +72,7 @@ function getEmbedClient(): BedrockRuntimeClient {
 export async function bedrockGenerateEmbedding(
   text: string,
   modelId: string,
+  abortSignal?: AbortSignal,
 ): Promise<JSONValue> {
   try {
     let body: string;
@@ -94,7 +95,7 @@ export async function bedrockGenerateEmbedding(
       accept: "application/json",
     });
 
-    const resp = await getEmbedClient().send(cmd);
+    const resp = await getEmbedClient().send(cmd, abortSignal ? { abortSignal } : undefined);
     const decoded = new TextDecoder().decode(resp.body);
     const parsed = JSON.parse(decoded) as Record<string, unknown>;
 

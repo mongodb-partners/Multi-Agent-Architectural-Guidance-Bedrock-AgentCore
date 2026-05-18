@@ -39,6 +39,7 @@ import { logger } from "../lib/logger.ts";
 import { appendTraceContextHeaders } from "../lib/otel.ts";
 import { currentTrace } from "../lib/trace-context.ts";
 import { currentGatewayJwt } from "../lib/gateway-auth-context.ts";
+import { currentUserId } from "../lib/user-id-context.ts";
 import { embedQueryText, previewVector, type EmbedResult } from "../lib/embed-query.ts";
 
 // Derive the tool type from the SDK without relying on McpTool being re-exported.
@@ -134,11 +135,56 @@ export class AliasedMcpTool extends Tool {
 //      gracefully fall back to keyword search via `mongodb_query`.
 // ---------------------------------------------------------------------------
 
-/** Default Atlas vector index per known seeded collection. */
+/**
+ * Default Atlas vector index per known seeded collection.
+ *
+ * The four entries here mirror `db-seeding/seed-indexes.ts`. Adding a new
+ * vector-searchable collection requires:
+ *
+ *   1. Append the embedding field at write time (see e.g. `chat_messages` and
+ *      `agent_memory_facts` write paths).
+ *   2. Create the Atlas Vector Search index named `<collection>-vector-index`
+ *      via `seed-indexes.ts`.
+ *   3. Add an entry here so the API-side wrapper can default the `index`
+ *      argument the model is not required to know.
+ *   4. (Hybrid mode) add a matching `<collection>-text-index` Atlas Search
+ *      index and an entry in `DEFAULT_LEXICAL_INDEX_BY_COLLECTION` below.
+ */
 const DEFAULT_VECTOR_INDEX_BY_COLLECTION: Record<string, string> = {
   products: "products-vector-index",
   troubleshooting_docs: "troubleshooting-vector-index",
+  agent_memory_facts: "agent_memory_facts-vector-index",
+  chat_messages: "chat_messages-vector-index",
 };
+
+/**
+ * Default Atlas Search (BM25) index + indexed text path for hybrid mode. Used
+ * when the model (or the wrapper itself, for internal callers) requests
+ * `hybrid: true`. Each entry pairs the lexical index name with the document
+ * field that the index covers — both must agree with `seed-indexes.ts`.
+ */
+const DEFAULT_LEXICAL_INDEX_BY_COLLECTION: Record<
+  string,
+  { index: string; path: string }
+> = {
+  products: { index: "products-text-index", path: "name" },
+  troubleshooting_docs: { index: "troubleshooting-text-index", path: "title" },
+  agent_memory_facts: { index: "agent_memory_facts-text-index", path: "fact" },
+  chat_messages: { index: "chat_messages-text-index", path: "content" },
+};
+
+/**
+ * Runtime-only MCP tools that the API-side wrapper invokes on behalf of an
+ * agent-visible tool (e.g. the hybrid retrieval helper). They must be
+ * filtered out of `tools/list` so the agent never sees them; the wrapper
+ * reaches them through its own `McpClient` handle.
+ */
+const INTERNAL_ONLY_MCP_TOOL_NAMES = new Set(["mongodb_hybrid_search"]);
+
+export function isInternalOnlyMcpTool(name: string): boolean {
+  const stripped = stripGatewayTargetPrefix(name) ?? name;
+  return INTERNAL_ONLY_MCP_TOOL_NAMES.has(stripped);
+}
 
 /**
  * Bytes the wrapper will record per `documents` sample / vector preview before
@@ -146,6 +192,8 @@ const DEFAULT_VECTOR_INDEX_BY_COLLECTION: Record<string, string> = {
  * `mongo.vector_search` events fit alongside `mongo.result` for the same call.
  */
 const MAX_TRACE_SCORES = 25;
+const MAX_TRACE_DOCUMENT_PREVIEWS = 5;
+const MAX_TRACE_DOC_FIELD_CHARS = 180;
 
 /** Public-facing input schema for `mongodb_vector_search`. The McpTool's own
  *  schema (declared inline in `deploy/terraform/modules/agentcore-gateway/main.tf`
@@ -157,27 +205,32 @@ export const VECTOR_SEARCH_TOOL_SPEC: ToolSpec = {
   description:
     "Run an Atlas $vectorSearch on a MongoDB collection. Pass a natural-language `queryText` " +
     "and the embedding is computed server-side (Voyage AI primary, Bedrock fallback). " +
-    "For known collections (`products`, `troubleshooting_docs`) the vector index is inferred " +
-    "from the collection name; pass `indexName` to override. Returns the matching documents " +
-    "with a `_score` field per hit.",
+    "For known collections (`products`, `troubleshooting_docs`, `agent_memory_facts`, " +
+    "`chat_messages`) the vector index is inferred from the collection name; pass `indexName` " +
+    "to override. Set `hybrid: true` to fuse vector + Atlas Search BM25 results with " +
+    "Reciprocal Rank Fusion for higher recall on rare keywords. Returns the matching " +
+    "documents with a `_score` field per hit (RRF score in hybrid mode).",
   inputSchema: {
     type: "object",
     properties: {
       collection: {
         type: "string",
-        description: "MongoDB collection name (e.g. `products`, `troubleshooting_docs`).",
+        description:
+          "MongoDB collection name (e.g. `products`, `troubleshooting_docs`, `agent_memory_facts`, `chat_messages`).",
       },
       queryText: {
         type: "string",
         description:
           "Natural-language query. Embedded server-side using the configured embedding provider. " +
-          "Prefer this over `queryVector`.",
+          "Prefer this over `queryVector`. Required for `hybrid: true`.",
       },
       indexName: {
         type: "string",
         description:
           "Optional Atlas vector index name. Defaults: products → products-vector-index, " +
-          "troubleshooting_docs → troubleshooting-vector-index.",
+          "troubleshooting_docs → troubleshooting-vector-index, " +
+          "agent_memory_facts → agent_memory_facts-vector-index, " +
+          "chat_messages → chat_messages-vector-index.",
       },
       limit: {
         type: "integer",
@@ -188,7 +241,7 @@ export const VECTOR_SEARCH_TOOL_SPEC: ToolSpec = {
       numCandidates: {
         type: "integer",
         description:
-          "Number of nearest-neighbor candidates to consider before applying `limit` (default 100, max 1000).",
+          "Number of nearest-neighbor candidates to consider before applying `limit` (default 200, max 1000).",
         minimum: 1,
         maximum: 1000,
       },
@@ -208,6 +261,37 @@ export const VECTOR_SEARCH_TOOL_SPEC: ToolSpec = {
         description:
           "Pre-computed embedding. Advanced; usually omit and pass `queryText` instead.",
       },
+      hybrid: {
+        type: "boolean",
+        description:
+          "When true, fuse $vectorSearch (semantic) with an Atlas $search BM25 leg over the " +
+          "collection's text-indexed field and merge with Reciprocal Rank Fusion. Lexical index " +
+          "and path are inferred for known collections; pass `lexicalIndex` / `lexicalPath` to " +
+          "override. Requires `queryText`.",
+      },
+      lexicalIndex: {
+        type: "string",
+        description:
+          "Override the per-collection Atlas Search index used by the lexical leg in hybrid mode.",
+      },
+      lexicalPath: {
+        type: "string",
+        description:
+          "Override the document field path searched by the lexical leg in hybrid mode.",
+      },
+      fetchK: {
+        type: "integer",
+        description:
+          "Per-leg over-fetch before RRF merge in hybrid mode (default 32; clamped server-side).",
+        minimum: 1,
+        maximum: 100,
+      },
+      minScore: {
+        type: "number",
+        description:
+          "Optional minimum score floor. In vector mode this filters by raw cosine score; in " +
+          "hybrid mode it filters by the merged RRF score.",
+      },
     },
     required: ["collection"],
   },
@@ -223,6 +307,10 @@ export type VectorSearchTransform =
         | { source: "model_supplied"; modelId: undefined };
       queryText: string;
       vectorPreview: { length: number; head: number[]; tail: number[] };
+      /** Which MCP tool the wrapper should call: pure vector or hybrid fusion. */
+      mode: "vector" | "hybrid";
+      /** Tool name to invoke on the underlying MCP client (canonical, no gateway prefix). */
+      targetToolName: "mongodb_vector_search" | "mongodb_hybrid_search";
     }
   | { ok: false; code: string; message: string; queryText: string };
 
@@ -254,6 +342,7 @@ export async function transformVectorSearchArgs(
   const suppliedVector = isNumberArray(input.queryVector)
     ? (input.queryVector as number[])
     : undefined;
+  const wantHybrid = input.hybrid === true;
 
   // Resolve the vector index: explicit `index`, then `indexName`, then the
   // per-collection default. We deliberately fail loud if none of these
@@ -274,27 +363,81 @@ export async function transformVectorSearchArgs(
     };
   }
 
+  // Resolve hybrid-mode-only inputs up front so we can reject early if the
+  // collection has no companion text index. (Lexical leg has no fallback —
+  // it just runs against the named index, which must exist in Atlas.)
+  let lexicalIndex: string | undefined;
+  let lexicalPath: string | undefined;
+  if (wantHybrid) {
+    const explicitLex =
+      typeof input.lexicalIndex === "string" && input.lexicalIndex.trim()
+        ? input.lexicalIndex.trim()
+        : undefined;
+    const explicitLexPath =
+      typeof input.lexicalPath === "string" && input.lexicalPath.trim()
+        ? input.lexicalPath.trim()
+        : undefined;
+    const defaults = DEFAULT_LEXICAL_INDEX_BY_COLLECTION[collection];
+    lexicalIndex = explicitLex ?? defaults?.index;
+    lexicalPath = explicitLexPath ?? defaults?.path;
+    if (!lexicalIndex || !lexicalPath) {
+      return {
+        ok: false,
+        code: "missing_lexical_index",
+        message:
+          `Hybrid mode requested but no Atlas Search index configured for '${collection}'. ` +
+          "Pass `lexicalIndex` and `lexicalPath` explicitly, or set hybrid: false.",
+        queryText,
+      };
+    }
+  }
+
   // Build the Lambda-shaped args object up front so we always emit a stable
   // `index` / `path` regardless of what the model passed in.
-  const args: Record<string, JSONValue> = {
-    collection,
-    index: explicitIndex,
-    path: typeof input.path === "string" && input.path.trim() ? input.path.trim() : "embedding",
-  };
+  const path =
+    typeof input.path === "string" && input.path.trim() ? input.path.trim() : "embedding";
+  const args: Record<string, JSONValue> = wantHybrid
+    ? {
+        collection,
+        vectorIndex: explicitIndex,
+        lexicalIndex: lexicalIndex!,
+        lexicalPath: lexicalPath!,
+        path,
+      }
+    : {
+        collection,
+        index: explicitIndex,
+        path,
+      };
   if (typeof input.limit === "number" && Number.isFinite(input.limit)) {
     args.limit = Math.max(1, Math.floor(input.limit));
   }
   if (typeof input.numCandidates === "number" && Number.isFinite(input.numCandidates)) {
     args.numCandidates = Math.max(1, Math.floor(input.numCandidates));
   }
+  if (wantHybrid && typeof input.fetchK === "number" && Number.isFinite(input.fetchK)) {
+    args.fetchK = Math.max(1, Math.floor(input.fetchK));
+  }
+  if (typeof input.minScore === "number" && Number.isFinite(input.minScore)) {
+    args.minScore = input.minScore as JSONValue;
+  }
   if (isPlainObject(input.filter)) {
     args.filter = input.filter as JSONValue;
   }
 
-  // Vector resolution: prefer model-supplied `queryVector` (advanced path —
-  // useful for callers that already cached an embedding), else embed
-  // `queryText`. If neither is present we can't run the search.
-  if (suppliedVector) {
+  const targetToolName: VectorSearchTransform extends infer T
+    ? T extends { targetToolName: infer N }
+      ? N
+      : never
+    : never = wantHybrid ? "mongodb_hybrid_search" : "mongodb_vector_search";
+  const mode = wantHybrid ? ("hybrid" as const) : ("vector" as const);
+
+  // Vector resolution. Pure-vector mode: prefer model-supplied `queryVector`
+  // (advanced path — useful for callers that already cached an embedding),
+  // else embed `queryText`. Hybrid mode: needs both queryText (for the
+  // lexical leg) AND queryVector — if the caller already has a vector, we
+  // reuse it and skip the embed; otherwise we embed `queryText`.
+  if (!wantHybrid && suppliedVector) {
     args.queryVector = suppliedVector as unknown as JSONValue;
     return {
       ok: true,
@@ -302,6 +445,8 @@ export async function transformVectorSearchArgs(
       embed: { source: "model_supplied", modelId: undefined },
       queryText: queryText || "(supplied as queryVector)",
       vectorPreview: previewVector(suppliedVector),
+      mode,
+      targetToolName,
     };
   }
 
@@ -309,9 +454,24 @@ export async function transformVectorSearchArgs(
     return {
       ok: false,
       code: "missing_query",
-      message:
-        "Pass `queryText` (preferred) or `queryVector`. Example: { collection: 'products', queryText: 'waterproof outdoor headphones' }.",
+      message: wantHybrid
+        ? "Hybrid mode requires `queryText` (used for the lexical leg). Example: { collection: 'products', queryText: 'waterproof outdoor headphones', hybrid: true }."
+        : "Pass `queryText` (preferred) or `queryVector`. Example: { collection: 'products', queryText: 'waterproof outdoor headphones' }.",
       queryText: "",
+    };
+  }
+
+  if (wantHybrid && suppliedVector) {
+    args.queryText = queryText;
+    args.queryVector = suppliedVector as unknown as JSONValue;
+    return {
+      ok: true,
+      args,
+      embed: { source: "model_supplied", modelId: undefined },
+      queryText,
+      vectorPreview: previewVector(suppliedVector),
+      mode,
+      targetToolName,
     };
   }
 
@@ -326,12 +486,17 @@ export async function transformVectorSearchArgs(
   }
 
   args.queryVector = embedResult.vector as unknown as JSONValue;
+  if (wantHybrid) {
+    args.queryText = queryText;
+  }
   return {
     ok: true,
     args,
     embed: { source: embedResult.source, modelId: embedResult.modelId },
     queryText,
     vectorPreview: previewVector(embedResult.vector),
+    mode,
+    targetToolName,
   };
 }
 
@@ -346,30 +511,144 @@ export async function transformVectorSearchArgs(
  *
  * Exported so the unit test can pin the score-extraction contract.
  */
-export function extractScoresFromResult(result: ToolResultBlock): number[] {
+function extractDocumentsFromResult(result: ToolResultBlock): unknown[] {
   const blocks = result.content ?? [];
   for (const block of blocks) {
     // We only inspect text blocks: the MCP runtime always responds with a
     // single text block carrying the JSON envelope, even for empty results.
-    if (!block || (block as { type?: string }).type !== "textBlock") continue;
+    if (!block || !["text", "textBlock"].includes(String((block as { type?: string }).type ?? ""))) continue;
     const text = (block as { text?: unknown }).text;
     if (typeof text !== "string") continue;
     try {
-      const parsed = JSON.parse(text) as { documents?: unknown[]; count?: number };
-      const docs = Array.isArray(parsed.documents) ? parsed.documents : [];
-      const scores: number[] = [];
-      for (const d of docs) {
-        if (d && typeof d === "object" && typeof (d as { _score?: unknown })._score === "number") {
-          scores.push((d as { _score: number })._score);
-        }
-      }
-      return scores;
+      const parsed = JSON.parse(text) as { documents?: unknown[]; result?: { documents?: unknown[] } };
+      if (Array.isArray(parsed.documents)) return parsed.documents;
+      if (parsed.result && Array.isArray(parsed.result.documents)) return parsed.result.documents;
     } catch {
       // Not JSON — could be the unembed-friendly "Tool execution completed…"
       // fallback. Keep iterating in case a later block is parseable.
     }
   }
   return [];
+}
+
+export function extractScoresFromResult(result: ToolResultBlock): number[] {
+  const docs = extractDocumentsFromResult(result);
+  const scores: number[] = [];
+  for (const d of docs) {
+    if (d && typeof d === "object" && typeof (d as { _score?: unknown })._score === "number") {
+      scores.push((d as { _score: number })._score);
+    }
+  }
+  return scores;
+}
+
+function previewString(value: unknown, max = MAX_TRACE_DOC_FIELD_CHARS): string | undefined {
+  if (value === undefined || value === null) return undefined;
+  const text = typeof value === "string" ? value : JSON.stringify(value);
+  const trimmed = text.trim();
+  if (!trimmed) return undefined;
+  return trimmed.length > max ? `${trimmed.slice(0, max)}…` : trimmed;
+}
+
+function previewScalar(value: unknown): string | number | boolean | null | undefined {
+  if (value === null) return null;
+  if (["string", "number", "boolean"].includes(typeof value)) {
+    if (typeof value === "string") return previewString(value);
+    return value as number | boolean;
+  }
+  return previewString(value);
+}
+
+function stringList(value: unknown): string[] {
+  if (Array.isArray(value)) {
+    return value.map((v) => previewString(v, 80)).filter((v): v is string => !!v);
+  }
+  const single = previewString(value, 80);
+  return single ? [single] : [];
+}
+
+function docId(doc: Record<string, unknown>): string | undefined {
+  return previewString(doc._id ?? doc.id ?? doc.docId ?? doc.messageId ?? doc.sku, 120);
+}
+
+function docTitle(doc: Record<string, unknown>): string | undefined {
+  return previewString(doc.title ?? doc.name ?? doc.sku ?? doc.code ?? doc.fact ?? docId(doc), 120);
+}
+
+function docSourceUrl(doc: Record<string, unknown>): string | undefined {
+  for (const field of ["sourceUrl", "url", "uri", "articleUrl"]) {
+    const value = doc[field];
+    if (typeof value === "string" && /^https?:\/\//i.test(value)) return value;
+  }
+  return undefined;
+}
+
+export function extractDocumentPreviewsFromResult(
+  result: ToolResultBlock,
+  collection?: string,
+): Array<{
+  rank: number;
+  collection?: string;
+  id?: string;
+  score?: number;
+  title?: string;
+  snippet?: string;
+  sourceUrl?: string;
+  sources?: string[];
+  fields?: Record<string, string | number | boolean | null>;
+}> {
+  const docs = extractDocumentsFromResult(result);
+  const fieldNames = [
+    "sku",
+    "category",
+    "brand",
+    "status",
+    "orderId",
+    "customerEmail",
+    "docId",
+    "source",
+    "sourceUrl",
+    "url",
+    "uri",
+    "articleUrl",
+    "role",
+    "sessionId",
+    "messageId",
+  ];
+  const snippetFields = ["content", "fact", "description", "summary", "body", "text", "answer"];
+
+  return docs.slice(0, MAX_TRACE_DOCUMENT_PREVIEWS).flatMap((d, idx) => {
+    if (!d || typeof d !== "object") return [];
+    const doc = d as Record<string, unknown>;
+    const fields: Record<string, string | number | boolean | null> = {};
+    for (const name of fieldNames) {
+      const value = previewScalar(doc[name]);
+      if (value !== undefined) fields[name] = value;
+    }
+    const sources = [
+      ...stringList(doc._sources),
+      ...stringList(doc.source),
+      ...stringList(doc.sourceUrl),
+      ...stringList(doc.url),
+      ...stringList(doc.uri),
+      ...stringList(doc.articleUrl),
+      ...stringList(doc.path),
+    ].filter((v, i, arr) => arr.indexOf(v) === i);
+    const snippet = snippetFields.map((name) => previewString(doc[name])).find(Boolean);
+    return [
+      {
+        rank: idx + 1,
+        collection,
+        id: docId(doc),
+        score: typeof doc._score === "number" ? doc._score : undefined,
+        title: docTitle(doc),
+        snippet,
+        sourceUrl: docSourceUrl(doc),
+        sources: sources.length ? sources : undefined,
+        fields: Object.keys(fields).length ? fields : undefined,
+      },
+    ];
+  });
 }
 
 /** Compact summary of similarity scores for the trace UI. */
@@ -423,17 +702,28 @@ function extractText(v: unknown): string {
  * `mongodb_vector_search` directly or through the Gateway's
  * `mongodb-mcp___mongodb_vector_search` namespace.
  *
+ * When the model sets `hybrid: true`, the wrapper routes the rewritten args
+ * through a second underlying `Tool` bound to the runtime's
+ * `mongodb_hybrid_search` helper. That helper performs vector + lexical
+ * Reciprocal Rank Fusion server-side and never appears in the agent-visible
+ * tool list (filtered out in `loadMcpTools`).
+ *
+ * Boundary rule preserved: even hybrid retrieval routes through the Mongo
+ * MCP runtime — the API never bypasses MCP for chat-invoked Mongo calls.
+ *
  * Exported for the wrapper unit test.
  */
 export class VectorSearchEmbedTool extends Tool {
   readonly name = "mongodb_vector_search";
   readonly description: string;
   readonly toolSpec: ToolSpec;
-  private readonly underlying: Tool;
+  private readonly vectorUnderlying: Tool;
+  private readonly hybridUnderlying?: Tool;
 
-  constructor(underlying: Tool) {
+  constructor(vectorUnderlying: Tool, hybridUnderlying?: Tool) {
     super();
-    this.underlying = underlying;
+    this.vectorUnderlying = vectorUnderlying;
+    this.hybridUnderlying = hybridUnderlying;
     this.description = VECTOR_SEARCH_TOOL_SPEC.description;
     this.toolSpec = VECTOR_SEARCH_TOOL_SPEC;
   }
@@ -465,9 +755,47 @@ export class VectorSearchEmbedTool extends Tool {
       });
     }
 
+    // Pick the underlying MCP tool based on the transform's mode. Hybrid mode
+    // needs the runtime helper; if it is not exposed (older MCP runtime),
+    // surface a clear error rather than silently downgrading.
+    let underlying: Tool;
+    if (transform.mode === "hybrid") {
+      if (!this.hybridUnderlying) {
+        trace?.event("mongo.vector_search", {
+          collection: stringArg(transform.args.collection),
+          embeddingSource: transform.embed.source,
+          embeddingModelId: transform.embed.modelId,
+          queryText: transform.queryText,
+          queryVectorPreview: transform.vectorPreview,
+          numCandidates: numericArg(transform.args.numCandidates),
+          limit: numericArg(transform.args.limit),
+          filter: transform.args.filter,
+          scores: [],
+        });
+        return new ToolResultBlock({
+          toolUseId,
+          status: "error",
+          content: [
+            new TextBlock(
+              JSON.stringify({
+                status: "error",
+                code: "hybrid_unsupported",
+                message:
+                  "Hybrid mode requires the mongodb_hybrid_search helper, which is not exposed by this MCP runtime. " +
+                  "Retry with hybrid: false, or update the MongoDB MCP runtime.",
+              }),
+            ),
+          ],
+        });
+      }
+      underlying = this.hybridUnderlying;
+    } else {
+      underlying = this.vectorUnderlying;
+    }
+
     // Forward the rewritten args to the underlying MCP tool. The McpClient
     // wrapper in `connectMcpClient` still emits `tool.mcp` and splices the
-    // lambda's nested mongo.intent / mongo.result events into our trace, so
+    // runtime's nested mongo.intent / mongo.result events into our trace, so
     // we only need to add the vector-specific event here.
     const innerCtx: ToolContext = {
       ...toolContext,
@@ -476,12 +804,13 @@ export class VectorSearchEmbedTool extends Tool {
 
     let result: ToolResultBlock;
     try {
-      result = yield* this.underlying.stream(innerCtx);
+      result = yield* underlying.stream(innerCtx);
     } catch (err) {
       // McpTool.stream() catches its own errors into createErrorResult, so we
       // shouldn't get here for normal failures. Defensive: still emit the
       // vector_search event so the trace doesn't lose context, then rethrow.
       trace?.event("mongo.vector_search", {
+        collection: stringArg(transform.args.collection),
         embeddingSource: transform.embed.source,
         embeddingModelId: transform.embed.modelId,
         queryText: transform.queryText,
@@ -495,7 +824,9 @@ export class VectorSearchEmbedTool extends Tool {
     }
 
     const scores = extractScoresFromResult(result).slice(0, MAX_TRACE_SCORES);
+    const collection = stringArg(transform.args.collection);
     trace?.event("mongo.vector_search", {
+      collection,
       embeddingSource: transform.embed.source,
       embeddingModelId: transform.embed.modelId,
       queryText: transform.queryText,
@@ -506,9 +837,15 @@ export class VectorSearchEmbedTool extends Tool {
       scores,
       scoreSummary: summarizeScores(scores),
       histogram: scoreHistogram(scores),
+      hybrid: transform.mode === "hybrid",
+      documentPreviews: extractDocumentPreviewsFromResult(result, collection),
     });
     return result;
   }
+}
+
+function stringArg(v: JSONValue | undefined): string | undefined {
+  return typeof v === "string" && v.trim() ? v.trim() : undefined;
 }
 
 function numericArg(v: JSONValue | undefined): number | undefined {
@@ -521,16 +858,20 @@ function numericArg(v: JSONValue | undefined): number | undefined {
  *   - Gateway mode: `mongodb-mcp___mongodb_query` → `mongodb_query`.
  *   - Direct runtime mode: `mongodb_query` stays `mongodb_query`.
  *   - `mongodb_vector_search` always gets the queryText embedding bridge,
- *     whether it arrived through Gateway or direct runtime.
+ *     whether it arrived through Gateway or direct runtime. When the runtime
+ *     also exposes `mongodb_hybrid_search`, the wrapper carries a second
+ *     handle to that helper so `hybrid: true` calls route through MCP too.
  *
  * Exported so the test can verify the wrapping decision without a live MCP
- * connection.
+ * connection. `hybridUnderlying` is optional so the test surface stays simple.
  */
-export function wrapGatewayTool(raw: McpTool): Tool {
+export function wrapGatewayTool(raw: McpTool, hybridUnderlying?: Tool): Tool {
   const alias = stripGatewayTargetPrefix(raw.name);
   const exposedName = alias ?? raw.name;
   const exposed = alias ? new AliasedMcpTool(alias, raw) : raw;
-  if (exposedName === "mongodb_vector_search") return new VectorSearchEmbedTool(exposed);
+  if (exposedName === "mongodb_vector_search") {
+    return new VectorSearchEmbedTool(exposed, hybridUnderlying);
+  }
   return exposed;
 }
 
@@ -747,11 +1088,122 @@ function isAuthError(err: unknown): boolean {
   );
 }
 
+// ---------------------------------------------------------------------------
+// userId / tenant predicate injection
+//
+// Every MongoDB MCP tool call is intercepted to inject `{ userId: jwt.sub }`
+// into the filter (reads / updates / deletes) or document body (inserts) for
+// non-public collections. This closes the design-level gap where the LLM
+// could omit or misspecify the tenant predicate and accidentally read or write
+// another user's data.
+//
+// "Public" collections — shared catalog / knowledge-base data that has no
+// per-user ownership and must not be filtered by userId — are configured via
+// the `MONGODB_PUBLIC_COLLECTIONS` env var (comma-separated, case-insensitive).
+// Defaults: products, troubleshooting_docs.
+// ---------------------------------------------------------------------------
+
+function publicCollections(): Set<string> {
+  const env = process.env.MONGODB_PUBLIC_COLLECTIONS?.trim();
+  const raw = env
+    ? env.split(",").map((s) => s.trim().toLowerCase()).filter(Boolean)
+    : ["products", "troubleshooting_docs"];
+  return new Set(raw);
+}
+
+/** Tool names whose `filter` field should carry the userId predicate. */
+const READ_FILTER_TOOLS = new Set([
+  "mongodb_query",
+  "mongodb_find",
+  "mongodb_vector_search",
+]);
+/** Tool names whose `filter` field should carry the userId predicate (writes). */
+const WRITE_FILTER_TOOLS = new Set([
+  "mongodb_update_one",
+  "mongodb_update_many",
+  "mongodb_delete_one",
+  "mongodb_delete_many",
+  "mongodb_replace_one",
+]);
+/** Tool names whose `document`/`documents` field should carry the userId. */
+const INSERT_TOOLS = new Set([
+  "mongodb_insert_one",
+  "mongodb_insert_many",
+]);
+
+/**
+ * Inject the verified `userId` into the tool arguments before forwarding to
+ * the MongoDB MCP runtime. This guarantees that even when the LLM omits or
+ * incorrectly specifies the tenant predicate, every query is still bounded to
+ * the current user's data.
+ *
+ * Strips the gateway-target prefix (`mongodb-mcp___`) from the tool name
+ * before checking the known-tool sets so the logic applies in both gateway
+ * and direct-runtime modes.
+ */
+function injectUserIdIntoArgs(
+  toolName: string,
+  args: unknown,
+  userId: string,
+): unknown {
+  if (!isPlainObject(args)) return args;
+
+  // Normalise away the gateway prefix for tool-name matching.
+  const bare = toolName.startsWith(GATEWAY_TARGET_PREFIX)
+    ? toolName.slice(GATEWAY_TARGET_PREFIX.length)
+    : toolName;
+
+  const collection =
+    typeof (args as Record<string, unknown>).collection === "string"
+      ? ((args as Record<string, unknown>).collection as string).toLowerCase()
+      : "";
+
+  // Public / shared collections are intentionally not user-scoped.
+  if (collection && publicCollections().has(collection)) return args;
+
+  const mutated = { ...args } as Record<string, unknown>;
+
+  if (READ_FILTER_TOOLS.has(bare) || WRITE_FILTER_TOOLS.has(bare)) {
+    const existing = isPlainObject(mutated.filter) ? mutated.filter : {};
+    mutated.filter = { ...existing, userId };
+  }
+
+  if (INSERT_TOOLS.has(bare)) {
+    if (isPlainObject(mutated.document)) {
+      mutated.document = { ...(mutated.document as Record<string, unknown>), userId };
+    }
+    if (Array.isArray(mutated.documents)) {
+      mutated.documents = (mutated.documents as unknown[]).map((d) =>
+        isPlainObject(d) ? { ...(d as Record<string, unknown>), userId } : d,
+      );
+    }
+  }
+
+  // mongodb_aggregate: prepend a $match stage so the pipeline always starts
+  // with a tenant predicate even if the LLM doesn't include one.
+  if (bare === "mongodb_aggregate" && Array.isArray(mutated.pipeline)) {
+    const firstStage = mutated.pipeline[0];
+    const alreadyScoped =
+      isPlainObject(firstStage) &&
+      isPlainObject((firstStage as Record<string, unknown>)["$match"]) &&
+      typeof ((firstStage as Record<string, unknown>)["$match"] as Record<string, unknown>).userId !== "undefined";
+    if (!alreadyScoped) {
+      mutated.pipeline = [{ $match: { userId } }, ...mutated.pipeline];
+    }
+  }
+
+  return mutated;
+}
+
 /**
  * Build and connect an `McpClient` against the configured transport, then
- * wrap its `callTool` to (a) emit `tool.mcp` trace events per invocation and
- * (b) splice nested trace events the Lambda MCP target packed into the
- * response envelope (see `lambda/mongodb-mcp/index.mjs`).
+ * wrap its `callTool` to:
+ *  (a) inject the verified JWT `sub` (userId) into every query filter /
+ *      document body for non-public collections — enforcing tenant isolation
+ *      even when the LLM omits the predicate.
+ *  (b) emit `tool.mcp` trace events per invocation.
+ *  (c) splice nested trace events the Lambda MCP target packed into the
+ *      response envelope (see `lambda/mongodb-mcp/index.mjs`).
  *
  * Connection is deferred until first use (rather than at module load) so the
  * `connect` handshake runs inside a `withGatewayJwt(...)` scope and the
@@ -770,16 +1222,31 @@ async function connectMcpClient(): Promise<McpClient> {
     args: unknown,
   ) {
     const trace = currentTrace();
+
+    // Inject the verified userId into the query/filter/document fields so
+    // the database always enforces tenant isolation regardless of what the
+    // LLM generated. currentUserId() reads from the AsyncLocalStorage scope
+    // established by withCurrentUserId(userId, ...) in chat.ts.
+    const uid = currentUserId();
+    const scopedArgs = uid ? injectUserIdIntoArgs(tool.name, args, uid) : args;
+
+    if (uid && scopedArgs !== args) {
+      logger.debug("[mcp] userId predicate injected", {
+        toolName: tool.name,
+        userId: uid,
+      });
+    }
+
     logger.audit().info("[mcp] callTool", {
       toolName: tool.name,
       argPreview:
         typeof args === "object" && args !== null
-          ? JSON.stringify(args).slice(0, 400)
-          : String(args).slice(0, 400),
+          ? JSON.stringify(scopedArgs).slice(0, 400)
+          : String(scopedArgs).slice(0, 400),
     });
     try {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const result = await originalCallTool(tool as any, args as any);
+      const result = await originalCallTool(tool as any, scopedArgs as any);
       // The MongoDB MCP runtime packs trace events into the content envelope;
       // extract them first and rewrite the LLM-visible text, then emit
       // tool.mcp with the cleaned result.
@@ -787,7 +1254,7 @@ async function connectMcpClient(): Promise<McpClient> {
       trace?.event("tool.mcp", {
         server: serverLabel,
         toolName: tool.name,
-        args,
+        args: scopedArgs,
         result,
         ...(nestedDropped > 0 ? { nestedTracesDropped: nestedDropped } : {}),
       });
@@ -798,7 +1265,7 @@ async function connectMcpClient(): Promise<McpClient> {
       trace?.event("tool.mcp", {
         server: serverLabel,
         toolName: tool.name,
-        args,
+        args: scopedArgs,
         errorClass: errClass,
         errorMessage: errMsg,
       });
@@ -872,15 +1339,31 @@ async function loadMcpTools(): Promise<Tool[]> {
         continue;
       }
       const rawTools = await client.listTools();
+      // The runtime exposes `mongodb_hybrid_search` as a helper that the
+      // wrapper invokes for `hybrid: true` calls. It must NOT appear in the
+      // model's tool list — agents call `mongodb_vector_search` by name and
+      // the wrapper routes hybrid mode behind the scenes. Build an aliased
+      // handle to the hybrid helper first, then filter it out.
+      const hybridRaw = rawTools.find(
+        (t) => (stripGatewayTargetPrefix(t.name) ?? t.name) === "mongodb_hybrid_search",
+      );
+      const hybridAliased = hybridRaw
+        ? stripGatewayTargetPrefix(hybridRaw.name)
+          ? new AliasedMcpTool("mongodb_hybrid_search", hybridRaw)
+          : (hybridRaw as Tool)
+        : undefined;
       // Replace each gateway-prefixed tool with an alias bound to the unprefixed
       // name. Tools that don't carry the prefix (e.g. future targets, custom
       // gateway tools) pass through unchanged. `mongodb_vector_search` gets a
       // richer wrapper that re-specs the schema to accept `queryText` and
       // performs the embedding before forwarding to the gateway.
-      _mcpTools = rawTools.map((t) => wrapGatewayTool(t));
+      _mcpTools = rawTools
+        .filter((t) => !isInternalOnlyMcpTool(t.name))
+        .map((t) => wrapGatewayTool(t, hybridAliased));
       logger.info("[mcp] loaded tools", {
         tools: _mcpTools.map((t) => t.name),
         gatewayNames: rawTools.map((t) => t.name),
+        hybridHelperAvailable: Boolean(hybridAliased),
       });
       return _mcpTools;
     } catch (err) {

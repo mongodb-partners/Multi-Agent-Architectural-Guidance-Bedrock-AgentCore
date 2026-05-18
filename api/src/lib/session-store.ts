@@ -4,6 +4,12 @@ import {
   usePersistentChatSessions,
   type ChatSessionDoc,
 } from "./chat-sessions-collection.ts";
+import {
+  deleteMessagesBySession,
+  persistChatMessage,
+  type ChatMessageDoc,
+} from "./chat-messages-collection.ts";
+import { embedDocumentText } from "./embed-query.ts";
 import { logger } from "./logger.ts";
 
 export type ChatMessage = {
@@ -104,6 +110,60 @@ async function deleteFromMongo(sessionId: string): Promise<void> {
   }
 }
 
+/**
+ * Mirror a chat message into the vector-searchable `chat_messages` collection.
+ * Best-effort: embedding failures fall back to storing the row without an
+ * `embedding` so lexical search still indexes the content. Runs in the
+ * background — callers should never await this on the chat hot path.
+ */
+async function mirrorMessageToMongo(
+  rec: SessionRecord,
+  message: ChatMessage,
+): Promise<void> {
+  if (!usePersistentChatSessions()) return;
+  const ts = new Date(message.timestamp);
+  const doc: ChatMessageDoc = {
+    messageId: message.id,
+    sessionId: rec.sessionId,
+    userId: rec.userId,
+    agentId: message.agentId,
+    role: message.role,
+    content: message.content,
+    timestamp: message.timestamp,
+    ts,
+  };
+  try {
+    const emb = await embedDocumentText(message.content);
+    if (emb.ok) {
+      doc.embedding = emb.vector;
+      doc.embeddingModel = emb.modelId;
+    } else {
+      logger.warn("[session-store] chat message embedding failed; storing without vector", {
+        sessionId: rec.sessionId,
+        messageId: message.id,
+        code: emb.code,
+        message: emb.message,
+      });
+    }
+  } catch (e) {
+    logger.warn("[session-store] chat message embedding threw; storing without vector", {
+      sessionId: rec.sessionId,
+      messageId: message.id,
+      error: e instanceof Error ? e.message : String(e),
+    });
+  }
+  await persistChatMessage(doc);
+}
+
+/** Schedule the chat_messages mirror as a microtask so it never sits on the
+ *  user's TTFB clock. Failures are logged inside `mirrorMessageToMongo`. */
+function scheduleMirror(rec: SessionRecord, message: ChatMessage): void {
+  if (!usePersistentChatSessions()) return;
+  queueMicrotask(() => {
+    void mirrorMessageToMongo(rec, message);
+  });
+}
+
 /** Re-export for health / docs. */
 export { usePersistentChatSessions };
 
@@ -115,17 +175,24 @@ export { usePersistentChatSessions };
 export const FORBIDDEN_SESSION = Symbol("FORBIDDEN_SESSION");
 export type ForbiddenSession = typeof FORBIDDEN_SESSION;
 
-function ownsOrLegacy(record: SessionRecord, userId: string): boolean {
-  if (!record.userId) return true; // legacy session written before user scoping; treat as caller's
-  return record.userId === userId;
+/**
+ * Strict ownership check: the session must be explicitly bound to `userId`.
+ * Sessions with no `userId` are denied — they must be migrated before use.
+ * This enforces the SOW requirement that jwt.sub is the sole tenant key and
+ * one user can never access another user's session data.
+ */
+function owns(record: SessionRecord, userId: string): boolean {
+  return !!record.userId && record.userId === userId;
 }
 
 /**
- * Return the existing session for `sessionId` if `userId` owns it (or it is a legacy
- * session with no `userId`); create a new session bound to `userId` otherwise.
+ * Return the existing session for `sessionId` if `userId` owns it; create a
+ * new session bound to `userId` otherwise.
  *
- * Returns `FORBIDDEN_SESSION` when the session exists but is owned by a different user —
- * the caller must NOT distinguish that case from "not found" externally.
+ * Returns `FORBIDDEN_SESSION` when the session exists but is owned by a
+ * different user (or has no owner at all — legacy unscoped rows are denied,
+ * not claimed). The caller must NOT distinguish that case from "not found"
+ * externally so we never confirm or deny existence to the wrong user.
  */
 export async function getOrCreateSession(
   sessionId: string,
@@ -143,17 +210,13 @@ export async function getOrCreateSession(
     if (usePersistentChatSessions()) await saveToMongo(s);
     return s;
   }
-  if (!ownsOrLegacy(s, userId)) return FORBIDDEN_SESSION;
-  if (!s.userId) {
-    s.userId = userId;
-    if (usePersistentChatSessions()) await saveToMongo(s);
-  }
+  if (!owns(s, userId)) return FORBIDDEN_SESSION;
   return s;
 }
 
 /**
- * Look up an existing session for `userId`. Returns `undefined` when the session does not
- * exist and `FORBIDDEN_SESSION` when it belongs to a different user.
+ * Look up an existing session for `userId`. Returns `undefined` when the session does
+ * not exist and `FORBIDDEN_SESSION` when it belongs to a different user or has no owner.
  */
 export async function getSession(
   sessionId: string,
@@ -165,7 +228,7 @@ export async function getSession(
     cached = await loadFromMongo(sessionId);
   }
   if (!cached) return undefined;
-  if (!ownsOrLegacy(cached, userId)) return FORBIDDEN_SESSION;
+  if (!owns(cached, userId)) return FORBIDDEN_SESSION;
   return cached;
 }
 
@@ -185,6 +248,7 @@ export async function appendUserMessage(
   s.messages.push(m);
   memory.set(sessionId, s);
   if (usePersistentChatSessions()) await saveToMongo(s);
+  scheduleMirror(s, m);
   return m;
 }
 
@@ -206,6 +270,7 @@ export async function appendAssistantMessage(
   s.messages.push(m);
   memory.set(sessionId, s);
   if (usePersistentChatSessions()) await saveToMongo(s);
+  scheduleMirror(s, m);
   return m;
 }
 
@@ -216,9 +281,14 @@ export async function deleteSession(sessionId: string, userId: string): Promise<
     cur = await loadFromMongo(sessionId);
   }
   if (!cur) return false;
-  if (!ownsOrLegacy(cur, userId)) return false;
+  if (!owns(cur, userId)) return false;
   memory.delete(sessionId);
-  if (usePersistentChatSessions()) await deleteFromMongo(sessionId);
+  if (usePersistentChatSessions()) {
+    await deleteFromMongo(sessionId);
+    // Cascade-delete vector-searchable mirrors so the user's "delete chat" UX
+    // also wipes the long-term retrieval surface. Best-effort, logged inside.
+    await deleteMessagesBySession(sessionId, userId);
+  }
   return true;
 }
 

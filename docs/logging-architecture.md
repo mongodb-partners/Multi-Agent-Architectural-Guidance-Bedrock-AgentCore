@@ -215,7 +215,7 @@ The flow is:
 4. `amazon-cloudwatch-agent.json` declares two file collectors pointing at those paths and ships into the two log groups templated from Terraform variables (`cw_log_group_api`, `cw_log_group_ui`).
 5. `amazon-cloudwatch-agent-ctl -a fetch-config -m ec2 -s -c file:…` validates + starts the agent.
 
-`deploy.sh` runs **two** non-fatal validation probes after `.bootstrap-done` appears:
+`deploy-project.sh` runs **two** non-fatal validation probes after `.bootstrap-done` appears:
 
 - `systemctl is-active amazon-cloudwatch-agent` over SSM (warn if not `active`).
 - `aws logs describe-log-streams --log-group-name $CW_API_LOG_GROUP --max-items 1` polled for 60 s after API restart (warn if 0 streams).
@@ -295,7 +295,7 @@ That command must always return empty (CI enforces this via the test that JSON-p
 | [`ui/lib/api_client.py`](../ui/lib/api_client.py) | Sends `X-Request-Id`, captures `X-Trace-Id` from response. |
 | [`deploy/terraform/modules/cloudwatch/`](../deploy/terraform/modules/cloudwatch/) | 4 log groups + per-group retention. |
 | [`deploy/terraform/modules/ec2/user_data.sh`](../deploy/terraform/modules/ec2/user_data.sh) | Installs CW agent + file-based collectors + logrotate. |
-| [`deploy/scripts/deploy.sh`](../deploy/scripts/deploy.sh) | Post-bootstrap CW-agent + describe-log-streams probes. |
+| [`deploy/scripts/deploy-project.sh`](../deploy/scripts/deploy-project.sh) | Post-bootstrap CW-agent + describe-log-streams probes. |
 | [`e2e-smoke/post-deploy-smoke.py`](../e2e-smoke/post-deploy-smoke.py) | `check_cloudwatch_join` — verifies `trace_id` appears in `/api` and AgentCore log groups. |
 | [`api/tests/unit/logger.test.ts`](../api/tests/unit/logger.test.ts) | JSON shape, level filtering, `trace_id` correlation, `child()`. |
 | [`api/tests/unit/logger-redactor.test.ts`](../api/tests/unit/logger-redactor.test.ts) | 8-case redactor matrix. |

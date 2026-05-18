@@ -22,8 +22,8 @@ set -euo pipefail
 : "${ATLAS_PROJECT_ID:?required}"
 : "${ATLAS_REGION:?required}"           # underscored, e.g. US_EAST_1
 : "${STATE_FILE:?required}"
-: "${MONGODB_ATLAS_PUBLIC_KEY:?required — export from env.sh}"
-: "${MONGODB_ATLAS_PRIVATE_KEY:?required — export from env.sh}"
+: "${MONGODB_ATLAS_PUBLIC_KEY:?required — export from .env}"
+: "${MONGODB_ATLAS_PRIVATE_KEY:?required — export from .env}"
 
 ATLAS_API="https://cloud.mongodb.com/api/atlas/v2"
 AUTH="${MONGODB_ATLAS_PUBLIC_KEY}:${MONGODB_ATLAS_PRIVATE_KEY}"

@@ -131,6 +131,17 @@ variable "voyage_endpoint_name_suffix" {
 }
 
 # ── AgentCore ─────────────────────────────────────────────────────────────────
+variable "specialist_agents" {
+  type        = list(object({ id = string, runtime_name = string }))
+  description = "Specialist AgentCore Runtimes to provision. Populated from config/agents/*.agent.md (excluding the orchestrator) by deploy.sh / deploy-agents.sh via agents.auto.tfvars.json. Adding a new entry creates a new runtime; removing one destroys it on next apply."
+  default     = []
+
+  validation {
+    condition     = alltrue([for a in var.specialist_agents : can(regex("^[a-z0-9-]+$", a.id))])
+    error_message = "Each specialist_agents[].id must be lowercase-kebab-case (matches config/agents/<id>.agent.md)."
+  }
+}
+
 variable "agentcore_memory_expiry_days" {
   type    = number
   default = 30

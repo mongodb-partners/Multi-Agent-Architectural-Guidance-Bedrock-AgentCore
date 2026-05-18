@@ -116,6 +116,32 @@ module "mongodb_atlas" {
   privatelink_endpoint_id = local.shared_atlas_pl_vpce_id
 }
 
+# Atlas Search indexes that belong to application data (`products`,
+# `troubleshooting_docs`, `agent_memory_facts`, `chat_messages`) are reconciled
+# through the idempotent db-seeding script. This keeps collection/index bootstraps
+# together and avoids Terraform state drift for indexes also needed by local
+# seed workflows.
+resource "null_resource" "seed_mongodb_indexes" {
+  triggers = {
+    cluster_name      = module.mongodb_atlas.cluster_name
+    db_name           = var.atlas_db_name
+    seed_indexes_sha1 = filesha1("${path.module}/../../../../db-seeding/seed-indexes.ts")
+  }
+
+  provisioner "local-exec" {
+    command = "bun ${path.module}/../../../../db-seeding/seed-indexes.ts"
+
+    environment = {
+      MONGODB_URI                   = module.mongodb_atlas.connection_string
+      MONGODB_DB                    = var.atlas_db_name
+      EMBEDDING_DIMENSIONS          = "1024"
+      WAIT_FOR_ATLAS_SEARCH_INDEXES = "1"
+    }
+  }
+
+  depends_on = [module.mongodb_atlas]
+}
+
 # ══════════════════════════════════════════════════════════════════════════════
 # Bedrock KB PrivateLink (CLIENT_REVIEW P1-6 Option A — opt-in)
 # Provisions an NLB + VPC Endpoint Service so Bedrock-managed ingestion
@@ -537,12 +563,14 @@ locals {
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
-# AgentCore Gateway — non-Mongo tool surface
+# AgentCore Gateway — Cognito-authenticated MCP endpoint
 #
-# Cognito JWKS-authenticated MCP endpoint kept for Gateway-hosted tools. MongoDB
-# MCP calls now go directly to the dedicated mongodb-mcp AgentCore Runtime
-# because AgentCore Gateway mcpServer targets cannot use AgentCore Runtime
-# endpoints. The legacy Lambda target remains physically deleted.
+# Routes MCP tool calls (mongodb_query, mongodb_vector_search, etc.) through
+# the gateway to the mongodb_mcp_runtime AgentCore Runtime via Streamable-HTTP.
+# The gateway IAM role is granted bedrock-agentcore:InvokeAgentRuntime on the
+# runtime ARN (see modules/agentcore-gateway/main.tf).
+# Endpoint format: https://bedrock-agentcore.<region>.amazonaws.com/runtimes
+#   /<url-encoded-arn>/invocations?qualifier=DEFAULT
 # ══════════════════════════════════════════════════════════════════════════════
 module "agentcore_gateway" {
   source = "../../modules/agentcore-gateway"
@@ -551,7 +579,9 @@ module "agentcore_gateway" {
   project_name             = var.project_name
   environment              = var.environment
   create_lambda_target     = false
-  create_mcp_server_target = false
+  create_mcp_server_target = true
+  mcp_server_endpoint      = local.mongodb_mcp_runtime_endpoint
+  mcp_server_runtime_arn   = local.mongodb_mcp_runtime_arn
   cognito_user_pool_id     = module.cognito.user_pool_id
   cognito_app_client_id    = module.cognito.user_pool_client_id
   tags                     = local.common_tags
@@ -586,19 +616,28 @@ resource "aws_ecr_lifecycle_policy" "agent_runtime" {
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
-# AgentCore Agent Runtime — 4 runtimes (orchestrator + 3 specialists)
-# All share one ARM64 image; AGENT_ID decides runtime behavior.
-# Static env vars only; deploy.sh injects dynamic vars and specialist ARNs.
+# AgentCore Agent Runtime — specialists (for_each) + orchestrator (hardcoded)
+#
+# Specialists are driven by var.specialist_agents, populated from
+# config/agents/*.agent.md by deploy.sh / deploy-agents.sh via
+# agents.auto.tfvars.json. Adding a new .agent.md + re-running
+# deploy-agents.sh provisions a new runtime automatically. Removing one
+# destroys it (requires --allow-destroy in deploy-agents.sh).
+#
+# The orchestrator is kept hardcoded because it has distinct env-var wiring
+# (ORCHESTRATOR_MODE=runtime, AGENTCORE_RUNTIME_ARN_* for each specialist).
+# All runtimes share one ARM64 code artifact in S3; AGENT_ID selects behavior.
 # ══════════════════════════════════════════════════════════════════════════════
-module "acr_troubleshooting" {
-  source = "../../modules/agentcore-agent-runtime"
+module "acr_specialists" {
+  source   = "../../modules/agentcore-agent-runtime"
+  for_each = { for a in var.specialist_agents : a.id => a }
 
   aws_region                    = var.aws_region
   project_name                  = var.project_name
   environment                   = var.environment
   account_id                    = data.aws_caller_identity.current.account_id
   network_mode                  = "PUBLIC"
-  runtime_name                  = "${var.project_name}-troubleshooting-${var.environment}"
+  runtime_name                  = each.value.runtime_name
   deployment_mode               = var.agentcore_runtime_deployment_mode
   container_uri                 = var.agentcore_runtime_deployment_mode == "container" ? "${local.agentcore_runtime_repo_url}:latest" : ""
   code_artifact_bucket          = data.aws_s3_bucket.shared.id
@@ -609,75 +648,10 @@ module "acr_troubleshooting" {
   voyage_sagemaker_endpoint_arn = local.voyage_sagemaker_endpoint_arn
 
   environment_variables = {
-    AWS_REGION = var.aws_region
-    AGENT_ID   = "troubleshooting"
-    LOG_LEVEL  = "info"
-  }
-
-  tags = local.common_tags
-
-  depends_on = [
-    aws_ecr_repository.agent_runtime,
-    module.agentcore_gateway,
-    module.agentcore_memory,
-  ]
-}
-
-module "acr_order_management" {
-  source = "../../modules/agentcore-agent-runtime"
-
-  aws_region                    = var.aws_region
-  project_name                  = var.project_name
-  environment                   = var.environment
-  account_id                    = data.aws_caller_identity.current.account_id
-  network_mode                  = "PUBLIC"
-  runtime_name                  = "${var.project_name}-order-management-${var.environment}"
-  deployment_mode               = var.agentcore_runtime_deployment_mode
-  container_uri                 = var.agentcore_runtime_deployment_mode == "container" ? "${local.agentcore_runtime_repo_url}:latest" : ""
-  code_artifact_bucket          = data.aws_s3_bucket.shared.id
-  code_artifact_prefix          = var.agentcore_code_artifact_prefix
-  code_runtime                  = "NODE_22"
-  code_entry_point              = local.agentcore_code_entrypoint
-  kb_secret_name_prefix         = module.bedrock_kb.atlas_secret_name
-  voyage_sagemaker_endpoint_arn = local.voyage_sagemaker_endpoint_arn
-
-  environment_variables = {
-    AWS_REGION = var.aws_region
-    AGENT_ID   = "order-management"
-    LOG_LEVEL  = "info"
-  }
-
-  tags = local.common_tags
-
-  depends_on = [
-    aws_ecr_repository.agent_runtime,
-    module.agentcore_gateway,
-    module.agentcore_memory,
-  ]
-}
-
-module "acr_product_recommendation" {
-  source = "../../modules/agentcore-agent-runtime"
-
-  aws_region                    = var.aws_region
-  project_name                  = var.project_name
-  environment                   = var.environment
-  account_id                    = data.aws_caller_identity.current.account_id
-  network_mode                  = "PUBLIC"
-  runtime_name                  = "${var.project_name}-product-recommendation-${var.environment}"
-  deployment_mode               = var.agentcore_runtime_deployment_mode
-  container_uri                 = var.agentcore_runtime_deployment_mode == "container" ? "${local.agentcore_runtime_repo_url}:latest" : ""
-  code_artifact_bucket          = data.aws_s3_bucket.shared.id
-  code_artifact_prefix          = var.agentcore_code_artifact_prefix
-  code_runtime                  = "NODE_22"
-  code_entry_point              = local.agentcore_code_entrypoint
-  kb_secret_name_prefix         = module.bedrock_kb.atlas_secret_name
-  voyage_sagemaker_endpoint_arn = local.voyage_sagemaker_endpoint_arn
-
-  environment_variables = {
-    AWS_REGION = var.aws_region
-    AGENT_ID   = "product-recommendation"
-    LOG_LEVEL  = "info"
+    AWS_REGION                = var.aws_region
+    AGENT_ID                  = each.key
+    LOG_LEVEL                 = "info"
+    AGENTCORE_MEMORY_STORE_ID = module.agentcore_memory.memory_id
   }
 
   tags = local.common_tags
@@ -708,9 +682,10 @@ module "acr_orchestrator" {
   voyage_sagemaker_endpoint_arn = local.voyage_sagemaker_endpoint_arn
 
   environment_variables = {
-    AWS_REGION = var.aws_region
-    AGENT_ID   = "orchestrator"
-    LOG_LEVEL  = "info"
+    AWS_REGION                = var.aws_region
+    AGENT_ID                  = "orchestrator"
+    LOG_LEVEL                 = "info"
+    AGENTCORE_MEMORY_STORE_ID = module.agentcore_memory.memory_id
   }
 
   tags = local.common_tags
@@ -719,9 +694,7 @@ module "acr_orchestrator" {
     aws_ecr_repository.agent_runtime,
     module.agentcore_gateway,
     module.agentcore_memory,
-    module.acr_troubleshooting,
-    module.acr_order_management,
-    module.acr_product_recommendation,
+    module.acr_specialists,
   ]
 }
 

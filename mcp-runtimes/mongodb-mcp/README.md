@@ -45,7 +45,7 @@ npx @modelcontextprotocol/inspector
 
 ## Deploy to AgentCore Runtime
 
-The container is built and pushed to ECR by `deploy/scripts/deploy.sh`
+The container is built and pushed to ECR by `deploy/scripts/deploy-project.sh`
 (Phase 7d). `deploy/terraform/envs/ec2/main.tf` provisions an AgentCore
 Runtime with `serverProtocol = MCP` pointing at this image, and an
 AgentCore Gateway target of type `mcpServer` pointing at the runtime's
