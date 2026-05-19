@@ -194,7 +194,31 @@ Editable diagram with descriptions: [`diagrams/04-deployment-pipeline.drawio`](d
 | 9 | Health + smoke validation | Waits for `/health`, then runs authenticated backend smoke checks. |
 | 10 | Manifest write | Writes `deploy-manifest.json` with resolved runtime/resource outputs. |
 
-### 3.2 Common deploy issues
+### 3.2 Observability stack (deployed by default)
+
+The same `terraform apply` provisions the **CloudWatch GenAI Observability** + **OTLP via ADOT** + **fleet dashboards** stack. Defaults are tuned for low-volume dev / staging:
+
+| Terraform variable | Default | What it does | Cost driver |
+|---|---|---|---|
+| `enable_genai_observability` | `true` | `aws/spans` log group, X-Ray Transaction Search, AgentCore Memory/Gateway vended log delivery | Span ingestion volume |
+| `span_sampling_percent` | `100` | What % of received spans become indexed trace summaries (raw spans always land in `aws/spans`) | Indexed-trace fee |
+| `enable_bedrock_invocation_logging` | `true` | `/aws/bedrock/invocations` log group, KMS-encrypted, Data Protection Policy attached. **Body logging OFF**. | Metadata records only |
+| `log_prompt_bodies` | `false` | When true, raw prompts + completions land in invocation logs (still PII-masked) | Big bump — bodies dwarf metadata |
+| `log_embedding_bodies` | `false` | When true, raw embedding inputs land in invocation logs | Same |
+| `enable_adot_collector` | `true` | ADOT sidecar on EC2 + `/<project>/<env>/otel` log group | OTLP egress + storage |
+| `enable_fleet_dashboards` | `true` | 3 dashboards + 7 alarms + SNS topic + query library | Negligible |
+| `alarm_email` | `""` | Subscribes a single email address to the alarms SNS topic | Free |
+| `enable_atlas_metrics` | `false` | **Phase 4 opt-in.** ADOT scrapes Atlas Prometheus → `MongoDB/Atlas` CloudWatch namespace; adds Atlas dashboard + 2 alarms | Custom metrics + secret |
+
+**Important caveats:**
+
+- **`awscc` provider.** `modules/cloudwatch-genai` uses `awscc_xray_transaction_search_config` because the legacy `aws` provider does not yet expose it. The `awscc` provider is already added to `envs/ec2/main.tf` and authenticates via the same AWS credential chain — no extra setup.
+- **`aws_bedrock_model_invocation_logging_configuration` is account-scoped.** Only one per region per AWS account. If another stack in the same account already owns it, **set `enable_bedrock_invocation_logging = false`** to avoid a Terraform clash (the apply will succeed but the singleton resource fails on conflict).
+- **Sidecar ordering.** `modules/ec2/user_data.sh` orders `multiagent-api.service` and `multiagent-ui.service` with `After=aws-otel-collector.service` so the OTLP receiver is up before either app starts. If the collector unit is missing (e.g. `enable_adot_collector = false`), the `After=` is a no-op and the services start unchanged.
+- **`log_prompt_bodies = true` is opt-in.** Body logging captures user inputs + model outputs. Even though the Data Protection Policy auto-masks PII, the body is written before scrubbing. Treat the flag as audit-reviewed and time-boxed. See [`docs/observability-runbook.md`](observability-runbook.md) §3 for the checklist.
+- **Per-user cost wiring.** Phase 3's `MetadataAwareBedrockModel` wrapper in `api/src/adapters/resolve-model.ts` is on by default and reads `currentTrace().userId / agentId` at call time. If you fork the API to use `BedrockModel` directly, the per-user cost dashboard widget will be empty.
+
+### 3.3 Common deploy issues
 
 | Symptom | Cause | Fix |
 |---|---|---|

@@ -221,6 +221,32 @@
       "Resource": "*"
     },
     {
+      "Sid": "ApplicationSignalsForTransactionSearch",
+      "Effect": "Allow",
+      "Action": [
+        "application-signals:StartDiscovery",
+        "application-signals:StopDiscovery",
+        "application-signals:GetService",
+        "application-signals:ListServices",
+        "application-signals:GetServiceLevelObjective",
+        "application-signals:ListServiceLevelObjectives",
+        "application-signals:BatchGetServiceLevelObjectiveBudgetReport"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "CloudTrailServiceLinkedChannel",
+      "Effect": "Allow",
+      "Action": [
+        "cloudtrail:CreateServiceLinkedChannel",
+        "cloudtrail:DeleteServiceLinkedChannel",
+        "cloudtrail:GetServiceLinkedChannel",
+        "cloudtrail:ListServiceLinkedChannels",
+        "cloudtrail:UpdateServiceLinkedChannel"
+      ],
+      "Resource": "*"
+    },
+    {
       "Sid": "SystemsManager",
       "Effect": "Allow",
       "Action": [

@@ -74,6 +74,11 @@ source .env && python3 e2e-smoke/post-deploy-smoke.py
 # Rebuilds/pushes only the API image, refreshes .env.live, restarts multiagent-api, runs backend smoke.
 ./deploy/deploy-api.sh [--skip-docker] [--skip-smoke]
 
+# UI-only redeploy (when only ui/ code changed)
+# Rebuilds/pushes only the UI image, restarts multiagent-ui, runs Streamlit health check.
+# Does NOT regenerate .env.live — run deploy-api.sh first if Cognito/Atlas/OTel env vars changed.
+./deploy/deploy-ui.sh [--skip-docker] [--skip-smoke]
+
 # Docker — full stack (mock model + fixtures; no AWS required)
 docker compose up --build
 # or: make docker-up
@@ -179,6 +184,12 @@ cd api && bun run dev
 - Auth: `api/src/middleware/auth.ts` + `api/src/lib/jwt-verify.ts` — JWKS auth is mandatory. `assertJwksAuthConfigured()` runs at boot in `api/src/index.ts` and refuses to start without **`AUTH_JWKS_URI`** + **`AUTH_ISSUER`**. Every protected request is required to carry a valid Bearer JWT verified with **`jose`**; JWT `sub` is stored in `c.get("jwtPayload")?.sub` and used for session userId scoping. There is no `ALLOW_UNAUTHENTICATED` / `REQUIRE_AUTH=false` bypass.
 - Session userId scoping: `api/src/lib/session-store.ts` carries `userId?`; `api/src/routes/sessions.ts` filters `GET /sessions` by user and enforces `DELETE` ownership.
 - Structured logging: `api/src/lib/logger.ts` — JSON lines, level controlled by **`LOG_LEVEL`** (`error`|`warn`|`info`|`debug`; default `info`). Used across config-scan, skill-loader, mongo-data, base-tools, app error handler, chat/swarm streams.
+- OpenTelemetry: `api/src/lib/otel.ts` — when **`OTEL_EXPORTER_OTLP_ENDPOINT`** is set (EC2 default: `http://127.0.0.1:4318`, ADOT sidecar), installs `NodeTracerProvider` + `BatchSpanProcessor` + `OTLPTraceExporter`. When unset, falls back to in-process tracing only. The Strands TS SDK auto-instruments via the global tracer provider — bump OTel deps in `api/package.json` only after checking the Strands 0.7 peer-dep matrix or you'll get two providers and silent span loss.
+- TraceCollector OTel bridge: `api/src/lib/trace-collector.ts` — `start()` / `end()` / `event()` emit real OTel spans alongside the in-house event stream. Wrapped in try/catch so OTel exporter back-pressure can't destabilize the chat path. `attachEventsNested(...)` deliberately skips OTel re-emission because AgentCore Runtime emits its own `gen_ai.*` spans for the inner hop.
+- Per-user cost attribution: `api/src/adapters/resolve-model.ts` instantiates `MetadataAwareBedrockModel` (a `BedrockModel` subclass) that reads `currentTrace().userId / agentId` at `stream()` time and injects them into `additionalArgs.requestMetadata`. Bedrock invocation logging surfaces them in `/aws/bedrock/invocations`, and the `<project>-cost-<env>` dashboard groups token usage by `requestMetadata.userId`. The model cache is per-agent (not per-user), so we mutate `_config` per call — relies on Strands 0.7 reading `_config` at request time.
+- Custom metrics (EMF): `api/src/lib/cw-metrics.ts` emits **CloudWatch Embedded Metric Format** stdout JSON for `Multiagent/Chat`, `Multiagent/Mongo`, `Multiagent/Memory`. Call sites: `routes/chat.ts` (chat.turn.end), `adapters/agentcore-runtime.ts` (AgentCore invoke success + failure), `lib/trace-collector.ts` (bridges `mongo.query` / `mongo.vector_search` events), `lib/long-term-memory.ts` (write completion). Lock-down test: `api/tests/unit/cw-metrics.test.ts` — fails the moment a metric is renamed or a value moves off the top level of the EMF record. Disable in CI with `METRICS_EMITTER_ENABLED=0`. **Without this emitter the Phase 3 fleet dashboards stay empty and the latency / error-rate alarms go `INSUFFICIENT_DATA`.**
+- OTel dependency pinning: Strands TS SDK 0.7 peers `@opentelemetry/{api,sdk-trace-*,resources,exporter-trace-otlp-http}` on the **OTel 1.30.x line** (exporters `^0.57.x`). `api/package.json` must stay inside that range or `gen_ai.*` spans silently drop — see [`memory.md`](memory.md#strands-ts-sdk--otel--global-tracer-provider-version-drift-kills-gen_ai-spans). Run `bun run validate:strands-otel` before merging any OTel dep bump.
+- Prompt-body logging: `var.log_prompt_bodies` and `var.log_embedding_bodies` default to **false** in `modules/bedrock-invocation-logging`. Flip per-environment only with audit sign-off; the attached Data Protection Policy still masks PII even when bodies are on, but the body is written before scrubbing. See `docs/observability-runbook.md` §3 for the checklist.
 - HTTP + SSE: `api/src/routes/chat.ts`.
 - Tracing: `api/src/lib/trace-types.ts` (event union), `api/src/lib/trace-collector.ts` (per-turn collector + cost summary + byte cap + nested splice), `api/src/lib/trace-context.ts` (`AsyncLocalStorage`), `api/src/lib/trace-store.ts` (ring buffer + MongoDB persistence with TTL), `api/src/routes/trace.ts` (`GET /traces/:id`, `GET /trace`, `GET /trace/mongo`, `GET /traces`). UI: `ui/lib/inline_summary.py` (per-turn card), `ui/pages/2_Trace_Viewer.py` (full dashboard). Streamlit chat surfaces vector-search source previews via browser-native `title=` tooltips; treat `mongo.vector_search.documentPreviews[]` as the user-visible source-preview contract.
 
@@ -200,7 +211,9 @@ Implemented: Streamlit **Cognito** (`streamlit-cognito-auth`, `ui/lib/cognito_ga
 | [`docs/configuration-guide.md`](docs/configuration-guide.md) | Config and environment |
 | [`docs/deployment-guide.md`](docs/deployment-guide.md) | Target AWS/Terraform, **Docker & ECR** (reference), ECS notes |
 | [`docs/architecture.md`](docs/architecture.md) | System design |
-| [`docs/logging-architecture.md`](docs/logging-architecture.md) | Structured JSON logger, OpenTelemetry trace correlation, CloudWatch shipping, audit channel, redaction |
+| [`docs/logging-architecture.md`](docs/logging-architecture.md) | Structured JSON logger, OpenTelemetry trace correlation, CloudWatch shipping + GenAI Observability + ADOT sidecar, audit channel, redaction |
+| [`docs/observability-runbook.md`](docs/observability-runbook.md) | Day-2 ops — finding traces, log-group cheat sheet, body-logging checklist, sampling tuning, alarm authoring, SNS, per-user cost dashboard, Atlas anomalies, emergency knobs |
+| [`docs/dashboards/README.md`](docs/dashboards/README.md) | CloudWatch dashboard reference — widget catalog, screenshots, alarm thresholds, console URLs, how to regenerate screenshots |
 | [`docs/demo-mode-guide.md`](docs/demo-mode-guide.md) | Trace UI walkthrough + env knobs for client demos |
 
 ---

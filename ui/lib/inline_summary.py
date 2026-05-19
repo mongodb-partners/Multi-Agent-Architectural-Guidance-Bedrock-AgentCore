@@ -294,23 +294,13 @@ def aggregate_summary(events: Iterable[TraceEvent]) -> TurnSummary:
 # ---------------------------------------------------------------------------
 
 def _tile(label: str, value: str, *, hint: str | None = None) -> None:
+    hint_html = f'<div class="brand-tile-hint">{hint}</div>' if hint else ""
     st.markdown(
-        f"""
-<div style="
-    background: rgba(255,255,255,0.04);
-    border: 1px solid rgba(255,255,255,0.08);
-    border-radius: 10px;
-    padding: 10px 12px;
-    min-width: 90px;
-    display: inline-block;
-    margin-right: 8px;
-    margin-bottom: 8px;
-">
-  <div style="font-size: 11px; opacity: 0.65; letter-spacing: 0.04em; text-transform: uppercase;">{label}</div>
-  <div style="font-size: 17px; font-weight: 600; margin-top: 2px;">{value}</div>
-  {f'<div style="font-size: 11px; opacity: 0.55; margin-top: 2px;">{hint}</div>' if hint else ''}
-</div>
-""",
+        f"""<div class="brand-tile">
+  <div class="brand-tile-label">{label}</div>
+  <div class="brand-tile-value">{value}</div>
+  {hint_html}
+</div>""",
         unsafe_allow_html=True,
     )
 
@@ -476,7 +466,7 @@ def _render_reasoning_panel(s: TurnSummary) -> None:
             f"{len(s.thinking_blocks)} thinking block"
             f"{'s' if len(s.thinking_blocks) != 1 else ''}"
         )
-    header = "🧠 Reasoning — " + " · ".join(parts)
+    header = ":material/psychology: Reasoning — " + " · ".join(parts)
 
     with st.expander(header, expanded=False):
         for i, c in enumerate(s.classifications, 1):
@@ -495,8 +485,8 @@ def _render_reasoning_panel(s: TurnSummary) -> None:
             preview = block[:_THINKING_PREVIEW_CHARS]
             truncated = len(block) > _THINKING_PREVIEW_CHARS
             label = (
-                f"🤔 Thinking block #{i}"
-                f" ({len(block):,} chars)" if truncated else f"🤔 Thinking block #{i}"
+                f":material/lightbulb: Thinking block #{i}"
+                f" ({len(block):,} chars)" if truncated else f":material/lightbulb: Thinking block #{i}"
             )
             with st.expander(label, expanded=False):
                 if truncated:

@@ -51,3 +51,12 @@ bash e2e-smoke/ltm/ltm-smoke.sh
 ```
 
 This suite writes fresh memory, recalls it across sessions, fetches persisted traces, and fails unless `agent_memory_facts` and `chat_messages` participate in hybrid/vector retrieval.
+
+## Failure drills
+
+```bash
+source .env
+python3 e2e-smoke/failure-drills/run_all.py
+```
+
+The failure-drill suite covers auth edge cases, CloudWatch alarm state transitions, a non-destructive Bedrock throttling alarm drill, Mongo outage/recovery, AgentCore runtime failure/recovery, and API image rollback/restore. See `failure-drills/README.md` for individual drill commands and safety notes.

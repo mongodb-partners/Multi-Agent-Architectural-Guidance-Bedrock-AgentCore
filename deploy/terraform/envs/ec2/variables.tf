@@ -170,3 +170,158 @@ variable "log_retention_days" {
   type    = number
   default = 30
 }
+
+# ── CloudWatch GenAI Observability ────────────────────────────────────────────
+variable "enable_genai_observability" {
+  type        = bool
+  description = "Provision modules/cloudwatch-genai (Transaction Search + AgentCore vended log delivery). Defaults to true; set false to skip in stacks that share an account with another team's GenAI Observability config."
+  default     = true
+}
+
+variable "span_retention_days" {
+  type        = number
+  description = "Retention for the aws/spans Transaction Search log group."
+  default     = 14
+}
+
+variable "enable_transaction_search_toggle" {
+  type        = bool
+  description = "Run the X-Ray CLI calls that switch span destination to CloudWatch Logs and set the indexing sampling rate. Safe to leave true after the first apply — the null_resource is idempotent."
+  default     = true
+}
+
+variable "span_sampling_percent" {
+  type        = number
+  description = "X-Ray Transaction Search indexing percentage (0-100). 100 = every span indexed (best for dev), 10 = sample 10% (typical prod). Underlying spans always land in /aws/spans either way."
+  default     = 100
+
+  validation {
+    condition     = var.span_sampling_percent >= 0 && var.span_sampling_percent <= 100
+    error_message = "span_sampling_percent must be between 0 and 100."
+  }
+}
+
+variable "agentcore_vended_log_retention_days" {
+  type        = number
+  description = "Retention for AgentCore memory + gateway vended APPLICATION_LOGS log groups."
+  default     = 7
+}
+
+# ── Bedrock invocation logging ────────────────────────────────────────────────
+variable "enable_bedrock_invocation_logging" {
+  type        = bool
+  description = "Provision modules/bedrock-invocation-logging. Account-scoped resource — set false when another stack in this AWS account already owns it."
+  default     = true
+}
+
+variable "log_prompt_bodies" {
+  type        = bool
+  description = "Deliver raw prompt + completion bodies to /aws/bedrock/invocations. Defaults FALSE for privacy. Flip true per-environment only with security sign-off (the attached Data Protection Policy still masks PII, but the body still gets written before masking)."
+  default     = false
+}
+
+variable "log_embedding_bodies" {
+  type        = bool
+  description = "Deliver raw embedding input text. Defaults FALSE — embeddings can encode user text and so leak semantically."
+  default     = false
+}
+
+variable "invocation_retention_days" {
+  type        = number
+  description = "Retention for the Bedrock invocation log group. 7 dev / 30 prod typical; longer for regulated industries."
+  default     = 7
+}
+
+variable "data_protection_identifiers" {
+  type        = list(string)
+  description = "Managed PII identifiers for the Data Protection Policy attached to the Bedrock invocation log group. Defaults cover language- + region-independent PII (always valid). Add country-scoped identifiers per environment as needed: e.g. PhoneNumber-US, PhoneNumber-GB, BankAccountNumber-US, Ssn. Full list: https://docs.aws.amazon.com/AmazonCloudWatch/latest/logs/CWL-managed-data-identifiers.html"
+  default = [
+    "EmailAddress",
+    "CreditCardNumber",
+    "AwsSecretKey",
+    "IpAddress",
+  ]
+}
+
+# ── ADOT Collector sidecar (Phase 2) ──────────────────────────────────────────
+variable "enable_adot_collector" {
+  type        = bool
+  description = "Provision modules/adot-collector and install the sidecar systemd unit on EC2. When false the API and UI fall back to in-process OTel only (no /aws/spans / no GenAI Observability traces from the application). Default true."
+  default     = true
+}
+
+variable "adot_collector_image" {
+  type        = string
+  description = "OCI image for the ADOT collector container. Default uses the public-ecr :latest tag; pin a digest in prod for repeatable builds."
+  default     = "public.ecr.aws/aws-observability/aws-otel-collector:latest"
+}
+
+variable "otel_sample_ratio" {
+  type        = string
+  description = "OTEL_TRACES_SAMPLER_ARG injected into the API container. 1.0 = sample everything (dev). 0.1 = 10% (typical prod)."
+  default     = "1.0"
+}
+
+# ── MongoDB Atlas → CloudWatch metrics (Phase 4) ──────────────────────────────
+variable "enable_atlas_metrics" {
+  type        = bool
+  description = "Phase 4 toggle. When true, provisions an Atlas Prometheus credentials secret and extends the ADOT collector config with a prometheus receiver + awsemf exporter pushing to the MongoDB/Atlas CloudWatch namespace. Default false."
+  default     = false
+}
+
+variable "atlas_scrape_interval_sec" {
+  type        = number
+  description = "Atlas Prometheus scrape cadence. 60s is the recommended floor."
+  default     = 60
+}
+
+variable "atlas_prom_username" {
+  type        = string
+  description = "Atlas Prometheus integration username (generated in Atlas UI → Project → Integrations → Prometheus). Stored in Secrets Manager when enable_atlas_metrics=true; unused otherwise."
+  default     = ""
+  sensitive   = true
+}
+
+variable "atlas_prom_password" {
+  type        = string
+  description = "Atlas Prometheus integration password."
+  default     = ""
+  sensitive   = true
+}
+
+variable "atlas_prom_host" {
+  type        = string
+  description = "Atlas Prometheus scrape host, e.g. <group-id>-prometheus.mongodb.com (from Atlas UI)."
+  default     = ""
+}
+
+variable "atlas_replication_lag_threshold_ms" {
+  type        = number
+  description = "Alarm threshold for Atlas secondary replication lag (Phase 4)."
+  default     = 5000
+}
+
+# ── Fleet dashboards + alarms (Phase 3) ───────────────────────────────────────
+variable "enable_fleet_dashboards" {
+  type        = bool
+  description = "Provision modules/cloudwatch-fleet-dashboards (3 dashboards, 7 alarms, audit metric filter, query library). Default true."
+  default     = true
+}
+
+variable "p99_latency_threshold_ms" {
+  type        = number
+  description = "P99 chat-turn latency alarm threshold (ms)."
+  default     = 12000
+}
+
+variable "error_rate_threshold_pct" {
+  type        = number
+  description = "Error-rate alarm threshold as %."
+  default     = 2
+}
+
+variable "throttle_burst_threshold" {
+  type        = number
+  description = "Bedrock throttle alarm threshold (count of ThrottlingException per 5 minutes)."
+  default     = 5
+}

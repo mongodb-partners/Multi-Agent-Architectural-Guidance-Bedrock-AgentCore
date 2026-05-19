@@ -965,6 +965,22 @@ STREAMLIT_COGNITO_CLIENT_ID=${COGNITO_CLIENT_ID}
 
 # EC2 URLs
 STREAMLIT_API_URL=http://${EC2_IP}:3000/
+
+# OpenTelemetry — points Bun API + Streamlit UI at the local ADOT Collector
+# sidecar (modules/adot-collector). The sidecar signs SigV4 outbound to the
+# AWS X-Ray OTLP endpoint, so apps never need their own credentials for
+# telemetry. When OTEL_EXPORTER_OTLP_ENDPOINT is empty (e.g. enable_adot_collector
+# = false in Terraform), the Bun bootstrap falls back to in-process tracing
+# only and the Streamlit auto-instrumentation no-ops gracefully.
+OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-http://127.0.0.1:4318}
+OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
+OTEL_SERVICE_NAME=multiagent-api
+OTEL_RESOURCE_ATTRIBUTES=service.namespace=multiagent,deployment.environment=${ENVIRONMENT:-dev},service.version=${GIT_SHA:-unknown}
+OTEL_TRACES_SAMPLER=parentbased_traceidratio
+OTEL_TRACES_SAMPLER_ARG=${OTEL_SAMPLE_RATIO:-1.0}
+# Streamlit-side instrumentation hook (Python distro convention).
+OTEL_PYTHON_LOG_CORRELATION=true
+OTEL_PYTHON_LOG_FORMAT=%(asctime)s %(levelname)s [%(name)s] [trace_id=%(otelTraceID)s span_id=%(otelSpanID)s resource.service.name=%(otelServiceName)s] - %(message)s
 EOF
 ok ".env.live written"
 

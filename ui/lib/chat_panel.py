@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import streamlit as st
 
+from lib.avatars import BOT_AVATAR, USER_AVATAR
 from lib.api_client import (
     AgentActiveEvent,
     ChatStreamError,
@@ -18,13 +19,13 @@ from lib.api_client import (
 from lib import log as ui_log
 from lib.inline_summary import aggregate_summary, render_inline_summary
 
-_TOOL_ICON = "🔧"
-_SKILL_ICON = "📚"
-_HANDOFF_ICON = "🔀"
-_AGENT_ICON = "🤖"
-_MODEL_ICON = "🧠"
-_MONGO_ICON = "🍃"
-_STREAM_ICON = "⚡"
+_TOOL_ICON = ":material/build:"
+_SKILL_ICON = ":material/menu_book:"
+_HANDOFF_ICON = ":material/swap_horiz:"
+_AGENT_ICON = ":material/smart_toy:"
+_MODEL_ICON = ":material/psychology:"
+_MONGO_ICON = ":material/database:"
+_STREAM_ICON = ":material/bolt:"
 
 
 def _pretty_tool_name(tool: str) -> str:
@@ -87,8 +88,9 @@ def _trace_progress_badge(ev: TraceEvent) -> str | None:
 
 
 def render_message_history() -> None:
+    _avatars = {"user": USER_AVATAR, "assistant": BOT_AVATAR}
     for m in st.session_state.messages:
-        with st.chat_message(m["role"]):
+        with st.chat_message(m["role"], avatar=_avatars.get(m["role"])):
             st.markdown(m["content"])
             for badge in m.get("badges", []):
                 st.caption(badge)
@@ -116,10 +118,10 @@ def handle_chat_input(api_base: str, token: str | None, agent_id: str) -> None:
         return
 
     st.session_state.messages.append({"role": "user", "content": prompt})
-    with st.chat_message("user"):
+    with st.chat_message("user", avatar=USER_AVATAR):
         st.markdown(prompt)
 
-    with st.chat_message("assistant"):
+    with st.chat_message("assistant", avatar=BOT_AVATAR):
         progress_status = st.status("Starting assistant response...", expanded=True)
         progress_status.write("Opening response stream...")
 

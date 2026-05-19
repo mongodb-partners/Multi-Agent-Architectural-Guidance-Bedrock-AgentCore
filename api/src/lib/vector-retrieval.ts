@@ -20,6 +20,7 @@
  */
 
 import type { Db, Document } from "mongodb";
+import { recordMongoQuery } from "./cw-metrics.ts";
 
 // ---------------------------------------------------------------------------
 // Pipeline builders (pure)
@@ -150,19 +151,24 @@ export async function runVectorSearch(
 ): Promise<ScoredHit[]> {
   const pipeline = buildVectorSearchPipeline(queryVector, opts);
   const aggregateOpts = aggregateTimeoutOptions(opts.maxTimeMS);
+  const vsStart = Date.now();
   try {
-  const docs = (await db
-    .collection(collection)
-    .aggregate(pipeline, aggregateOpts.options)
-    .toArray()) as Document[];
-  return docs.map((d, i) => ({
-    id: stringifyId(d._id),
-    collection,
-    score: typeof d._score === "number" ? d._score : 0,
-    rank: i + 1,
-    source: "vector",
-    doc: d,
-  }));
+    const docs = (await db
+      .collection(collection)
+      .aggregate(pipeline, aggregateOpts.options)
+      .toArray()) as Document[];
+    recordMongoQuery({ kind: "vector_search", collection, latencyMs: Date.now() - vsStart });
+    return docs.map((d, i) => ({
+      id: stringifyId(d._id),
+      collection,
+      score: typeof d._score === "number" ? d._score : 0,
+      rank: i + 1,
+      source: "vector",
+      doc: d,
+    }));
+  } catch (err) {
+    recordMongoQuery({ kind: "vector_search", collection, latencyMs: Date.now() - vsStart });
+    throw err;
   } finally {
     aggregateOpts.clear();
   }
@@ -176,19 +182,24 @@ export async function runLexicalSearch(
 ): Promise<ScoredHit[]> {
   const pipeline = buildLexicalSearchPipeline(queryText, opts);
   const aggregateOpts = aggregateTimeoutOptions(opts.maxTimeMS);
+  const bm25Start = Date.now();
   try {
-  const docs = (await db
-    .collection(collection)
-    .aggregate(pipeline, aggregateOpts.options)
-    .toArray()) as Document[];
-  return docs.map((d, i) => ({
-    id: stringifyId(d._id),
-    collection,
-    score: typeof d._score === "number" ? d._score : 0,
-    rank: i + 1,
-    source: "lexical",
-    doc: d,
-  }));
+    const docs = (await db
+      .collection(collection)
+      .aggregate(pipeline, aggregateOpts.options)
+      .toArray()) as Document[];
+    recordMongoQuery({ kind: "aggregate", collection, latencyMs: Date.now() - bm25Start });
+    return docs.map((d, i) => ({
+      id: stringifyId(d._id),
+      collection,
+      score: typeof d._score === "number" ? d._score : 0,
+      rank: i + 1,
+      source: "lexical",
+      doc: d,
+    }));
+  } catch (err) {
+    recordMongoQuery({ kind: "aggregate", collection, latencyMs: Date.now() - bm25Start });
+    throw err;
   } finally {
     aggregateOpts.clear();
   }

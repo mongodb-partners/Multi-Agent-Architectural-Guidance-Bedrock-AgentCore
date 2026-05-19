@@ -225,23 +225,75 @@ module "cognito" {
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
+# MongoDB Atlas Prometheus credentials (Phase 4) — only created when
+# enable_atlas_metrics=true. Holds the username/password/host JSON that the
+# ADOT collector reads at boot to scrape the Atlas Prometheus endpoint.
+# ══════════════════════════════════════════════════════════════════════════════
+resource "aws_secretsmanager_secret" "atlas_prometheus" {
+  count                   = var.enable_atlas_metrics ? 1 : 0
+  name                    = "${var.project_name}-atlas-prometheus-${var.environment}"
+  description             = "MongoDB Atlas Prometheus scrape credentials for the ADOT collector"
+  recovery_window_in_days = 7
+  tags                    = local.common_tags
+}
+
+resource "aws_secretsmanager_secret_version" "atlas_prometheus" {
+  count     = var.enable_atlas_metrics ? 1 : 0
+  secret_id = aws_secretsmanager_secret.atlas_prometheus[0].id
+  secret_string = jsonencode({
+    username = var.atlas_prom_username
+    password = var.atlas_prom_password
+    host     = var.atlas_prom_host
+  })
+}
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ADOT Collector sidecar (Phase 2) — runs on the EC2 box, signs SigV4 outbound
+# to AWS OTLP endpoints. Apps speak plain OTLP to 127.0.0.1:4318.
+#
+# enable_atlas_metrics + atlas_secret_arn are wired in Phase 4; default off
+# so Phase 2 can ship independently.
+# ══════════════════════════════════════════════════════════════════════════════
+module "adot_collector" {
+  count  = var.enable_adot_collector ? 1 : 0
+  source = "../../modules/adot-collector"
+
+  project_name              = var.project_name
+  environment               = var.environment
+  aws_region                = var.aws_region
+  shared_bucket_name        = data.aws_s3_bucket.shared.id
+  otel_log_group_name       = "/${var.project_name}/${var.environment}/otel"
+  otel_retention_days       = var.log_retention_days
+  enable_atlas_metrics      = var.enable_atlas_metrics
+  atlas_scrape_interval_sec = var.atlas_scrape_interval_sec
+  atlas_secret_arn          = var.enable_atlas_metrics ? aws_secretsmanager_secret.atlas_prometheus[0].arn : ""
+  tags                      = local.common_tags
+}
+
+# ══════════════════════════════════════════════════════════════════════════════
 # EC2 — t3.medium + Elastic IP in shared public subnet, SSM enabled, no SSH
 # ══════════════════════════════════════════════════════════════════════════════
 module "ec2" {
   source = "../../modules/ec2"
 
-  project_name     = var.project_name
-  environment      = var.environment
-  aws_region       = var.aws_region
-  vpc_id           = local.shared_vpc_id
-  public_subnet_id = local.shared_public_subnet_ids[0]
-  instance_type    = var.ec2_instance_type
-  key_pair_name    = var.ec2_key_pair_name
-  ecr_api_image    = "${module.ecr.api_repository_url}:latest"
-  ecr_ui_image     = "${module.ecr.ui_repository_url}:latest"
-  ecr_registry     = "${module.ecr.registry_id}.dkr.ecr.${var.aws_region}.amazonaws.com"
-  cw_log_group_api = module.cloudwatch.api_log_group_name
-  cw_log_group_ui  = module.cloudwatch.ui_log_group_name
+  project_name          = var.project_name
+  environment           = var.environment
+  aws_region            = var.aws_region
+  vpc_id                = local.shared_vpc_id
+  public_subnet_id      = local.shared_public_subnet_ids[0]
+  instance_type         = var.ec2_instance_type
+  key_pair_name         = var.ec2_key_pair_name
+  ecr_api_image         = "${module.ecr.api_repository_url}:latest"
+  ecr_ui_image          = "${module.ecr.ui_repository_url}:latest"
+  ecr_registry          = "${module.ecr.registry_id}.dkr.ecr.${var.aws_region}.amazonaws.com"
+  cw_log_group_api      = module.cloudwatch.api_log_group_name
+  cw_log_group_ui       = module.cloudwatch.ui_log_group_name
+  adot_collector_image  = var.adot_collector_image
+  adot_config_s3_bucket = var.enable_adot_collector ? module.adot_collector[0].config_s3_bucket : ""
+  adot_config_s3_key    = var.enable_adot_collector ? module.adot_collector[0].config_s3_key : ""
+  adot_config_etag      = var.enable_adot_collector ? module.adot_collector[0].config_etag : ""
+  otel_sample_ratio     = var.otel_sample_ratio
+  atlas_prom_secret_arn = var.enable_atlas_metrics ? aws_secretsmanager_secret.atlas_prometheus[0].arn : ""
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -721,4 +773,99 @@ module "cloudwatch" {
   project_name       = var.project_name
   environment        = var.environment
   api_retention_days = var.log_retention_days
+}
+
+# ══════════════════════════════════════════════════════════════════════════════
+# CloudWatch Generative AI Observability — enables the managed AgentCore Agents
+# tab + Model Invocations tab, plus the Transaction Search infrastructure that
+# the ADOT sidecar (Phase 2) signs OTLP spans into.
+#
+# Pass AgentCore memory + gateway IDs so the module wires up service-vended
+# log delivery (memory/gateway dashboards stay empty without this).
+# ══════════════════════════════════════════════════════════════════════════════
+module "cloudwatch_genai" {
+  count  = var.enable_genai_observability ? 1 : 0
+  source = "../../modules/cloudwatch-genai"
+
+  project_name                    = var.project_name
+  environment                     = var.environment
+  span_retention_days             = var.span_retention_days
+  span_sampling_percent           = var.span_sampling_percent
+  enable_transaction_search_toggle = var.enable_transaction_search_toggle
+  agentcore_log_retention_days    = var.agentcore_vended_log_retention_days
+  # Pass the full ARNs (not ids) so log_delivery_source.resource_arn is
+  # partition-aware (arn:aws / arn:aws-gov / arn:aws-cn) and not derived from
+  # a hardcoded "arn:aws:bedrock-agentcore:..." prefix.
+  agentcore_memories = {
+    (module.agentcore_memory.memory_id) = module.agentcore_memory.memory_arn
+  }
+  agentcore_gateways = {
+    (module.agentcore_gateway.gateway_id) = module.agentcore_gateway.gateway_arn
+  }
+  tags = local.common_tags
+
+  depends_on = [
+    module.agentcore_memory,
+    module.agentcore_gateway,
+  ]
+}
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Bedrock model invocation logging — account-scoped. Captures per-call
+# metadata (modelId, token counts, latency, requestMetadata, error) by default;
+# prompt + completion bodies are OFF unless var.log_prompt_bodies is true.
+#
+# Set var.enable_bedrock_invocation_logging = false when another stack in this
+# AWS account already owns the singleton.
+# ══════════════════════════════════════════════════════════════════════════════
+module "bedrock_invocation_logging" {
+  source = "../../modules/bedrock-invocation-logging"
+
+  project_name                = var.project_name
+  environment                 = var.environment
+  enable                      = var.enable_bedrock_invocation_logging
+  log_prompt_bodies           = var.log_prompt_bodies
+  log_embedding_bodies        = var.log_embedding_bodies
+  retention_days              = var.invocation_retention_days
+  data_protection_identifiers = var.data_protection_identifiers
+  tags                        = local.common_tags
+}
+
+# ══════════════════════════════════════════════════════════════════════════════
+# CloudWatch Fleet Dashboards + Alarms (Phase 3) — SNS topic, 3 dashboards
+# (fleet / mongo / cost), 7 alarms, audit metric filter, query library.
+# Wires log groups from cloudwatch + adot-collector + bedrock-invocation-logging
+# so a single apply produces a working ops console.
+# ══════════════════════════════════════════════════════════════════════════════
+module "cloudwatch_fleet_dashboards" {
+  count  = var.enable_fleet_dashboards ? 1 : 0
+  source = "../../modules/cloudwatch-fleet-dashboards"
+
+  project_name              = var.project_name
+  environment               = var.environment
+  aws_region                = var.aws_region
+  api_log_group_name        = module.cloudwatch.api_log_group_name
+  ui_log_group_name         = module.cloudwatch.ui_log_group_name
+  invocation_log_group_name     = var.enable_bedrock_invocation_logging ? module.bedrock_invocation_logging.log_group_name : ""
+  audit_findings_log_group_name = var.enable_bedrock_invocation_logging ? module.bedrock_invocation_logging.audit_log_group_name : ""
+  otel_log_group_name       = var.enable_adot_collector ? module.adot_collector[0].otel_log_group_name : ""
+  p99_latency_threshold_ms  = var.p99_latency_threshold_ms
+  error_rate_threshold_pct  = var.error_rate_threshold_pct
+  throttle_burst_threshold  = var.throttle_burst_threshold
+  tags                      = local.common_tags
+}
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Atlas dashboard + alarms (Phase 4) — consumes the MongoDB/Atlas CloudWatch
+# namespace published by the ADOT collector's prometheus -> awsemf pipeline.
+# ══════════════════════════════════════════════════════════════════════════════
+module "cloudwatch_atlas_dashboard" {
+  count  = var.enable_atlas_metrics ? 1 : 0
+  source = "../../modules/cloudwatch-atlas-dashboard"
+
+  project_name                 = var.project_name
+  environment                  = var.environment
+  aws_region                   = var.aws_region
+  replication_lag_threshold_ms = var.atlas_replication_lag_threshold_ms
+  tags                         = local.common_tags
 }

@@ -16,6 +16,8 @@ the full multi-agent stack — no juggling 12+ AWS-managed policies.
 | `BedrockAndAgentCore` | Allow | `bedrock:*` (covers Foundation Models, Bedrock Runtime, Bedrock Agent, Bedrock Agent Runtime, Bedrock Knowledge Base — all one IAM namespace) + `bedrock-agentcore:*` (Memory + Gateway, both control and data plane) |
 | `SageMakerAndMarketplace` | Allow | SageMaker endpoints (Voyage AI) + Marketplace subscribe flows + License Manager reads |
 | `ObservabilityAndDelivery` | Allow | CloudWatch Logs, CloudWatch metrics, EventBridge, Scheduler, CloudFront |
+| `XRayObservability` | Allow | X-Ray trace ingestion, Transaction Search indexing rules, groups, sampling rules, resource policies |
+| `ApplicationSignalsForTransactionSearch` | Allow | `application-signals:StartDiscovery` (called internally by `xray:UpdateTraceSegmentDestination` when switching destination to CloudWatch Logs — required to enable Transaction Search) |
 | `SystemsManager` | Allow | SSM Session Manager, SSM send-command (deploy.sh uses this to push env + restart services on EC2 without SSH) |
 | `PassRoleToAwsServices` | Allow | Conditional `iam:PassRole` so EC2/Lambda/Bedrock/AgentCore/SageMaker can assume their execution roles during provisioning. The `Condition.StringEquals.iam:PassedToService` allow-list means the principal cannot pass a role to any service outside this list (blocks cross-service role hijacking). |
 
@@ -105,13 +107,17 @@ aws iam create-policy-version \
 
 ## Size check
 
-AWS default limits (all increasable on request):
+AWS measures policy size **without whitespace** (quotes from the IAM quota page: "Maximum size of an IAM policy (without whitespace): 6,144 characters").
 
-- Managed policy document: **6,144 characters**
-- User inline policy: **2,048 characters**
-- Role inline policy: **10,240 characters**
+Run to check:
 
-Run `wc -c deploy/iam/policy.json` to check before publishing.
+```bash
+# Minified size (what AWS actually counts — whitespace stripped):
+python3 -c "import json; d=json.load(open('deploy/iam/policy.json')); print(len(json.dumps(d)), 'chars (limit 6144)')"
+
+# Raw file size (formatted, includes whitespace — higher than the AWS limit but that's fine):
+wc -c deploy/iam/policy.json
+```
 
 ## Iterative policy testing + resource tagging
 

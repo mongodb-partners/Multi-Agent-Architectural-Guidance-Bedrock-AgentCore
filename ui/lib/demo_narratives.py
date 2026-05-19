@@ -106,7 +106,8 @@ def narrate(events: Iterable[dict]) -> list[str]:
     errs = [e for e in events_list if e.get("type") == "error"]
     if errs:
         out.append(
-            f"⚠️ <strong>{len(errs)}</strong> error(s) recorded — see the trace events for details."
+            f'<span class="brand-status brand-status--warn" title="errors"></span>'
+            f" <strong>{len(errs)}</strong> error(s) recorded — see the trace events for details."
         )
 
     return out

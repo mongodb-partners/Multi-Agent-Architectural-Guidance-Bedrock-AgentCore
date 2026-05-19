@@ -802,6 +802,7 @@ export class VectorSearchEmbedTool extends Tool {
       toolUse: { ...toolContext.toolUse, input: transform.args as JSONValue },
     };
 
+    const vsStart = Date.now();
     let result: ToolResultBlock;
     try {
       result = yield* underlying.stream(innerCtx);
@@ -819,6 +820,7 @@ export class VectorSearchEmbedTool extends Tool {
         limit: numericArg(transform.args.limit),
         filter: transform.args.filter,
         scores: [],
+        latencyMs: Date.now() - vsStart,
       });
       throw err;
     }
@@ -839,6 +841,7 @@ export class VectorSearchEmbedTool extends Tool {
       histogram: scoreHistogram(scores),
       hybrid: transform.mode === "hybrid",
       documentPreviews: extractDocumentPreviewsFromResult(result, collection),
+      latencyMs: Date.now() - vsStart,
     });
     return result;
   }
@@ -1141,7 +1144,7 @@ const INSERT_TOOLS = new Set([
  * before checking the known-tool sets so the logic applies in both gateway
  * and direct-runtime modes.
  */
-function injectUserIdIntoArgs(
+export function injectUserIdIntoArgs(
   toolName: string,
   args: unknown,
   userId: string,
@@ -1244,18 +1247,21 @@ async function connectMcpClient(): Promise<McpClient> {
           ? JSON.stringify(scopedArgs).slice(0, 400)
           : String(scopedArgs).slice(0, 400),
     });
+    const mcpCallStart = Date.now();
     try {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const result = await originalCallTool(tool as any, scopedArgs as any);
+      const mcpCallLatencyMs = Date.now() - mcpCallStart;
       // The MongoDB MCP runtime packs trace events into the content envelope;
       // extract them first and rewrite the LLM-visible text, then emit
       // tool.mcp with the cleaned result.
-      const nestedDropped = extractAndReplayMcpTraces(result, trace);
+      const nestedDropped = extractAndReplayMcpTraces(result, trace, { mcpCallLatencyMs });
       trace?.event("tool.mcp", {
         server: serverLabel,
         toolName: tool.name,
         args: scopedArgs,
         result,
+        latencyMs: mcpCallLatencyMs,
         ...(nestedDropped > 0 ? { nestedTracesDropped: nestedDropped } : {}),
       });
       return result;
@@ -1427,7 +1433,11 @@ export function resetMcpClientForTests(): void {
  * is safe against future MCP tools that don't follow the convention.
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-export function extractAndReplayMcpTraces(result: any, trace: ReturnType<typeof currentTrace>): number {
+export function extractAndReplayMcpTraces(
+  result: any,
+  trace: ReturnType<typeof currentTrace>,
+  opts: { mcpCallLatencyMs?: number } = {},
+): number {
   if (!result || !Array.isArray(result.content)) return 0;
   let dropped = 0;
   for (const block of result.content) {
@@ -1444,10 +1454,18 @@ export function extractAndReplayMcpTraces(result: any, trace: ReturnType<typeof 
     if (!meta || !Array.isArray(meta.traces)) continue;
     for (const ev of meta.traces) {
       if (!ev || typeof ev !== "object") continue;
-      const e = ev as { type?: string; payload?: unknown };
+      const e = ev as { type?: string; payload?: Record<string, unknown> };
       if (typeof e.type !== "string") continue;
+      let payload = (e.payload ?? {}) as Record<string, unknown>;
+      // mongo.vector_search events from the MongoDB MCP server don't carry
+      // latencyMs (the MCP server traces the result shape, not wall-clock time).
+      // Stamp with the MCP round-trip duration so maybeEmitMetric can emit
+      // VectorSearchLatencyMs for the MCP tool path (AgentCore runtime).
+      if (e.type === "mongo.vector_search" && typeof payload.latencyMs !== "number" && typeof opts.mcpCallLatencyMs === "number") {
+        payload = { ...payload, latencyMs: opts.mcpCallLatencyMs };
+      }
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      trace?.event(e.type as never, (e.payload ?? {}) as any);
+      trace?.event(e.type as never, payload as any);
     }
     if (typeof meta.tracesDropped === "number") dropped += meta.tracesDropped;
     // Rewrite text to just the result so the LLM doesn't see `meta`.

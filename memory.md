@@ -170,17 +170,21 @@ A `memory.long_term_skip` trace event with `reason: "llm_extractor_failed"` is e
 
 ---
 
-## AgentCore Gateway — `gateway_iam_role {}` does not work for `mcpServer` targets (TF provider gap)
+## Strands TS SDK + OTel — global tracer provider version drift kills `gen_ai.*` spans
 
-**Symptom:** `terraform apply` on `aws_bedrockagentcore_gateway_target` with `credential_provider_configuration { gateway_iam_role {} }` fails immediately with `ValidationException: IamCredentialProvider is required for mcpServer targets using IAM authentication`.
+**Symptom:** `validate-strands-otel.ts` passes, the Bun API boots, but **no `gen_ai.*` spans land in `aws/spans`** — even though our own `multiagent.*` spans (chat.turn, agentcore.invoke) appear correctly. The CloudWatch GenAI Observability **Agents** tab shows the runtime activity but the inner cycle/model spans are missing.
 
-**Cause:** AWS Terraform provider ≤ 6.45.0 emits an incomplete API payload for `gateway_iam_role {}` — it sends `credentialProviderType: GATEWAY_IAM_ROLE` without the required nested `credentialProvider.iamCredentialProvider.{service, region}` fields. The lambda target variant is unaffected. This is an upstream provider bug.
+**Cause:** the Strands TS SDK declares `@opentelemetry/api`, `@opentelemetry/sdk-trace-base`, `@opentelemetry/sdk-trace-node`, `@opentelemetry/resources`, `@opentelemetry/exporter-trace-otlp-http`, and `@opentelemetry/exporter-metrics-otlp-http` as **peer dependencies** pinned to the OTel **1.30.x** SDK line (and the matching `^0.57.x` exporters). When `api/package.json` bumps them outside that range — for example to the OTel `2.x` SDK line that ships an incompatible `Resource` API — npm/bun either (a) resolves **two** copies of `sdk-trace-base` (one nested under `node_modules/@strands-agents/sdk/node_modules/`, one at the top level) where each installs its own `ProxyTracerProvider` and our `initOtel()` only binds the top-level copy, or (b) makes Strands fail at import time because the `Resource` / `BatchSpanProcessor` shapes changed. Either way the **Bedrock GenAI Observability "Agents" tab loses every `gen_ai.*` span**.
 
-**Workaround (in place):** `modules/agentcore-gateway/main.tf` uses `null_resource` + `local-exec` to call `aws bedrock-agentcore-control create-gateway-target` directly with the correct JSON shape. The script is idempotent (checks for existing target by name before creating).
+**Rule:** when bumping any `@opentelemetry/*` dependency in `api/package.json`:
 
-**Rule:** When upgrading the AWS provider, test `terraform apply -target=module.agentcore_gateway` against a real endpoint. If the provider has added `service` + `region` attributes to the `gateway_iam_role` block, replace the `null_resource` with the native `aws_bedrockagentcore_gateway_target` resource and remove the `null_resource` workaround.
+1. Read `node_modules/@strands-agents/sdk/package.json` `peerDependencies` first; **stay inside the declared range** (today: `sdk-trace-*` `^1.30.1`, exporters `^0.57.2`).
+2. Run `bun install` and then `ls node_modules/@strands-agents/sdk/node_modules/@opentelemetry` — if the directory exists, you've split the provider; downgrade until it disappears.
+3. Run `bun run validate:strands-otel` (must print `ProxyTracerProvider -> NodeTracerProvider OK` **and** `emitted gen_ai.* test span OK`).
 
-**Files:** `deploy/terraform/modules/agentcore-gateway/main.tf` (lines 220–279), `docs/analysis/deploy-test-results.md` §4.1.
+The smoke `bun run validate:strands-otel` only catches the case where the global provider is fully Noop; it does NOT catch the dual-provider case (the global is real, Strands' is shadow-Noop). If you suspect this, add temporary `console.error(...)` inside Strands' own model span emitter to confirm whether it ever fires.
+
+**Code:** [`api/package.json`](api/package.json) (OTel deps), [`api/src/lib/otel.ts`](api/src/lib/otel.ts) (`initOtel`), [`api/scripts/validate-strands-otel.ts`](api/scripts/validate-strands-otel.ts) (smoke).
 
 ---
 

@@ -13,7 +13,7 @@ const CUSTOMERS = [
     name: "Alex Rivera",
     verified: true,
     tier: "standard",
-    joinedAt: "2023-04-10",
+    joinedAt: new Date("2023-04-10"),
     preferences: { contactMethod: "email", language: "en" },
   },
   {
@@ -21,7 +21,7 @@ const CUSTOMERS = [
     name: "Blake Chen",
     verified: true,
     tier: "standard",
-    joinedAt: "2023-07-22",
+    joinedAt: new Date("2023-07-22"),
     preferences: { contactMethod: "sms", language: "en" },
   },
   {
@@ -29,7 +29,7 @@ const CUSTOMERS = [
     name: "Casey Morgan",
     verified: true,
     tier: "premium",
-    joinedAt: "2022-11-05",
+    joinedAt: new Date("2022-11-05"),
     preferences: { contactMethod: "email", language: "en" },
   },
   {
@@ -37,7 +37,7 @@ const CUSTOMERS = [
     name: "Dana Patel",
     verified: true,
     tier: "premium",
-    joinedAt: "2022-08-30",
+    joinedAt: new Date("2022-08-30"),
     preferences: { contactMethod: "email", language: "en" },
   },
   {
@@ -45,7 +45,7 @@ const CUSTOMERS = [
     name: "Eli Santos",
     verified: false,
     tier: "standard",
-    joinedAt: "2024-01-18",
+    joinedAt: new Date("2024-01-18"),
     preferences: { contactMethod: "email", language: "en" },
   },
 ];

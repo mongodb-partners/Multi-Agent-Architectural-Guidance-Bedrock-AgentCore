@@ -15,6 +15,7 @@
 | **Apply shared network** (once per region) | `./deploy/scripts/deploy-network.sh --auto-approve` |
 | **Deploy to EC2** (full infra + agents) | `./deploy/deploy-full-with-privatelink.sh --auto-approve` |
 | **Redeploy API only** (API code/config/env) | `./deploy/deploy-api.sh` |
+| **Redeploy UI only** (ui/ code changed) | `./deploy/deploy-ui.sh` |
 | **Redeploy agents only** (no infra change) | `./deploy/deploy-agents.sh --auto-approve` |
 | **Health check** | `curl -s http://$EC2_IP:3000/health \| python3 -m json.tool` |
 | **Open EC2 shell (no SSH)** | `aws ssm start-session --target $EC2_INSTANCE_ID` |
@@ -103,6 +104,7 @@ Benchmark TTFB before/after with `bun run bench:ttfb` (env: `API_URL`, `BEARER_T
 - ✅ Tracing: every chat turn emits `TraceEvent`s (see [api-reference.md §14](docs/api-reference.md#14-tracing-endpoints)); persisted to MongoDB `traces` + ring buffer; Streamlit Trace Viewer at `/Trace_Viewer?traceId=…`
 - ✅ Deploy fully automated: `deploy-full-with-privatelink.sh --auto-approve` (~20-25 min)
 - ✅ API-only redeploy: `./deploy/deploy-api.sh` (~3-5 min) — rebuilds/pushes only the API Docker image, regenerates `.env.live` from Terraform outputs (including dynamic specialist ARNs and the API PrivateLink MongoDB URI), restarts only `multiagent-api`, and runs backend smoke. Skips Terraform apply, UI, and AgentCore runtime image/artifact changes.
+- ✅ UI-only redeploy: `./deploy/deploy-ui.sh` (~2-3 min) — rebuilds/pushes only the UI Docker image, restarts only `multiagent-ui`, runs Streamlit `/_stcore/health` check. Does not regenerate `.env.live` (reuses the one on EC2 from the last API/full deploy). Skips Terraform apply, API image rebuilds, Atlas/AgentCore wiring.
 - ✅ Agent-only redeploy: `./deploy/deploy-agents.sh --auto-approve` (~3-5 min) — rebuilds code artifact, targeted terraform apply on `module.acr_specialists` + `module.acr_orchestrator`, re-injects dynamic env vars, verifies, calls the API config/cache refresh endpoint, then runs optional smoke. Skips Atlas/EC2/KB/Cognito/API-UI changes and does not restart `multiagent-api`.
 
 ## What's known-yellow
@@ -143,6 +145,22 @@ source .env
 **What it skips:** Terraform apply, UI image rebuilds, Streamlit restart, AgentCore runtime artifact rebuilds, MongoDB/Cognito seeding, network/bootstrap.
 
 **What it still refreshes:** `.env.live` with Terraform outputs, the Atlas PrivateLink direct MongoDB URI, and one `AGENTCORE_<SPECIALIST_ID>_ARN` line for each discovered specialist so the in-API classifier can route directly to specialists.
+
+### Deploying just the UI
+
+Use `deploy/deploy-ui.sh` when only `ui/` code changed and the API, `.env.live`, and AgentCore infrastructure should stay in place.
+
+```bash
+source .env
+./deploy/deploy-ui.sh
+
+# Restart the UI container without rebuilding/pushing an image:
+./deploy/deploy-ui.sh --skip-docker
+```
+
+**What it skips:** Terraform apply, API image rebuilds, `.env.live` regeneration, Atlas PrivateLink URI computation, MongoDB index seeding, agent roster discovery, `multiagent-api` restart.
+
+**Note:** If Cognito pool IDs, the API URL, CW log groups, or other UI-facing env vars changed, run `deploy-api.sh` first (it writes the full `.env.live` with those values); `deploy-ui.sh` then re-uses the updated file on EC2.
 
 ### Deploying just agents (no infra change)
 
@@ -225,6 +243,41 @@ aws ssm send-command \
 
 ---
 
+## Observability — CloudWatch GenAI rollout
+
+The full CloudWatch GenAI Observability stack ships with the EC2 deploy:
+
+| Phase | What it gives you | Default | Terraform toggle |
+|---|---|---|---|
+| **1. Managed surfaces** | CloudWatch GenAI Observability **Agents** + **Model Invocations** tabs; X-Ray **Transaction Search** on `aws/spans`; AgentCore Memory + Gateway vended logs. | **ON** | `enable_genai_observability`, `enable_bedrock_invocation_logging` |
+| **1. PII protection** | Data Protection Policy on `/aws/bedrock/invocations` (audit + mask `EmailAddress` / `PhoneNumber` / `CreditCardNumber` / `AwsSecretKey` / `BankAccountNumber` / `UsSocialSecurityNumber`). Prompt + completion bodies **NOT** logged. | **ON** (bodies OFF) | `log_prompt_bodies = false`, `log_embedding_bodies = false`, `data_protection_identifiers` |
+| **2. OTLP export** | ADOT Collector sidecar on `127.0.0.1:4318`, SigV4 outbound to X-Ray + CloudWatch Logs. Bun API + Streamlit UI + Strands `gen_ai.*` spans all land in `aws/spans`. | **ON** | `enable_adot_collector`, `otel_sample_ratio` |
+| **3. Fleet dashboards** | 3 dashboards (`fleet`, `mongo`, `cost`) + 7 alarms + audit metric filter + Logs Insights query library. SNS topic with optional email subscriber. | **ON** | `enable_fleet_dashboards`, `alarm_email`, `sns_extra_subscriptions` |
+| **3. Custom metrics (EMF)** | API emits `Multiagent/Chat:{TurnsTotal,TurnErrors,TurnLatencyMs,AgentCoreInvokes,AgentCoreInvokeLatencyMs}` + `Multiagent/Mongo:{QueryCount,QueryLatencyMs,VectorSearchLatencyMs}` + `Multiagent/Memory:{FactsExtracted,FactsWritten,EmbeddingFailures}` as stdout EMF lines — zero extra IAM, zero extra container. Feeds every Phase 3 widget + alarm. | **ON** | `METRICS_EMITTER_ENABLED` (set to `0` to silence) |
+| **4. MongoDB Atlas** | ADOT scrapes Atlas Prometheus → `MongoDB/Atlas` CloudWatch namespace; dashboard + connection-saturation + replication-lag alarms. | **OFF** | `enable_atlas_metrics`, `atlas_prom_username`, `atlas_prom_password`, `atlas_prom_host` |
+
+**Find a chat turn in CloudWatch:**
+- Capture `X-Trace-Id` from a `POST /chat` response, then in CloudWatch Logs Insights query `/api`:
+  ```text
+  fields @timestamp, msg, level, agent_id, span_id
+  | filter trace_id = "<X-Trace-Id>"
+  | sort @timestamp asc
+  ```
+- Or open **CloudWatch → X-Ray → Trace map** and search the same trace id — you'll see the full Streamlit → Bun → AgentCore → Bedrock waterfall.
+
+**Per-user cost:** open the `<project>-cost-<env>` dashboard; the top widget groups token usage by `requestMetadata.userId` (requires Phase 1 + the Phase 3 `MetadataAwareBedrockModel` wrapper, both default-on).
+
+**Flip prompt-body logging on (audit-reviewed only):**
+```bash
+cd deploy/terraform/envs/ec2
+TF_VAR_log_prompt_bodies=true terraform apply -auto-approve
+```
+Bodies appear in `/aws/bedrock/invocations` with PII auto-masked (e.g. `{EmailAddress}` substituted). Audit findings ship to the same log group so the `audit_findings` alarm catches volume spikes.
+
+Detailed runbook: [`docs/observability-runbook.md`](docs/observability-runbook.md).
+
+---
+
 ## Documentation map
 
 | Doc | When to read |
@@ -235,6 +288,8 @@ aws ssm send-command \
 | [`docs/configuration-guide.md`](docs/configuration-guide.md) | Every env var, every config file |
 | [`docs/api-reference.md`](docs/api-reference.md) | HTTP/SSE contract for the Hono API |
 | [`docs/memory-architecture.md`](docs/memory-architecture.md) | Short-term + long-term memory |
+| [`docs/logging-architecture.md`](docs/logging-architecture.md) | Structured JSON logger, OTel trace correlation, CloudWatch shipping, audit channel, ADOT sidecar, GenAI Observability |
+| [`docs/observability-runbook.md`](docs/observability-runbook.md) | Day-2 ops — finding traces, reading log groups, sampling, alarms, Atlas anomalies, flipping body logging on |
 | [`docs/gap-analysis.md`](docs/gap-analysis.md) | What's shipped vs SoW vs parked |
 | [`docs/agent-authoring-guide.md`](docs/agent-authoring-guide.md) | How to add a new agent |
 | [`docs/skills-authoring-guide.md`](docs/skills-authoring-guide.md) | How to add a new skill |

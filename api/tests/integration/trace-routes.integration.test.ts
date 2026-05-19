@@ -107,19 +107,19 @@ describe("Trace routes — auth ownership matrix", () => {
     expect(body.error.code).toBe("TRACE_NOT_FOUND");
   });
 
-  test("GET /traces/:id returns the trace when it has no userId (unscoped)", async () => {
+  test("GET /traces/:id returns 404 when trace has no userId (unscoped traces are denied)", async () => {
     await persistTrace(makeTrace({ traceId: "trc-pub" }));
     const tok = await jwtFor("user-a");
     const res = await app.request("http://localhost/traces/trc-pub", {
       headers: { Authorization: `Bearer ${tok}` },
     });
-    expect(res.status).toBe(200);
-    const body = (await res.json()) as Trace;
-    expect(body.traceId).toBe("trc-pub");
+    expect(res.status).toBe(404);
+    const body = (await res.json()) as { error: { code: string } };
+    expect(body.error.code).toBe("TRACE_NOT_FOUND");
   });
 
-  test("GET /trace by sessionId+messageId returns the trace", async () => {
-    await persistTrace(makeTrace({ traceId: "trc-q", sessionId: "s-q", messageId: "m-q" }));
+  test("GET /trace by sessionId+messageId returns the trace when owned by caller", async () => {
+    await persistTrace(makeTrace({ traceId: "trc-q", sessionId: "s-q", messageId: "m-q", userId: "user-a" }));
     const tok = await jwtFor("user-a");
     const res = await app.request("http://localhost/trace?sessionId=s-q&messageId=m-q", {
       headers: { Authorization: `Bearer ${tok}` },
@@ -127,6 +127,15 @@ describe("Trace routes — auth ownership matrix", () => {
     expect(res.status).toBe(200);
     const body = (await res.json()) as Trace;
     expect(body.traceId).toBe("trc-q");
+  });
+
+  test("GET /trace by sessionId+messageId returns 404 for unscoped trace", async () => {
+    await persistTrace(makeTrace({ traceId: "trc-q-unscoped", sessionId: "s-q-u", messageId: "m-q-u" }));
+    const tok = await jwtFor("user-a");
+    const res = await app.request("http://localhost/trace?sessionId=s-q-u&messageId=m-q-u", {
+      headers: { Authorization: `Bearer ${tok}` },
+    });
+    expect(res.status).toBe(404);
   });
 
   test("GET /trace returns 400 when sessionId/messageId missing", async () => {
@@ -139,8 +148,8 @@ describe("Trace routes — auth ownership matrix", () => {
     expect(body.error.code).toBe("MISSING_QUERY");
   });
 
-  test("GET /trace/mongo filters to mongo.* events only", async () => {
-    await persistTrace(makeTrace({ traceId: "trc-mongo" }));
+  test("GET /trace/mongo filters to mongo.* events only (scoped to owner)", async () => {
+    await persistTrace(makeTrace({ traceId: "trc-mongo", userId: "user-a" }));
     const tok = await jwtFor("user-a");
     const res = await app.request("http://localhost/trace/mongo?traceId=trc-mongo", {
       headers: { Authorization: `Bearer ${tok}` },
@@ -151,19 +160,29 @@ describe("Trace routes — auth ownership matrix", () => {
     expect(body.events[0].type).toBe("mongo.query");
   });
 
-  test("GET /traces returns recent traces wrapped in { traces: [...] }", async () => {
-    await persistTrace(makeTrace({ traceId: "trc-list-1" }));
-    await persistTrace(makeTrace({ traceId: "trc-list-2", sessionId: "s2", messageId: "m2" }));
+  test("GET /trace/mongo returns 404 for unscoped trace", async () => {
+    await persistTrace(makeTrace({ traceId: "trc-mongo-unscoped" }));
+    const tok = await jwtFor("user-a");
+    const res = await app.request("http://localhost/trace/mongo?traceId=trc-mongo-unscoped", {
+      headers: { Authorization: `Bearer ${tok}` },
+    });
+    expect(res.status).toBe(404);
+  });
+
+  test("GET /traces returns only the caller's scoped traces wrapped in { traces: [...] }", async () => {
+    await persistTrace(makeTrace({ traceId: "trc-list-1", userId: "user-a" }));
+    await persistTrace(makeTrace({ traceId: "trc-list-2", sessionId: "s2", messageId: "m2", userId: "user-a" }));
+    await persistTrace(makeTrace({ traceId: "trc-list-unscoped" }));
     const tok = await jwtFor("user-a");
     const res = await app.request("http://localhost/traces?limit=5", {
       headers: { Authorization: `Bearer ${tok}` },
     });
     expect(res.status).toBe(200);
     const body = (await res.json()) as { traces: Array<{ traceId: string }> };
-    expect(body.traces.length).toBeGreaterThanOrEqual(2);
     const ids = body.traces.map((t) => t.traceId);
     expect(ids).toContain("trc-list-1");
     expect(ids).toContain("trc-list-2");
+    expect(ids).not.toContain("trc-list-unscoped");
   });
 
   test("GET /traces/:id returns 404 when trace.userId mismatches caller userId", async () => {

@@ -2,7 +2,7 @@
 
 > **Audience:** anyone reading or shipping logs from this repo — including incident-response engineers, security reviewers, and AI agents editing the codebase.
 >
-> **TL;DR.** Every API / agent-runtime / MCP / Streamlit process writes single-line **JSON** to stdout/stderr. Each line carries the W3C **`trace_id`** / **`span_id`** of the active OpenTelemetry span, so a single chat turn can be reconstructed across services in CloudWatch Logs Insights. On EC2, **`amazon-cloudwatch-agent`** tails the file-based service logs into project log groups. There is **no OTLP exporter** and **no collector** — OpenTelemetry runs in-process purely for trace-id correlation.
+> **TL;DR.** Every API / agent-runtime / MCP / Streamlit process writes single-line **JSON** to stdout/stderr. Each line carries the W3C **`trace_id`** / **`span_id`** of the active OpenTelemetry span, so a single chat turn can be reconstructed across services in CloudWatch Logs Insights. On EC2, **`amazon-cloudwatch-agent`** tails the file-based service logs into project log groups, and an **ADOT Collector sidecar** on `127.0.0.1:4318` signs SigV4 outbound to the CloudWatch X-Ray OTLP endpoint so spans land in **`aws/spans`** for **CloudWatch GenAI Observability** + **Transaction Search**. The Strands TS SDK auto-instruments via the global tracer provider, emitting `gen_ai.*` spans, and Bedrock model invocation logging captures per-call metadata in **`/aws/bedrock/invocations`** (prompt + completion bodies are **OFF** by default for privacy; flip `log_prompt_bodies = true` per environment to enable them — a Data Protection Policy still masks PII even when bodies are on).
 
 ---
 
@@ -17,7 +17,7 @@
 | Local-dev parity | The same JSON shape lands on `docker compose logs` and on `~/.../multiagent-setup.log`. No special tooling required to read it. |
 | Defensive PII redaction | A default redactor recursively masks keys matching `token|secret|password|authorization|jwt|api[_-]?key|mongodb_uri`, hashes `email`/`phone`/`ssn`, truncates `query`/`message` to 256 chars, and rewrites Mongo URIs to strip credentials. |
 
-We deliberately **did not** wire OTLP / X-Ray / metrics. Logs + in-process trace IDs are enough to answer 95% of operational questions, and the spans we already emit are hex/W3C-compatible — when ADOT is eventually provisioned, joining logs with traces is a one-line collector config.
+The original design intentionally skipped OTLP/X-Ray; **Phase 2 of the CloudWatch GenAI Observability rollout** turned that on without changing the JSON log shape. The ADOT Collector sidecar (modules/adot-collector) is the single SigV4 boundary — apps still speak plain OTLP to localhost; the sidecar signs requests outbound. When `OTEL_EXPORTER_OTLP_ENDPOINT` is unset (local docker compose / `DEV_MOCK_BACKENDS=1`) the bootstrap falls back to in-process tracing only and everything else still works.
 
 ---
 
@@ -54,13 +54,16 @@ The full implementation lives in [`api/src/lib/logger.ts`](../api/src/lib/logger
 
 ```mermaid
 flowchart LR
-  UI[Streamlit UI<br/>ui/lib/log.py]
-  API[Hono API<br/>api/src/lib/logger.ts<br/>+ otel.ts]
+  UI[Streamlit UI<br/>ui/lib/log.py<br/>+ opentelemetry-instrument]
+  API[Hono API<br/>api/src/lib/logger.ts<br/>+ otel.ts NodeTracerProvider]
   AR[AgentCore Runtime<br/>api/src/agent-runtime-code.ts<br/>(deployed as ECR image)]
   MCP[MongoDB MCP Runtime<br/>mcp-runtimes/mongodb-mcp/src/lib/logger.ts]
+  ADOT[ADOT Collector sidecar<br/>127.0.0.1:4318 OTLP<br/>SigV4 outbound]
   CWA[amazon-cloudwatch-agent<br/>(EC2)]
-  CWG[(CloudWatch Log Groups<br/>/&lt;project&gt;/&lt;env&gt;/{api,ui,mcp,agentcore})]
+  CWG[(CloudWatch Log Groups<br/>/&lt;project&gt;/&lt;env&gt;/{api,ui,mcp,agentcore,otel})]
   AWS[(/aws/bedrock-agentcore/runtimes/*<br/>AWS-managed)]
+  SPANS[(aws/spans<br/>Transaction Search)]
+  INV[(/aws/bedrock/invocations<br/>+ Data Protection Policy)]
 
   UI -- X-Request-Id --> API
   API <-- X-Trace-Id --> UI
@@ -75,6 +78,13 @@ flowchart LR
   CWA --> CWG
   AR  -- stdout JSON --> AWS
   MCP -- stdout JSON --> AWS
+
+  UI  -- OTLP HTTP --> ADOT
+  API -- OTLP HTTP --> ADOT
+  ADOT -- awsxray exporter --> SPANS
+  ADOT -- awscloudwatchlogs exporter --> CWG
+  AR -- service-vended --> SPANS
+  API -- requestMetadata.userId/agentId --> INV
 ```
 
 ### 3.1 API (`api/`)
@@ -192,18 +202,49 @@ Test coverage:
 
 ### 8.1 Log groups
 
-Terraform module [`deploy/terraform/modules/cloudwatch/`](../deploy/terraform/modules/cloudwatch/) creates four groups under `/<project>/<env>/`:
+| Group | Retention | Source | Owning module |
+|---|---|---|---|
+| `/api` | `api_retention_days` (default **30**) | `multiagent-api.service` → `/var/log/multiagent-api.log` → CW agent | `modules/cloudwatch` |
+| `/ui` | `aux_retention_days` (default **7**) | `multiagent-ui.service` → `/var/log/multiagent-ui.log` → CW agent | `modules/cloudwatch` |
+| `/mcp` | `aux_retention_days` (default **7**) | Reserved (MongoDB MCP runs as an AgentCore Runtime; its logs land under `/aws/bedrock-agentcore/...`). | `modules/cloudwatch` |
+| `/agentcore` | `aux_retention_days` (default **7**) | Reserved — AgentCore Runtime logs are AWS-managed at `/aws/bedrock-agentcore/runtimes/<id>/`. | `modules/cloudwatch` |
+| `/<project>/<env>/otel` | `log_retention_days` (default **30**) | ADOT Collector sidecar's `awscloudwatchlogs` exporter — receives OTLP application logs from API + Streamlit. | `modules/adot-collector` |
+| `aws/spans` | `span_retention_days` (default **14**) | X-Ray Transaction Search ingest. Receives OTLP spans signed by the ADOT sidecar + the AgentCore Runtime's own service-vended spans. | `modules/cloudwatch-genai` |
+| `/aws/vendedlogs/bedrock-agentcore/memory/APPLICATION_LOGS/<id>` | `agentcore_log_retention_days` (default **7**) | AgentCore Memory service-vended `APPLICATION_LOGS`. | `modules/cloudwatch-genai` |
+| `/aws/vendedlogs/bedrock-agentcore/gateway/APPLICATION_LOGS/<id>` | `agentcore_log_retention_days` (default **7**) | AgentCore Gateway service-vended `APPLICATION_LOGS`. | `modules/cloudwatch-genai` |
+| `/aws/bedrock/invocations` | `invocation_retention_days` (default **7**) | Bedrock model invocation logging — per-call metadata (modelId, token counts, latency, requestMetadata, error). | `modules/bedrock-invocation-logging` |
 
-| Group | Retention | Source |
-|---|---|---|
-| `/api` | `api_retention_days` (default **30**) | `multiagent-api.service` → `/var/log/multiagent-api.log` → CW agent |
-| `/ui` | `aux_retention_days` (default **7**) | `multiagent-ui.service` → `/var/log/multiagent-ui.log` → CW agent |
-| `/mcp` | `aux_retention_days` (default **7**) | Reserved (current MongoDB MCP host is the AgentCore Runtime; its logs live under `/aws/bedrock-agentcore/...`). Useful if you ever run an MCP sidecar on the EC2 host directly. |
-| `/agentcore` | `aux_retention_days` (default **7**) | Reserved (AgentCore Runtime logs are AWS-managed at `/aws/bedrock-agentcore/runtimes/<id>/`). |
+The 30-day retention on `/api` carries the audit channel — keep it long enough to investigate after-the-fact. Spans default to 14 days because they're high-volume and the per-span value drops sharply after a week.
 
-The 30-day retention on `/api` carries the audit channel — keep it long enough to investigate after-the-fact. The 7-day retention on the placeholders avoids paying for empty groups.
+### 8.2 CloudWatch GenAI Observability (Phase 1)
 
-### 8.2 EC2 bootstrap (`deploy/terraform/modules/ec2/user_data.sh`)
+Two modules light up the **AgentCore Agents** + **Model Invocations** tabs in the CloudWatch console:
+
+- [`modules/cloudwatch-genai`](../deploy/terraform/modules/cloudwatch-genai/) — provisions the `aws/spans` log group, the X-Ray → Logs resource policy, the `awscc_xray_transaction_search_config` toggle (`var.span_sampling_percent`; account-scoped), and the service-vended log delivery triples for every AgentCore Memory and Gateway id.
+- [`modules/bedrock-invocation-logging`](../deploy/terraform/modules/bedrock-invocation-logging/) — provisions `/aws/bedrock/invocations`, a customer-managed KMS key (alias `alias/<project>-<env>-bedrock-invocations`), the IAM role Bedrock assumes to write logs, and the singleton `aws_bedrock_model_invocation_logging_configuration`.
+
+**Per-user / per-agent attribution.** Phase 3's `api/src/adapters/resolve-model.ts` injects `requestMetadata: { userId, agentId }` into every Converse / ConverseStream call via the `MetadataAwareBedrockModel` wrapper (reads from `currentTrace()` at call time). The cost dashboard groups `InputTokenCount` / `OutputTokenCount` by `requestMetadata.userId` to render per-user breakdown.
+
+### 8.3 Data Protection Policy
+
+[`modules/bedrock-invocation-logging`](../deploy/terraform/modules/bedrock-invocation-logging/) attaches an `aws_cloudwatch_log_data_protection_policy` to `/aws/bedrock/invocations`. The policy:
+
+- **Audits** every detected PII identifier (`EmailAddress`, `PhoneNumber`, `CreditCardNumber`, `AwsSecretKey`, `BankAccountNumber`, `UsSocialSecurityNumber` by default — extend per environment via `var.data_protection_identifiers`).
+- **Deidentifies** the same identifiers via `MaskConfig{}` so consumers reading the log see e.g. `{EmailAddress}` instead of the raw value.
+- **Publishes audit findings** back into `/aws/bedrock/invocations` with `eventType="DataMaskingFinding"`. Phase 3's `modules/cloudwatch-fleet-dashboards` `audit_findings` metric filter increments `Multiagent/Audit:AuditFindings` on every finding, and the matching `audit_findings` alarm pages on > 10 findings / 5 minutes.
+
+**Defense in depth.** Body logging is **OFF** by default (`var.log_prompt_bodies = false`, `var.log_embedding_bodies = false`). The Data Protection Policy still runs on the metadata records that DO get written (errors, requestMetadata, dimensions). When you flip `log_prompt_bodies = true` for a specific environment, the policy automatically scrubs PII in the new body field — but the body is still written before scrubbing, so treat that flag as opt-in and audit-reviewed.
+
+### 8.4 ADOT Collector sidecar (Phase 2)
+
+[`modules/adot-collector`](../deploy/terraform/modules/adot-collector/) uploads a rendered YAML config to S3 and `modules/ec2/user_data.sh` materializes it into a systemd unit running `aws-otel-collector` on the host network. The collector:
+
+- Listens on `127.0.0.1:4318` (OTLP HTTP `/v1/traces` + `/v1/logs`) and `127.0.0.1:4317` (gRPC).
+- Signs SigV4 outbound to `https://xray.<region>.amazonaws.com/v1/traces` via the `awsxray` exporter and to `https://logs.<region>.amazonaws.com/v1/logs` via `awscloudwatchlogs` — the EC2 instance profile holds `xray:PutTraceSegments / PutTelemetryRecords / GetSampling*` and `logs:PutLogEvents` for that.
+- Phase 4: scrapes the MongoDB Atlas Prometheus endpoint and publishes to the `MongoDB/Atlas` CloudWatch namespace via the `awsemf` exporter.
+- Exposes a `/13133` health endpoint so `multiagent-api.service` and `multiagent-ui.service` can declare `After=aws-otel-collector.service` and assume the receiver is up.
+
+### 8.5 EC2 bootstrap (`deploy/terraform/modules/ec2/user_data.sh`)
 
 We use **file-based collection**, not journald collection. The official AWS CloudWatch agent configuration reference (as of 2026-05) documents only `logs.logs_collected.files` and `logs.logs_collected.windows_events`. Journald support exists in the agent's source code but isn't part of the stable documented schema — pinning on it would mean undocumented JSON keys that can break on an agent RPM upgrade.
 
@@ -220,9 +261,26 @@ The flow is:
 - `systemctl is-active amazon-cloudwatch-agent` over SSM (warn if not `active`).
 - `aws logs describe-log-streams --log-group-name $CW_API_LOG_GROUP --max-items 1` polled for 60 s after API restart (warn if 0 streams).
 
-### 8.3 Local development
+### 8.6 EMF custom metrics — `Multiagent/Chat`, `Multiagent/Mongo`, `Multiagent/Memory` (Phase 3)
 
-`docker compose up --build` does **not** run the CloudWatch agent. Logs stay on stdout in the same JSON shape; tail with `docker compose logs -f api`. The CWA path is EC2-only.
+[`api/src/lib/cw-metrics.ts`](../api/src/lib/cw-metrics.ts) emits **CloudWatch Embedded Metric Format (EMF)** records as plain stdout JSON lines, riding the same `/var/log/multiagent-api.log` → `multiagent-api` log group path the structured logger uses. CloudWatch detects the `_aws.CloudWatchMetrics` envelope and extracts metrics automatically — **no extra SDK calls, no extra IAM, no extra container.**
+
+Wired call sites:
+
+| Source | Namespace · metrics |
+|---|---|
+| `routes/chat.ts` @ `chat.turn.end` | `Multiagent/Chat` · `TurnsTotal`, `TurnErrors`, `TurnLatencyMs` (dim: `agentId`) |
+| `adapters/agentcore-runtime.ts` end/error | `Multiagent/Chat` · `AgentCoreInvokes`, `AgentCoreInvokeErrors`, `AgentCoreInvokeLatencyMs` (dims: `agentId`, `mode`) |
+| `lib/trace-collector.ts` event bridge for `mongo.query` / `mongo.vector_search` | `Multiagent/Mongo` · `QueryCount`, `QueryLatencyMs`, `VectorSearchLatencyMs` (dims: `collection`, `kind`) |
+| `lib/long-term-memory.ts` write end | `Multiagent/Memory` · `FactsExtracted`, `FactsWritten`, `EmbeddingFailures` (dim: `agentId`) |
+
+These are the exact metric names the [`cloudwatch-fleet-dashboards`](../deploy/terraform/modules/cloudwatch-fleet-dashboards/) widgets and alarms read. **Without this emitter the fleet/Mongo dashboards stay empty and the P99 latency / error-rate / vector-search alarms go `INSUFFICIENT_DATA`.** Lock-down test: [`api/tests/unit/cw-metrics.test.ts`](../api/tests/unit/cw-metrics.test.ts) — fails CI the moment anyone renames a metric or moves the value off the top level of the EMF record.
+
+Disable in CI / unit tests with `METRICS_EMITTER_ENABLED=0`. Dimension cardinality is intentionally low (no `userId` as a dimension — per-user attribution lives in Bedrock invocation logs via `requestMetadata.userId`).
+
+### 8.7 Local development
+
+`docker compose up --build` does **not** run the CloudWatch agent or the ADOT sidecar. Logs stay on stdout in the same JSON shape; tail with `docker compose logs -f api`. EMF lines are still emitted (they're harmless JSON to anything that's not CloudWatch). With `OTEL_EXPORTER_OTLP_ENDPOINT` unset, the API's `initOtel(...)` skips the OTLPTraceExporter installation and spans live in-process only — Trace Viewer still works, but nothing is exported.
 
 ---
 
@@ -272,6 +330,33 @@ rg "console\.(log|error|warn)" api/src/
 
 That command must always return empty (CI enforces this via the test that JSON-parses every emitted line — see `api/tests/unit/logger.test.ts`).
 
+### `aws/spans` is empty after a chat turn
+
+- Confirm the ADOT sidecar is running on EC2: `systemctl is-active aws-otel-collector`. If not, `journalctl -u aws-otel-collector -n 200` will surface SigV4 / endpoint errors.
+- Verify the API exported with the right endpoint: `grep OTEL_EXPORTER_OTLP_ENDPOINT /opt/multiagent/.env.live` — should be `http://127.0.0.1:4318`.
+- Re-run `bun run validate:strands-otel` inside the API container — exit code 0 means the global tracer provider is bound (not Noop) and Strands `gen_ai.*` spans will flow.
+- Check the `awscc_xray_transaction_search_config` indexing percentage — if you set it to a small number (e.g. 1), only 1% of spans are indexed; lower-volume traffic will look empty.
+
+### Bedrock invocation log lines have no prompt body
+
+That's the default. `var.log_prompt_bodies = false` (and `var.log_embedding_bodies = false`) is intentional — see §8.3. Flipping to true requires re-applying Terraform with the override and is gated on security review.
+
+### CloudWatch GenAI Observability "Agents" tab is empty for memory / gateway columns
+
+The runtime column populates automatically (AWS-managed). Memory + Gateway require the **service-vended log delivery triples** from `modules/cloudwatch-genai`. Apply Phase 1 (`enable_genai_observability = true`) and pass the actual memory / gateway IDs.
+
+### Per-user cost widget on the cost dashboard is empty
+
+Per-user attribution requires both: (1) `var.enable_bedrock_invocation_logging = true` (so `/aws/bedrock/invocations` exists at all), and (2) the API running with the Phase 3 `MetadataAwareBedrockModel` wrapper — confirm by running a chat turn and grepping the invocation log for `requestMetadata.userId`. If absent, the wrapper isn't being instantiated; check `api/src/adapters/resolve-model.ts` and run `bun test tests/unit/agentcore-runtime-traceparent.test.ts`.
+
+### Fleet / Mongo dashboard widgets are empty, alarms are `INSUFFICIENT_DATA`
+
+The Phase 3 dashboards + alarms read **custom metrics** in `Multiagent/Chat`, `Multiagent/Mongo`, and `Multiagent/Memory`. Those metrics are emitted by the EMF emitter in [`api/src/lib/cw-metrics.ts`](../api/src/lib/cw-metrics.ts) (see §8.6). Three things can break it: (1) someone set `METRICS_EMITTER_ENABLED=0` in the API env, (2) the API process didn't get the latest code (run `./deploy/deploy-api.sh`), (3) the call sites that import `recordChatTurn` / `recordAgentCoreInvoke` / `recordMongoQuery` / `recordMemoryWrite` were edited and dropped the call. Lock-down test: `bun test tests/unit/cw-metrics.test.ts`. To confirm metric extraction at runtime, search the API log group for `_aws.CloudWatchMetrics` in CloudWatch Logs Insights — if records appear, the emitter is healthy and the metric extractor will pick them up within ~1 min.
+
+### A fleet alarm is firing constantly
+
+Alarms route through the SNS topic `${project}-fleet-alarms-${env}`. Subscribe a human first (`var.alarm_email`) to triage signal vs. noise before adding webhook subscribers. Threshold defaults are in `envs/ec2/variables.tf` — bump `p99_latency_threshold_ms` / `error_rate_threshold_pct` / `throttle_burst_threshold` rather than disabling alarms.
+
 ---
 
 ## 11. File index
@@ -293,10 +378,19 @@ That command must always return empty (CI enforces this via the test that JSON-p
 | [`mcp-runtimes/mongodb-mcp/src/index.ts`](../mcp-runtimes/mongodb-mcp/src/index.ts) | Wraps Express `/mcp` in `context.with(extractContextFromHeaders(req.headers), …)`. |
 | [`ui/lib/log.py`](../ui/lib/log.py) | Streamlit JSON logger + `new_request_id()`. |
 | [`ui/lib/api_client.py`](../ui/lib/api_client.py) | Sends `X-Request-Id`, captures `X-Trace-Id` from response. |
-| [`deploy/terraform/modules/cloudwatch/`](../deploy/terraform/modules/cloudwatch/) | 4 log groups + per-group retention. |
-| [`deploy/terraform/modules/ec2/user_data.sh`](../deploy/terraform/modules/ec2/user_data.sh) | Installs CW agent + file-based collectors + logrotate. |
-| [`deploy/scripts/deploy-project.sh`](../deploy/scripts/deploy-project.sh) | Post-bootstrap CW-agent + describe-log-streams probes. |
+| [`deploy/terraform/modules/cloudwatch/`](../deploy/terraform/modules/cloudwatch/) | 4 base log groups + per-group retention. |
+| [`deploy/terraform/modules/cloudwatch-genai/`](../deploy/terraform/modules/cloudwatch-genai/) | Phase 1 — `aws/spans` + X-Ray Transaction Search + AgentCore vended log delivery. |
+| [`deploy/terraform/modules/bedrock-invocation-logging/`](../deploy/terraform/modules/bedrock-invocation-logging/) | Phase 1 — `/aws/bedrock/invocations` + KMS + Data Protection Policy + invocation logging singleton. |
+| [`deploy/terraform/modules/adot-collector/`](../deploy/terraform/modules/adot-collector/) | Phase 2 — ADOT collector sidecar config + OTLP log group. |
+| [`deploy/terraform/modules/cloudwatch-fleet-dashboards/`](../deploy/terraform/modules/cloudwatch-fleet-dashboards/) | Phase 3 — SNS topic, 3 dashboards, 7 alarms, audit metric filter, query library. |
+| [`deploy/terraform/modules/cloudwatch-atlas-dashboard/`](../deploy/terraform/modules/cloudwatch-atlas-dashboard/) | Phase 4 — Atlas dashboard + connection saturation + replication-lag alarms. |
+| [`deploy/terraform/modules/ec2/user_data.sh`](../deploy/terraform/modules/ec2/user_data.sh) | Installs CW agent + ADOT collector sidecar + file-based collectors + logrotate. |
+| [`deploy/scripts/deploy-project.sh`](../deploy/scripts/deploy-project.sh) | Post-bootstrap CW-agent + describe-log-streams probes; writes OTEL_* env vars into `.env.live`. |
 | [`e2e-smoke/post-deploy-smoke.py`](../e2e-smoke/post-deploy-smoke.py) | `check_cloudwatch_join` — verifies `trace_id` appears in `/api` and AgentCore log groups. |
+| [`api/scripts/validate-strands-otel.ts`](../api/scripts/validate-strands-otel.ts) | Smoke: global tracer provider is real (not Noop), so Strands `gen_ai.*` spans flow. |
+| [`api/tests/unit/agentcore-runtime-traceparent.test.ts`](../api/tests/unit/agentcore-runtime-traceparent.test.ts) | Regression guard — every `InvokeAgentRuntime` payload carries W3C `_trace.traceparent`. |
+| [`api/src/lib/cw-metrics.ts`](../api/src/lib/cw-metrics.ts) | EMF emitter — turns `Multiagent/Chat`, `Multiagent/Mongo`, `Multiagent/Memory` custom metrics into stdout JSON. |
+| [`api/tests/unit/cw-metrics.test.ts`](../api/tests/unit/cw-metrics.test.ts) | Locks down EMF record shape so a metric rename never silently empties the fleet dashboards. |
 | [`api/tests/unit/logger.test.ts`](../api/tests/unit/logger.test.ts) | JSON shape, level filtering, `trace_id` correlation, `child()`. |
 | [`api/tests/unit/logger-redactor.test.ts`](../api/tests/unit/logger-redactor.test.ts) | 8-case redactor matrix. |
 | [`api/tests/unit/logger-log-level.test.ts`](../api/tests/unit/logger-log-level.test.ts) | Per-component `LOG_LEVEL_*` overrides. |
@@ -309,9 +403,18 @@ That command must always return empty (CI enforces this via the test that JSON-p
 
 ---
 
-## 12. Future work (out of scope today)
+## 12. CloudWatch GenAI Observability rollout — what landed, what's next
 
-- **OTLP exporter** — when an ADOT collector is provisioned, swap `BasicTracerProvider`'s no-op SpanProcessor for `OTLPTraceExporter` in `api/src/lib/otel.ts`. Logs already carry the right IDs.
-- **CloudWatch metric filters / alarms** — none defined yet. `channel="audit"` is the seam for future filters.
-- **X-Ray correlation** — `trace_id` is already W3C hex, so X-Ray ADOT export joins automatically without further code changes.
-- **Log archival to S3** — CloudWatch native retention only for now.
+### Landed
+
+- **Phase 1 — managed observability surfaces.** `modules/cloudwatch-genai` enables Transaction Search on `aws/spans` and wires AgentCore Memory + Gateway vended log delivery; `modules/bedrock-invocation-logging` provisions `/aws/bedrock/invocations` with KMS encryption and a Data Protection Policy (PII auditing + masking). Body logging defaults to OFF.
+- **Phase 2 — OTLP export.** `api/src/lib/otel.ts` swapped `BasicTracerProvider` for `NodeTracerProvider` + `BatchSpanProcessor` + `OTLPTraceExporter` pointing at `127.0.0.1:4318`. `api/src/lib/trace-collector.ts` bridges every internal span / event into the global tracer provider, so Strands `gen_ai.*` spans and our domain events land in the same trace. The ADOT Collector sidecar (`modules/adot-collector`) signs SigV4 outbound — no SDK changes needed in any app. Streamlit launches via `opentelemetry-instrument` so its HTTP server spans + outbound `requests` calls join the same trace tree.
+- **Phase 3 — fleet ops console.** `modules/cloudwatch-fleet-dashboards` creates an SNS topic + three dashboards (fleet / mongo / cost) + seven alarms (P99 latency, error rate, model throttles, AgentCore failures, Bedrock invocation errors, PII audit findings, SLO burn) + a Logs Insights query library. Per-user cost attribution comes from the `MetadataAwareBedrockModel` wrapper injecting `requestMetadata.userId / agentId` into every Converse call.
+- **Phase 4 — MongoDB Atlas metrics.** The ADOT collector grew a Prometheus receiver that scrapes Atlas's metrics endpoint and an `awsemf` exporter publishing to the `MongoDB/Atlas` namespace. `modules/cloudwatch-atlas-dashboard` adds a 5-widget dashboard plus connection-saturation and replication-lag alarms wired into the Phase 3 SNS topic.
+
+### Still open
+
+- **Span-level sampling tuning** — `var.span_sampling_percent` controls the X-Ray indexed slice; the OTel SDK's own sampler (`OTEL_TRACES_SAMPLER=parentbased_traceidratio` + `OTEL_TRACES_SAMPLER_ARG`) controls export volume. A real workload profile is needed before recommending non-default ratios per env.
+- **Application Inference Profile cost separation** — `requestMetadata` is good for dashboard attribution but not for IAM-isolated cost ledgers. If a customer wants per-business-unit billing with separate Bedrock quotas, switch to Application Inference Profiles per business unit and pivot the cost dashboard to AIP dimensions.
+- **CI-side automation** — the deploy scripts run smoke tests post-apply, but a dedicated CI job that asserts every dashboard renders + every alarm fires once on a synthetic failure injection would harden against regressions.
+- **Log archival to S3 / Athena** — CloudWatch native retention only for now.

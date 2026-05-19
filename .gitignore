@@ -178,6 +178,16 @@ deploy/terraform/modules/lambda-mcp/.build/
 __pycache__/
 *.py[cod]
 *$py.class
+# pytest (ui/tests/, e2e-smoke/)
+.pytest_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+# type checkers
+.mypy_cache/
+.dmypy.json
+dmypy.json
 
 # Bun / Node
 api/node_modules/

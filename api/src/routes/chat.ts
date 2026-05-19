@@ -26,6 +26,7 @@ import {
 } from "../adapters/agentcore-runtime.ts";
 import { buildAuthenticatedUserContext } from "../lib/auth-user-context.ts";
 import { TraceCollector, tracingEnabled } from "../lib/trace-collector.ts";
+import { recordChatTurn } from "../lib/cw-metrics.ts";
 import { withTrace } from "../lib/trace-context.ts";
 import { withGatewayJwt } from "../lib/gateway-auth-context.ts";
 import { withCurrentUserId } from "../lib/user-id-context.ts";
@@ -480,10 +481,21 @@ chatRoutes.post("/chat", async (c) => {
         collector.recordBytesIn(Buffer.byteLength(body.message, "utf8"));
         collector.recordBytesOut(Buffer.byteLength(fullReply, "utf8"));
         collector.setFinalAgentId(handoffsSeen[handoffsSeen.length - 1] ?? routeAgentId);
+        const durationMs = Date.now() - collector.startTs;
         collector.event("chat.turn.end", {
-          durationMs: Date.now() - collector.startTs,
+          durationMs,
           summary: collector.summary(),
         });
+        try {
+          recordChatTurn({
+            agentId: handoffsSeen[handoffsSeen.length - 1] ?? routeAgentId,
+            latencyMs: durationMs,
+            error: Boolean(streamFailed),
+            errorClass: typeof streamFailed === "string" ? streamFailed : undefined,
+          });
+        } catch {
+          // metric emission must never destabilize the chat turn
+        }
       }
 
       // Persist BEFORE `done` so any client that immediately reads

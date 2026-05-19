@@ -38,6 +38,7 @@ import {
 } from "./llm-fact-extractor.ts";
 import { logger } from "./logger.ts";
 import { currentTrace } from "./trace-context.ts";
+import { recordMemoryWrite } from "./cw-metrics.ts";
 
 export type { FactCandidate } from "./llm-fact-extractor.ts";
 
@@ -168,7 +169,7 @@ type MemoryFact = {
   agentId: string;
   fact: string;
   source: "user" | "assistant";
-  ts: string;
+  ts: Date;
   /** Stable content fingerprint used as the dedup key for `bulkWrite` upsert. */
   factHash: string;
   /** Voyage / Bedrock embedding for vector retrieval. Absent when no provider configured. */
@@ -379,7 +380,7 @@ async function mongoWriteFacts(turn: MemoryTurn): Promise<MongoWriteFactsResult>
       agentId: turn.agentId,
       fact,
       source: "user",
-      ts: turn.ts,
+      ts: new Date(turn.ts),
       factHash,
       ...(emb && emb.ok
         ? { embedding: emb.vector, embeddingModel: emb.modelId }
@@ -650,6 +651,20 @@ export async function writeLongTermMemory(
     extractorInputTokens: result.extractorInputTokens,
     extractorOutputTokens: result.extractorOutputTokens,
   });
+
+  try {
+    recordMemoryWrite({
+      agentId,
+      factsExtracted: Array.isArray(result.considered) ? result.considered.length : 0,
+      factsWritten: result.inserted ?? 0,
+      embeddingFailures:
+        typeof result.embeddedCount === "number" && Array.isArray(result.accepted)
+          ? Math.max(0, result.accepted.length - result.embeddedCount)
+          : 0,
+    });
+  } catch {
+    // metric emission must never destabilize the memory write
+  }
 }
 
 /**
@@ -803,6 +818,22 @@ function memoryWeightFacts(): number {
 function memoryWeightChatMessages(): number {
   const raw = Number(process.env.MEMORY_WEIGHT_CHAT_MESSAGES ?? 1);
   return Number.isFinite(raw) ? raw : 1;
+}
+
+/**
+ * Whether to include assistant-role messages from `chat_messages` during
+ * long-term memory retrieval. Defaults to `true` so the agent can recall
+ * what it previously said (e.g. "why did you list blake@example.com?").
+ *
+ * Set `MEMORY_INCLUDE_ASSISTANT_MESSAGES=0` to revert to the conservative
+ * user-only behaviour if assistant replies cause retrieval noise.
+ *
+ * Exported so unit tests can call the real function without duplicating logic.
+ */
+export function memoryIncludeAssistantMessages(): boolean {
+  const v = process.env.MEMORY_INCLUDE_ASSISTANT_MESSAGES?.trim().toLowerCase();
+  if (v === "0" || v === "false") return false;
+  return true;
 }
 
 function memorySearchMaxTimeMs(): number {
@@ -983,10 +1014,13 @@ export async function readLongTermMemoryContext(
       vectorPath: "embedding",
       lexicalIndex: CHAT_MESSAGES_LEXICAL_INDEX,
       lexicalPath: "content",
-      // Raw assistant replies often include denials or summaries that can
-      // poison later recall. For LTM retrieval, user-authored messages are the
-      // durable source of truth for conversational details.
-      filter: { userId, role: "user" },
+      // Include both user and assistant messages by default so the agent can
+      // recall what it previously said (e.g. "why did you return X?").
+      // Opt out with MEMORY_INCLUDE_ASSISTANT_MESSAGES=0 if assistant replies
+      // cause retrieval noise in your dataset.
+      filter: memoryIncludeAssistantMessages()
+        ? { userId }
+        : { userId, role: "user" },
       weight: memoryWeightChatMessages(),
     },
   ];
@@ -1164,3 +1198,4 @@ export async function readSharedLongTermMemory(userId: string): Promise<string |
   });
   return null;
 }
+

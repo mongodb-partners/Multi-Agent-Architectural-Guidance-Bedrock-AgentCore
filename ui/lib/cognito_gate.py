@@ -82,7 +82,14 @@ def ensure_api_bearer_token(settings: UISettings) -> str | None:
 
 
 def render_cognito_logout(settings: UISettings) -> None:
-    """Sidebar logout when Cognito is configured (primary UI auth path)."""
+    """Sidebar logout when Cognito is configured (primary UI auth path).
+
+    Only safe to call from the Chat home page. The injected ``components.html``
+    iframe + MutationObserver below hang Streamlit's WebSocket loop on pages
+    with a short sidebar (Sessions, Trace Viewer) — the page sticks in RUNNING
+    with no clickable widgets. Sub-pages render the Sign Out via the parent
+    Chat page only and provide navigation back via ``st.page_link``.
+    """
     if not settings.cognito:
         return
     if not st.session_state.get("_streamlit_cognito_auth"):
@@ -138,8 +145,8 @@ def render_cognito_logout(settings: UISettings) -> None:
                     left:            sidebarL + 'px',
                     width:           sidebarW + 'px',
                     zIndex:          '9999',
-                    backgroundColor: 'rgb(14, 17, 23)',
-                    borderTop:       '1px solid rgba(250, 250, 250, 0.15)',
+                    backgroundColor: '#00141C',
+                    borderTop:       '1px solid rgba(255, 255, 255, 0.08)',
                     padding:         '0.6rem 1rem 0.9rem',
                     boxSizing:       'border-box',
                     margin:          '0'

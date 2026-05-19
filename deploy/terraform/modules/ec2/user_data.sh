@@ -92,6 +92,7 @@ systemctl enable amazon-cloudwatch-agent || true
 cat > /etc/logrotate.d/multiagent << 'LR'
 /var/log/multiagent-api.log
 /var/log/multiagent-ui.log
+/var/log/aws-otel-collector.log
 {
   daily
   rotate 7
@@ -104,12 +105,113 @@ cat > /etc/logrotate.d/multiagent << 'LR'
 }
 LR
 
+# ── ADOT Collector sidecar (Phase 2) ─────────────────────────────────────────
+# Signs SigV4 outbound to xray/logs/monitoring AWS OTLP endpoints so the API,
+# Streamlit UI, and (Phase 4) Atlas Prometheus scrape do not need their own
+# AWS credentials for telemetry. Apps speak plain OTLP to 127.0.0.1:4318.
+#
+# Config is fetched fresh from S3 on every boot (and on every Terraform apply
+# via user_data_replace_on_change in modules/ec2/main.tf). adot_config_etag is
+# included in user_data so changes in the rendered YAML force a re-create.
+#
+# When adot_config_s3_bucket is empty (legacy/Phase 1 deploys) the sidecar
+# unit is intentionally NOT created — the API + UI fall back to in-process
+# OTel only and the existing file-based log shipping is unchanged.
+ADOT_CONFIG_BUCKET="${adot_config_s3_bucket}"
+ADOT_CONFIG_KEY="${adot_config_s3_key}"
+ADOT_CONFIG_ETAG="${adot_config_etag}"
+ADOT_COLLECTOR_IMAGE="${adot_collector_image}"
+
+if [ -n "$ADOT_CONFIG_BUCKET" ] && [ -n "$ADOT_CONFIG_KEY" ]; then
+  echo "=== Installing ADOT Collector sidecar (etag=$ADOT_CONFIG_ETAG) ==="
+  mkdir -p /etc/aws-otel-collector
+  touch /var/log/aws-otel-collector.log
+  chmod 0644 /var/log/aws-otel-collector.log
+
+  # awscli v2 is installed by SSM agent dependencies on AL2023; fall back to
+  # dnf install just in case for older AMIs.
+  if ! command -v aws >/dev/null 2>&1; then
+    dnf install -y awscli
+  fi
+
+  # Initial config fetch — non-fatal so first boot does not block when SSM
+  # has not yet uploaded credentials; the systemd unit will retry on each
+  # restart via ExecStartPre.
+  aws s3 cp "s3://$ADOT_CONFIG_BUCKET/$ADOT_CONFIG_KEY" \
+    /etc/aws-otel-collector/config.yaml --region "${aws_region}" || \
+    echo "WARN: initial ADOT config fetch failed; sidecar will retry"
+
+  # Account id needed by the collector's resource processor (cloud.account.id).
+  AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text --region "${aws_region}" 2>/dev/null || echo "unknown")
+  echo "AWS_ACCOUNT_ID=$AWS_ACCOUNT_ID" > /etc/aws-otel-collector/env
+
+  # Phase 4: when an Atlas Prometheus secret is wired, populate ATLAS_PROM_*
+  # env vars from Secrets Manager. The collector reads $${env:...} substitutions
+  # at startup, so we materialize the values once here.
+  ATLAS_PROM_SECRET_ARN="${atlas_prom_secret_arn}"
+  if [ -n "$ATLAS_PROM_SECRET_ARN" ]; then
+    SECRET_JSON=$(aws secretsmanager get-secret-value \
+      --secret-id "$ATLAS_PROM_SECRET_ARN" \
+      --region "${aws_region}" \
+      --query SecretString --output text 2>/dev/null || echo "")
+    if [ -n "$SECRET_JSON" ]; then
+      # Expect the secret to be JSON like {"username":"...","password":"...","host":"..."}.
+      ATLAS_PROM_USER=$(echo "$SECRET_JSON" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("username",""))' || echo "")
+      ATLAS_PROM_PASSWORD=$(echo "$SECRET_JSON" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("password",""))' || echo "")
+      ATLAS_PROM_HOST=$(echo "$SECRET_JSON" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("host",""))' || echo "")
+      {
+        echo "ATLAS_PROM_USER=$ATLAS_PROM_USER"
+        echo "ATLAS_PROM_PASSWORD=$ATLAS_PROM_PASSWORD"
+        echo "ATLAS_PROM_HOST=$ATLAS_PROM_HOST"
+      } >> /etc/aws-otel-collector/env
+    fi
+  fi
+
+  cat > /etc/systemd/system/aws-otel-collector.service << EOF
+[Unit]
+Description=AWS Distro for OpenTelemetry Collector
+After=docker.service network-online.target
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+User=root
+EnvironmentFile=/etc/aws-otel-collector/env
+ExecStartPre=-/usr/bin/aws s3 cp s3://$ADOT_CONFIG_BUCKET/$ADOT_CONFIG_KEY /etc/aws-otel-collector/config.yaml --region ${aws_region}
+ExecStartPre=-/usr/bin/docker stop aws-otel-collector
+ExecStartPre=-/usr/bin/docker rm aws-otel-collector
+ExecStart=/usr/bin/docker run --rm \\
+  --name aws-otel-collector \\
+  --network=host \\
+  --env-file /etc/aws-otel-collector/env \\
+  -v /etc/aws-otel-collector/config.yaml:/etc/otel-config.yaml:ro \\
+  $ADOT_COLLECTOR_IMAGE \\
+  --config=/etc/otel-config.yaml
+ExecStop=/usr/bin/docker stop aws-otel-collector
+Restart=on-failure
+RestartSec=5
+StandardOutput=append:/var/log/aws-otel-collector.log
+StandardError=append:/var/log/aws-otel-collector.log
+SyslogIdentifier=aws-otel-collector
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+  systemctl daemon-reload
+  systemctl enable aws-otel-collector
+fi
+
 # ── Systemd: API (Docker container on :3000) ──────────────────────────────────
+# `After=aws-otel-collector.service` is harmless when the unit is absent (it
+# becomes a no-op ordering dependency); when present, it guarantees the
+# collector receiver is up before the API tries to emit OTLP.
 cat > /etc/systemd/system/multiagent-api.service << EOF
 [Unit]
 Description=Multi-Agent API (Docker --network=host, :3000)
-After=docker.service network-online.target
-Wants=network-online.target
+After=docker.service network-online.target aws-otel-collector.service
+Wants=network-online.target aws-otel-collector.service
 Requires=docker.service
 
 [Service]
@@ -134,11 +236,16 @@ WantedBy=multi-user.target
 EOF
 
 # ── Systemd: UI (Docker container on :8501) ───────────────────────────────────
+# --network=host so the UI can reach the ADOT sidecar on 127.0.0.1:4318.
+# We deliberately do not override the Docker image entrypoint here — Phase 2
+# bakes `opentelemetry-instrument streamlit run app.py` into ui/Dockerfile so
+# the auto-instrumentation hook runs whether the container is launched on
+# EC2 (via this systemd unit) or locally (via docker compose).
 cat > /etc/systemd/system/multiagent-ui.service << EOF
 [Unit]
 Description=Multi-Agent UI (Docker :8501)
-After=docker.service network-online.target multiagent-api.service
-Wants=network-online.target
+After=docker.service network-online.target multiagent-api.service aws-otel-collector.service
+Wants=network-online.target aws-otel-collector.service
 Requires=docker.service
 
 [Service]
@@ -148,7 +255,7 @@ ExecStartPre=-/usr/bin/docker stop multiagent-ui
 ExecStartPre=-/usr/bin/docker rm multiagent-ui
 ExecStart=/usr/bin/docker run --rm \
   --name multiagent-ui \
-  -p 8501:8501 \
+  --network=host \
   --env-file /opt/multiagent/.env.live \
   ${ecr_ui_image}
 ExecStop=/usr/bin/docker stop multiagent-ui

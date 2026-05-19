@@ -17,7 +17,9 @@
  *    parent collector with id rewiring + clock normalization. (§6.3.1 of plan.)
  */
 
+import { type Span, SpanStatusCode, trace as otelTrace } from "@opentelemetry/api";
 import { costOfUsage } from "./model-pricing.ts";
+import { recordMongoQuery } from "./cw-metrics.ts";
 import type {
   ChatTurnSummary,
   Trace,
@@ -152,6 +154,18 @@ export class TraceCollector {
   private listeners: Listener[] = [];
   private spanStack: string[] = [];
   private startedSpans = new Map<string, { type: TraceEventType; startTs: number; agentId?: string; parentId?: string }>();
+  /**
+   * Bridge from internal span id -> OTel Span. Populated by `start()` when
+   * OTel is bootstrapped (api/src/lib/otel.ts has installed a tracer
+   * provider). `end()` closes the matching OTel span; `event()` records the
+   * one-off as an OTel span event on the current OTel span. Wrapped in
+   * try/catch so OTel-side failures cannot destabilize the trace pipeline.
+   *
+   * `attachEventsNested()` deliberately bypasses this — AgentCore Runtime
+   * already emits its own gen_ai.* spans, and re-emitting from spliced
+   * events would produce a duplicate hierarchy in /aws/spans.
+   */
+  private otelSpans = new Map<string, Span>();
 
   // Byte accounting
   private totalBytes = 0;
@@ -225,6 +239,7 @@ export class TraceCollector {
       agentId,
       payload: payload as never,
     } as TraceEvent);
+    this.emitOtelStart(id, type, payload, agentId);
     return id;
   }
 
@@ -254,6 +269,7 @@ export class TraceCollector {
       agentId: span?.agentId,
       payload: payload as never,
     } as TraceEvent);
+    this.emitOtelEnd(id, payload);
   }
 
   /** Emit a one-off (non-span) event. */
@@ -273,7 +289,144 @@ export class TraceCollector {
       agentId,
       payload: payload as never,
     } as TraceEvent);
+    this.emitOtelEvent(type, payload, parentId);
+    // maybeEmitMetric is invoked centrally from `emit()` so spliced nested
+    // events (specialist runtimes → orchestrator via attachEventsNested) also
+    // bridge to CloudWatch EMF metrics. Don't double-emit from here.
     return id;
+  }
+
+  /**
+   * Bridge known trace event types to CloudWatch custom metrics (EMF). Keeps
+   * the metric emission centralized so individual mongo/tool call sites stay
+   * focused on their main logic and don't have to import cw-metrics. Wrapped
+   * in try/catch because metric emission must never destabilize a chat turn.
+   */
+  private maybeEmitMetric(type: TraceEventType, payload: Record<string, unknown>, agentId?: string): void {
+    try {
+      // mongo.result is the completion event; mongo.query is the start event.
+      // Only the result carries latencyMs / status / errorClass. We bridge
+      // from mongo.result so the Mongo dashboard widgets reflect actual
+      // round-trip latency, not the synchronous payload-build time of the
+      // start event (which is ~0ms and meaningless).
+      if (type === "mongo.result") {
+        const latencyMs = typeof payload?.latencyMs === "number" ? payload.latencyMs : undefined;
+        if (latencyMs === undefined) return;
+        const status = typeof payload?.status === "string" ? payload.status : undefined;
+        // mongo.result doesn't carry collection/op — those live on the matching
+        // mongo.query start event. To keep dimensions stable we encode kind as
+        // "result" and let widgets group by `status` (ok/empty/error) plus
+        // agent. Collection-level breakdowns stay in Logs Insights for now.
+        const kind = status === "error" ? "other" : "find";
+        recordMongoQuery({ kind, latencyMs });
+        return;
+      }
+      // mongo.vector_search is emitted by the mongodb_vector_search tool wrapper
+      // after the underlying MCP call returns. latencyMs covers the full MCP
+      // round-trip (embed excluded — that is billed to the embedding provider).
+      if (type === "mongo.vector_search") {
+        const latencyMs = typeof payload?.latencyMs === "number" ? payload.latencyMs : undefined;
+        if (latencyMs === undefined) return;
+        const collection = typeof payload?.collection === "string" ? payload.collection : "unknown";
+        recordMongoQuery({ kind: "vector_search", collection, latencyMs });
+        return;
+      }
+      void agentId; // reserved for future per-agent dimensions
+    } catch {
+      // metric emission must never destabilize the chat turn
+    }
+  }
+
+  // -------- OTel bridge --------
+  //
+  // Wrapped in try/catch at every call site so a tracer-side failure (e.g.
+  // exporter back-pressure / sidecar restart) never bubbles into the chat
+  // path. Spans land in /aws/spans via the ADOT sidecar in EXPORT mode and
+  // stay in-process otherwise.
+
+  private otelTracer() {
+    return otelTrace.getTracer("multiagent-api");
+  }
+
+  private flattenAttrs(prefix: string, value: unknown, out: Record<string, string | number | boolean>, depth = 0): void {
+    if (depth > 3 || value == null) return;
+    if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+      out[prefix] = value;
+      return;
+    }
+    if (Array.isArray(value)) {
+      if (value.every((v) => typeof v === "string" || typeof v === "number" || typeof v === "boolean")) {
+        // primitive array — flatten as JSON for OTel compat
+        out[prefix] = safeStringify(value);
+      } else {
+        out[prefix] = safeStringify(value);
+      }
+      return;
+    }
+    if (typeof value === "object") {
+      for (const [k, v] of Object.entries(value)) {
+        this.flattenAttrs(`${prefix}.${k}`, v, out, depth + 1);
+      }
+    }
+  }
+
+  private emitOtelStart(id: string, type: TraceEventType, payload: Record<string, unknown>, agentId?: string): void {
+    try {
+      const tracer = this.otelTracer();
+      const attrs: Record<string, string | number | boolean> = {
+        "multiagent.span.type": type,
+        "multiagent.trace_id": this.traceId,
+        "multiagent.session_id": this.sessionId,
+        "multiagent.message_id": this.messageId,
+      };
+      if (agentId) attrs["multiagent.agent_id"] = agentId;
+      if (this.userId) attrs["enduser.id"] = this.userId;
+      this.flattenAttrs("multiagent.payload", payload, attrs);
+      const span = tracer.startSpan(type, { attributes: attrs });
+      this.otelSpans.set(id, span);
+    } catch {
+      // OTel-side failure must not destabilize trace collection
+    }
+  }
+
+  private emitOtelEnd(id: string, payload: Record<string, unknown>): void {
+    try {
+      const span = this.otelSpans.get(id);
+      if (!span) return;
+      this.otelSpans.delete(id);
+      const extra: Record<string, string | number | boolean> = {};
+      this.flattenAttrs("multiagent.end", payload, extra);
+      span.setAttributes(extra);
+      const err = (payload as { error?: { class?: string; message?: string } }).error;
+      if (err) {
+        span.setStatus({ code: SpanStatusCode.ERROR, message: err.message ?? err.class ?? "error" });
+      } else {
+        span.setStatus({ code: SpanStatusCode.OK });
+      }
+      span.end();
+    } catch {
+      // OTel-side failure must not destabilize trace collection
+    }
+  }
+
+  private emitOtelEvent(type: TraceEventType, payload: Record<string, unknown>, parentId?: string): void {
+    try {
+      const parentSpan = parentId ? this.otelSpans.get(parentId) : undefined;
+      const attrs: Record<string, string | number | boolean> = {};
+      this.flattenAttrs("multiagent.payload", payload, attrs);
+      if (parentSpan) {
+        parentSpan.addEvent(type, attrs);
+      } else {
+        // No parent span → emit as a zero-duration span so the event still
+        // appears in /aws/spans Transaction Search. Useful for top-level
+        // events emitted before any wrapper span exists.
+        const tracer = this.otelTracer();
+        const span = tracer.startSpan(type, { attributes: attrs });
+        span.end();
+      }
+    } catch {
+      // OTel-side failure must not destabilize trace collection
+    }
   }
 
   /** Convenience: run an async function inside a span, auto-closing on resolve/reject. */
@@ -361,6 +514,16 @@ export class TraceCollector {
 
     this.totalBytes += size2;
     this.events.push(ev);
+
+    // Bridge to EMF metrics here (not in event()) so spliced nested events
+    // from specialist runtimes also emit. agentId on the event takes priority
+    // — falls back to this collector's agentId for direct events.
+    this.maybeEmitMetric(
+      ev.type,
+      (ev.payload ?? {}) as Record<string, unknown>,
+      ev.agentId ?? this.agentId,
+    );
+
     for (const l of this.listeners) {
       try {
         l(ev);

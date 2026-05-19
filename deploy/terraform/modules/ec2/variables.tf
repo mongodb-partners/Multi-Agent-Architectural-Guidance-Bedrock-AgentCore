@@ -62,3 +62,40 @@ variable "cw_log_group_ui" {
   type        = string
   description = "CloudWatch Logs group name for UI journald → agent"
 }
+
+# ── ADOT Collector sidecar (Phase 2) ──────────────────────────────────────────
+variable "adot_collector_image" {
+  type        = string
+  description = "OCI image for the AWS Distro for OpenTelemetry Collector. Default uses the public-ecr image; pin a digest for prod."
+  default     = "public.ecr.aws/aws-observability/aws-otel-collector:latest"
+}
+
+variable "adot_config_s3_bucket" {
+  type        = string
+  description = "S3 bucket containing the rendered ADOT collector config. Empty disables the sidecar (Phase 1 / legacy deployments)."
+  default     = ""
+}
+
+variable "adot_config_s3_key" {
+  type        = string
+  description = "S3 key of the rendered ADOT collector config. Empty disables the sidecar."
+  default     = ""
+}
+
+variable "adot_config_etag" {
+  type        = string
+  description = "Etag of the rendered ADOT config — included in user_data hash so the instance restarts the sidecar on config changes."
+  default     = ""
+}
+
+variable "otel_sample_ratio" {
+  type        = string
+  description = "OTEL_TRACES_SAMPLER_ARG. 1.0 = sample everything (dev). 0.1 = 10% (typical prod). Quoted as string because env files want strings."
+  default     = "1.0"
+}
+
+variable "atlas_prom_secret_arn" {
+  type        = string
+  description = "Secrets Manager ARN for the Atlas Prometheus integration credentials (Phase 4). Empty means no Atlas scraping — the EC2 fetches the secret only when this is set."
+  default     = ""
+}

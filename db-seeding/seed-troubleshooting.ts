@@ -25,7 +25,7 @@ If BOOT-010 appears (unit partially powers then restarts), perform a factory res
   hold Power + Volume-Down for 15 seconds until the LED blinks twice.
 If the issue persists after two resets, escalate to hardware replacement.`,
     escalateTo: "ts-3",
-    updatedAt: "2024-10-01",
+    updatedAt: new Date("2024-10-01"),
   },
   {
     docId: "ts-1b",
@@ -40,7 +40,7 @@ Step 2: Disable background sync and location services temporarily to isolate the
 Step 3: If on battery, calibrate by fully discharging then charging to 100% without interruption.
 Step 4: Factory reset if the problem persists after firmware update (BOOT-010 recovery procedure).
 Escalate if restarts continue after a clean firmware install — may indicate hardware fault.`,
-    updatedAt: "2024-10-15",
+    updatedAt: new Date("2024-10-15"),
   },
 
   // ── Connectivity ─────────────────────────────────────────────────────────
@@ -59,7 +59,7 @@ Escalate if restarts continue after a clean firmware install — may indicate ha
 5. Factory network reset — hold Network-Reset button for 5 seconds (LED blinks amber x3).
 If NET-204 persists after all five steps, open a return request referencing error code NET-204.`,
     escalateTo: "ts-4-policy",
-    updatedAt: "2024-09-20",
+    updatedAt: new Date("2024-09-20"),
   },
   {
     docId: "ts-2b",
@@ -74,7 +74,7 @@ If NET-204 persists after all five steps, open a return request referencing erro
 3. Ensure no more than 3 devices are paired simultaneously (firmware limit).
 4. Interference — microwave ovens and other 2.4GHz devices can disrupt BT; move away and retry.
 5. Update companion app and device firmware to the latest version before re-pairing.`,
-    updatedAt: "2024-08-12",
+    updatedAt: new Date("2024-08-12"),
   },
 
   // ── Hardware fault / escalation ──────────────────────────────────────────
@@ -94,7 +94,7 @@ Action required:
   4. Open a replacement ticket via the Order Management agent — reference HW-900.
 The standard replacement window is 24 months from the date of purchase for Pro series,
 12 months for standard widgets. Premium-tier customers have an extended 36-month window.`,
-    updatedAt: "2024-11-01",
+    updatedAt: new Date("2024-11-01"),
   },
 
   // ── Return / replacement policy ──────────────────────────────────────────
@@ -114,7 +114,7 @@ Process:
   1. Look up the order with mongodb_query (field: orderId or customerEmail).
   2. Run validate-return.mjs via run_skill_script to get the eligibility verdict.
   3. Summarize verdict and next steps for the customer — never approve from memory alone.`,
-    updatedAt: "2024-10-05",
+    updatedAt: new Date("2024-10-05"),
   },
 
   // ── Smart home / app issues ───────────────────────────────────────────────
@@ -133,7 +133,7 @@ Process:
 5. Delete the hub from the app and re-add as a new device.
 If the hub never appears in discovery after step 5, perform a full factory reset (ts-1 procedure)
 and re-add — some firmware versions require this after a network change.`,
-    updatedAt: "2024-09-10",
+    updatedAt: new Date("2024-09-10"),
   },
   {
     docId: "ts-6",
@@ -151,7 +151,7 @@ and re-add — some firmware versions require this after a network change.`,
    - The device boots into recovery mode; trigger the update again from the app.
 3. Ensure the phone has a stable internet connection during the OTA download.
 4. If recovery mode update also fails, escalate to hardware replacement (HW-900 procedure).`,
-    updatedAt: "2024-10-22",
+    updatedAt: new Date("2024-10-22"),
   },
 ];
 

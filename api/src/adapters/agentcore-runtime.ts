@@ -18,6 +18,7 @@ import { logger } from "../lib/logger.ts";
 import { injectTraceContextToCarrier } from "../lib/otel.ts";
 import type { ChatMessage } from "../lib/session-store.ts";
 import { currentTrace } from "../lib/trace-context.ts";
+import { recordAgentCoreInvoke } from "../lib/cw-metrics.ts";
 import {
   parseRuntimeSseStream,
   type RuntimeStreamEvent,
@@ -193,6 +194,17 @@ export async function* invokeAgentRuntime(
       errorClass: errClass,
       errorMessage: errMsg,
     });
+    try {
+      recordAgentCoreInvoke({
+        agentId: params.agentId,
+        mode,
+        latencyMs,
+        error: true,
+        errorClass: errClass,
+      });
+    } catch {
+      // metric emission must never destabilize the runtime call
+    }
     throw err;
   }
 
@@ -241,6 +253,16 @@ export async function* invokeAgentRuntime(
         httpStatus: 200,
         ...(firstByteAt !== undefined ? { timeToFirstByteMs: firstByteAt - t0 } : {}),
       });
+    }
+    try {
+      recordAgentCoreInvoke({
+        agentId: params.agentId,
+        mode,
+        latencyMs,
+        error: false,
+      });
+    } catch {
+      // metric emission must never destabilize the runtime call
     }
   }
 }

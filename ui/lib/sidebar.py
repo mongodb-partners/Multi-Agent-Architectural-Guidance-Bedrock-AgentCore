@@ -8,19 +8,20 @@ import streamlit as st
 
 from lib.api_client import get_health, list_agents
 
-_STATUS_ICONS = {
-    "ok": "🟢",
-    "connected": "🟢",
-    "dev_mock": "🟡",
-    "degraded": "🔴",
-    "unreachable": "🔴",
-    "not_configured": "⚪",
-    "no_agents": "⚪",
+_STATUS_CLASS = {
+    "ok": "ok",
+    "connected": "ok",
+    "dev_mock": "warn",
+    "degraded": "err",
+    "unreachable": "err",
+    "not_configured": "muted",
+    "no_agents": "muted",
 }
 
 
 def _status_icon(status: str) -> str:
-    return _STATUS_ICONS.get(status, "⚪")
+    cls = _STATUS_CLASS.get(status, "muted")
+    return f'<span class="brand-status brand-status--{cls}"></span>'
 
 
 def render_session_and_agent_sidebar(api_base: str, token: str | None) -> str:
@@ -43,8 +44,6 @@ def render_session_and_agent_sidebar(api_base: str, token: str | None) -> str:
         st.session_state.messages = []
         st.rerun()
 
-    st.caption(f"`{st.session_state.session_id}`")
-
     return pick_agent
 
 
@@ -55,12 +54,12 @@ def render_api_health(api_base: str, token: str | None) -> None:
             health = get_health(api_base, token)
             overall = health.get("status", "unknown")
             icon = _status_icon(overall)
-            st.markdown(f"**{icon} {overall.upper()}**")
+            st.markdown(f"**{icon} {overall.upper()}**", unsafe_allow_html=True)
             deps = health.get("dependencies") or {}
             for dep_name, dep_status in deps.items():
                 dep_icon = _status_icon(str(dep_status))
                 label = dep_name.replace("_", " ").title()
-                st.caption(f"{dep_icon} {label}: `{dep_status}`")
+                st.markdown(f"{dep_icon} {label}: `{dep_status}`", unsafe_allow_html=True)
             ts = health.get("timestamp")
             if ts:
                 st.caption(f"Checked: {ts}")

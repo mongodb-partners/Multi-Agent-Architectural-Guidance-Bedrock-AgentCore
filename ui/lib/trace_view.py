@@ -397,12 +397,12 @@ def render_timeline(events: list[dict]) -> None:
         rows_html.append(
             f"""
 <div style="display:flex; align-items:center; margin-bottom:3px;">
-  <div style="width:170px; font-size:11px; opacity:0.7; padding-right:8px;">{ev.get('type')}</div>
-  <div style="flex:1; height:14px; background:rgba(255,255,255,0.05); border-radius:4px; position:relative;">
-    <div style="position:absolute; left:{left}%; width:{width}%; height:100%; background:cornflowerblue; border-radius:4px;"
+  <div style="width:170px; font-size:11px; color:var(--text-muted,#B1B5BA); padding-right:8px;">{ev.get('type')}</div>
+  <div style="flex:1; height:14px; background:var(--surface-2,#0E2932); border-radius:4px; position:relative;">
+    <div style="position:absolute; left:{left}%; width:{width}%; height:100%; background:var(--primary,#00ED64); border-radius:4px; opacity:0.85;"
          title="{ev.get('type')} — {d} ms"></div>
   </div>
-  <div style="width:60px; font-size:11px; text-align:right; opacity:0.6; padding-left:8px;">{d} ms</div>
+  <div style="width:60px; font-size:11px; text-align:right; color:var(--text-muted,#B1B5BA); padding-left:8px;">{d} ms</div>
 </div>"""
         )
     st.markdown("".join(rows_html), unsafe_allow_html=True)
@@ -428,7 +428,7 @@ def render_context(events: list[dict]) -> None:
     for a in auth:
         ap = _payload(a)
         st.markdown(
-            f"🔐 **Authenticated user context** — {ap.get('customersResolved', 0)} customer(s), "
+            f":material/lock: **Authenticated user context** — {ap.get('customersResolved', 0)} customer(s), "
             f"{ap.get('ordersResolved', 0)} order(s) resolved from MongoDB"
         )
 
@@ -450,7 +450,7 @@ def render_prompt_and_skills(events: list[dict]) -> None:
     for p in prompts:
         pp = _payload(p)
         st.markdown(
-            f"🧩 **Prompt assembled** — {pp.get('totalBytes', 0)} B "
+            f":material/extension: **Prompt assembled** — {pp.get('totalBytes', 0)} B "
             f"(persona {pp.get('personaBytes', 0)} B, discovery {pp.get('discoveryBytes', 0)} B, "
             f"memory {pp.get('memoryContextBytes', 0)} B)"
         )
@@ -485,7 +485,7 @@ def render_model_activity(events: list[dict]) -> None:
         up = _payload(usage[i]) if i < len(usage) else {}
         stop = _payload(stops[i]).get("stopReason") if i < len(stops) else None
         with st.expander(
-            f"🤖 `{rp.get('modelId', '?')}` via `{rp.get('backend', '?')}`"
+            f":material/smart_toy: `{rp.get('modelId', '?')}` via `{rp.get('backend', '?')}`"
             f" — {up.get('totalTokens', 0)} token(s)"
             f"{f' · stop `{stop}`' if stop else ''}",
             expanded=i == 0,
@@ -574,7 +574,11 @@ def render_mongo_dashboard(events: list[dict]) -> None:
     for i, q in enumerate(queries):
         qp = _payload(q)
         rp = _payload(results[i]) if i < len(results) else {}
-        emoji = {"ok": "✅", "empty": "∅", "error": "❌"}.get(rp.get("status", ""), "·")
+        emoji = {
+            "ok": ":material/check_circle:",
+            "empty": ":material/circle:",
+            "error": ":material/error:",
+        }.get(rp.get("status", ""), "·")
         with st.expander(
             f"{emoji} #{i + 1} {qp.get('op')} on `{qp.get('collection')}` — "
             f"{rp.get('docCount', 0)} doc(s) in {rp.get('latencyMs', 0)} ms",
@@ -607,7 +611,7 @@ def render_mongo_dashboard(events: list[dict]) -> None:
                     )
                 if dp.get("valueTypeWarnings"):
                     for w in dp["valueTypeWarnings"]:
-                        st.caption(f"⚠️ {w.get('kind')} on `{w.get('field')}` — {w.get('detail')}")
+                        st.caption(f":material/warning: {w.get('kind')} on `{w.get('field')}` — {w.get('detail')}")
 
     for v in vectors:
         vp = _payload(v)
@@ -618,7 +622,7 @@ def render_mongo_dashboard(events: list[dict]) -> None:
         scores = vp.get("scores")
         hit_count = len(scores) if isinstance(scores, list) else 0
         with st.expander(
-            f"🧭 vector_search{collection_label} — embed via {embed_label} — {hit_count} hit(s)",
+            f":material/explore: vector_search{collection_label} — embed via {embed_label} — {hit_count} hit(s)",
             expanded=False,
         ):
             if vp.get("queryText") is not None:
@@ -735,7 +739,7 @@ def render_tool_calls(events: list[dict]) -> None:
         name = info.get("name") or "?"
         end = info.get("end") or {}
         duration = end.get("latencyMs", info.get("durationMs", 0))
-        with st.expander(f"🔧 `{name}` — {duration or 0} ms", expanded=False):
+        with st.expander(f":material/build: `{name}` — {duration or 0} ms", expanded=False):
             if (info.get("start") or {}).get("input"):
                 st.caption("Input")
                 _render_jsonish((info["start"] or {}).get("input"))
@@ -746,7 +750,7 @@ def render_tool_calls(events: list[dict]) -> None:
                 st.error(end["error"].get("message") or "Tool error")
     for h in https:
         hp = h.get("payload") or {}
-        emoji = "❌" if hp.get("blocked") or hp.get("errorClass") else f"📡 {hp.get('status') or '?'}"
+        emoji = ":material/error:" if hp.get("blocked") or hp.get("errorClass") else f":material/satellite_alt: {hp.get('status') or '?'}"
         with st.expander(
             f"{emoji} HTTP {hp.get('method')} {hp.get('url')}", expanded=False
         ):
@@ -759,7 +763,7 @@ def render_tool_calls(events: list[dict]) -> None:
                 st.warning(f"Blocked: {hp.get('blocked')}")
     for m in mcps:
         mp = m.get("payload") or {}
-        emoji = "❌" if mp.get("errorClass") else "🛰"
+        emoji = ":material/error:" if mp.get("errorClass") else ":material/router:"
         with st.expander(
             f"{emoji} MCP {mp.get('toolName')} on `{mp.get('server')}` ({mp.get('transport')})",
             expanded=False,
@@ -796,7 +800,7 @@ def render_agentcore(events: list[dict]) -> None:
                 st.write(cp["reasoning"])
     for inv in invokes:
         ip = inv.get("payload") or {}
-        emoji = "✅" if not ip.get("errorMessage") else "❌"
+        emoji = ":material/check_circle:" if not ip.get("errorMessage") else ":material/error:"
         with st.expander(
             f"{emoji} {ip.get('mode')} → `{ip.get('targetAgentId') or '?'}` "
             f"({int(ip.get('latencyMs', 0))} ms · {ip.get('responseBytes', 0)}B)",
@@ -812,7 +816,7 @@ def render_agentcore(events: list[dict]) -> None:
     for nm in nested_meta:
         np = nm.get("payload") or {}
         st.caption(
-            f"🪆 Nested trace {np.get('nestedTraceId') or 'unknown'} — {np.get('eventCount', 0)} events spliced"
+            f":material/account_tree: Nested trace {np.get('nestedTraceId') or 'unknown'} — {np.get('eventCount', 0)} events spliced"
         )
     for o in obs:
         op = o.get("payload") or {}
@@ -839,7 +843,7 @@ def render_memory(events: list[dict]) -> None:
         rp = r.get("payload") or {}
         kind = "Agent-scoped" if r.get("type") == "memory.scoped_read" else "Shared"
         st.markdown(
-            f"📥 **{kind}** — {rp.get('entryCount', 0)} fact(s) injected "
+            f":material/download: **{kind}** — {rp.get('entryCount', 0)} fact(s) injected "
             f"({rp.get('bytesInjected', 0)} B, backend `{rp.get('backend', '?')}`)"
         )
         if rp.get("facts"):
@@ -849,7 +853,7 @@ def render_memory(events: list[dict]) -> None:
     for w in writes:
         wp = w.get("payload") or {}
         st.markdown(
-            f"💾 **Write** — {wp.get('docsInserted', 0)} fact(s) · `{wp.get('primaryOutcome')}` "
+            f":material/save: **Write** — {wp.get('docsInserted', 0)} fact(s) · `{wp.get('primaryOutcome')}` "
             f"(prior {wp.get('priorEntryCount')}, now {wp.get('newEntryCount')})"
         )
         if wp.get("extractorModelId") or wp.get("extractorLatencyMs") is not None:
@@ -876,20 +880,20 @@ def render_memory(events: list[dict]) -> None:
                     label = ", ".join(label_parts)
                     note = c.get("note")
                     if c.get("matched"):
-                        line = f"- ✅ `{c.get('text')}`"
+                        line = f"- :material/check: `{c.get('text')}`"
                         if label:
                             line += f" ({label})"
                         if note:
                             line += f" — _{note}_"
                         st.markdown(line)
                     else:
-                        line = f"- ✗ `{c.get('text')}` — {c.get('rejectedReason')}"
+                        line = f"- :material/close: `{c.get('text')}` — {c.get('rejectedReason')}"
                         if note:
                             line += f" (_{note}_)"
                         st.markdown(line)
     for s in skips:
         sp = s.get("payload") or {}
-        st.caption(f"⏭ Write skipped — {sp.get('reason')}")
+        st.caption(f":material/skip_next: Write skipped — {sp.get('reason')}")
 
 
 # ---------------------------------------------------------------------------

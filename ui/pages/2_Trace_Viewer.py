@@ -15,7 +15,8 @@ if str(_ui_root) not in sys.path:
     sys.path.insert(0, str(_ui_root))
 
 from lib.api_client import get_trace, list_recent_traces  # noqa: E402
-from lib.cognito_gate import ensure_api_bearer_token, render_cognito_logout  # noqa: E402
+from lib.brand_css import inject_brand_css, inject_hide_builtin_sidebar_nav  # noqa: E402
+from lib.cognito_gate import ensure_api_bearer_token  # noqa: E402
 from lib.config import load_settings  # noqa: E402
 from lib.demo_narratives import narrate  # noqa: E402
 from lib.trace_css import inject_trace_css  # noqa: E402
@@ -45,12 +46,13 @@ from lib.trace_view import (  # noqa: E402
 
 st.set_page_config(page_title="Trace Viewer", layout="wide")
 inject_trace_css()
+inject_brand_css()
+inject_hide_builtin_sidebar_nav()
 
 settings = load_settings()
 api_token = ensure_api_bearer_token(settings)
 
 with st.sidebar:
-    render_cognito_logout(settings)
     st.page_link("app.py", label="← Chat")
     st.page_link("pages/1_Sessions.py", label="Sessions")
     st.markdown("---")

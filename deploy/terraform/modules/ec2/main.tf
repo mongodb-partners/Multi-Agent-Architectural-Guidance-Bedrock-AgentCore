@@ -128,6 +128,39 @@ resource "aws_iam_role_policy" "ec2_app" {
           "bedrock-agentcore:InvokeAgentRuntime",
         ]
         Resource = "*"
+      },
+      {
+        # ADOT sidecar awsxray exporter (Phase 2) — SigV4 outbound to the X-Ray
+        # OTLP endpoint. Scoped to PutTraceSegments + PutTelemetryRecords +
+        # sampling-rule reads (parentbased_traceidratio + dynamic rules).
+        Sid    = "XRayWrite"
+        Effect = "Allow"
+        Action = [
+          "xray:PutTraceSegments",
+          "xray:PutTelemetryRecords",
+          "xray:GetSamplingRules",
+          "xray:GetSamplingTargets",
+          "xray:GetSamplingStatisticSummaries",
+        ]
+        Resource = "*"
+      },
+      {
+        # ADOT sidecar awsemf exporter (Phase 4) — PutMetricData into the
+        # MongoDB/Atlas namespace + the AgentCore-Custom namespace for any
+        # custom dashboards we add later.
+        Sid      = "CloudWatchMetricsPublish"
+        Effect   = "Allow"
+        Action   = ["cloudwatch:PutMetricData"]
+        Resource = "*"
+      },
+      {
+        # Atlas Prometheus credentials (Phase 4). Only the specific secret
+        # passed via var.atlas_prom_secret_arn — gated to avoid granting
+        # broad Secrets Manager reads when Atlas scraping is off.
+        Sid      = "AtlasPrometheusSecretRead"
+        Effect   = "Allow"
+        Action   = ["secretsmanager:GetSecretValue", "secretsmanager:DescribeSecret"]
+        Resource = var.atlas_prom_secret_arn != "" ? var.atlas_prom_secret_arn : "arn:aws:secretsmanager:${var.aws_region}:000000000000:secret:disabled-by-default-*"
       }
     ]
   })
@@ -205,13 +238,20 @@ resource "aws_instance" "app" {
   # which makes user_data appear "different" on each run and forces the
   # instance to be replaced — even when nothing in the script actually changed.
   user_data_base64 = base64encode(templatefile("${path.module}/user_data.sh", {
-    project_name     = var.project_name
-    aws_region       = var.aws_region
-    ecr_registry     = var.ecr_registry
-    ecr_api_image    = var.ecr_api_image
-    ecr_ui_image     = var.ecr_ui_image
-    cw_log_group_api = var.cw_log_group_api
-    cw_log_group_ui  = var.cw_log_group_ui
+    project_name          = var.project_name
+    environment           = var.environment
+    aws_region            = var.aws_region
+    ecr_registry          = var.ecr_registry
+    ecr_api_image         = var.ecr_api_image
+    ecr_ui_image          = var.ecr_ui_image
+    cw_log_group_api      = var.cw_log_group_api
+    cw_log_group_ui       = var.cw_log_group_ui
+    adot_collector_image  = var.adot_collector_image
+    adot_config_s3_bucket = var.adot_config_s3_bucket
+    adot_config_s3_key    = var.adot_config_s3_key
+    adot_config_etag      = var.adot_config_etag
+    otel_sample_ratio     = var.otel_sample_ratio
+    atlas_prom_secret_arn = var.atlas_prom_secret_arn
   }))
   user_data_replace_on_change = true
 
