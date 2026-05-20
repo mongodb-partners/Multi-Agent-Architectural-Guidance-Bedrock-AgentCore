@@ -362,6 +362,9 @@ build_dynamic_env_base() {
     MONGODB_MCP_RUNTIME_ARN="${MONGODB_MCP_RUNTIME_ARN:-}" \
     MONGODB_MCP_RUNTIME_ENDPOINT="${MONGODB_MCP_RUNTIME_ENDPOINT:-}" \
     VOYAGE_ENDPOINT="${VOYAGE_ENDPOINT:-}" \
+    MEMORY_TRACE_VALUES="${MEMORY_TRACE_VALUES:-0}" \
+    TRACE_PROMPT_BODY="${TRACE_PROMPT_BODY:-0}" \
+    TRACE_REDACT="${TRACE_REDACT:-0}" \
     python3 -c "
 import json, os
 env = {
@@ -383,6 +386,12 @@ env = {
   'VOYAGE_SAGEMAKER_ENDPOINT': os.environ.get('VOYAGE_ENDPOINT', ''),
   'VOYAGE_OUTPUT_DIM':         '1024',
   'VOYAGE_REQUEST_FORMAT':     os.environ.get('VOYAGE_REQUEST_FORMAT', 'multimodal'),
+  # LTM trace-value gating — sourced from operator .env so flips are
+  # captured by ./deploy/deploy-agents.sh and never hand-edited on EC2.
+  # 0 (default) = redacted; 1 = raw text in trace events.
+  'MEMORY_TRACE_VALUES':       os.environ.get('MEMORY_TRACE_VALUES', '0'),
+  'TRACE_PROMPT_BODY':         os.environ.get('TRACE_PROMPT_BODY', '0'),
+  'TRACE_REDACT':              os.environ.get('TRACE_REDACT', '0'),
 }
 print(json.dumps({k: str(v) for k, v in env.items() if v}))
 ")

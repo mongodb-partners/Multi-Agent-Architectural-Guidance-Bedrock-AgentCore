@@ -4,6 +4,14 @@ This stack is always demo-mode. There is no toggle. Every chat turn produces
 a trace that the Streamlit UI renders inline and on a dedicated Trace
 Viewer page.
 
+> **For section-by-section guides to the Trace Viewer itself**, see:
+>
+> - [`trace-ui-system-overview.md`](trace-ui-system-overview.md) — **start here** — every Trace UI surface in one place (inline summary card under chat replies, Trace Viewer page, Sessions integration, developer fixture harness, print/PDF, mobile posture).
+> - [`trace-viewer-client-guide.md`](trace-viewer-client-guide.md) — the **default** Trace Viewer page (tiles, narrative, Mongo dashboard, memory, tool calls, AgentCore hops). Audience: PMs / AEs / support / customers on a demo.
+> - [`trace-viewer-developer-guide.md`](trace-viewer-developer-guide.md) — the **"Show developer details"** panel (full prompt + model I/O, Mongo pipelines, LTM internals, retries, span tree, byte caps, fixture harness, debug-the-panel workflow). Audience: engineers debugging a real turn.
+>
+> This file (`demo-mode-guide.md`) covers env knobs + how the demo *itself* is wired (sidebar, mock-mode banner, prompt buttons). The two guides above cover **what's on screen** in the Trace Viewer.
+
 ## What the user sees
 
 ### Chat panel (inline summary card)
@@ -28,7 +36,7 @@ Same trace, expanded:
 - **Routing decisions** — handoff attribution with trigger spans, confidence,
   alternatives considered.
 - **MongoDB** — per-query expander with normalized filter, sample docs,
-  plan, diagnostic (offending clause / value-type warnings), schema sample,
+  plan, diagnostic (offending clause / value-type warnings), DB Data info,
   vector-search histogram.
 - **Tool calls** — generic tool spans, HTTP tools (with method/status/
   redacted headers), MCP tools.

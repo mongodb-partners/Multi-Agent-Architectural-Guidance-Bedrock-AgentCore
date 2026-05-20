@@ -14,10 +14,15 @@ from lib.api_client import (
     ToolCallEvent,
     TokenEvent,
     TraceEvent,
+    get_trace,
     stream_chat_events,
 )
 from lib import log as ui_log
-from lib.inline_summary import aggregate_summary, render_inline_summary
+from lib.inline_summary import (
+    aggregate_summary,
+    merge_post_done_memory_events,
+    render_inline_summary,
+)
 
 _TOOL_ICON = ":material/build:"
 _SKILL_ICON = ":material/menu_book:"
@@ -236,9 +241,32 @@ def handle_chat_input(api_base: str, token: str | None, agent_id: str) -> None:
             full = f"*(error: {e})*"
 
         # ── Inline summary card (always-on demo polish) ───────────────────
+        # `memory.long_term_write` and `memory.long_term_skip` only land in
+        # the persisted trace AFTER the SSE `done` event because fact
+        # extraction is intentionally dangling. Re-fetch once with a short
+        # wait so the Memory card surfaces those events on this same render.
         inline_block: dict | None = None
         if trace_events:
-            summary = aggregate_summary(trace_events)
+            persisted_doc: dict | None = None
+            if done_trace_id:
+                try:
+                    import time as _time
+                    _time.sleep(1.5)  # one second covers most extraction latencies
+                    persisted_doc = get_trace(
+                        api_base,
+                        trace_id=done_trace_id,
+                        access_token=token,
+                        request_id=ui_log.new_request_id(),
+                        timeout=10.0,
+                    )
+                except Exception as exc:
+                    ui_log.warn(
+                        "post-done trace fetch failed",
+                        trace_id=done_trace_id,
+                        error=str(exc),
+                    )
+            merged_events = merge_post_done_memory_events(trace_events, persisted_doc)
+            summary = aggregate_summary(merged_events)
             render_inline_summary(summary, trace_id=done_trace_id)
             inline_block = {
                 "summary": summary,

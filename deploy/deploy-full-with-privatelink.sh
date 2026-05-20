@@ -2,20 +2,27 @@
 # deploy-full-with-privatelink.sh — Full end-to-end deployment coordinator.
 #
 # This is the single entrypoint for a complete deployment. It orchestrates:
-#   1. Shared network stack (VPC + Atlas PrivateLink) — via deploy-network.sh,
-#      only if the VPC does not already exist in SSM.
-#   2. Project stack (EC2 + ECR + Cognito + Bedrock KB + AgentCore + MongoDB)
-#      — via deploy-project.sh.
+#   1.  Shared network stack (VPC + Atlas PrivateLink) — via deploy-network.sh,
+#       only if the VPC does not already exist in SSM.
+#   1.5 Shared observability + embeddings stack (SageMaker + log groups +
+#       dashboards + invocation logging) — via deploy-shared.sh, only if its
+#       SSM canary (cw_api_log_group) is not already populated.
+#   2.  Project stack (EC2 + ECR + Cognito + Bedrock KB + AgentCore + MongoDB)
+#       — via deploy-project.sh.
 #
 # Usage:
 #   ./deploy/deploy-full-with-privatelink.sh [--auto-approve] [--skip-docker]
-#                                             [--skip-network] [--env-file <path>]
+#                                             [--skip-network] [--skip-shared]
+#                                             [--env-file <path>]
 #
 # Flags:
-#   --auto-approve   Pass -auto-approve to both terraform applies (no interactive prompts)
+#   --auto-approve   Pass -auto-approve to all terraform applies (no interactive prompts)
 #   --skip-docker    Skip Docker image build/push in deploy-project.sh
 #   --skip-network   Skip the network existence check and deploy-network.sh entirely
 #                    (use when you know the VPC is already deployed and want to save time)
+#   --skip-shared    Skip the shared-stack existence check and deploy-shared.sh entirely
+#                    (use when you know the shared stack is already applied for this
+#                    account+region+environment)
 #   --env-file PATH  Path to credentials file (default: repo-root/.env)
 #
 # Network existence check:
@@ -24,6 +31,12 @@
 #   populated. If it is, the network stack is considered deployed and
 #   deploy-network.sh is skipped.  If it is not (first run, or new region),
 #   deploy-network.sh is called first.
+#
+# Shared-stack existence check:
+#   Probes /<SHARED_VPC_NAME>/<REGION>/cw_api_log_group (canary published only by
+#   envs/shared). If empty, deploy-shared.sh is invoked. The shared stack is a
+#   singleton per (account, region, environment) — multiple per-project ec2
+#   stacks read its SSM outputs.
 #
 # Both sub-scripts accept --env-file and propagate it correctly; this script
 # passes it through so a non-default credentials path works end-to-end.
@@ -37,21 +50,24 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 NETWORK_SCRIPT="$REPO_ROOT/deploy/scripts/deploy-network.sh"
+SHARED_SCRIPT="$REPO_ROOT/deploy/scripts/deploy-shared.sh"
 PROJECT_SCRIPT="$REPO_ROOT/deploy/scripts/deploy-project.sh"
 
 ENV_FILE="$REPO_ROOT/.env"
 AUTO_APPROVE=false
 SKIP_DOCKER=false
 SKIP_NETWORK=false
+SKIP_SHARED=false
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --auto-approve) AUTO_APPROVE=true ;;
     --skip-docker)  SKIP_DOCKER=true ;;
     --skip-network) SKIP_NETWORK=true ;;
+    --skip-shared)  SKIP_SHARED=true ;;
     --env-file)     ENV_FILE="$2"; shift ;;
     -h|--help)
-      sed -n '2,30p' "$0"; exit 0 ;;
+      sed -n '2,40p' "$0"; exit 0 ;;
     *) echo "  [full-deploy] Unknown arg: $1" >&2; exit 1 ;;
   esac
   shift
@@ -66,18 +82,19 @@ sep()  { echo "═════════════════════�
 sep
 log "Starting full deployment (network + project) ..."
 log "Env file : $ENV_FILE"
-log "Flags    : auto-approve=$AUTO_APPROVE  skip-docker=$SKIP_DOCKER  skip-network=$SKIP_NETWORK"
+log "Flags    : auto-approve=$AUTO_APPROVE  skip-docker=$SKIP_DOCKER  skip-network=$SKIP_NETWORK  skip-shared=$SKIP_SHARED"
 sep
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Validate sub-scripts exist
 # ──────────────────────────────────────────────────────────────────────────────
 [[ -x "$NETWORK_SCRIPT" ]] || err "deploy-network.sh not found or not executable: $NETWORK_SCRIPT"
+[[ -x "$SHARED_SCRIPT"  ]] || err "deploy-shared.sh not found or not executable: $SHARED_SCRIPT"
 [[ -x "$PROJECT_SCRIPT" ]] || err "deploy-project.sh not found or not executable: $PROJECT_SCRIPT"
 [[ -f "$ENV_FILE" ]]       || err "Env file not found: $ENV_FILE  (create it from .env.example)"
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Source .env to obtain SHARED_VPC_NAME + AWS_REGION for the VPC existence check
+# Source .env to obtain SHARED_VPC_NAME + AWS_REGION for the existence probes
 # ──────────────────────────────────────────────────────────────────────────────
 # shellcheck source=/dev/null
 source "$ENV_FILE"
@@ -118,6 +135,41 @@ else
 fi
 
 # ──────────────────────────────────────────────────────────────────────────────
+# PHASE 1.5 — Shared observability + embeddings stack (SageMaker, log groups,
+# dashboards, Bedrock invocation logging). Singleton per (account, region,
+# environment); all per-project ec2 stacks read its SSM outputs.
+# ──────────────────────────────────────────────────────────────────────────────
+sep
+if [[ "$SKIP_SHARED" == "true" ]]; then
+  warn "Phase 1.5 — Skipping shared stack (--skip-shared flag set)"
+else
+  log "Phase 1.5 — Checking whether shared stack already exists..."
+  log "  SSM key : /${SHARED_VPC_NAME}/${AWS_REGION}/cw_api_log_group"
+
+  EXISTING_SHARED=$(aws ssm get-parameter \
+    --region "$AWS_REGION" \
+    --name "/${SHARED_VPC_NAME}/${AWS_REGION}/cw_api_log_group" \
+    --query "Parameter.Value" \
+    --output text 2>/dev/null || echo "")
+
+  if [[ -n "$EXISTING_SHARED" ]]; then
+    ok "Phase 1.5 — Shared stack already deployed (cw_api_log_group=$EXISTING_SHARED) — skipping deploy-shared.sh"
+    log "          Re-apply with: bash $SHARED_SCRIPT --env-file $ENV_FILE"
+  else
+    log "Phase 1.5 — Shared stack not found in SSM — running deploy-shared.sh ..."
+    sep
+
+    SHARED_ARGS=("--env-file" "$ENV_FILE")
+    [[ "$AUTO_APPROVE" == "true" ]] && SHARED_ARGS+=("--auto-approve")
+
+    bash "$SHARED_SCRIPT" "${SHARED_ARGS[@]}"
+
+    sep
+    ok "Phase 1.5 — Shared stack deployed successfully"
+  fi
+fi
+
+# ──────────────────────────────────────────────────────────────────────────────
 # PHASE 2 — Project stack (EC2 + infra + app)
 # ──────────────────────────────────────────────────────────────────────────────
 sep
@@ -139,6 +191,7 @@ echo "  Network : /${SHARED_VPC_NAME}/${AWS_REGION}/"
 echo "  To redeploy agents only : ./deploy/deploy-agents.sh"
 echo "  To redeploy API only    : ./deploy/deploy-api.sh"
 echo "  To tear down            : ./deploy/scripts/destroy.sh --mode ec2"
+echo "                            ./deploy/scripts/destroy.sh --mode shared"
 echo "                            ./deploy/scripts/destroy.sh --mode network"
 echo ""
 sep

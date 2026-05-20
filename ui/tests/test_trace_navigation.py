@@ -43,3 +43,49 @@ def test_open_trace_viewer_switches_with_selected_trace(monkeypatch) -> None:
     assert query_params["traceId"] == "trc-123"
     assert switched_to == [nav.TRACE_VIEWER_PAGE]
 
+
+# ---------------------------------------------------------------------------
+# session_neighbors
+# ---------------------------------------------------------------------------
+
+
+def _trace(trace_id: str, created_at: str) -> dict:
+    return {"traceId": trace_id, "createdAt": created_at}
+
+
+def test_session_neighbors_sorts_oldest_first_and_returns_position() -> None:
+    """Server returns newest-first; the helper must sort oldest-first so
+    "prev" = earlier turn, "next" = later turn, and the 1-based position
+    reflects chronological order."""
+    traces = [
+        _trace("t3", "2026-05-20T08:02:00Z"),
+        _trace("t1", "2026-05-20T08:00:00Z"),
+        _trace("t2", "2026-05-20T08:01:00Z"),
+    ]
+    prev_t, next_t, position, total = nav.session_neighbors(traces, current_trace_id="t2")
+    assert prev_t is not None and prev_t["traceId"] == "t1"
+    assert next_t is not None and next_t["traceId"] == "t3"
+    assert position == 2
+    assert total == 3
+
+
+def test_session_neighbors_handles_first_and_last_turn() -> None:
+    traces = [_trace("t1", "2026-05-20T08:00:00Z"), _trace("t2", "2026-05-20T08:01:00Z")]
+    prev_t, next_t, position, total = nav.session_neighbors(traces, current_trace_id="t1")
+    assert prev_t is None
+    assert next_t is not None and next_t["traceId"] == "t2"
+    assert position == 1 and total == 2
+
+    prev_t, next_t, position, total = nav.session_neighbors(traces, current_trace_id="t2")
+    assert prev_t is not None and prev_t["traceId"] == "t1"
+    assert next_t is None
+    assert position == 2 and total == 2
+
+
+def test_session_neighbors_returns_sentinel_when_trace_not_in_list() -> None:
+    traces = [_trace("t1", "2026-05-20T08:00:00Z")]
+    prev_t, next_t, position, total = nav.session_neighbors(traces, current_trace_id="stale-id")
+    assert prev_t is None and next_t is None
+    assert position == 0
+    assert total == 1
+

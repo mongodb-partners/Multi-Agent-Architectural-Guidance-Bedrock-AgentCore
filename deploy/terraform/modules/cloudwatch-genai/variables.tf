@@ -38,15 +38,42 @@ variable "enable_transaction_search_toggle" {
 }
 
 variable "agentcore_memories" {
-  type        = map(string)
+  type = map(object({
+    id  = string
+    arn = string
+  }))
   default     = {}
-  description = "Map of AgentCore Memory id -> full ARN. Preferred over agentcore_memory_ids — pass {(module.agentcore_memory.memory_id) = module.agentcore_memory.memory_arn} from envs/ec2 so the ARN is partition-safe (aws / aws-gov / aws-cn) and survives future ARN format changes."
+  description = <<-EOT
+    Map of static-key -> { id, arn } for AgentCore Memory resources.
+
+    The KEY (e.g. "main") MUST be a static string known at plan time — NOT the
+    memory_id from module.agentcore_memory. Terraform requires for_each keys
+    to be known before apply, and memory_id is `(known after apply)` on a
+    fresh deploy, which historically forced operators into a two-pass
+    `-target` apply (see git log for the 2026-05 cloudwatch-genai refactor).
+
+    Pass shape:
+      agentcore_memories = {
+        main = {
+          id  = module.agentcore_memory.memory_id
+          arn = module.agentcore_memory.memory_arn
+        }
+      }
+
+    Values can be unknown-after-apply (Terraform 1.6+ handles this fine when
+    only values, not keys, are unknown). The module uses each.value.id in the
+    AWS-mandated log-group path /aws/vendedlogs/bedrock-agentcore/memory/
+    APPLICATION_LOGS/<memory-id> so console auto-discovery still works.
+  EOT
 }
 
 variable "agentcore_gateways" {
-  type        = map(string)
+  type = map(object({
+    id  = string
+    arn = string
+  }))
   default     = {}
-  description = "Map of AgentCore Gateway id -> full ARN. Preferred over agentcore_gateway_ids — see agentcore_memories for rationale."
+  description = "Map of static-key -> { id, arn } for AgentCore Gateway resources. Same shape and rationale as agentcore_memories — keys must be static (e.g. \"main\") so for_each plans without a two-pass apply on fresh deploys."
 }
 
 variable "agentcore_memory_ids" {

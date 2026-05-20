@@ -7,12 +7,12 @@
  * Real data quick-ref:
  *   SKU-1  Compact Widget          $29.99  (discontinued — replaced by SKU-4/SKU-5)
  *   SKU-2  Pro Gadget              $89.99
- *   SKU-3  Travel Widget           $19.99
+ *   SKU-3  Travel Widget Mini      $24.99
  *   SKU-4  Compact Widget Plus     $34.99  (replaces SKU-1)
  *   SKU-5  Smart Widget Hub        $49.99  (replaces SKU-1, smart home)
- *   SKU-7  Outdoor Widget Rugged   $44.99  (IP67, workshop/outdoor)
+ *   SKU-7  Outdoor Widget Rugged   $59.99  (IP67, workshop/outdoor)
  *   SKU-8  Pro Gadget Lite         $64.99  (similar to SKU-2, lighter)
- *   SKU-9  Widget Starter Bundle   $39.99  (Compact Widget + Travel Widget)
+ *   SKU-9  Widget Starter Bundle   $49.99  (Compact Widget + Travel Widget Mini)
  */
 
 import { test, expect } from '@playwright/test';

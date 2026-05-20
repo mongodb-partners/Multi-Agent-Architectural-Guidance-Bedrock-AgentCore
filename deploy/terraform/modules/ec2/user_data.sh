@@ -1,5 +1,5 @@
 #!/bin/bash
-# user_data.sh — POC EC2 bootstrap (Docker mode)
+# user_data.sh — Application EC2 bootstrap (Docker mode)
 # Runs ONCE on first boot. Installs Docker, creates systemd services, enables them.
 #
 # Topology:
@@ -20,7 +20,7 @@
 set -euo pipefail
 exec > /var/log/multiagent-setup.log 2>&1
 
-echo "=== Multi-Agent POC bootstrap started $(date -u +%Y-%m-%dT%H:%M:%SZ) ==="
+echo "=== Multi-Agent application bootstrap started $(date -u +%Y-%m-%dT%H:%M:%SZ) ==="
 
 # ── App directory created FIRST so deploy.sh SSM .env.live copy never races ──
 mkdir -p /opt/multiagent
@@ -32,7 +32,13 @@ chmod 0644 /var/log/multiagent-api.log /var/log/multiagent-ui.log
 
 # ── System deps ───────────────────────────────────────────────────────────────
 dnf update -y
-dnf install -y docker git amazon-ssm-agent
+# bind-utils gives us `dig` + `nslookup`. Required by modules/bedrock-kb-peering
+# scripts/discover-atlas-private-ips.sh, which the peering deploy invokes via
+# SSM send-command from the operator host to resolve Atlas mongod -pri.mongodb.net
+# SRV records into private peering IPs (used to back-fill NLB target groups).
+# The discover script fails with `dig: command not found` if bind-utils is missing,
+# which silently bricks Bedrock KB ingestion in peering mode.
+dnf install -y docker git amazon-ssm-agent bind-utils
 
 # Ensure SSM agent is up early so deploy.sh can use send-command reliably.
 systemctl enable --now amazon-ssm-agent

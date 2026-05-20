@@ -210,7 +210,7 @@ if (ltm) blocks.push(`## Relevant prior context\n\n${ltm}`);
    - **RRF merges** the four ranked lists with `score = Σ 1 / (k + rank)`, `k = 60`. RRF works on rank position so the BM25 score scale (0–10ish) and the cosine score scale (0–1) don't have to be normalised.
    - Applies the per-collection weight (`hit.rrfScore *= weight`).
    - Applies exponential recency decay (`hit.rrfScore *= exp(-Δdays / MEMORY_RECENCY_HALFLIFE_DAYS)`).
-   - Runs **MMR** to pick `MEMORY_VECTOR_TOPK=6` final rows from the top `fetchK` candidates, balancing relevance and diversity by `lambda = MEMORY_MMR_LAMBDA=0.7`.
+   - Runs **MMR** to pick `MEMORY_VECTOR_TOPK=14` final rows from the top `fetchK` candidates, balancing relevance and diversity by `lambda = MEMORY_MMR_LAMBDA=0.7`.
 6. **Render** — facts become `- <fact>` bullets; chat messages become `- [YYYY-MM-DD <role>] <content...>` bullets (content truncated at 400 chars).
 7. **Trace** — single `memory.scoped_read` event with hybrid metadata:
 

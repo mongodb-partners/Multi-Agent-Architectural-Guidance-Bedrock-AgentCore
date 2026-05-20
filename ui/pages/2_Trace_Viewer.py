@@ -24,12 +24,12 @@ from lib.trace_navigation import (  # noqa: E402
     SELECTED_TRACE_ID_KEY,
     open_trace_viewer,
     query_trace_id,
+    render_session_nav,
     select_trace,
 )
-from lib.trace_view import (  # noqa: E402
+from lib.client_trace_view import (  # noqa: E402
     render_agentcore,
     render_context,
-    render_developer_details,
     render_errors,
     render_memory,
     render_model_activity,
@@ -42,6 +42,7 @@ from lib.trace_view import (  # noqa: E402
     render_tool_calls,
     render_trace_meta,
 )
+from lib.developer_trace_view import render_developer_details  # noqa: E402
 
 
 st.set_page_config(page_title="Trace Viewer", layout="wide")
@@ -62,10 +63,14 @@ with st.sidebar:
     except Exception as exc:
         st.caption(f"_(could not load recent traces: {exc})_")
         recent = []
+    seen_trace_ids: set[str] = set()
     for r in recent:
         tid = r.get("traceId", "")
         if not tid:
             continue
+        if tid in seen_trace_ids:
+            continue
+        seen_trace_ids.add(tid)
         label = f"{tid[:8]}… · {r.get('agentId', '')}"
         if st.button(label, key=f"recent_trace_{tid}", use_container_width=True):
             open_trace_viewer(tid)
@@ -95,12 +100,16 @@ if not trace_id and not (session_id and message_id):
 
 with st.spinner("Loading trace…"):
     try:
+        # The page loads the slim "core" projection so client demos stay fast.
+        # The full dev payload is fetched on demand when the user clicks
+        # "Show developer details" inside `render_developer_details`.
         trace = get_trace(
             settings.api_base,
             trace_id=trace_id,
             session_id=session_id,
             message_id=message_id,
             access_token=api_token,
+            include="core",
         )
     except Exception as exc:
         st.error(f"Could not fetch trace: {exc}")
@@ -124,6 +133,7 @@ st.markdown(
 events = trace.get("events") or []
 
 render_trace_meta(trace)
+render_session_nav(settings, api_token, trace)
 render_mock_banner(events)
 render_summary_header(trace)
 render_mongo_dashboard(events)
@@ -139,12 +149,16 @@ for render_section in (
     render_timeline,
     render_context,
     render_prompt_and_skills,
+    render_memory,
     render_model_activity,
     render_routing,
     render_tool_calls,
     render_agentcore,
-    render_memory,
     render_errors,
 ):
     render_section(events)
-render_developer_details(trace)
+st.markdown(
+    '<div class="trace-developer-divider">Developer details (loaded on demand)</div>',
+    unsafe_allow_html=True,
+)
+render_developer_details(trace, settings, api_token)

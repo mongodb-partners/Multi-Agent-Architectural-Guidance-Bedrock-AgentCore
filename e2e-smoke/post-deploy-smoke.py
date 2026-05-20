@@ -15,6 +15,7 @@ Environment overrides:
     E2E_PASS               Cognito smoke password, default DemoUser#2026
     SKIP_TERRAFORM_CHECKS  Set to 1 to skip local terraform output checks
     SKIP_CHAT_CHECKS       Set to 1 to skip live /chat checks
+    SKIP_LTM_CHECK         Set to 1 to skip the long-term memory recall check
 """
 
 from __future__ import annotations
@@ -85,6 +86,13 @@ def manifest_resources(path: Path) -> dict[str, Any]:
     for key in ("aws_account", "aws_region", "environment"):
         resources.setdefault(key, doc.get(key) or os.environ.get(key.upper(), ""))
     return resources
+
+
+def manifest_doc(path: Path) -> dict[str, Any]:
+    """Full manifest doc — needed for top-level keys like `network` that the
+    `check_*` helpers introspect to branch on NETWORK_MODE."""
+    require(path.exists(), f"deploy manifest not found: {path}")
+    return json.loads(path.read_text())
 
 
 def check_health(api_url: str) -> None:
@@ -169,29 +177,59 @@ def check_embedding_manifest_and_sagemaker(resources: dict[str, Any]) -> None:
         require(not endpoint, "titan provider should not publish a Voyage endpoint")
 
 
-def check_terraform_outputs(resources: dict[str, Any]) -> None:
+def _network_mode_from_manifest(manifest: dict[str, Any]) -> str:
+    """Return network_mode from the manifest, defaulting to 'privatelink' for
+    back-compat with pre-NETWORK_MODE manifests. Top-level resolution because
+    older manifests stored nothing; new ones nest it under 'network'."""
+    nm = ((manifest.get("network") or {}).get("mode") or "").strip().lower()
+    return nm or "privatelink"
+
+
+def _kb_connectivity_mode_from_manifest(manifest: dict[str, Any]) -> str:
+    """Resolved at deploy time by envs/ec2. One of: privatelink, peering-nlb,
+    public-srv. Defaults to 'privatelink' for pre-NETWORK_MODE manifests."""
+    return (
+        ((manifest.get("network") or {}).get("kb_connectivity_mode") or "").strip().lower()
+        or "privatelink"
+    )
+
+
+def check_terraform_outputs(resources: dict[str, Any], manifest: dict[str, Any]) -> None:
     log("\n== Terraform outputs ==")
     if os.environ.get("SKIP_TERRAFORM_CHECKS") == "1":
         log("skipped via SKIP_TERRAFORM_CHECKS=1")
         return
 
+    network_mode = _network_mode_from_manifest(manifest)
+    kb_conn_mode = _kb_connectivity_mode_from_manifest(manifest)
+    log(f"network_mode={network_mode}  kb_connectivity_mode={kb_conn_mode}")
+
     voyage_output = run(["terraform", "output", "-raw", "voyage_endpoint_name"], cwd=TF_DIR)
+    cw_api = run(["terraform", "output", "-raw", "cloudwatch_api_log_group"], cwd=TF_DIR)
+    cw_ui = run(["terraform", "output", "-raw", "cloudwatch_ui_log_group"], cwd=TF_DIR)
+    tf_network_mode = run(["terraform", "output", "-raw", "network_mode"], cwd=TF_DIR)
     kb_pl_enabled = run(
         ["terraform", "output", "-raw", "bedrock_kb_privatelink_enabled"],
+        cwd=TF_DIR,
+    )
+    kb_peering_enabled = run(
+        ["terraform", "output", "-raw", "bedrock_kb_peering_enabled"],
         cwd=TF_DIR,
     )
     kb_endpoint_service = run(
         ["terraform", "output", "-raw", "bedrock_kb_endpoint_service_name"],
         cwd=TF_DIR,
     )
-    cw_api = run(["terraform", "output", "-raw", "cloudwatch_api_log_group"], cwd=TF_DIR)
-    cw_ui = run(["terraform", "output", "-raw", "cloudwatch_ui_log_group"], cwd=TF_DIR)
+    tf_kb_conn_mode = run(["terraform", "output", "-raw", "kb_connectivity_mode"], cwd=TF_DIR)
     log(
         json.dumps(
             {
                 "voyage_endpoint_name": voyage_output,
+                "network_mode": tf_network_mode,
                 "bedrock_kb_privatelink_enabled": kb_pl_enabled,
+                "bedrock_kb_peering_enabled": kb_peering_enabled,
                 "bedrock_kb_endpoint_service_name": kb_endpoint_service,
+                "kb_connectivity_mode": tf_kb_conn_mode,
                 "cloudwatch_api_log_group": cw_api,
                 "cloudwatch_ui_log_group": cw_ui,
             },
@@ -204,17 +242,51 @@ def check_terraform_outputs(resources: dict[str, Any]) -> None:
             voyage_output == resources.get("voyage_sagemaker_endpoint"),
             "terraform voyage_endpoint_name does not match deploy manifest",
         )
-    require(kb_pl_enabled == "true", "Bedrock KB PrivateLink must be enabled")
+
+    # Mode parity: TF and manifest must agree on connectivity mode.
     require(
-        kb_endpoint_service.startswith("com.amazonaws.vpce."),
-        f"Bedrock KB endpoint service name missing/invalid: {kb_endpoint_service}",
+        tf_network_mode == network_mode,
+        f"terraform network_mode={tf_network_mode!r} disagrees with manifest network.mode={network_mode!r}",
     )
+    require(
+        tf_kb_conn_mode == kb_conn_mode,
+        f"terraform kb_connectivity_mode={tf_kb_conn_mode!r} disagrees with manifest {kb_conn_mode!r}",
+    )
+
+    # Mutual exclusion: privatelink and peering KB modes must NEVER both be on.
+    require(
+        not (kb_pl_enabled == "true" and kb_peering_enabled == "true"),
+        "PrivateLink and peering KB modes are mutually exclusive but both are reported enabled — hybrid mode is forbidden",
+    )
+
+    if network_mode == "privatelink":
+        require(kb_pl_enabled == "true", "Bedrock KB PrivateLink must be enabled in privatelink mode")
+        require(kb_peering_enabled == "false", "Bedrock KB peering must be disabled in privatelink mode")
+        require(
+            kb_endpoint_service.startswith("com.amazonaws.vpce."),
+            f"Bedrock KB endpoint service name missing/invalid: {kb_endpoint_service}",
+        )
+    else:
+        require(kb_pl_enabled == "false", "Bedrock KB PrivateLink must be disabled in peering mode")
+        if kb_conn_mode == "peering-nlb":
+            require(kb_peering_enabled == "true", "Bedrock KB peering-NLB must be enabled when kb_connectivity_mode=peering-nlb")
+            require(
+                kb_endpoint_service.startswith("com.amazonaws.vpce."),
+                f"Bedrock KB peering endpoint service name missing/invalid: {kb_endpoint_service}",
+            )
+        elif kb_conn_mode == "public-srv":
+            require(kb_peering_enabled == "false", "Bedrock KB peering must be disabled when kb_connectivity_mode=public-srv")
+        else:
+            require(False, f"unexpected kb_connectivity_mode in peering mode: {kb_conn_mode!r}")
+
     require("/" in cw_api and cw_api.rstrip("/").endswith("/api"), f"unexpected api log group: {cw_api!r}")
     require("/" in cw_ui and cw_ui.rstrip("/").endswith("/ui"), f"unexpected ui log group: {cw_ui!r}")
 
 
-def check_bedrock_kb(resources: dict[str, Any]) -> None:
-    log("\n== Bedrock KB PrivateLink ==")
+def check_bedrock_kb(resources: dict[str, Any], manifest: dict[str, Any]) -> None:
+    network_mode = _network_mode_from_manifest(manifest)
+    kb_conn_mode = _kb_connectivity_mode_from_manifest(manifest)
+    log(f"\n== Bedrock KB connectivity ({network_mode} / kb={kb_conn_mode}) ==")
     kb_id = resources.get("bedrock_kb_id")
     region = resources.get("aws_region")
     require(kb_id, "deploy manifest missing bedrock_kb_id")
@@ -237,11 +309,30 @@ def check_bedrock_kb(resources: dict[str, Any]) -> None:
     info = json.loads(raw)
     log(json.dumps(info, sort_keys=True))
     require(info.get("status") == "ACTIVE", f"Bedrock KB is not ACTIVE: {info.get('status')}")
-    require(
-        str(info.get("endpointServiceName", "")).startswith("com.amazonaws.vpce."),
-        "Bedrock KB is not configured with endpointServiceName PrivateLink",
-    )
-    require("-pl-" in str(info.get("endpoint", "")), "Bedrock KB endpoint is not the Atlas -pl host")
+
+    endpoint_service = str(info.get("endpointServiceName") or "")
+    endpoint_host = str(info.get("endpoint") or "")
+    if kb_conn_mode == "privatelink":
+        require(
+            endpoint_service.startswith("com.amazonaws.vpce."),
+            "Bedrock KB is not configured with endpointServiceName PrivateLink",
+        )
+        require("-pl-" in endpoint_host, f"Bedrock KB endpoint is not the Atlas -pl host: {endpoint_host}")
+    elif kb_conn_mode == "peering-nlb":
+        require(
+            endpoint_service.startswith("com.amazonaws.vpce."),
+            "Bedrock KB peering-NLB path must still publish a VPCE endpoint service name",
+        )
+        # The peering NLB fronts the standard cluster hostname so the cert SAN
+        # matches; we don't require any specific token in the hostname.
+        require(endpoint_host, "Bedrock KB endpoint host is empty in peering-NLB mode")
+    else:
+        # public-srv mode — endpointServiceName must be empty, endpoint is the
+        # cluster's public SRV host.
+        require(
+            not endpoint_service,
+            f"Bedrock KB is in public-srv mode but endpointServiceName is set: {endpoint_service}",
+        )
 
 
 def cognito_token(client_id: str) -> str:
@@ -403,6 +494,76 @@ def check_all_agents(api_url: str, token: str) -> None:
         log(f"checks={json.dumps(checks, sort_keys=True)}")
         require(all(checks.values()), f"{agent} smoke failed: {checks}")
         log(f"PASS {agent}")
+
+
+def check_long_term_memory_recall(api_url: str, token: str) -> None:
+    """End-to-end LTM regression: plant a memorable fact, then ask a fresh
+    session to recall it. Fails if either turn errors or the recall reply
+    doesn't surface the planted token.
+
+    Promoted from `memory-recall-diagnostic.py::scenario_B`. Lightweight —
+    one plant + one recall, ~30 s total. Skip with SKIP_CHAT_CHECKS=1 or
+    SKIP_LTM_CHECK=1.
+    """
+    log("\n== Long-term memory recall ==")
+    if os.environ.get("SKIP_CHAT_CHECKS") == "1" or os.environ.get("SKIP_LTM_CHECK") == "1":
+        log("skipped via SKIP_CHAT_CHECKS=1 or SKIP_LTM_CHECK=1")
+        return
+
+    needle = "HELIOTROPE-LANTERN"
+    plant_session = f"post-deploy-smoke-ltm-plant-{int(time.time() * 1000)}"
+    recall_session = f"post-deploy-smoke-ltm-recall-{int(time.time() * 1000)}"
+    plant_msg = (
+        f"Please remember this preference for future support tickets: my "
+        f"favorite mnemonic phrase is {needle}. Treat it as a stable user "
+        "preference, not a one-off."
+    )
+    recall_msg = (
+        "We talked earlier about a memorable phrase you should keep on file "
+        "as one of my preferences. Quote that exact phrase back to me."
+    )
+
+    payload_plant = json.dumps({
+        "agentId": "orchestrator",
+        "sessionId": plant_session,
+        "message": plant_msg,
+    }).encode()
+    payload_recall = json.dumps({
+        "agentId": "orchestrator",
+        "sessionId": recall_session,
+        "message": recall_msg,
+    }).encode()
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+
+    def _stream(payload: bytes) -> tuple[str, list[str], list[Any]]:
+        request = urllib.request.Request(
+            f"{api_url}/chat", data=payload, headers=headers, method="POST"
+        )
+        with urllib.request.urlopen(request, timeout=240) as response:
+            body = response.read().decode("utf-8", "replace")
+        text, events, _traces, _handoffs, errors = parse_sse(body)
+        return text, events, errors
+
+    plant_text, plant_events, plant_errors = _stream(payload_plant)
+    require("done" in plant_events, f"LTM plant turn did not finish: events={plant_events}")
+    require(not plant_errors, f"LTM plant turn returned errors: {plant_errors}")
+    log(f"plant reply head: {plant_text[:160]!r}")
+
+    # Let fact extraction + embedding + dedup index settle before recall.
+    # Empirically writeLongTermMemory + chat_messages mirror complete < 5 s
+    # on the live stack; we give it 8 s to absorb cold-start jitter.
+    time.sleep(8)
+
+    recall_text, recall_events, recall_errors = _stream(payload_recall)
+    require("done" in recall_events, f"LTM recall turn did not finish: events={recall_events}")
+    require(not recall_errors, f"LTM recall turn returned errors: {recall_errors}")
+    flat = re.sub(r"\s+", " ", recall_text).strip()
+    log(f"recall reply head: {flat[:400]!r}")
+    require(
+        needle.lower() in flat.lower(),
+        f"LTM recall did not surface needle {needle!r} in reply: {flat[:400]!r}",
+    )
+    log(f"PASS LTM cross-session recall ({needle})")
 
 
 def check_cloudwatch_join(resources: dict[str, Any], api_url: str, token: str) -> None:
@@ -602,6 +763,7 @@ def main() -> int:
     args = parser.parse_args()
 
     resources = manifest_resources(Path(args.manifest))
+    full_manifest = manifest_doc(Path(args.manifest))
     api_url = str(resources.get("ec2_api_url", "")).rstrip("/")
     client_id = str(resources.get("cognito_client_id", ""))
     require(api_url, "deploy manifest missing ec2_api_url")
@@ -610,15 +772,17 @@ def main() -> int:
     log(f"API={api_url}")
     log(f"UI={resources.get('ec2_ui_url')}")
     log(f"manifest={args.manifest}")
+    log(f"network_mode={_network_mode_from_manifest(full_manifest)}  kb_connectivity_mode={_kb_connectivity_mode_from_manifest(full_manifest)}")
 
     check_health(api_url)
     token = cognito_token(client_id)
     log(f"cognito_token_len={len(token)}")
     check_agents_endpoint(api_url, token)
     check_embedding_manifest_and_sagemaker(resources)
-    check_terraform_outputs(resources)
-    check_bedrock_kb(resources)
+    check_terraform_outputs(resources, full_manifest)
+    check_bedrock_kb(resources, full_manifest)
     check_all_agents(api_url, token)
+    check_long_term_memory_recall(api_url, token)
     check_cloudwatch_join(resources, api_url, token)
 
     log("\nALL_POST_DEPLOY_SMOKE_CHECKS_PASSED")

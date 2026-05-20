@@ -183,7 +183,7 @@ resource "aws_iam_instance_profile" "ec2" {
 
 resource "aws_security_group" "ec2" {
   name        = "${var.project_name}-sg-ec2-${var.environment}"
-  description = "POC EC2 - Hono API :3000, Streamlit :8501. SSM for shell (no SSH)."
+  description = "Application EC2 - Hono API :3000, Streamlit :8501. SSM for shell (no SSH)."
   vpc_id      = var.vpc_id
 
   # Port 22 (SSH) intentionally omitted — use SSM Session Manager instead:
@@ -206,12 +206,75 @@ resource "aws_security_group" "ec2" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 
-  egress {
-    description = "All outbound (AWS APIs + Atlas)"
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
+  # ── Egress — mode-aware split for defense-in-depth ─────────────────────────
+  # PrivateLink mode keeps the single catch-all (back-compat; AWS service
+  # ENIs land on private VPC IPs that vary, and Atlas VPCE routing
+  # constrains the actual destination anyway).
+  # Peering mode splits into:
+  #   * 443/TCP → 0.0.0.0/0     for AWS services (Bedrock, AgentCore, ECR,
+  #                              CloudWatch, Cognito, SSM, etc. — these run
+  #                              on public AWS endpoints reached over IGW)
+  #   * 27017/TCP + 1024-65535/TCP → atlas_peering_cidr (Atlas mongod listener
+  #                                  ports — dynamic per cluster)
+  #   * 53/UDP + 53/TCP → 0.0.0.0/0 for DNS resolution
+  # Atlas is unreachable from outside the VPC via peering anyway, but
+  # restricting egress at the SG layer makes mis-configuration fail loud.
+  dynamic "egress" {
+    for_each = var.network_mode == "privatelink" ? [1] : []
+    content {
+      description = "All outbound (AWS APIs + Atlas) - privatelink mode catch-all"
+      from_port   = 0
+      to_port     = 0
+      protocol    = "-1"
+      cidr_blocks = ["0.0.0.0/0"]
+    }
+  }
+  dynamic "egress" {
+    for_each = var.network_mode == "peering" ? [1] : []
+    content {
+      description = "HTTPS to AWS service endpoints (Bedrock, AgentCore, ECR, CW, Cognito, SSM)"
+      from_port   = 443
+      to_port     = 443
+      protocol    = "tcp"
+      cidr_blocks = ["0.0.0.0/0"]
+    }
+  }
+  dynamic "egress" {
+    for_each = var.network_mode == "peering" ? [1] : []
+    content {
+      description = "MongoDB Atlas TLS + mongod dynamic listener ports - narrowed to peering CIDR"
+      from_port   = 1024
+      to_port     = 65535
+      protocol    = "tcp"
+      cidr_blocks = [var.atlas_peering_cidr]
+    }
+  }
+  dynamic "egress" {
+    for_each = var.network_mode == "peering" ? [1] : []
+    content {
+      description = "MongoDB Atlas TLS canonical port"
+      from_port   = 27017
+      to_port     = 27017
+      protocol    = "tcp"
+      cidr_blocks = [var.atlas_peering_cidr]
+    }
+  }
+  dynamic "egress" {
+    for_each = var.network_mode == "peering" ? [1, 2] : []
+    content {
+      description = "DNS (UDP+TCP for completeness)"
+      from_port   = 53
+      to_port     = 53
+      protocol    = egress.value == 1 ? "udp" : "tcp"
+      cidr_blocks = ["0.0.0.0/0"]
+    }
+  }
+
+  lifecycle {
+    precondition {
+      condition     = var.network_mode != "peering" || var.atlas_peering_cidr != ""
+      error_message = "ec2 module: network_mode='peering' requires var.atlas_peering_cidr to be set (used to narrow Atlas-bound egress)."
+    }
   }
 
   tags = merge(local.common_tags, {
@@ -263,7 +326,7 @@ resource "aws_instance" "app" {
   }
 
   tags = merge(local.common_tags, {
-    Name = "${var.project_name}-poc-${var.environment}"
+    Name = "${var.project_name}-ec2-${var.environment}"
   })
 }
 

@@ -301,6 +301,7 @@ class TestAggregateSummary:
                         {
                             "rank": 1,
                             "collection": "products",
+                            "_id": "p1",
                             "id": "p1",
                             "title": "Compact Widget",
                             "score": 0.92,
@@ -326,6 +327,7 @@ class TestAggregateSummary:
         search = s.vector_searches[0]
         assert search["collection"] == "products"
         assert search["hit_count"] == 2
+        assert search["previews"][0]["_id"] == "p1"
         assert search["previews"][0]["title"] == "Compact Widget"
         assert search["previews"][0]["score"] == 0.92
         assert search["previews"][0]["sources"] == ["products"]
@@ -364,10 +366,39 @@ class TestAggregateSummary:
         preview = s.vector_searches[0]["previews"][0]
 
         assert preview["collection"] == "troubleshooting_docs"
+        assert preview["_id"] == "ts-3"
         assert preview["title"] == "Hardware fault - HW-900"
         assert preview["sources"] == ["troubleshooting_docs"]
         assert preview["score"] == 0.91
         assert preview["snippet"].startswith("HW-900 means")
+
+    def test_vector_search_previews_are_collection_agnostic(self) -> None:
+        events = [
+            _ev(
+                "mongo.vector_search",
+                {
+                    "collection": "arbitrary_collection",
+                    "queryText": "arbitrary collection hit",
+                    "scores": [0.87],
+                    "documentPreviews": [
+                        {
+                            "rank": 1,
+                            "collection": "arbitrary_collection",
+                            "_id": "507f1f77bcf86cd799439011",
+                            "id": "507f1f77bcf86cd799439011",
+                            "title": "Arbitrary Collection Hit",
+                            "score": 0.87,
+                        }
+                    ],
+                },
+            )
+        ]
+
+        preview = aggregate_summary(events).vector_searches[0]["previews"][0]
+
+        assert preview["collection"] == "arbitrary_collection"
+        assert preview["_id"] == "507f1f77bcf86cd799439011"
+        assert preview["title"] == "Arbitrary Collection Hit"
 
     def test_vector_source_rendering_uses_plain_markdown_and_dedupes(self, monkeypatch) -> None:
         recorder = _StreamlitRecorder()
@@ -380,6 +411,7 @@ class TestAggregateSummary:
                 {
                     "rank": 1,
                     "collection": "products",
+                    "_id": "507f1f77bcf86cd799439011",
                     "id": "p1",
                     "title": "Compact <span>Widget</span>",
                     "score": 0.52,
@@ -398,6 +430,7 @@ class TestAggregateSummary:
         assert len([m for m in markdowns if "#1 Compact" in m]) == 1
         assert all("vec-source-pill" not in m for m in markdowns)
         assert all("<span class=" not in m for m in markdowns)
+        assert any("Mongo _id: `507f1f77bcf86cd799439011`" in c for c in captions)
         assert any("Fields: sku=SKU-1, category=home" in c for c in captions)
 
     def test_vector_search_dedupe_keeps_distinct_queries(self) -> None:

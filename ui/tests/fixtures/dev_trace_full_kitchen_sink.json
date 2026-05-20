@@ -1,0 +1,50 @@
+{
+  "traceId": "dev-fixture-kitchen-sink",
+  "sessionId": "demo-session",
+  "messageId": "demo-msg-kitchen",
+  "userId": "demo-user",
+  "agentId": "orchestrator",
+  "createdAt": "2026-05-20T08:06:00.000Z",
+  "release": { "gitSha": "abcdef0", "env": "dev" },
+  "correlation": { "requestId": "req-kitchen-1" },
+  "otel": { "traceId": "aabbccddeeff00112233445566778899", "rootSpanId": "aabbccddeeff0011" },
+  "spanTree": [
+    { "id": "k1", "type": "chat.turn.start", "ts": 0, "durationMs": 3200, "agentId": "orchestrator", "children": [
+      { "id": "k2", "type": "model.request", "ts": 5, "durationMs": 2400, "agentId": "orchestrator", "children": [
+        { "id": "k3", "type": "mongo.vector_search", "ts": 100, "durationMs": 130, "agentId": "orchestrator", "children": [] }
+      ]}
+    ]}
+  ],
+  "events": [
+    { "id": "k1", "ts": 0, "type": "chat.turn.start", "payload": { "sessionId": "demo-session", "messageId": "demo-msg-kitchen", "agentId": "orchestrator", "startTs": 0 } },
+    { "id": "k-env", "ts": 1, "type": "dev.environment", "payload": { "chatMode": "live", "devMockBackends": false, "mongoConfigured": true, "voyageConfigured": true, "logLevel": "info" } },
+    { "id": "k2", "ts": 5, "type": "model.request", "payload": { "modelId": "anthropic.claude-sonnet-4-5", "region": "us-east-1", "systemPromptHash": "h-k", "systemPromptBytes": 4096, "priorTurnsCount": 4, "userMessage": "What is the status of order O-1234?" } },
+    { "id": "k-skill", "ts": 8, "type": "skill.activated", "payload": { "name": "order-management", "source": "pre_activate", "injectedVia": "system_prompt", "bytes": 2048, "allowed": true, "bodyPreview": "# Order management skill body preview …", "resourceReads": [{ "resourcePath": "references/order-status-codes.md", "bytes": 1024, "toolUseId": "tu-1", "latencyMs": 5 }] } },
+    { "id": "k3", "ts": 100, "type": "mongo.vector_search", "payload": { "collection": "products", "embeddingSource": "voyage", "indexName": "products-vector-index", "scores": [0.92, 0.88], "embedLatencyMs": 75, "searchLatencyMs": 55 } },
+    { "id": "k-retry", "ts": 150, "type": "model.retry", "payload": { "provider": "bedrock", "modelId": "anthropic.claude-sonnet-4-5", "attempt": 1, "previousErrorClass": "ThrottlingException", "backoffMs": 100 } },
+    { "id": "k-byte", "ts": 200, "type": "dev.byte_cap_hit", "payload": { "droppedType": "tool.call", "bytes": 4096, "reason": "per_event" } },
+    { "id": "k-usage", "ts": 2400, "type": "model.usage", "payload": { "modelId": "anthropic.claude-sonnet-4-5", "inputTokens": 2000, "outputTokens": 800, "totalTokens": 2800 } },
+    { "id": "k-end", "ts": 3200, "type": "chat.turn.end", "payload": { "durationMs": 3200 } }
+  ],
+  "summary": {
+    "inputTokens": 2000,
+    "outputTokens": 800,
+    "totalTokens": 2800,
+    "toolCalls": 2,
+    "mongoQueries": 0,
+    "mongoDocsReturned": 2,
+    "mcpCalls": 1,
+    "agentcoreHops": 1,
+    "agentcoreRuntimeMs": 3200,
+    "estimatedCostUsd": 0.0084,
+    "costEstimateComplete": true,
+    "costBreakdown": { "anthropic.claude-sonnet-4-5": 0.0084 },
+    "durationMs": 3200,
+    "modelIds": ["anthropic.claude-sonnet-4-5"],
+    "toolsUsed": ["read_skill_resource", "mongodb_vector_search"],
+    "eventsDropped": 1,
+    "degraded": true
+  },
+  "eventsDropped": 1,
+  "truncated": true
+}

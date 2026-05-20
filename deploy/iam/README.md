@@ -1,8 +1,18 @@
-# IAM policy for `peerislands-terraform`
+# IAM artefacts for the Terraform deploy principal
 
-This directory holds a single consolidated IAM policy that grants the Terraform
-deploy user (`peerislands-terraform`) everything it needs to **create and destroy**
-the full multi-agent stack — no juggling 12+ AWS-managed policies.
+This directory holds the two IAM JSON documents the deploy principal needs:
+
+| File | Type | Answers | Attached to |
+|---|---|---|---|
+| [`policy.json`](policy.json) | **Identity / permissions policy** | "What can this principal do once authenticated?" | The IAM user / role as a managed or inline policy |
+| [`sts-trust-policy.json`](sts-trust-policy.json) | **Trust policy** (`AssumeRolePolicyDocument`) | "Who is allowed to assume this role via STS?" | An IAM Role's trust relationship (role-only, not used by IAM users) |
+
+The two are **not interchangeable** — `policy.json` has no `Principal` field and no `sts:AssumeRole` action; it cannot serve as a trust policy. `sts-trust-policy.json` only grants `sts:AssumeRole` / `sts:AssumeRoleWithWebIdentity` to specified principals; it grants no service permissions on its own.
+
+**Pick a mode:**
+
+- **IAM user (static long-lived keys)** → attach `policy.json` only. No trust policy applies.
+- **IAM Role assumed via STS** (required when the account prohibits IAM users) → create the role with `sts-trust-policy.json` as its trust relationship **and** attach `policy.json` as a permissions policy. See [§ STS-assumed role setup](#sts-assumed-role-setup) below.
 
 ## What's in `policy.json`
 
@@ -56,6 +66,87 @@ This is a **POC** account. The policy uses service-level wildcards (`ec2:*`, `la
 3. Root-account damage is prevented by the `PassRoleToAwsServices` allow-list (no arbitrary role assumption).
 
 For a production account, replace each `service:*` with the explicit action list Terraform actually calls, scope `Resource: "*"` to ARN patterns, and add a `Condition` with `aws:RequestedRegion`.
+
+## STS-assumed role setup
+
+Use this path when the account policy prohibits IAM users (e.g. enterprise SSO / federated identity / cross-account assume-role).
+
+### 1. Pick the trust statements that apply to you
+
+`sts-trust-policy.json` ships with four SIDs covering the common patterns. **Delete the ones that do not apply** before creating the role — IAM trust policies have a 2,048-character limit and unused principals expand the role's attack surface:
+
+| SID | Use when | Placeholder(s) to fill |
+|---|---|---|
+| `AllowSameAccountIamPrincipalsWithMfa` | Any IAM principal in the same account can assume the role, provided MFA is present in the session and ≤ 12h old. Good general fallback. | `ACCOUNT_ID` |
+| `AllowAwsIdentityCenterSsoUsers` | The deploy is run by a user signed in through AWS IAM Identity Center (formerly AWS SSO) with a specific permission set. | `ACCOUNT_ID`, `PERMISSION_SET_NAME` |
+| `AllowCrossAccountTrustedPrincipal` | The deploy is run from a role in a different AWS account (e.g. a central tooling account assuming into the UAT workload account). The `sts:ExternalId` condition prevents the confused-deputy attack and must be a high-entropy value the trusted caller will pass on every `AssumeRole`. | `TRUSTED_ACCOUNT_ID`, `TRUSTED_ROLE_NAME`, `REPLACE_WITH_GENERATED_EXTERNAL_ID` (use `aws secretsmanager get-random-password --password-length 32 --no-include-space` or `openssl rand -hex 16`) |
+| `AllowGitHubActionsOidcFederation` | The deploy is run from GitHub Actions via OIDC federation. Requires the GitHub OIDC provider to already exist in the account. | `ACCOUNT_ID`, `GITHUB_ORG`, `GITHUB_REPO` (and adjust the `sub` claim glob if you deploy from non-`main` branches or tags) |
+
+### 2. Create the role with both documents
+
+```bash
+ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+ROLE_NAME="PeerIslandsTerraformDeploy"
+
+# Replace ACCOUNT_ID / SSO permission-set / external ID placeholders first.
+sed -i.bak "s/ACCOUNT_ID/${ACCOUNT_ID}/g" deploy/iam/sts-trust-policy.json
+# Manually edit the remaining placeholders (PERMISSION_SET_NAME, TRUSTED_ACCOUNT_ID, ...).
+
+# Create the role with the trust policy.
+aws iam create-role \
+  --role-name "$ROLE_NAME" \
+  --assume-role-policy-document file://deploy/iam/sts-trust-policy.json \
+  --max-session-duration 14400 \
+  --description "Terraform deploy role for the multi-agent stack (STS-assumed)"
+
+# Create the permissions policy (or reuse if already published).
+POLICY_ARN=$(aws iam create-policy \
+  --policy-name "${ROLE_NAME}Permissions" \
+  --policy-document file://deploy/iam/policy.json \
+  --query 'Policy.Arn' --output text)
+
+# Attach the permissions policy to the role.
+aws iam attach-role-policy \
+  --role-name "$ROLE_NAME" \
+  --policy-arn "$POLICY_ARN"
+```
+
+`--max-session-duration 14400` requests a 4-hour ceiling on `AssumeRole` sessions (default is 1h). The deploy's longest single phase is `terraform apply` at ~20-25 min — 4 hours is a safe headroom for end-to-end runs without re-authenticating mid-deploy. Raise to `43200` (12 h) if the account permits.
+
+### 3. Assume the role from the deploying shell
+
+Three equivalent ways, pick whichever fits your tooling — all are accepted transparently by the deploy scripts:
+
+```bash
+# (a) Raw STS assume-role → export env vars
+CREDS=$(aws sts assume-role \
+  --role-arn "arn:aws:iam::${ACCOUNT_ID}:role/${ROLE_NAME}" \
+  --role-session-name "multiagent-uat-$(date +%s)" \
+  --duration-seconds 14400 \
+  --output json)
+export AWS_ACCESS_KEY_ID=$(echo "$CREDS"     | jq -r '.Credentials.AccessKeyId')
+export AWS_SECRET_ACCESS_KEY=$(echo "$CREDS" | jq -r '.Credentials.SecretAccessKey')
+export AWS_SESSION_TOKEN=$(echo "$CREDS"     | jq -r '.Credentials.SessionToken')
+
+# (b) Named profile in ~/.aws/config with source_profile + role_arn
+#     [profile uat-deploy]
+#       role_arn       = arn:aws:iam::<ACCOUNT_ID>:role/PeerIslandsTerraformDeploy
+#       source_profile = my-sso-profile
+#       duration_seconds = 14400
+export AWS_PROFILE=uat-deploy
+
+# (c) AWS IAM Identity Center (SSO) — exchange OIDC token for STS session
+aws sso login --profile uat-deploy
+export AWS_PROFILE=uat-deploy
+```
+
+After any of the three, set `AUTH_MODE=sts` in your `.env` so the deploy scripts validate the assumed-role caller shape (the shared validator at [`../scripts/_aws-auth.sh`](../scripts/_aws-auth.sh) refuses to proceed if the resolved ARN isn't an `assumed-role`). Then confirm and run:
+
+```bash
+aws sts get-caller-identity   # must show the assumed-role ARN, not the source identity
+source .env
+./deploy/deploy-full-with-privatelink.sh --auto-approve
+```
 
 ## How to apply
 

@@ -42,3 +42,26 @@ variable "atlas_private_key" {
   sensitive = true
   default   = ""
 }
+
+# ── Connectivity mode ────────────────────────────────────────────────────────
+variable "network_mode" {
+  type        = string
+  default     = "privatelink"
+  description = "Connectivity mode for Atlas. 'privatelink' (default) provisions module.atlas_privatelink (Interface VPCE + Atlas-side endpoint binding); 'peering' provisions module.atlas_vpc_peering (network container + AWS-side accepter + route entries + IP access list). Mutually exclusive. Switching modes requires destroy + redeploy (the SSM /network_mode key guards against accidental flips)."
+
+  validation {
+    condition     = contains(["privatelink", "peering"], var.network_mode)
+    error_message = "network_mode must be either 'privatelink' or 'peering'."
+  }
+}
+
+variable "atlas_peering_cidr" {
+  type        = string
+  default     = "192.168.248.0/21"
+  description = "CIDR block for the Atlas network container. Used ONLY when network_mode='peering'. Atlas default is 192.168.248.0/21. MUST NOT overlap var.vpc_cidr — see precondition on module.atlas_vpc_peering. Shell pre-flight in deploy-network.sh catches overlap before terraform plan; this default value is safe with the default vpc_cidr of 10.0.0.0/16."
+
+  validation {
+    condition     = can(cidrnetmask(var.atlas_peering_cidr))
+    error_message = "atlas_peering_cidr must be a valid IPv4 CIDR."
+  }
+}

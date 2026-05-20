@@ -99,3 +99,21 @@ variable "atlas_prom_secret_arn" {
   description = "Secrets Manager ARN for the Atlas Prometheus integration credentials (Phase 4). Empty means no Atlas scraping — the EC2 fetches the secret only when this is set."
   default     = ""
 }
+
+# ── Connectivity mode ────────────────────────────────────────────────────────
+variable "network_mode" {
+  type        = string
+  default     = "privatelink"
+  description = "Connectivity mode. In 'peering' mode the EC2 host's Atlas egress is narrowed to var.atlas_peering_cidr for defense-in-depth (matches modules/bedrock-kb-peering NLB target subnet)."
+
+  validation {
+    condition     = contains(["privatelink", "peering"], var.network_mode)
+    error_message = "network_mode must be either 'privatelink' or 'peering'."
+  }
+}
+
+variable "atlas_peering_cidr" {
+  type        = string
+  default     = ""
+  description = "Atlas-side peering CIDR (e.g. 192.168.248.0/21). Used to narrow Atlas-bound egress on the EC2 SG when network_mode='peering'. Ignored in privatelink mode."
+}

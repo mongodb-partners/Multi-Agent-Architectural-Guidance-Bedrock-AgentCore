@@ -1,14 +1,19 @@
 # CloudWatch Dashboards — Reference Guide
 
-> **Quick links** (account `483874864688`, region `us-east-1`)
+> **Note on screenshots.** The PNGs embedded below are illustrative — they were captured against the dev account where the framework was developed and show example traffic shapes. Your dashboards will look identical structurally but with different values. Regenerate by following [§ Regenerating screenshots](#regenerating-screenshots) at the bottom.
+>
+> **Console URLs.** The dashboards are named `<SHARED_RESOURCE_PREFIX>-{fleet,mongo,cost,atlas}-<env>`. With the default prefix `multiagent` and environment `dev` they resolve to:
 >
 > | Dashboard | Console URL |
 > |---|---|
-> | Fleet (latency · volume · errors) | [mongodb-multiagent3-fleet-dev](https://us-east-1.console.aws.amazon.com/cloudwatch/home?region=us-east-1#dashboards/dashboard/mongodb-multiagent3-fleet-dev) |
-> | MongoDB (queries · memory · vector search) | [mongodb-multiagent3-mongo-dev](https://us-east-1.console.aws.amazon.com/cloudwatch/home?region=us-east-1#dashboards/dashboard/mongodb-multiagent3-mongo-dev) |
-> | Cost & tokens | [mongodb-multiagent3-cost-dev](https://us-east-1.console.aws.amazon.com/cloudwatch/home?region=us-east-1#dashboards/dashboard/mongodb-multiagent3-cost-dev) |
-> | CloudWatch GenAI Observability | [Built-in Agents tab](https://us-east-1.console.aws.amazon.com/cloudwatch/home?region=us-east-1#generative-ai:agents) |
-> | Transaction Search (spans) | [aws/spans log group](https://us-east-1.console.aws.amazon.com/cloudwatch/home?region=us-east-1#logsV2:log-groups/log-group/aws$252Fspans) |
+> | Fleet (latency · volume · errors) | `https://<region>.console.aws.amazon.com/cloudwatch/home?region=<region>#dashboards/dashboard/<SHARED_RESOURCE_PREFIX>-fleet-<env>` |
+> | MongoDB (queries · memory · vector search) | `…/<SHARED_RESOURCE_PREFIX>-mongo-<env>` |
+> | Cost & tokens | `…/<SHARED_RESOURCE_PREFIX>-cost-<env>` |
+> | Atlas (Prometheus scrape) | `…/<SHARED_RESOURCE_PREFIX>-atlas-<env>` (when `enable_atlas_metrics=true`) |
+> | CloudWatch GenAI Observability | `https://<region>.console.aws.amazon.com/cloudwatch/home?region=<region>#generative-ai:agents` |
+> | Transaction Search (spans) | `https://<region>.console.aws.amazon.com/cloudwatch/home?region=<region>#logsV2:log-groups/log-group/aws$252Fspans` |
+>
+> Discover the exact names for your environment: `aws cloudwatch list-dashboards --query 'DashboardEntries[].DashboardName'` or `terraform output -state=deploy/terraform/envs/shared/terraform.tfstate dashboard_names`.
 
 ---
 
@@ -30,7 +35,7 @@ Three custom dashboards are provisioned by Terraform (`modules/cloudwatch-fleet-
 
 ## 1. Fleet Dashboard
 
-**Name:** `mongodb-multiagent3-fleet-dev`
+**Name:** `<SHARED_RESOURCE_PREFIX>-fleet-dev`
 **Purpose:** Real-time agent health — latency SLOs, error rates, Bedrock and AgentCore throughput.
 
 ### Widgets
@@ -41,7 +46,7 @@ Three custom dashboards are provisioned by Terraform (`modules/cloudwatch-fleet-
 
 - **Metric:** `Multiagent/Chat / TurnLatencyMs` (dimension: `agentId=<agent-name>`) — aggregated via `SEARCH()`
 - **Alarm source:** `Multiagent/FleetRollup / TurnLatencyMs` p99 (dimensionless, for reliable alarm evaluation)
-- **Alarm:** `mongodb-multiagent3-dev-p99-turn-latency` fires when p99 > 15,000 ms for 2 of 3 5-minute windows
+- **Alarm:** `<SHARED_RESOURCE_PREFIX>-dev-p99-turn-latency` fires when p99 > 15,000 ms for 2 of 3 5-minute windows
 - **What to watch:** p99 > 15 s indicates a slow Bedrock model response or Strands agent loop taking extra tool-call rounds. Check `aws/spans` for the trace.
 
 #### Turn volume + errors
@@ -49,7 +54,7 @@ Three custom dashboards are provisioned by Terraform (`modules/cloudwatch-fleet-
 ![Turn volume](turn-volume.png)
 
 - **Metrics:** `Multiagent/Chat / TurnsTotal Sum` (all agents), `TurnErrors Sum` (right axis) — via `SEARCH()`
-- **Alarm:** `mongodb-multiagent3-dev-error-rate` fires when error rate > 2% of turns over 10 minutes
+- **Alarm:** `<SHARED_RESOURCE_PREFIX>-dev-error-rate` fires when error rate > 2% of turns over 10 minutes
 - **What to watch:** Error spike without latency spike = downstream dependency fault (MongoDB, MCP tool). Latency + error together = model overload or rate-limit.
 
 #### Bedrock model invocations + throttles
@@ -57,20 +62,20 @@ Three custom dashboards are provisioned by Terraform (`modules/cloudwatch-fleet-
 ![Bedrock invocations](bedrock-invocations.png)
 
 - **Metrics:** `AWS/Bedrock / Invocations`, `InvocationThrottles`
-- **Alarm:** `mongodb-multiagent3-dev-bedrock-throttles` fires on burst > 5 throttles / 5 min
+- **Alarm:** `<SHARED_RESOURCE_PREFIX>-dev-bedrock-throttles` fires on burst > 5 throttles / 5 min
 - **What to watch:** Throttle spikes indicate you've hit the on-demand throughput limit for `anthropic.claude-3-5-sonnet`. Request a quota increase or switch to Provisioned Throughput.
 
 #### AgentCore runtime invocations
 
 - **Metric:** `Multiagent/Chat / AgentCoreInvokes` + `AgentCoreInvokeErrors` — via `SEARCH('{Multiagent/Chat,agentId,mode}')`
-- **Alarm:** `mongodb-multiagent3-dev-agentcore-failures` fires when failure count > 5 / 5 min
+- **Alarm:** `<SHARED_RESOURCE_PREFIX>-dev-agentcore-failures` fires when failure count > 5 / 5 min
 - **What to watch:** Failures here usually mean the AgentCore runtime hit a cold-start or the Strands agent inside it hit a retry loop. Cross-reference with AgentCore vended logs in `/aws/vendedlogs/bedrock-agentcore/`.
 
 ---
 
 ## 2. MongoDB Dashboard
 
-**Name:** `mongodb-multiagent3-mongo-dev`
+**Name:** `<SHARED_RESOURCE_PREFIX>-mongo-dev`
 **Purpose:** MongoDB Atlas operation health visible from the application side (not Atlas native metrics).
 
 ### Widgets
@@ -99,13 +104,13 @@ Three custom dashboards are provisioned by Terraform (`modules/cloudwatch-fleet-
 
 #### Recent Mongo errors
 
-- Logs Insights query pre-saved as `mongodb-multiagent3/dev/top-errors` targeting `/<project>/<env>/api`
+- Logs Insights query pre-saved as `mongodb-multiagent3/dev/top-errors` targeting `/<SHARED_RESOURCE_PREFIX>/<env>/api`
 
 ---
 
 ## 3. Cost Dashboard
 
-**Name:** `mongodb-multiagent3-cost-dev`
+**Name:** `<SHARED_RESOURCE_PREFIX>-cost-dev`
 **Purpose:** Token consumption tracking and per-user attribution for FinOps reviews.
 
 ### Widgets
@@ -124,7 +129,7 @@ Three custom dashboards are provisioned by Terraform (`modules/cloudwatch-fleet-
 
 #### Top users by turn count
 
-- Logs Insights query scanning `/<project>/<env>/api` for `userId` per-turn events
+- Logs Insights query scanning `/<SHARED_RESOURCE_PREFIX>/<env>/api` for `userId` per-turn events
 
 ---
 

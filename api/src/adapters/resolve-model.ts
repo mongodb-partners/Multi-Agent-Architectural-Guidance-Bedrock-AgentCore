@@ -1,4 +1,6 @@
 import { BedrockModel, type Model } from "@strands-agents/sdk";
+import { ConfiguredRetryStrategy } from "@smithy/util-retry";
+import type { RetryErrorInfo, StandardRetryToken } from "@smithy/types";
 import type { AgentDetail } from "../lib/config-scan.ts";
 import { logger } from "../lib/logger.ts";
 import { currentTrace } from "../lib/trace-context.ts";
@@ -51,14 +53,101 @@ export function resolveModel(agentConfig: AgentDetail): Model {
     maxTokens: agentConfig.maxTokens,
     temperature: agentConfig.temperature,
   });
+  // Bedrock retry visibility (`model.retry` trace events): the Strands SDK
+  // 0.7 does NOT natively surface AWS SDK v3 retries through its hook
+  // surface (`AfterModelCallEvent.retry` is a *user-driven* application
+  // retry flag, not an SDK-level observer — see scripts/validate-strands-
+  // retries.ts). The actual Bedrock retries (`ThrottlingException`,
+  // `InternalServerException`, etc.) happen below Strands inside the AWS
+  // SDK v3 `BedrockRuntimeClient`. We wrap the client's `retryStrategy`
+  // with a `TracingRetryStrategy` that delegates to a standard strategy
+  // and emits one `model.retry` event per refresh — giving the Developer
+  // details panel a complete picture of "why was this turn slow" without
+  // having to grep CloudWatch.
+  const maxAttempts = envInt("BEDROCK_MAX_ATTEMPTS", 3);
+  const retryStrategy = new TracingRetryStrategy(maxAttempts, modelId);
   const model = new MetadataAwareBedrockModel({
     modelId,
     maxTokens: agentConfig.maxTokens,
     temperature: agentConfig.temperature,
     ...(region ? { region } : {}),
+    clientConfig: {
+      ...(region ? { region } : {}),
+      retryStrategy,
+    },
   }) as unknown as Model;
   cache.set(key, model);
   return model;
+}
+
+function envInt(name: string, fallback: number): number {
+  const v = process.env[name];
+  if (!v) return fallback;
+  const n = Number.parseInt(v, 10);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+
+/**
+ * AWS SDK v3 retry strategy wrapper that emits a `model.retry` trace event
+ * each time the underlying strategy decides to retry. Wraps `ConfiguredRetryStrategy`
+ * with exponential backoff (`attempt ** 2 * 100ms`) — same defaults the SDK
+ * uses internally, just observable from our trace pipeline.
+ *
+ * The trace event lives in `model.retry` (see `api/src/lib/trace-types.ts`)
+ * and is rendered in Developer details → Retries.
+ *
+ * Failure mode: if `currentTrace()` is `undefined` (turn started without a
+ * collector) the retry still happens; we just don't observe it. The strategy
+ * never throws — emitting the trace event is wrapped in try/catch.
+ */
+export class TracingRetryStrategy extends ConfiguredRetryStrategy {
+  constructor(
+    maxAttempts: number,
+    private readonly modelId: string,
+  ) {
+    // Exponential backoff: 100ms, 400ms, 900ms, 1600ms, 2500ms…
+    super(maxAttempts, (attempt: number) => attempt ** 2 * 100);
+  }
+
+  override async refreshRetryTokenForRetry(
+    tokenToRenew: StandardRetryToken,
+    errorInfo: RetryErrorInfo,
+  ): Promise<StandardRetryToken> {
+    const newToken = await super.refreshRetryTokenForRetry(tokenToRenew, errorInfo);
+    try {
+      const trace = currentTrace();
+      if (trace) {
+        // `retryCount` on a StandardRetryToken is post-increment (the
+        // refresh just bumped it). Surfacing it as `attempt` matches the
+        // convention "attempt 1 = first retry after the initial call".
+        const attempt = (newToken as unknown as { retryCount?: number }).retryCount ?? 1;
+        const errClass =
+          (errorInfo as unknown as { errorType?: string }).errorType ??
+          (errorInfo as unknown as { error?: { name?: string } }).error?.name ??
+          "RetryableError";
+        const errMessage =
+          (errorInfo as unknown as { error?: { message?: string } }).error?.message ??
+          "Retryable Bedrock error";
+        // retryDelay lives on the token after `super.refreshRetryTokenForRetry`.
+        const backoffMs =
+          (newToken as unknown as { getRetryDelay?: () => number }).getRetryDelay?.() ?? 0;
+        trace.event("model.retry", {
+          provider: "bedrock",
+          modelId: this.modelId,
+          attempt,
+          previousErrorClass: errClass,
+          previousErrorMessage: errMessage,
+          backoffMs,
+        });
+      }
+    } catch (err) {
+      logger.warn("[resolve-model] failed to emit model.retry event", {
+        modelId: this.modelId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+    return newToken;
+  }
 }
 
 /**

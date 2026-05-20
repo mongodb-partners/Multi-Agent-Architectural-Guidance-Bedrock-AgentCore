@@ -31,25 +31,30 @@ locals {
     Component   = "cloudwatch-fleet-dashboards"
   })
 
-  fleet_dashboard_name = "${var.project_name}-fleet-${var.environment}"
-  mongo_dashboard_name = "${var.project_name}-mongo-${var.environment}"
-  cost_dashboard_name  = "${var.project_name}-cost-${var.environment}"
+  # Dashboard / alarm / metric-filter / query names drop the project_name
+  # prefix because this module is now instantiated by envs/shared once per
+  # (account, region, environment) and consumed by multiple per-project
+  # envs/ec2 stacks. Names are stable per environment; the shared prefix is
+  # a single var so renaming the framework is one-line change.
+  fleet_dashboard_name = "${var.shared_resource_prefix}-fleet-${var.environment}"
+  mongo_dashboard_name = "${var.shared_resource_prefix}-mongo-${var.environment}"
+  cost_dashboard_name  = "${var.shared_resource_prefix}-cost-${var.environment}"
 
   # Audit-findings metric filter target. Prefer the dedicated audit group when
   # set, else fall back to the source group (legacy callers / smoke tests).
   audit_log_group = var.audit_findings_log_group_name != "" ? var.audit_findings_log_group_name : var.invocation_log_group_name
 
   template_vars = {
-    project_name              = var.project_name
-    environment               = var.environment
-    aws_region                = var.aws_region
-    api_log_group             = var.api_log_group_name
-    ui_log_group              = var.ui_log_group_name
-    invocation_log_group      = var.invocation_log_group_name
-    otel_log_group            = var.otel_log_group_name
-    p99_latency_threshold_ms  = var.p99_latency_threshold_ms
-    error_rate_threshold_pct  = var.error_rate_threshold_pct
-    throttle_burst_threshold  = var.throttle_burst_threshold
+    project_name             = var.project_name
+    environment              = var.environment
+    aws_region               = var.aws_region
+    api_log_group            = var.api_log_group_name
+    ui_log_group             = var.ui_log_group_name
+    invocation_log_group     = var.invocation_log_group_name
+    otel_log_group           = var.otel_log_group_name
+    p99_latency_threshold_ms = var.p99_latency_threshold_ms
+    error_rate_threshold_pct = var.error_rate_threshold_pct
+    throttle_burst_threshold = var.throttle_burst_threshold
   }
 }
 
@@ -67,7 +72,7 @@ data "aws_region" "current" {}
 # -----------------------------------------------------------------------------
 resource "aws_cloudwatch_log_metric_filter" "fleet_turns_total" {
   count          = var.api_log_group_name != "" ? 1 : 0
-  name           = "${var.project_name}-fleet-turns-total-${var.environment}"
+  name           = "${var.shared_resource_prefix}-fleet-turns-total-${var.environment}"
   log_group_name = var.api_log_group_name
   pattern        = "{ $.channel = \"metric\" && $.TurnsTotal = * }"
   metric_transformation {
@@ -81,7 +86,7 @@ resource "aws_cloudwatch_log_metric_filter" "fleet_turns_total" {
 
 resource "aws_cloudwatch_log_metric_filter" "fleet_turn_errors" {
   count          = var.api_log_group_name != "" ? 1 : 0
-  name           = "${var.project_name}-fleet-turn-errors-${var.environment}"
+  name           = "${var.shared_resource_prefix}-fleet-turn-errors-${var.environment}"
   log_group_name = var.api_log_group_name
   pattern        = "{ $.channel = \"metric\" && $.TurnErrors = * }"
   metric_transformation {
@@ -95,7 +100,7 @@ resource "aws_cloudwatch_log_metric_filter" "fleet_turn_errors" {
 
 resource "aws_cloudwatch_log_metric_filter" "fleet_turn_latency" {
   count          = var.api_log_group_name != "" ? 1 : 0
-  name           = "${var.project_name}-fleet-turn-latency-${var.environment}"
+  name           = "${var.shared_resource_prefix}-fleet-turn-latency-${var.environment}"
   log_group_name = var.api_log_group_name
   pattern        = "{ $.channel = \"metric\" && $.TurnLatencyMs = * }"
   metric_transformation {
@@ -109,7 +114,7 @@ resource "aws_cloudwatch_log_metric_filter" "fleet_turn_latency" {
 
 resource "aws_cloudwatch_log_metric_filter" "fleet_agentcore_errors" {
   count          = var.api_log_group_name != "" ? 1 : 0
-  name           = "${var.project_name}-fleet-agentcore-errors-${var.environment}"
+  name           = "${var.shared_resource_prefix}-fleet-agentcore-errors-${var.environment}"
   log_group_name = var.api_log_group_name
   pattern        = "{ $.channel = \"metric\" && $.AgentCoreInvokeErrors = * }"
   metric_transformation {
@@ -128,7 +133,7 @@ resource "aws_cloudwatch_log_metric_filter" "fleet_agentcore_errors" {
 # -----------------------------------------------------------------------------
 resource "aws_cloudwatch_log_metric_filter" "audit_findings" {
   count          = local.audit_log_group != "" ? 1 : 0
-  name           = "${var.project_name}-audit-findings-${var.environment}"
+  name           = "${var.shared_resource_prefix}-audit-findings-${var.environment}"
   log_group_name = local.audit_log_group
   # Data Protection findings are emitted as JSON records with
   # eventType=DataMaskingFinding. See `aws logs put-data-protection-policy`
@@ -169,7 +174,7 @@ resource "aws_cloudwatch_dashboard" "cost" {
 # one click instead of typing each query.
 # -----------------------------------------------------------------------------
 resource "aws_cloudwatch_query_definition" "top_errors" {
-  name = "${var.project_name}/${var.environment}/top-errors"
+  name = "${var.shared_resource_prefix}/${var.environment}/top-errors"
   log_group_names = compact([
     var.api_log_group_name,
     var.ui_log_group_name,
@@ -185,9 +190,9 @@ resource "aws_cloudwatch_query_definition" "top_errors" {
 }
 
 resource "aws_cloudwatch_query_definition" "slow_turns" {
-  name = "${var.project_name}/${var.environment}/slow-turns"
+  name            = "${var.shared_resource_prefix}/${var.environment}/slow-turns"
   log_group_names = compact([var.api_log_group_name])
-  query_string = <<-EOT
+  query_string    = <<-EOT
     fields @timestamp, agent_id, session_id, message_id, latency_ms, trace_id
     | filter ispresent(latency_ms) and latency_ms > 5000
     | sort latency_ms desc
@@ -196,10 +201,10 @@ resource "aws_cloudwatch_query_definition" "slow_turns" {
 }
 
 resource "aws_cloudwatch_query_definition" "per_user_cost" {
-  count = var.invocation_log_group_name != "" ? 1 : 0
-  name  = "${var.project_name}/${var.environment}/per-user-cost"
+  count           = var.invocation_log_group_name != "" ? 1 : 0
+  name            = "${var.shared_resource_prefix}/${var.environment}/per-user-cost"
   log_group_names = [var.invocation_log_group_name]
-  query_string = <<-EOT
+  query_string    = <<-EOT
     fields @timestamp, modelId, requestMetadata.userId as userId, requestMetadata.agentId as agentId, input.inputTokenCount as inTok, output.outputTokenCount as outTok
     | stats sum(inTok) as inputTokens, sum(outTok) as outputTokens by userId, agentId, modelId
     | sort inputTokens desc
@@ -208,9 +213,9 @@ resource "aws_cloudwatch_query_definition" "per_user_cost" {
 }
 
 resource "aws_cloudwatch_query_definition" "agentcore_failures" {
-  name = "${var.project_name}/${var.environment}/agentcore-failures"
+  name            = "${var.shared_resource_prefix}/${var.environment}/agentcore-failures"
   log_group_names = compact([var.api_log_group_name])
-  query_string = <<-EOT
+  query_string    = <<-EOT
     fields @timestamp, agent_id, runtime_arn, error_class, error_message, trace_id
     | filter msg like /InvokeAgentRuntime failed/
     | sort @timestamp desc
@@ -219,9 +224,9 @@ resource "aws_cloudwatch_query_definition" "agentcore_failures" {
 }
 
 resource "aws_cloudwatch_query_definition" "memory_writes" {
-  name = "${var.project_name}/${var.environment}/memory-writes"
+  name            = "${var.shared_resource_prefix}/${var.environment}/memory-writes"
   log_group_names = compact([var.api_log_group_name])
-  query_string = <<-EOT
+  query_string    = <<-EOT
     fields @timestamp, user_id, agent_id, facts_written, latency_ms, trace_id
     | filter msg like /writeLongTermMemory/
     | sort @timestamp desc
@@ -239,7 +244,7 @@ resource "aws_cloudwatch_query_definition" "memory_writes" {
 # 1. P99 turn latency — MAX across all agentId values so any single agent
 #    breaching the SLO fires the alarm.
 resource "aws_cloudwatch_metric_alarm" "p99_latency" {
-  alarm_name          = "${var.project_name}-${var.environment}-p99-turn-latency"
+  alarm_name          = "${var.shared_resource_prefix}-${var.environment}-p99-turn-latency"
   comparison_operator = "GreaterThanThreshold"
   evaluation_periods  = 3
   datapoints_to_alarm = 2
@@ -267,7 +272,7 @@ resource "aws_cloudwatch_metric_alarm" "p99_latency" {
 
 # 2. Error-rate threshold (errors per 100 turns) — aggregated across all agents.
 resource "aws_cloudwatch_metric_alarm" "error_rate" {
-  alarm_name          = "${var.project_name}-${var.environment}-error-rate"
+  alarm_name          = "${var.shared_resource_prefix}-${var.environment}-error-rate"
   comparison_operator = "GreaterThanThreshold"
   evaluation_periods  = 3
   datapoints_to_alarm = 2
@@ -312,7 +317,7 @@ resource "aws_cloudwatch_metric_alarm" "error_rate" {
 
 # 3. Model throttling spike
 resource "aws_cloudwatch_metric_alarm" "model_throttles" {
-  alarm_name          = "${var.project_name}-${var.environment}-bedrock-throttles"
+  alarm_name          = "${var.shared_resource_prefix}-${var.environment}-bedrock-throttles"
   comparison_operator = "GreaterThanThreshold"
   evaluation_periods  = 2
   datapoints_to_alarm = 1
@@ -338,7 +343,7 @@ resource "aws_cloudwatch_metric_alarm" "model_throttles" {
 
 # 4. AgentCore InvokeRuntime failures — aggregated across all agent+mode combos.
 resource "aws_cloudwatch_metric_alarm" "agentcore_failures" {
-  alarm_name          = "${var.project_name}-${var.environment}-agentcore-failures"
+  alarm_name          = "${var.shared_resource_prefix}-${var.environment}-agentcore-failures"
   comparison_operator = "GreaterThanThreshold"
   evaluation_periods  = 2
   datapoints_to_alarm = 1
@@ -366,7 +371,7 @@ resource "aws_cloudwatch_metric_alarm" "agentcore_failures" {
 
 # 5. Bedrock per-model invocation failures (uses native CW metric)
 resource "aws_cloudwatch_metric_alarm" "bedrock_invocation_errors" {
-  alarm_name          = "${var.project_name}-${var.environment}-bedrock-invoke-errors"
+  alarm_name          = "${var.shared_resource_prefix}-${var.environment}-bedrock-invoke-errors"
   comparison_operator = "GreaterThanThreshold"
   evaluation_periods  = 2
   datapoints_to_alarm = 1
@@ -393,7 +398,7 @@ resource "aws_cloudwatch_metric_alarm" "bedrock_invocation_errors" {
 # 6. PII Data Protection findings spike
 resource "aws_cloudwatch_metric_alarm" "audit_findings" {
   count               = var.invocation_log_group_name != "" ? 1 : 0
-  alarm_name          = "${var.project_name}-${var.environment}-audit-findings"
+  alarm_name          = "${var.shared_resource_prefix}-${var.environment}-audit-findings"
   comparison_operator = "GreaterThanThreshold"
   evaluation_periods  = 1
   datapoints_to_alarm = 1
@@ -421,7 +426,7 @@ resource "aws_cloudwatch_metric_alarm" "audit_findings" {
 
 # 7. SLO error-budget burn (fast-burn detector) — aggregated across all agents.
 resource "aws_cloudwatch_metric_alarm" "slo_burn" {
-  alarm_name          = "${var.project_name}-${var.environment}-slo-burn"
+  alarm_name          = "${var.shared_resource_prefix}-${var.environment}-slo-burn"
   comparison_operator = "GreaterThanThreshold"
   evaluation_periods  = 1
   datapoints_to_alarm = 1

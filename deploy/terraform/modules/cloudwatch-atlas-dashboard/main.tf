@@ -20,7 +20,7 @@ locals {
     Component   = "cloudwatch-atlas-dashboard"
   })
 
-  dashboard_name = "${var.project_name}-atlas-${var.environment}"
+  dashboard_name = "${var.shared_resource_prefix}-atlas-${var.environment}"
 }
 
 resource "aws_cloudwatch_dashboard" "atlas" {
@@ -39,7 +39,7 @@ resource "aws_cloudwatch_dashboard" "atlas" {
 # update a hardcoded ceiling when the cluster tier changes).
 # -----------------------------------------------------------------------------
 resource "aws_cloudwatch_metric_alarm" "connection_saturation" {
-  alarm_name          = "${var.project_name}-${var.environment}-atlas-connection-saturation"
+  alarm_name          = "${var.shared_resource_prefix}-${var.environment}-atlas-connection-saturation"
   comparison_operator = "GreaterThanThreshold"
   evaluation_periods  = 2
   datapoints_to_alarm = 2
@@ -82,7 +82,7 @@ resource "aws_cloudwatch_metric_alarm" "connection_saturation" {
 # per secondary. Alarm if the worst secondary exceeds the configured threshold.
 # -----------------------------------------------------------------------------
 resource "aws_cloudwatch_metric_alarm" "replication_lag" {
-  alarm_name          = "${var.project_name}-${var.environment}-atlas-replication-lag"
+  alarm_name          = "${var.shared_resource_prefix}-${var.environment}-atlas-replication-lag"
   comparison_operator = "GreaterThanThreshold"
   evaluation_periods  = 3
   datapoints_to_alarm = 2

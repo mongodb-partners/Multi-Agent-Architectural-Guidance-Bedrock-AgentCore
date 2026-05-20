@@ -128,8 +128,10 @@ log "Phase 2 — Loading credentials and Terraform outputs..."
 # shellcheck source=/dev/null
 source "$ENV_FILE"
 
-ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text 2>/dev/null) \
-  || err "AWS credentials invalid or expired. Re-authenticate and update .env"
+# shellcheck source=deploy/scripts/_aws-auth.sh
+source "$SCRIPT_DIR/scripts/_aws-auth.sh"
+validate_aws_auth || err "AWS auth validation failed (see above)"
+ACCOUNT_ID="$AWS_AUTH_ACCOUNT_ID"
 ok "AWS account: $ACCOUNT_ID"
 
 terraform -chdir="$TF_DIR" init -input=false -reconfigure -backend-config="$TF_DIR/backend.hcl" -no-color >/dev/null
@@ -146,6 +148,15 @@ COGNITO_JWKS="$(tf_raw cognito_jwks_uri)"
 BEDROCK_KB_ID="$(tf_raw knowledge_base_id)"
 ATLAS_MONGO_HOST="$(tf_raw atlas_mongo_host)"
 ATLAS_PRIVATELINK_ENDPOINT_ID="$(tf_raw atlas_privatelink_endpoint_id)"
+# Connectivity mode — read from terraform output (set by envs/ec2). Falls back
+# to env var, then 'privatelink' for pre-NETWORK_MODE deploys.
+NETWORK_MODE="$(tf_raw network_mode)"
+NETWORK_MODE="${NETWORK_MODE:-${NETWORK_MODE_ENV:-${NETWORK_MODE:-privatelink}}}"
+case "$NETWORK_MODE" in
+  privatelink|peering) ;;
+  *) err "Invalid network_mode='${NETWORK_MODE}' from terraform output" ;;
+esac
+ok "Network mode: ${NETWORK_MODE}"
 VOYAGE_ENDPOINT="$(tf_raw voyage_endpoint_name)"
 AGENTCORE_MEMORY_STORE_ID="$(tf_raw agentcore_memory_id)"
 AGENTCORE_GATEWAY_URL="$(tf_raw agentcore_gateway_url)"
@@ -170,14 +181,22 @@ VOYAGE_REQUEST_FORMAT="${VOYAGE_REQUEST_FORMAT:-multimodal}"
 [[ -n "$MONGODB_URI" ]] || err "MONGODB_URI unavailable (.env or terraform output atlas_connection_string)"
 [[ -n "$TF_VAR_atlas_project_id" ]] || err "Atlas project id missing (TF_VAR_mongodb_atlas_project_id / TF_VAR_atlas_project_id)"
 [[ -n "${MONGODB_ATLAS_PUBLIC_KEY:-}" && -n "${MONGODB_ATLAS_PRIVATE_KEY:-}" ]] \
-  || err "MongoDB Atlas API keys missing; required to compute the API PrivateLink URI"
+  || err "MongoDB Atlas API keys missing; required to compute the API private URI"
 case "$EMBEDDINGS_PROVIDER" in
   voyage|titan) ;;
   "") err "EMBEDDINGS_PROVIDER is not set. Set 'voyage' or 'titan' in .env." ;;
   *)  err "EMBEDDINGS_PROVIDER='$EMBEDDINGS_PROVIDER' is not recognised. Use 'voyage' or 'titan'." ;;
 esac
 
-if [[ -n "$ATLAS_PRIVATELINK_ENDPOINT_ID" ]]; then
+# ── Atlas private MONGODB_URI computation — mode-aware ───────────────────────
+# privatelink: Atlas awsPrivateLink direct multi-host URI with
+#   tlsAllowInvalidHostnames=true.
+# peering: cluster's connectionStrings.privateSrv (when Atlas Private DNS for
+#   Peering is on) else connectionStrings.private (multi-host non-SRV). NO
+#   tlsAllowInvalidHostnames — peering hostnames ARE in the cert SAN.
+if [[ "$NETWORK_MODE" == "privatelink" ]]; then
+  [[ -n "$ATLAS_PRIVATELINK_ENDPOINT_ID" ]] \
+    || err "Missing Atlas PrivateLink endpoint ID for deterministic API deploy (privatelink mode)"
   log "Computing Atlas awsPrivateLink direct URI for the EC2 API..."
   if API_PRIVATE_URI=$(ATLAS_PROJECT_ID="$TF_VAR_atlas_project_id" \
     CLUSTER_NAME="${PROJECT_NAME}-${ENVIRONMENT}" \
@@ -218,7 +237,53 @@ PY
     err "Could not compute Atlas awsPrivateLink URI for the API"
   fi
 else
-  err "Missing Atlas PrivateLink endpoint ID for deterministic API deploy"
+  # ── peering mode ───────────────────────────────────────────────────────────
+  log "Computing Atlas peering URI for the EC2 API..."
+  if API_PRIVATE_URI=$(ATLAS_PROJECT_ID="$TF_VAR_atlas_project_id" \
+    CLUSTER_NAME="${PROJECT_NAME}-${ENVIRONMENT}" \
+    BASE_MONGODB_URI="$MONGODB_URI" \
+    MONGODB_ATLAS_PUBLIC_KEY="${MONGODB_ATLAS_PUBLIC_KEY:-}" \
+    MONGODB_ATLAS_PRIVATE_KEY="${MONGODB_ATLAS_PRIVATE_KEY:-}" \
+    python3 - <<'PY'
+import json, os, subprocess, urllib.parse
+project = os.environ["ATLAS_PROJECT_ID"]
+cluster = os.environ["CLUSTER_NAME"]
+base_uri = os.environ["BASE_MONGODB_URI"]
+public_key = os.environ.get("MONGODB_ATLAS_PUBLIC_KEY", "")
+private_key = os.environ.get("MONGODB_ATLAS_PRIVATE_KEY", "")
+parsed = urllib.parse.urlsplit(base_uri)
+user = urllib.parse.quote(urllib.parse.unquote(parsed.username or ""))
+pwd = urllib.parse.quote(urllib.parse.unquote(parsed.password or ""))
+resp = subprocess.check_output([
+    "curl", "-s",
+    "--user", f"{public_key}:{private_key}",
+    "--digest",
+    "-H", "Accept: application/vnd.atlas.2023-01-01+json",
+    f"https://cloud.mongodb.com/api/atlas/v2/groups/{project}/clusters/{cluster}",
+], text=True)
+data = json.loads(resp)
+conn = (data.get("connectionStrings") or {})
+priv_srv = conn.get("privateSrv") or ""
+priv_multi = conn.get("private") or ""
+if priv_srv:
+    host = priv_srv.replace("mongodb+srv://", "", 1)
+    print(f"mongodb+srv://{user}:{pwd}@{host}/?retryWrites=true&w=majority")
+elif priv_multi:
+    no_scheme = priv_multi.replace("mongodb://", "", 1)
+    sep_char = "&" if "?" in no_scheme else "/?"
+    print(f"mongodb://{user}:{pwd}@{no_scheme}{sep_char}retryWrites=true&w=majority")
+else:
+    raise SystemExit("Atlas cluster has neither connectionStrings.privateSrv nor connectionStrings.private — peering not active yet?")
+PY
+  ); then
+    MONGODB_URI="$API_PRIVATE_URI"
+    if ! echo "$MONGODB_URI" | grep -q '\-pri\.mongodb\.net'; then
+      err "Computed peering URI does not contain '-pri.mongodb.net' — would route over the public SRV. Aborting to preserve privacy parity."
+    fi
+    ok "API MongoDB URI normalized to peering connection string"
+  else
+    err "Could not compute Atlas peering URI for the API. Verify the peering connection is ACTIVE."
+  fi
 fi
 ok "Terraform outputs loaded"
 
@@ -303,6 +368,11 @@ ORCHESTRATOR_MODE=runtime
 AGENT_CONFIG_REFRESH_TOKEN=${AGENT_CONFIG_REFRESH_TOKEN}
 
 MONGODB_URI=${MONGODB_URI}
+# Public SRV URI for off-VPC tooling (harness cleanup, ad-hoc \`mongosh\`,
+# memory-recall-diagnostic.py scenarios C/F which delete chat_messages rows
+# the API session-list cannot reach). The API container itself MUST keep
+# using MONGODB_URI (PrivateLink) for security + no public egress.
+MONGODB_URI_PUBLIC=${SEED_MONGODB_URI}
 MONGODB_DB=${ATLAS_DB_NAME}
 BEDROCK_KB_ID=${BEDROCK_KB_ID}
 AWS_REGION=${AWS_REGION}
@@ -334,6 +404,18 @@ SHORT_TERM_MEMORY_BACKEND=agentcore
 PERSIST_CHAT_SESSIONS=1
 MEMORY_TTL_DAYS=30
 MEMORY_EXTRACTION_MODEL_ID=us.anthropic.claude-haiku-4-5-20251001-v1:0
+
+# LTM / trace value gating — sourced from .env so flips are deploy-tracked.
+#   MEMORY_TRACE_VALUES=1 → facts[], queryText, factCandidates[].text,
+#                            factsExtracted[] are emitted raw in trace events.
+#                            Default 0 = literal "<redacted>" (safe).
+#   TRACE_PROMPT_BODY=1   → prompt.assembled.body (full rendered system prompt
+#                            including ## Relevant prior context) is attached.
+#   TRACE_REDACT=1        → blanket redactDeep pass over every payload.
+# Flip via .env then re-run ./deploy/deploy-api.sh --skip-docker --skip-smoke.
+MEMORY_TRACE_VALUES=${MEMORY_TRACE_VALUES:-0}
+TRACE_PROMPT_BODY=${TRACE_PROMPT_BODY:-0}
+TRACE_REDACT=${TRACE_REDACT:-0}
 
 CLOUDWATCH_LOG_GROUP=${CW_API_LOG_GROUP}
 CLOUDWATCH_UI_LOG_GROUP=${CW_UI_LOG_GROUP}

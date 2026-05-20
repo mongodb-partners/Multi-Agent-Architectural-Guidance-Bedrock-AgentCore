@@ -25,7 +25,9 @@ import type {
   Trace,
   TraceEvent,
   TraceEventType,
+  TraceSpanNode,
   ModelUsagePayload,
+  DevEnvironmentPayload,
 } from "./trace-types.ts";
 
 // ---------------------------------------------------------------------------
@@ -107,23 +109,117 @@ function approxBytes(ev: TraceEvent): number {
 // PII redaction keys (lower-case match).
 const PII_KEYS = new Set(["email", "phone", "address", "name", "dob", "ssn"]);
 
-function redactDeep(value: unknown, depth = 0): unknown {
+/**
+ * Per-event-type allow-list of field names that look like PII (`name`,
+ * `address`, …) but are actually structural identifiers. Without this,
+ * `skill.activated.name` (the skill id, e.g. `"order-management"`) gets
+ * stomped to `"[redacted]"`, and the `toJSON()` rollup that folds
+ * `read_skill_resource` calls back onto the matching `skill.activated`
+ * event silently breaks because it can no longer look up the bucket.
+ *
+ * The right shape long-term is event-type-typed redaction; this table is
+ * the narrowest fix that keeps PII redaction default-on while not
+ * destroying schema-level identifiers.
+ */
+const PII_EXEMPT_FIELDS: Partial<Record<TraceEventType, ReadonlySet<string>>> = {
+  "skill.activated": new Set(["name"]),
+};
+
+// ---------------------------------------------------------------------------
+// Tiered per-event-type truncation caps.
+//
+// Debug-critical fields (full prompt body, model.request.userMessage, raw
+// AgentCore I/O, etc.) get a generous 64 KB cap so a developer can actually
+// debug the turn from the Trace Viewer's Developer details panel. Everything
+// else stays at the historical 512-char cap. PII redaction (`PII_KEYS`) runs
+// regardless and is orthogonal to length capping.
+//
+// Reviewer note: 64 KB per field is well under the per-event byte cap
+// (`TRACE_MAX_EVENT_BYTES = 16_384`) — the per-event cap kicks in second,
+// after these per-field caps, and now reports a `dev.byte_cap_hit` event
+// instead of silently dropping. The pre-merge checklist measures real-world
+// trace doc size and the cap is lowered to 16 KB if p50 > 1 MB.
+// ---------------------------------------------------------------------------
+
+const TRUNCATION_CAP_DEFAULT = 512;
+const TRUNCATION_CAP_DEBUG = 65_536;
+
+/**
+ * Field-name allow-list per event type for the 64 KB debug cap. Fields not
+ * listed (and fields on other event types) fall back to `TRUNCATION_CAP_DEFAULT`.
+ * Top-level field names only — nested objects/arrays inherit the larger cap
+ * when traversed through a debug field.
+ */
+const DEBUG_CAP_FIELDS: Partial<Record<TraceEventType, ReadonlySet<string>>> = {
+  "prompt.assembled":         new Set(["body"]),
+  "model.request":            new Set(["userMessage", "messagesSeed", "priorTurnsPreview"]),
+  "model.text_delta_batch":   new Set(["text"]),
+  "model.thinking_block":     new Set(["text"]),
+  "tool.call":                new Set(["input", "result"]),
+  "tool.http":                new Set(["body", "responseSnippet"]),
+  "tool.mcp":                 new Set(["args", "result"]),
+  "agentcore.invoke":         new Set(["payload", "responseBody"]),
+  "skill.activated":          new Set(["bodyPreview"]),
+};
+
+function capString(s: string, cap: number): string {
+  if (s.length <= cap) return s;
+  return s.slice(0, cap) + "…[truncated]";
+}
+
+/**
+ * Recursive redactor with per-field cap awareness. Once we descend into a
+ * field that's been flagged as `debug` (via `DEBUG_CAP_FIELDS`), the larger
+ * cap follows through nested objects/arrays so the entire `messagesSeed`
+ * array (or `responseBody` object tree) gets the debug cap, not just the
+ * top-level string.
+ */
+function redactValue(value: unknown, cap: number, depth = 0): unknown {
   if (depth > 6) return value;
   if (value == null) return value;
-  if (typeof value === "string") {
-    return value.length > 512 ? value.slice(0, 512) + "…[truncated]" : value;
-  }
-  if (Array.isArray(value)) return value.map((v) => redactDeep(v, depth + 1));
+  if (typeof value === "string") return capString(value, cap);
+  if (Array.isArray(value)) return value.map((v) => redactValue(v, cap, depth + 1));
   if (typeof value === "object") {
     const out: Record<string, unknown> = {};
     for (const [k, v] of Object.entries(value)) {
       if (PII_KEYS.has(k.toLowerCase())) out[k] = "[redacted]";
-      else out[k] = redactDeep(v, depth + 1);
+      else out[k] = redactValue(v, cap, depth + 1);
     }
     return out;
   }
   return value;
 }
+
+/**
+ * Apply PII redaction + tiered truncation caps to a payload, using the
+ * event type to look up the per-field cap allow-list.
+ */
+function redactPayload(type: TraceEventType, payload: unknown): unknown {
+  if (payload == null || typeof payload !== "object" || Array.isArray(payload)) {
+    return redactValue(payload, TRUNCATION_CAP_DEFAULT);
+  }
+  const debugFields = DEBUG_CAP_FIELDS[type];
+  const piiExempt = PII_EXEMPT_FIELDS[type];
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(payload as Record<string, unknown>)) {
+    if (PII_KEYS.has(k.toLowerCase()) && !piiExempt?.has(k)) {
+      out[k] = "[redacted]";
+      continue;
+    }
+    const cap = debugFields?.has(k) ? TRUNCATION_CAP_DEBUG : TRUNCATION_CAP_DEFAULT;
+    out[k] = redactValue(v, cap);
+  }
+  return out;
+}
+
+/**
+ * Legacy export. Same behavior as `redactValue(value, TRUNCATION_CAP_DEFAULT)`
+ * but kept for any out-of-tree caller that imports `redactDeep` directly.
+ */
+function redactDeep(value: unknown, depth = 0): unknown {
+  return redactValue(value, TRUNCATION_CAP_DEFAULT, depth);
+}
+void redactDeep;
 
 // ---------------------------------------------------------------------------
 // Collector
@@ -174,6 +270,10 @@ export class TraceCollector {
   private degraded = false;
   private eventsDropped = 0;
   private nestedEventsDropped = 0;
+  /** Count-limit `dev.byte_cap_hit` emission per turn to avoid runaway loops
+   *  if a misbehaving event source keeps tripping the cap. */
+  private byteCapHitEmissions = 0;
+  private static readonly MAX_BYTE_CAP_HIT_EMISSIONS = 50;
 
   // Redaction
   readonly redact: boolean;
@@ -181,6 +281,17 @@ export class TraceCollector {
   // Misc instrumentation
   private pendingAssistantText = "";
   private readonly pendingTextCap: number;
+  /** Per-skill buffer of `read_skill_resource` tool reads observed during the
+   *  turn. Folded into matching `skill.activated.resourceReads` arrays by
+   *  `toJSON()` at finalize time so the Skills dev sub-panel can render a
+   *  per-skill roll-up without forcing the dev to grep flat `tool.call`
+   *  events. */
+  private skillResourceReads = new Map<string, Array<{
+    resourcePath: string;
+    bytes: number;
+    toolUseId?: string;
+    latencyMs?: number;
+  }>>();
   /** Per-turn counters consumed by `summary()`. */
   private toolCallCount = 0;
   private mongoQueryCount = 0;
@@ -492,6 +603,29 @@ export class TraceCollector {
     this.bytesOut += Math.max(0, n);
   }
 
+  /**
+   * Record a `read_skill_resource` invocation against the named skill so
+   * `toJSON()` can fold it into the matching `skill.activated.resourceReads`
+   * roll-up at finalize time. The corresponding flat `tool.call` event keeps
+   * streaming live — this is purely metadata for the Skills dev sub-panel.
+   */
+  recordSkillResourceRead(read: {
+    skillName: string;
+    resourcePath: string;
+    bytes: number;
+    toolUseId?: string;
+    latencyMs?: number;
+  }): void {
+    const bucket = this.skillResourceReads.get(read.skillName) ?? [];
+    bucket.push({
+      resourcePath: read.resourcePath,
+      bytes: read.bytes,
+      toolUseId: read.toolUseId,
+      latencyMs: read.latencyMs,
+    });
+    this.skillResourceReads.set(read.skillName, bucket);
+  }
+
   // -------- Emit pipeline --------
 
   private emit(raw: TraceEvent): void {
@@ -499,9 +633,12 @@ export class TraceCollector {
     const size = approxBytes(ev);
 
     // Per-event cap: if a single event exceeds the per-event byte cap, strip
-    // large fields (payload body) before deciding whether to drop.
+    // large fields (payload body) before deciding whether to drop. Surface
+    // the trim as a `dev.byte_cap_hit` event so the Developer details panel
+    // can show which type was capped, instead of silently swallowing it.
     if (size > this.maxEventBytes) {
       this.shrinkPayload(ev);
+      this.emitByteCapHit(ev.type, size, "per_event");
     }
     const size2 = approxBytes(ev);
 
@@ -509,6 +646,7 @@ export class TraceCollector {
     if (!PROTECTED_TYPES.has(ev.type) && this.totalBytes + size2 > this.maxTurnBytes) {
       this.degraded = true;
       this.eventsDropped += 1;
+      this.emitByteCapHit(ev.type, size2, "per_turn");
       return;
     }
 
@@ -533,9 +671,173 @@ export class TraceCollector {
     }
   }
 
+  /**
+   * Apply tiered per-event-type truncation caps. PII keys are always
+   * redacted (independent of `TRACE_REDACT`); truncation caps run on every
+   * event so debug payloads never silently exceed the per-event byte cap.
+   * When `TRACE_REDACT=1`, the underlying value-level pass still strips PII
+   * field by field. The `this.redact` flag is preserved for back-compat but
+   * the tiered cap path now runs unconditionally — pre-PR1 behavior of
+   * "no caps at all" was the silent-bloat bug we're fixing.
+   */
   private applyRedaction(ev: TraceEvent): TraceEvent {
-    if (!this.redact) return ev;
-    return { ...ev, payload: redactDeep(ev.payload) as never };
+    return { ...ev, payload: redactPayload(ev.type, ev.payload) as never };
+  }
+
+  /**
+   * Push a `dev.byte_cap_hit` event into the trace whenever the byte-cap
+   * path trims or drops a payload. Count-limited to 50 emissions per turn
+   * so a misbehaving event source can't spam the trace. The emission goes
+   * through `events.push` directly (not `emit()`) to avoid recursion if
+   * the synthetic event itself somehow ever exceeded a cap.
+   */
+  private emitByteCapHit(
+    droppedType: TraceEventType,
+    bytes: number,
+    reason: "per_event" | "per_turn",
+  ): void {
+    if (droppedType === "dev.byte_cap_hit") return;
+    if (this.byteCapHitEmissions >= TraceCollector.MAX_BYTE_CAP_HIT_EMISSIONS) return;
+    this.byteCapHitEmissions += 1;
+    const synthetic: TraceEvent = {
+      id: uuid(),
+      parentId: this.currentSpanId(),
+      type: "dev.byte_cap_hit",
+      ts: nowMs(),
+      agentId: this.agentId,
+      payload: { droppedType, bytes, reason } as never,
+    } as TraceEvent;
+    this.events.push(synthetic);
+    this.totalBytes += approxBytes(synthetic);
+    for (const l of this.listeners) {
+      try {
+        l(synthetic);
+      } catch {
+        // listeners must not destabilize the collector
+      }
+    }
+  }
+
+  /**
+   * Emit a one-shot `dev.environment` event capturing the runtime knobs in
+   * play for this turn. Cheap, fixed-size; surfaces "why is this turn
+   * behaving like a mock" in one shot under Developer details → Environment.
+   * Called once from `routes/chat.ts` right after `start()`.
+   */
+  emitEnvironment(env: NodeJS.ProcessEnv = process.env): string {
+    const chatMode = env.CHAT_MODE?.trim() || "live";
+    const devMockBackends = envBool("DEV_MOCK_BACKENDS", false, env);
+    const mongoConfigured = !!env.MONGODB_URI?.trim();
+    const voyageConfigured = !!env.VOYAGE_API_KEY?.trim();
+    const flags: Record<string, "0" | "1"> = {
+      TRACE_REDACT: envBool("TRACE_REDACT", false, env) ? "1" : "0",
+      TRACE_PROMPT_BODY: envBool("TRACE_PROMPT_BODY", false, env) ? "1" : "0",
+      MEMORY_TRACE_VALUES: envBool("MEMORY_TRACE_VALUES", true, env) ? "1" : "0",
+      METRICS_EMITTER_ENABLED: envBool("METRICS_EMITTER_ENABLED", true, env) ? "1" : "0",
+      PERSIST_CHAT_SESSIONS: envBool("PERSIST_CHAT_SESSIONS", true, env) ? "1" : "0",
+    };
+    const payload: DevEnvironmentPayload = {
+      runtime: typeof Bun !== "undefined"
+        ? `bun ${Bun.version}`
+        : `node ${process.versions.node}`,
+      modelBackend: devMockBackends ? "mock" : "bedrock",
+      chatMode,
+      devMockBackends,
+      mongoUri: mongoConfigured ? "configured" : "missing",
+      voyageConfigured,
+      bedrockRegion: env.AWS_REGION || env.BEDROCK_REGION,
+      flags,
+    };
+    return this.event("dev.environment", payload as unknown as Record<string, unknown>);
+  }
+
+  /**
+   * Build the precomputed span tree from `events` using `parentId` chains.
+   * Roots are events with `parentId === undefined` (or whose `parentId`
+   * refers to an event not in the list — orphans get reparented to root so
+   * the tree is always complete).
+   *
+   * Span events appear twice in the events list (start + end pair sharing
+   * the same span id via `end()`'s `parentId: id` trick). We collapse them
+   * into one node, preferring the start event for `ts`/`agentId` and the
+   * end event for `durationMs`.
+   */
+  buildSpanTree(): TraceSpanNode[] {
+    type Acc = TraceSpanNode & { _seen: boolean };
+    const nodes = new Map<string, Acc>();
+    for (const ev of this.events) {
+      // Start half of a span (ours own `start()` always sets `durationMs`
+      // on the end half). Track it.
+      let node = nodes.get(ev.id);
+      if (!node) {
+        node = {
+          id: ev.id,
+          type: ev.type,
+          ts: ev.ts,
+          durationMs: ev.durationMs,
+          agentId: ev.agentId,
+          children: [],
+          _seen: false,
+        };
+        nodes.set(ev.id, node);
+      } else {
+        // Duplicate id is a synthetic end-event (id === uuid() but parentId
+        // === spanId of start). We don't track end events as nodes; their
+        // info gets merged below.
+      }
+      // End event: `parentId` of an end event is the span start's id.
+      // (Set in `end()` via `parentId: id`.) Merge `durationMs` back.
+      if (ev.durationMs !== undefined && ev.parentId && nodes.has(ev.parentId)) {
+        const parentNode = nodes.get(ev.parentId)!;
+        if (parentNode.type === ev.type) {
+          parentNode.durationMs = ev.durationMs;
+        }
+      }
+    }
+    const rootNodes: TraceSpanNode[] = [];
+    const seenIds = new Set<string>();
+    for (const ev of this.events) {
+      const node = nodes.get(ev.id);
+      if (!node || seenIds.has(ev.id)) continue;
+      seenIds.add(ev.id);
+      const parentNode = ev.parentId ? nodes.get(ev.parentId) : undefined;
+      // If parentId points at a real span node, nest under it. Otherwise
+      // (orphan / one-off event / root span) put it at the top level.
+      if (parentNode && parentNode.id !== node.id) {
+        parentNode.children.push(node);
+      } else {
+        rootNodes.push(node);
+      }
+    }
+    // Strip the internal `_seen` flag from the returned tree.
+    const strip = (n: Acc): TraceSpanNode => ({
+      id: n.id,
+      type: n.type,
+      ts: n.ts,
+      durationMs: n.durationMs,
+      agentId: n.agentId,
+      children: n.children.map((c) => strip(c as Acc)),
+    });
+    return rootNodes.map((n) => strip(n as Acc));
+  }
+
+  /**
+   * Capture the active OTel span's trace + root span IDs. Called at
+   * finalize time from `toJSON()` / `routes/chat.ts` so the Trace Viewer
+   * can deep-link to CloudWatch ServiceLens / X-Ray. Wrapped in try/catch
+   * because OTel may be uninitialized (DEV_MOCK_BACKENDS=1 without
+   * OTEL_EXPORTER_OTLP_ENDPOINT) — returns `undefined` cleanly.
+   */
+  captureOtelIds(): { traceId: string; rootSpanId: string } | undefined {
+    try {
+      const span = otelTrace.getActiveSpan();
+      if (!span) return undefined;
+      const ctx = span.spanContext();
+      if (!ctx?.traceId || !ctx?.spanId) return undefined;
+      return { traceId: ctx.traceId, rootSpanId: ctx.spanId };
+    } catch {
+      return undefined;
+    }
   }
 
   /**
@@ -777,18 +1079,65 @@ export class TraceCollector {
     return this.events.length;
   }
 
+  /**
+   * Top-level metadata callers want to overwrite on the finalized trace
+   * (release, correlation, otel). Stored here so `toJSON()` can fold them
+   * in without forcing every call site to mutate the returned object.
+   */
+  private releaseMeta?: Trace["release"];
+  private correlationMeta?: Trace["correlation"];
+
+  setRelease(meta: Trace["release"]): void {
+    this.releaseMeta = meta;
+  }
+
+  setCorrelation(meta: Trace["correlation"]): void {
+    this.correlationMeta = meta;
+  }
+
   toJSON(): Trace {
+    const otel = this.captureOtelIds();
+    const spanTree = this.buildSpanTree();
+    // Fold per-skill `read_skill_resource` rollups into each matching
+    // `skill.activated` event payload. We mutate a shallow clone of each
+    // event so the live `events` array (still referenced by listeners) stays
+    // unchanged.
+    const events = this.events.map((ev) => {
+      if (ev.type !== "skill.activated") return ev;
+      const payload = ev.payload as { name?: string; resourceReads?: unknown[] };
+      const reads = payload.name ? this.skillResourceReads.get(payload.name) : undefined;
+      if (!reads || reads.length === 0) return ev;
+      return {
+        ...ev,
+        payload: { ...payload, resourceReads: reads } as never,
+      };
+    });
     return {
       traceId: this.traceId,
       sessionId: this.sessionId,
       messageId: this.messageId,
       userId: this.userId,
       agentId: this.agentId,
-      events: this.events.slice(),
+      events,
       summary: this.summary(),
       createdAt: new Date(this.startTs).toISOString(),
       truncated: this.degraded || this.eventsDropped > 0 || undefined,
       eventsDropped: this.eventsDropped || undefined,
+      release: this.releaseMeta,
+      correlation: this.correlationMeta,
+      otel,
+      spanTree: spanTree.length ? spanTree : undefined,
     };
+  }
+
+  /** Test helper: snapshot the per-skill resource-read buffer without
+   *  forcing a full `toJSON()` (which fires OTel capture + span-tree build). */
+  getSkillResourceReadsForTests(): Map<string, Array<{
+    resourcePath: string;
+    bytes: number;
+    toolUseId?: string;
+    latencyMs?: number;
+  }>> {
+    return new Map(this.skillResourceReads);
   }
 }

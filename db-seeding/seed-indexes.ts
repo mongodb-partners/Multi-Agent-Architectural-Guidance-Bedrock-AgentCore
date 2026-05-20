@@ -158,6 +158,21 @@ function isExistingSearchIndexMessage(msg: string): boolean {
   return msg.includes("already exists") || msg.includes("Duplicate") || msg.includes("already defined");
 }
 
+async function updateExistingSearchIndex(
+  collection: string,
+  name: string,
+  definition: { definition: unknown },
+): Promise<void> {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await (db.collection(collection) as any).updateSearchIndex(name, definition.definition);
+    console.log(`  ↺  search index '${name}' on ${collection} — update initiated`);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.warn(`  ⚠️  search index '${name}' on ${collection} exists but update failed: ${msg}`);
+  }
+}
+
 const vectorIndexes: { collection: string; name: string }[] = [
   { collection: "products", name: "products-vector-index" },
   { collection: "troubleshooting_docs", name: "troubleshooting-vector-index" },
@@ -272,7 +287,7 @@ const lexicalIndexes: LexicalIndexSpec[] = [
     collection: "products",
     name: "products-text-index",
     fields: [
-      { type: "string", path: "name" },
+      { type: "string", path: "title" },
       { type: "string", path: "description" },
       { type: "token", path: "sku" },
       { type: "token", path: "category" },
@@ -336,7 +351,11 @@ for (const spec of lexicalIndexes) {
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     if (isExistingSearchIndexMessage(msg)) {
-      console.log(`  ✅  text index '${spec.name}' on ${spec.collection} — already exists`);
+      if (spec.collection === "products" && spec.name === "products-text-index") {
+        await updateExistingSearchIndex(spec.collection, spec.name, lexicalIndexDef(spec));
+      } else {
+        console.log(`  ✅  text index '${spec.name}' on ${spec.collection} — already exists`);
+      }
       lexicalOk++;
       expectedAtlasSearchIndexes.push({ collection: spec.collection, name: spec.name });
     } else if (msg.includes("not supported") || msg.includes("AtlasOnly") || msg.includes("MongoServerError")) {

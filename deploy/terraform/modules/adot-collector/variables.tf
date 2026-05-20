@@ -20,14 +20,8 @@ variable "shared_bucket_name" {
 
 variable "otel_log_group_name" {
   type        = string
-  description = "Default CW Logs group for OTLP-shipped application logs (distinct from /api which receives file-tailed logs via amazon-cloudwatch-agent)."
+  description = "Default CW Logs group for OTLP-shipped application logs (distinct from /api which receives file-tailed logs via amazon-cloudwatch-agent). Created + owned by the shared stack (envs/shared) — this module only consumes the name and looks up its ARN."
   default     = ""
-}
-
-variable "otel_retention_days" {
-  type        = number
-  description = "Retention for the OTLP log group."
-  default     = 14
 }
 
 variable "enable_atlas_metrics" {

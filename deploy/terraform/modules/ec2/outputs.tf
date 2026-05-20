@@ -1,6 +1,6 @@
 output "public_ip" {
   value       = aws_eip.app.public_ip
-  description = "Elastic IP address — stable public IP for the POC instance"
+  description = "Elastic IP address — stable public IP for the application EC2 instance"
 }
 
 output "instance_id" {

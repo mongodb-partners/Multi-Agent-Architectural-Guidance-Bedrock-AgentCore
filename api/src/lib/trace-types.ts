@@ -39,6 +39,7 @@ export type TraceEventType =
   | "model.thinking_block"
   | "model.usage"
   | "model.stop"
+  | "model.retry"
   | "skill.activated"
   | "tool.call"
   | "tool.http"
@@ -59,7 +60,10 @@ export type TraceEventType =
   | "agentcore.nested_trace"
   | "agentcore.observability_link"
   | "agentcore.gateway"
+  | "agentcore.retry"
   | "latency.checkpoint"
+  | "dev.environment"
+  | "dev.byte_cap_hit"
   | "error";
 
 // ---------------------------------------------------------------------------
@@ -73,6 +77,12 @@ export type ChatTurnStartPayload = {
   userId?: string;
   requestId?: string;
   startTs: number;
+  /**
+   * Allow-listed inbound headers for the dev panel's "copy curl to reproduce"
+   * block. Auth-bearing headers are redacted to `***`. Allow list:
+   * `x-request-id`, `user-agent`, `x-forwarded-for`, `accept`, `content-length`.
+   */
+  requestHeadersPreview?: Record<string, string>;
 };
 
 export type ChatTurnSummary = {
@@ -147,6 +157,17 @@ export type MemoryReadPayload = {
   };
   retrievalErrorClass?: string;
   retrievalErrorMessage?: string;
+  // ---- Live env-knob snapshot (debug-grade depth in Developer details) ------
+  /** MMR diversity weight (0 = pure diversity, 1 = pure relevance). */
+  mmrLambda?: number;
+  /** Exponential recency decay half-life in days. `0` disables. */
+  recencyHalflifeDays?: number;
+  /** Multiplier on `agent_memory_facts` RRF score. */
+  weightFacts?: number;
+  /** Multiplier on `chat_messages` RRF score. */
+  weightChatMessages?: number;
+  /** `$vectorSearch.numCandidates` width. */
+  numCandidates?: number;
 };
 
 export type MemoryLongTermWritePayload = {
@@ -227,7 +248,11 @@ export type PromptAssembledPayload = {
   memoryContextBytes: number;
   activatedSkills: Array<{ name: string; bytes: number; injectedVia: "system_prompt" | "tool_result" }>;
   totalBytes: number;
-  body?: string; // full prompt; dropped in degraded mode
+  body?: string; // full prompt; capped at 64 KB by truncation table, never dropped silently
+  /** Length of the original body in bytes (pre-truncation). Always populated. */
+  bodyBytes?: number;
+  /** SHA-256 (first 16 hex chars) of the original body — diff-friendly chip. */
+  bodyHash?: string;
 };
 
 export type ModelRequestPayload = {
@@ -237,6 +262,13 @@ export type ModelRequestPayload = {
   systemPromptBytes: number;
   priorTurnsCount: number;
   userMessage: string;
+  /** Lightweight preview of the prior conversation turns replayed into the
+   *  Strands Agent (`messages: seed`). Max 6 turns, each preview ≤ 200 chars. */
+  priorTurnsPreview?: Array<{ role: string; bytes: number; preview: string }>;
+  /** Source-of-truth replay: the actual `messages: seed` array passed into the
+   *  Strands `Agent` constructor. Whole array capped at 32 KB; per-item
+   *  `contentPreview` capped at 4 KB via the per-event-type truncation table. */
+  messagesSeed?: Array<{ role: string; contentBytes: number; contentPreview: string }>;
 };
 
 export type ModelUsagePayload = {
@@ -258,6 +290,9 @@ export type ModelTextDeltaBatchPayload = {
   text: string;
   bytes: number;
   windowMs: number;
+  /** Running total of streamed assistant bytes since `model.request` start.
+   *  Powers the Performance panel's streaming-throughput line chart. */
+  cumulativeBytes?: number;
 };
 
 export type ModelThinkingBlockPayload = {
@@ -271,6 +306,22 @@ export type SkillActivatedPayload = {
   injectedVia: "system_prompt" | "tool_result";
   bytes: number;
   allowed: boolean;
+  /** Preview of the skill body that got injected (4 KB cap via truncation
+   *  table). Lets the dev panel show *which* skill body was injected without
+   *  forcing them to diff `prompt.assembled.body` by hand. */
+  bodyPreview?: string;
+  /**
+   * Per-skill roll-up of `read_skill_resource` tool calls observed for this
+   * skill activation. Populated by `skill-loader.ts` / `base-tools.ts` and
+   * folded in at finalize time. The flat `tool.call` events still stream
+   * live; this array is metadata for the Skills sub-panel.
+   */
+  resourceReads?: Array<{
+    resourcePath: string;
+    bytes: number;
+    toolUseId?: string;
+    latencyMs?: number;
+  }>;
 };
 
 export type ToolCallPayload = {
@@ -375,6 +426,12 @@ export type MongoQueryPayload = {
   limit?: number;
   skip?: number;
   pipeline?: unknown;
+  /**
+   * Tenant-leak audit. Required for queries on user-scoped collections
+   * (`agent_memory_facts`, `chat_messages`, `chat_sessions`, `traces`); the
+   * dev panel surfaces `missing_user_filter` as a red chip. Optional for
+   * other collections (products catalog, troubleshooting docs, etc.).
+   */
   scoping?: "ok" | "missing_user_filter";
 };
 
@@ -402,6 +459,9 @@ export type MongoResultPayload = {
   sampleDocs?: unknown[];
   uncovered?: string[];
   perStageReturned?: number[];
+  /** Mirrors `mongo.plan` fields when they're available alongside the result. */
+  documentsExamined?: number;
+  keysExamined?: number;
 };
 
 export type MongoDiagnosticPayload = {
@@ -435,9 +495,23 @@ export type MongoVectorSearchPayload = {
   recallWithoutFilter?: number;
   /** True when the wrapper routed through `mongodb_hybrid_search` (vector + lexical RRF). */
   hybrid?: boolean;
+  /**
+   * Atlas Vector Search / Atlas Search index name actually used by the
+   * `$vectorSearch.index` or `$search.index` operator. Source-of-truth
+   * defaults live in `db-seeding/seed-indexes.ts`; surfacing the value the
+   * runtime sent helps catch typo drift between code and what Atlas created.
+   */
+  indexName?: string;
+  /** Time spent embedding the query text (excluded from `searchMs`). */
+  embedQueryMs?: number;
+  /** Time spent inside `$vectorSearch` / `$search` (excludes embedding). */
+  searchMs?: number;
   documentPreviews?: Array<{
     rank: number;
     collection?: string;
+    /** Native MongoDB document id, when the result document carried `_id`. */
+    _id?: string;
+    /** Stable display id; falls back to domain ids such as `docId`, `messageId`, or `sku`. */
     id?: string;
     score?: number;
     title?: string;
@@ -472,6 +546,10 @@ export type AgentcoreInvokePayload = {
   targetAgentId?: string;
   payload?: unknown;
   responseBody?: unknown;
+  /** Auth-scrubbed allow-list of outbound request headers. */
+  requestHeadersPreview?: Record<string, string>;
+  /** Auth-scrubbed allow-list of response headers. */
+  responseHeadersPreview?: Record<string, string>;
 };
 
 export type AgentcoreClassificationPayload = {
@@ -518,6 +596,51 @@ export type LatencyCheckpointPayload = {
   toolName?: string;
 };
 
+// Retry events --------------------------------------------------------------
+
+export type ModelRetryPayload = {
+  /** "bedrock" today; reserved for other providers later. */
+  provider: "bedrock" | string;
+  modelId: string;
+  /** 1-indexed attempt number (1 = first retry after the initial call). */
+  attempt: number;
+  previousErrorClass: string;
+  previousErrorMessage: string;
+  /** Delay slept before the retry, ms. */
+  backoffMs: number;
+};
+
+export type AgentcoreRetryPayload = {
+  arn: string;
+  targetAgentId?: string;
+  mode: string;
+  attempt: number;
+  previousErrorClass: string;
+  previousErrorMessage: string;
+  backoffMs: number;
+  httpStatus?: number;
+};
+
+// Dev events ----------------------------------------------------------------
+
+export type DevEnvironmentPayload = {
+  runtime: string;
+  modelBackend: string;
+  chatMode: string;
+  devMockBackends: boolean;
+  mongoUri: "configured" | "missing";
+  voyageConfigured: boolean;
+  bedrockRegion?: string;
+  /** Other on/off flags surfaced for the Environment sub-panel. */
+  flags: Record<string, "0" | "1">;
+};
+
+export type DevByteCapHitPayload = {
+  droppedType: TraceEventType;
+  bytes: number;
+  reason: "per_event" | "per_turn";
+};
+
 // Error event ---------------------------------------------------------------
 
 export type ErrorPayload = {
@@ -545,6 +668,7 @@ export type TraceEvent =
   | (TraceEventBase & { type: "model.thinking_block"; payload: ModelThinkingBlockPayload })
   | (TraceEventBase & { type: "model.usage"; payload: ModelUsagePayload })
   | (TraceEventBase & { type: "model.stop"; payload: ModelStopPayload })
+  | (TraceEventBase & { type: "model.retry"; payload: ModelRetryPayload })
   | (TraceEventBase & { type: "skill.activated"; payload: SkillActivatedPayload })
   | (TraceEventBase & { type: "tool.call"; payload: ToolCallPayload })
   | (TraceEventBase & { type: "tool.http"; payload: ToolHttpPayload })
@@ -565,8 +689,25 @@ export type TraceEvent =
   | (TraceEventBase & { type: "agentcore.nested_trace"; payload: AgentcoreNestedTracePayload })
   | (TraceEventBase & { type: "agentcore.observability_link"; payload: AgentcoreObservabilityLinkPayload })
   | (TraceEventBase & { type: "agentcore.gateway"; payload: AgentcoreGatewayPayload })
+  | (TraceEventBase & { type: "agentcore.retry"; payload: AgentcoreRetryPayload })
   | (TraceEventBase & { type: "latency.checkpoint"; payload: LatencyCheckpointPayload })
+  | (TraceEventBase & { type: "dev.environment"; payload: DevEnvironmentPayload })
+  | (TraceEventBase & { type: "dev.byte_cap_hit"; payload: DevByteCapHitPayload })
   | (TraceEventBase & { type: "error"; payload: ErrorPayload });
+
+/**
+ * Precomputed span-tree node built by `TraceCollector.buildSpanTree()` at
+ * finalize time. Stored on `Trace.spanTree` so the dev panel doesn't have to
+ * walk every event to reconstruct the hierarchy.
+ */
+export type TraceSpanNode = {
+  id: string;
+  type: TraceEventType;
+  ts: number;
+  durationMs?: number;
+  agentId?: string;
+  children: TraceSpanNode[];
+};
 
 /** Rolled-up trace document persisted to MongoDB / served by the trace endpoints. */
 export type Trace = {
@@ -580,4 +721,28 @@ export type Trace = {
   createdAt: string;
   truncated?: boolean;
   eventsDropped?: number;
+  // ---- Dev-only top-level fields (populated when capture is on; stripped by
+  //      `projectTraceForInclude(trace, "core")` so demos stay fast). --------
+  /** Build/release metadata. Surfaced in Developer details → Environment. */
+  release?: {
+    gitSha?: string;
+    deployTs?: string;
+    nodeVersion?: string;
+    bunVersion?: string;
+    env?: string;
+  };
+  /** Request-level correlation (auth-scrubbed). */
+  correlation?: {
+    requestId?: string;
+    apiClientIp?: string;
+    userAgent?: string;
+  };
+  /** OTel root span/trace id, 16-byte hex. Powers ServiceLens / X-Ray deep
+   *  links in Developer details → Identifiers. */
+  otel?: {
+    traceId: string;
+    rootSpanId: string;
+  };
+  /** Precomputed span tree (`parentId` hierarchy). */
+  spanTree?: TraceSpanNode[];
 };

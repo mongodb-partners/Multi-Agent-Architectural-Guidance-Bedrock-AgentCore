@@ -1,12 +1,31 @@
-"""Trace Viewer rendering functions.
+"""Client-facing Trace Viewer sections.
 
-Each `render_*` function takes a list of events (or a slice) and renders one
-section of the Trace Viewer page. The Trace Viewer page composes them.
+This is the slim, demo-friendly half of what used to be `lib/trace_view.py`.
+It renders only the panels we are happy to show in front of customers:
 
-Tier hierarchy:
- 1. Tiles + banners (always visible)
- 2. Section blocks (expander-collapsed by default for low-priority)
- 3. Developer details (full raw JSON)
+    render_mock_banner            — dev/mock backend warning
+    summary_tiles                 — Latency / AgentCore / Memory / MongoDB
+                                    / Tools / Tokens / Cost / Errors tiles
+    render_summary_header         — tiles + truncation warning
+    render_timeline               — Gantt-style HTML timeline
+    render_context                — request / auth context one-liners
+    render_prompt_and_skills      — "prompt assembled" + activated skills
+    render_model_activity         — model.request / usage / thinking summary
+    render_routing                — handoff.decision arrows
+    render_mongo_dashboard        — mongo.* + vector search dashboard
+    render_tool_calls             — tool.call / tool.http / tool.mcp spans
+    render_agentcore              — agentcore.* invocations + observability
+    render_memory                 — long-term memory read/write/skip cards
+    render_errors                 — error events
+    render_trace_meta             — small caption with traceId / sessionId
+
+Anything debug-grade (raw spans, span tree, environment dump, prompt body,
+agentcore response bodies, byte-cap drops, OTel link, …) lives in the
+sibling module `developer_trace_view.py` and is loaded on demand.
+
+Helpers shared with the developer module (and unit-tested directly) live in
+`trace_view_helpers.py` — we never reach across to that module's *render*
+functions.
 """
 
 from __future__ import annotations
@@ -15,235 +34,37 @@ import json
 import re
 from typing import Any
 
-from collections import defaultdict
 import streamlit as st
+from lib.display_labels import DB_DATA_INFO_LABEL
+
+from lib.trace_view_helpers import (
+    _VECTOR_SCORE_BINS,
+    _as_int,
+    _completed_span_count,
+    _events_of,
+    _human_skip_reason,
+    _is_redacted,
+    _mock_markers,
+    _nearest_vector_result_payload,
+    _payload,
+    _redacted_or_text,
+    _redaction_banner,
+    _render_jsonish,
+    _render_vector_document_previews,
+    _resolve_user_message_for_write,
+    _short_text,
+    _tile_html,
+    _trace_events_dropped,
+    _trace_is_truncated,
+    _vector_document_previews,
+    is_omitted_sentinel,
+    render_omitted_sentinel,
+)
 
 
 # ---------------------------------------------------------------------------
-# Helpers
+# 0. Mock-data banner
 # ---------------------------------------------------------------------------
-
-def _events_of(events: list[dict], *types: str) -> list[dict]:
-    s = set(types)
-    return [e for e in events if e.get("type") in s]
-
-
-def _payload(ev: dict) -> dict:
-    p = ev.get("payload") or {}
-    return p if isinstance(p, dict) else {}
-
-
-def _as_int(value: Any, default: int = 0) -> int:
-    try:
-        return int(value or default)
-    except (TypeError, ValueError):
-        return default
-
-
-_TRIMMED_MARKER_RE = re.compile(r"^\[trimmed\s+([0-9]+)B\]$")
-
-
-def _render_jsonish(value: Any, *, empty_label: str | None = None) -> None:
-    """Render trace payload values without handing raw strings to st.json."""
-    if value is None:
-        if empty_label:
-            st.caption(empty_label)
-        return
-
-    if isinstance(value, (dict, list)):
-        st.json(value)
-        return
-
-    if isinstance(value, str):
-        text = value.strip()
-        if not text:
-            if empty_label:
-                st.caption(empty_label)
-            return
-
-        trimmed = _TRIMMED_MARKER_RE.match(text)
-        if trimmed:
-            st.caption(f"Large raw trace detail was shortened for display ({int(trimmed.group(1)):,} bytes).")
-            return
-
-        if text[0] in "{[":
-            try:
-                parsed = json.loads(text)
-            except json.JSONDecodeError:
-                parsed = None
-            if isinstance(parsed, (dict, list)):
-                st.json(parsed)
-                return
-
-        st.code(text, language=None)
-        return
-
-    st.code(str(value), language=None)
-
-
-def _trace_events_dropped(trace: dict) -> int:
-    summary = trace.get("summary") if isinstance(trace.get("summary"), dict) else {}
-    return max(_as_int(trace.get("eventsDropped")), _as_int(summary.get("eventsDropped")))
-
-
-def _trace_is_truncated(trace: dict) -> bool:
-    summary = trace.get("summary") if isinstance(trace.get("summary"), dict) else {}
-    return bool(trace.get("truncated") or summary.get("degraded") or _trace_events_dropped(trace))
-
-
-_VECTOR_SCORE_BINS = [
-    "0.00-0.19",
-    "0.20-0.39",
-    "0.40-0.59",
-    "0.60-0.79",
-    "0.80-1.00",
-]
-
-
-def _short_text(value: Any, max_chars: int = 180) -> str | None:
-    if value is None:
-        return None
-    text = value if isinstance(value, str) else json.dumps(value, default=str)
-    text = text.strip()
-    if not text:
-        return None
-    return text if len(text) <= max_chars else f"{text[:max_chars]}…"
-
-
-def _doc_sources(doc: dict) -> list[str]:
-    values: list[str] = []
-    for key in ("sources", "_sources", "source", "url", "uri", "path"):
-        raw = doc.get(key)
-        if isinstance(raw, list):
-            values.extend(_short_text(v, 80) for v in raw)
-        else:
-            values.append(_short_text(raw, 80))
-    seen: set[str] = set()
-    out: list[str] = []
-    for value in values:
-        if value and value not in seen:
-            seen.add(value)
-            out.append(value)
-    return out
-
-
-def _doc_preview_from_sample(doc: dict, rank: int, collection: str | None = None) -> dict:
-    fields = {}
-    for key in ("sku", "category", "brand", "status", "orderId", "customerEmail", "docId", "source", "url", "role"):
-        if key in doc:
-            fields[key] = doc.get(key)
-    title = next(
-        (_short_text(doc.get(key), 120) for key in ("title", "name", "sku", "code", "fact", "_id", "id", "docId") if doc.get(key)),
-        None,
-    )
-    snippet = next(
-        (_short_text(doc.get(key)) for key in ("content", "fact", "description", "summary", "body", "text", "answer") if doc.get(key)),
-        None,
-    )
-    return {
-        "rank": rank,
-        "collection": collection,
-        "id": _short_text(doc.get("_id") or doc.get("id") or doc.get("docId") or doc.get("messageId") or doc.get("sku"), 120),
-        "score": doc.get("_score"),
-        "title": title,
-        "snippet": snippet,
-        "sources": _doc_sources(doc),
-        "fields": fields,
-    }
-
-
-def _nearest_vector_result_payload(events: list[dict], vector_event: dict) -> dict:
-    try:
-        idx = events.index(vector_event)
-    except ValueError:
-        return {}
-    for candidate in reversed(events[:idx]):
-        if candidate.get("type") == "mongo.vector_search":
-            break
-        if candidate.get("type") == "mongo.result":
-            payload = _payload(candidate)
-            if payload.get("sampleDocs"):
-                return payload
-    return {}
-
-
-def _vector_document_previews(vector_payload: dict, result_payload: dict) -> list[dict]:
-    previews = vector_payload.get("documentPreviews")
-    if isinstance(previews, list) and previews:
-        return [p for p in previews if isinstance(p, dict)]
-    sample_docs = result_payload.get("sampleDocs") if isinstance(result_payload, dict) else None
-    if isinstance(sample_docs, list):
-        collection = vector_payload.get("collection")
-        return [
-            _doc_preview_from_sample(doc, i + 1, collection if isinstance(collection, str) else None)
-            for i, doc in enumerate(sample_docs[:5])
-            if isinstance(doc, dict)
-        ]
-    return []
-
-
-def _render_vector_document_previews(previews: list[dict]) -> None:
-    if not previews:
-        st.caption("No retrieved document/source preview was recorded for this vector search.")
-        return
-    st.caption("Retrieved sources / documents")
-    for i, doc in enumerate(previews[:5], 1):
-        rank = _as_int(doc.get("rank"), i)
-        title = _short_text(doc.get("title"), 120) or _short_text(doc.get("id"), 120) or "document"
-        score = doc.get("score")
-        score_label = f" · score {float(score):.3f}" if isinstance(score, (int, float)) else ""
-        collection = doc.get("collection")
-        collection_label = f" · `{collection}`" if collection else ""
-        st.markdown(f"**#{rank} {title}**{collection_label}{score_label}")
-        sources = doc.get("sources")
-        if isinstance(sources, list) and sources:
-            st.caption("Sources: " + ", ".join(f"`{src}`" for src in sources[:4]))
-        snippet = _short_text(doc.get("snippet"))
-        if snippet:
-            st.caption(snippet)
-        fields = doc.get("fields")
-        if isinstance(fields, dict) and fields:
-            _render_jsonish(fields)
-
-
-def _completed_span_count(events: list[dict]) -> int:
-    completed = [e for e in events if e.get("durationMs") is not None]
-    return len(completed) or len(events)
-
-
-def _tile_html(label: str, value: str, hint: str | None = None) -> str:
-    extra = f'<div class="trace-tile-hint">{hint}</div>' if hint else ""
-    return (
-        f'<div class="trace-tile">'
-        f'<div class="trace-tile-label">{label}</div>'
-        f'<div class="trace-tile-value">{value}</div>'
-        f"{extra}"
-        f"</div>"
-    )
-
-
-def _mock_markers(events: list[dict]) -> list[str]:
-    markers: set[str] = set()
-    source_fields = (
-        "backend",
-        "embeddingSource",
-        "provider",
-        "source",
-        "modelBackend",
-        "runtime",
-        "adapter",
-    )
-    for ev in events:
-        payload = _payload(ev)
-        event_type = str(ev.get("type") or "event")
-        for field in source_fields:
-            value = payload.get(field)
-            if isinstance(value, str) and any(token in value.lower() for token in ("mock", "stub", "fixture")):
-                markers.add(f"{event_type}: {value}")
-        if payload.get("devMock") is True or payload.get("mock") is True:
-            markers.add(event_type)
-    return sorted(markers)
-
 
 def render_mock_banner(events: list[dict]) -> None:
     """Show when a trace includes mock/dev backend data."""
@@ -292,17 +113,27 @@ def summary_tiles(trace: dict) -> list[str]:
     skips = _events_of(events, "memory.long_term_skip")
     reads = _events_of(events, "memory.scoped_read", "memory.shared_read")
     stored = sum(_as_int(_payload(e).get("docsInserted")) for e in writes)
-    if stored:
-        outcomes = [str(_payload(e).get("primaryOutcome") or "") for e in writes]
-        hint = ", ".join(x for x in outcomes if x) or None
-        tiles.append(_tile_html("Memory", f"{stored} stored", hint=hint))
-    elif skips:
-        reason = str(_payload(skips[-1]).get("reason") or "skipped")
-        tiles.append(_tile_html("Memory", "Skipped", hint=reason))
-    elif reads:
-        read_count = sum(_as_int(_payload(e).get("entryCount")) for e in reads)
-        if read_count:
-            tiles.append(_tile_html("Memory", f"{read_count} read"))
+    read_entries = sum(_as_int(_payload(e).get("entryCount")) for e in reads)
+    if reads or writes or skips:
+        if reads:
+            modes = sorted({str(_payload(r).get("mode") or "") for r in reads if _payload(r).get("mode")})
+            mode_label = "/".join(modes) if modes else "read"
+            value = f"{read_entries} entries" if read_entries else "0 entries"
+        elif writes:
+            value = f"{stored} stored"
+            mode_label = "write"
+        else:
+            value = "Skipped"
+            mode_label = "skip"
+        hint_parts: list[str] = [mode_label]
+        if writes:
+            hint_parts.append(f"{stored} written")
+        if skips and not writes:
+            reason = str(_payload(skips[-1]).get("reason") or "skipped")
+            hint_parts.append(reason)
+        if reads and any(bool(_payload(r).get("primaryFailed")) for r in reads):
+            hint_parts.append("degraded")
+        tiles.append(_tile_html("Memory", value, hint=" · ".join(p for p in hint_parts if p) or None))
 
     mongo_results = _events_of(events, "mongo.result")
     vector_searches = _events_of(events, "mongo.vector_search")
@@ -409,7 +240,7 @@ def render_timeline(events: list[dict]) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 4. Routing / handoff attribution
+# 3. Request context
 # ---------------------------------------------------------------------------
 
 def render_context(events: list[dict]) -> None:
@@ -469,6 +300,10 @@ def render_prompt_and_skills(events: list[dict]) -> None:
                 )
 
 
+# ---------------------------------------------------------------------------
+# 4. Model activity
+# ---------------------------------------------------------------------------
+
 def render_model_activity(events: list[dict]) -> None:
     requests = _events_of(events, "model.request")
     usage = _events_of(events, "model.usage")
@@ -492,8 +327,7 @@ def render_model_activity(events: list[dict]) -> None:
         ):
             st.caption(
                 f"System prompt {rp.get('systemPromptBytes', 0)} B · "
-                f"prior turns {rp.get('priorTurnsCount', 0)} · "
-                f"hash `{rp.get('systemPromptHash', '?')}`"
+                f"prior turns {rp.get('priorTurnsCount', 0)}"
             )
             if up:
                 st.json(
@@ -516,6 +350,10 @@ def render_model_activity(events: list[dict]) -> None:
             f"and recorded {len(conversation)} conversation message event(s)."
         )
 
+
+# ---------------------------------------------------------------------------
+# 5. Routing / handoff attribution
+# ---------------------------------------------------------------------------
 
 def render_routing(events: list[dict]) -> None:
     decisions = _events_of(events, "handoff.decision")
@@ -545,7 +383,7 @@ def render_routing(events: list[dict]) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 5. MongoDB dashboard
+# 6. MongoDB dashboard
 # ---------------------------------------------------------------------------
 
 def render_mongo_dashboard(events: list[dict]) -> None:
@@ -633,6 +471,9 @@ def render_mongo_dashboard(events: list[dict]) -> None:
                     st.caption("Query")
                     _render_jsonish(query_text)
             preview = vp.get("queryVectorPreview")
+            if is_omitted_sentinel(preview):
+                render_omitted_sentinel(preview, label="queryVectorPreview")
+                preview = None
             if isinstance(preview, dict):
                 head = preview.get("head") or []
                 tail = preview.get("tail") or []
@@ -653,17 +494,19 @@ def render_mongo_dashboard(events: list[dict]) -> None:
                 tune_bits.append(f"limit={vp['limit']}")
             if vp.get("numCandidates") is not None:
                 tune_bits.append(f"numCandidates={vp['numCandidates']}")
-            if vp.get("filter"):
-                vfilter = vp["filter"]
+            vfilter = vp.get("filter")
+            if is_omitted_sentinel(vfilter):
+                render_omitted_sentinel(vfilter, label="filter")
+            elif vfilter:
                 if isinstance(vfilter, (dict, list)):
                     tune_bits.append(f"filter={json.dumps(vfilter, default=str)}")
                 else:
                     tune_bits.append("filter recorded separately")
             if tune_bits:
                 st.caption(" · ".join(tune_bits))
-            if vp.get("filter") and not isinstance(vp.get("filter"), (dict, list)):
+            if vfilter and not is_omitted_sentinel(vfilter) and not isinstance(vfilter, (dict, list)):
                 st.caption("Filter")
-                _render_jsonish(vp.get("filter"))
+                _render_jsonish(vfilter)
             if isinstance(vp.get("scoreSummary"), dict):
                 ss = vp["scoreSummary"]
                 try:
@@ -695,7 +538,7 @@ def render_mongo_dashboard(events: list[dict]) -> None:
             _render_vector_document_previews(_vector_document_previews(vp, result_payload))
 
     if schemas:
-        with st.expander(f"Schema samples ({len(schemas)})", expanded=False):
+        with st.expander(f"{DB_DATA_INFO_LABEL} ({len(schemas)})", expanded=False):
             for s in schemas:
                 sp = s.get("payload") or {}
                 st.markdown(
@@ -706,7 +549,7 @@ def render_mongo_dashboard(events: list[dict]) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 6. Tool calls
+# 7. Tool calls
 # ---------------------------------------------------------------------------
 
 def render_tool_calls(events: list[dict]) -> None:
@@ -777,7 +620,7 @@ def render_tool_calls(events: list[dict]) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 7. AgentCore deep tracing
+# 8. AgentCore
 # ---------------------------------------------------------------------------
 
 def render_agentcore(events: list[dict]) -> None:
@@ -828,8 +671,297 @@ def render_agentcore(events: list[dict]) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 8. Memory dashboard
+# 9. Long-term memory
 # ---------------------------------------------------------------------------
+
+def _render_memory_header(scoped: list[dict], shared: list[dict], writes: list[dict], skips: list[dict]) -> None:
+    reads = scoped + shared
+    tiles: list[str] = []
+
+    tiles.append(_tile_html("Reads", str(len(reads))))
+    tiles.append(_tile_html("Writes", str(len(writes))))
+    if skips:
+        tiles.append(_tile_html("Skips", str(len(skips))))
+
+    if reads:
+        modes = sorted({str(_payload(r).get("mode") or "n/a") for r in reads})
+        backends = sorted({str(_payload(r).get("backend") or "?") for r in reads})
+        mode_label = "/".join(modes) if modes else "n/a"
+        tiles.append(_tile_html("Read mode", mode_label, hint=", ".join(backends) or None))
+
+        primary_failed = sum(1 for r in reads if bool(_payload(r).get("primaryFailed")))
+        if primary_failed:
+            tiles.append(
+                _tile_html(
+                    "Read status",
+                    f"{primary_failed}/{len(reads)} degraded",
+                    hint="primaryFailed=true",
+                )
+            )
+        else:
+            tiles.append(_tile_html("Read status", "ok"))
+
+        total_bytes = sum(_as_int(_payload(r).get("bytesInjected")) for r in reads)
+        total_entries = sum(_as_int(_payload(r).get("entryCount")) for r in reads)
+        tiles.append(_tile_html("Injected", f"{total_entries} entries", hint=f"{total_bytes:,} B"))
+
+    if writes:
+        stored = sum(_as_int(_payload(w).get("docsInserted")) for w in writes)
+        dupes = sum(_as_int(_payload(w).get("duplicatesSkipped")) for w in writes)
+        outcomes = sorted({str(_payload(w).get("primaryOutcome") or "") for w in writes})
+        hint_parts = [o for o in outcomes if o]
+        if dupes:
+            hint_parts.append(f"{dupes} dup skipped")
+        tiles.append(
+            _tile_html(
+                "Stored",
+                f"{stored} fact(s)",
+                hint=", ".join(hint_parts) or None,
+            )
+        )
+
+    if tiles:
+        st.markdown("".join(tiles), unsafe_allow_html=True)
+
+
+def _render_memory_read(event: dict) -> None:
+    rp = _payload(event)
+    kind = "Agent-scoped" if event.get("type") == "memory.scoped_read" else "Shared"
+    mode = str(rp.get("mode") or "n/a")
+    backend = str(rp.get("backend") or "?")
+    primary_failed = bool(rp.get("primaryFailed"))
+    status_chip = " · :red[primaryFailed]" if primary_failed else ""
+
+    st.markdown(
+        f":material/download: **{kind} read** — `mode={mode}` · backend `{backend}` · "
+        f"{_as_int(rp.get('entryCount'))} entries · "
+        f"{_as_int(rp.get('bytesInjected')):,} B · "
+        f"{_as_int(rp.get('latencyMs'))} ms{status_chip}"
+    )
+
+    why_left, why_right = st.columns(2)
+    with why_left:
+        st.caption("Query")
+        st.markdown(_redacted_or_text(rp.get("queryText"), max_chars=400))
+        emb_source = rp.get("embeddingSource") or "?"
+        emb_model = rp.get("embeddingModel") or "?"
+        st.caption(f"Embedding: `{emb_source}` / `{emb_model}`")
+        injection = rp.get("injectionPoint") or "system_prompt"
+        st.caption(f"Injection point: `{injection}`")
+    with why_right:
+        retrieval = rp.get("retrieval") or {}
+        st.caption("Retrieval")
+        cols_queried = retrieval.get("collectionsQueried") if "collectionsQueried" in retrieval else rp.get("collectionsQueried")
+        st.markdown(
+            f"- topK `{_as_int(retrieval.get('topK'))}` · fetchK `{_as_int(retrieval.get('fetchK'))}`\n"
+            f"- vectorHits `{_as_int(retrieval.get('vectorHits'))}` · "
+            f"lexicalHits `{_as_int(retrieval.get('lexicalHits'))}` · "
+            f"rrfMerged `{_as_int(retrieval.get('rrfMergedCount'))}`"
+        )
+        if isinstance(cols_queried, list) and cols_queried:
+            st.caption("collectionsQueried: " + ", ".join(f"`{c}`" for c in cols_queried))
+
+    st.caption(
+        "Tuning: per-collection weights, recency half-life, and MMR diversification are env-driven "
+        "(`MEMORY_WEIGHT_FACTS`, `MEMORY_WEIGHT_CHAT_MESSAGES`, `MEMORY_RECENCY_HALFLIFE_DAYS`, "
+        "`MEMORY_MMR_LAMBDA`) — see `docs/memory-architecture.md` for the post-RRF pipeline. "
+        "The per-collection breakdown with error column + live env-knob values is in **Developer details → Long-term memory internals**."
+    )
+
+    facts = rp.get("facts")
+    if is_omitted_sentinel(facts):
+        render_omitted_sentinel(facts, label="Facts injected into the system prompt")
+        facts = []
+    elif not isinstance(facts, list):
+        facts = []
+    if facts:
+        with st.expander(f"Facts injected into the system prompt ({len(facts)})", expanded=False):
+            for line in facts:
+                if _is_redacted(line):
+                    st.markdown("- *<redacted>*")
+                    continue
+                if not isinstance(line, str):
+                    st.markdown(f"- {line}")
+                    continue
+                short = _short_text(line, 400) or line
+                m = re.match(r"^\[(.+?)\]\s*(.*)$", short)
+                if m:
+                    st.markdown(f"- _[{m.group(1)}]_ {m.group(2)}")
+                else:
+                    st.markdown(f"- {short}")
+
+    if primary_failed:
+        cls = rp.get("retrievalErrorClass") or "RetrievalError"
+        msg = rp.get("retrievalErrorMessage") or "(no message)"
+        st.error(f"{cls}: {msg}")
+
+
+def _render_memory_write(event: dict, all_events: list[dict]) -> None:
+    wp = _payload(event)
+    outcome = str(wp.get("primaryOutcome") or "?")
+    outcome_label = {
+        "persisted": ":green[persisted]",
+        "skipped": ":orange[skipped]",
+        "failed": ":red[failed]",
+    }.get(outcome, f"`{outcome}`")
+    op = str(wp.get("op") or "?")
+    prior = wp.get("priorEntryCount")
+    new = wp.get("newEntryCount")
+    delta_text = f"{prior} → {new}" if prior is not None or new is not None else "n/a"
+
+    st.markdown(
+        f":material/save: **Long-term write** — {outcome_label} · `op={op}` · "
+        f"{_as_int(wp.get('docsInserted'))} inserted · "
+        f"{_as_int(wp.get('duplicatesSkipped'))} dup skipped · "
+        f"{_as_int(wp.get('latencyMs'))} ms · entries {delta_text}"
+    )
+
+    user_label, user_source = _resolve_user_message_for_write(all_events, event)
+    st.caption("What was extracted from")
+    st.markdown(f"**User input** ({user_source}):")
+    st.markdown(user_label)
+    st.caption(
+        f"User msg: {_as_int(wp.get('userMessageBytes'))} B raw → "
+        f"{_as_int(wp.get('userMessageBytesStored'))} B stored (2 000-char cap) · "
+        f"Assistant reply: {_as_int(wp.get('assistantReplyBytes'))} B raw → "
+        f"{_as_int(wp.get('assistantReplyBytesStored'))} B stored (4 000-char cap)"
+    )
+    st.caption("Assistant reply is not persisted verbatim on a trace event — see the Model Activity section above for the streamed reply.")
+
+    extractor_bits: list[str] = []
+    if wp.get("extractorModelId"):
+        extractor_bits.append(f"model `{wp['extractorModelId']}`")
+    if wp.get("extractorLatencyMs") is not None:
+        extractor_bits.append(f"{_as_int(wp.get('extractorLatencyMs'))} ms")
+    tok_in = wp.get("extractorInputTokens")
+    tok_out = wp.get("extractorOutputTokens")
+    if tok_in is not None or tok_out is not None:
+        extractor_bits.append(f"tokens in/out {_as_int(tok_in)}/{_as_int(tok_out)}")
+    candidates = wp.get("factCandidates") or []
+    accepted = sum(1 for c in candidates if isinstance(c, dict) and c.get("matched"))
+    extractor_bits.append(f"accepted {accepted}/{len(candidates)}")
+    if extractor_bits:
+        st.caption("Extractor: " + " · ".join(extractor_bits))
+
+    embed_bits: list[str] = []
+    if wp.get("embeddingModel"):
+        embed_bits.append(f"model `{wp['embeddingModel']}`")
+    if wp.get("embeddedCount") is not None:
+        embed_bits.append(f"embedded {_as_int(wp.get('embeddedCount'))}/{accepted}")
+    if wp.get("ttlExpiresAt"):
+        embed_bits.append(f"TTL expires {wp['ttlExpiresAt']}")
+    if embed_bits:
+        st.caption("Embedding + TTL: " + " · ".join(embed_bits))
+
+    if candidates:
+        st.caption(
+            f"{len(candidates)} candidate(s) inspected — full table with matched/rejected reasons "
+            "is in **Developer details → Long-term memory internals**."
+        )
+
+    facts_extracted = wp.get("factsExtracted")
+    if is_omitted_sentinel(facts_extracted):
+        render_omitted_sentinel(facts_extracted, label="Persisted facts")
+        facts_extracted = []
+    elif not isinstance(facts_extracted, list):
+        facts_extracted = []
+    if facts_extracted:
+        with st.expander(f"Persisted facts ({len(facts_extracted)})", expanded=False):
+            st.caption(
+                f"{_as_int(wp.get('docsInserted'))} new · "
+                f"{_as_int(wp.get('duplicatesSkipped'))} already existed (matched on `factHash`)."
+            )
+            for f in facts_extracted:
+                if _is_redacted(f):
+                    st.markdown("- *<redacted>*")
+                else:
+                    st.markdown(f"- {_short_text(f, 400) or f}")
+
+    if wp.get("primaryOutcome") == "failed" or wp.get("primaryErrorMessage"):
+        cls = wp.get("primaryErrorClass") or "WriteError"
+        msg = wp.get("primaryErrorMessage") or "(no message)"
+        st.error(f"Primary write failed — {cls}: {msg}")
+
+    if wp.get("fallbackBackend"):
+        fb_outcome = wp.get("fallbackOutcome") or "?"
+        st.info(
+            f"AgentCore Memory Store fallback attempted (`{wp['fallbackBackend']}`) — outcome: `{fb_outcome}`"
+        )
+        if wp.get("fallbackErrorMessage"):
+            cls = wp.get("fallbackErrorClass") or "FallbackError"
+            st.error(f"Fallback error — {cls}: {wp['fallbackErrorMessage']}")
+
+
+def _render_memory_skip(event: dict) -> None:
+    sp = _payload(event)
+    reason = str(sp.get("reason") or "unknown")
+    st.warning(f":material/skip_next: **Write skipped** — {_human_skip_reason(reason)}")
+    excerpt = sp.get("userMessageExcerpt")
+    if excerpt:
+        st.caption(f"User input excerpt: {_short_text(excerpt, 200) or excerpt}")
+    agent_id = sp.get("agentId")
+    if agent_id:
+        st.caption(f"Agent: `{agent_id}`")
+    if reason == "llm_extractor_failed":
+        st.markdown("Extractor diagnostics:")
+        diag = {
+            "extractorModelId": sp.get("extractorModelId"),
+            "extractorLatencyMs": sp.get("extractorLatencyMs"),
+            "extractorError": sp.get("extractorError"),
+        }
+        st.code(json.dumps({k: v for k, v in diag.items() if v is not None}, indent=2, default=str), language="json")
+
+
+def _render_memory_related(events: list[dict]) -> None:
+    """Auth + prompt-assembly chips that compete with LTM for the system prompt.
+
+    The full rendered system-prompt body and agent-tool vector searches on
+    `agent_memory_facts` / `chat_messages` moved to
+    `developer_trace_view._dev_prompt_and_model_io` and
+    `developer_trace_view._dev_mongo_internals` respectively — both are
+    debug-grade and would otherwise drown the client demo. This function only
+    keeps the two short chips a client demo still benefits from seeing.
+    """
+    auths = _events_of(events, "auth.context_build")
+    prompts = _events_of(events, "prompt.assembled")
+    if not (auths or prompts):
+        return
+
+    with st.expander("Related context — what else shaped this prompt", expanded=False):
+        if auths:
+            st.markdown("**Auth context** (competes with LTM for system-prompt bytes)")
+            for a in auths:
+                ap = _payload(a)
+                claims = ap.get("jwtClaims") or {}
+                st.markdown(
+                    f"- user `{str(ap.get('userId') or 'anonymous')[:32]}` · "
+                    f"sub `{str(claims.get('sub') or '?')[:32]}` · "
+                    f"iss `{str(claims.get('iss') or '?')[:48]}` · "
+                    f"aud `{str(claims.get('aud') or '?')[:48]}`"
+                )
+                st.caption(
+                    f"customersResolved {_as_int(ap.get('customersResolved'))} · "
+                    f"ordersResolved {_as_int(ap.get('ordersResolved'))}"
+                )
+
+        if prompts:
+            st.markdown("**Prompt assembly** (where the memory context lands)")
+            for p in prompts:
+                pp = _payload(p)
+                st.markdown(
+                    f"- total `{_as_int(pp.get('totalBytes')):,}` B = "
+                    f"persona `{_as_int(pp.get('personaBytes'))}` + "
+                    f"discovery `{_as_int(pp.get('discoveryBytes'))}` + "
+                    f"memory `{_as_int(pp.get('memoryContextBytes'))}` "
+                    f"+ skills `{sum(_as_int((s or {}).get('bytes')) for s in (pp.get('activatedSkills') or []))}`"
+                )
+                activated = pp.get("activatedSkills") or []
+                if activated:
+                    names = ", ".join(f"`{(s or {}).get('name') or '?'}`" for s in activated if isinstance(s, dict))
+                    st.caption(f"Activated skills: {names}")
+                if isinstance(pp.get("body"), str) and pp.get("body"):
+                    st.caption("Full rendered prompt body is in **Developer details → Prompt + messages seed + model I/O**.")
+
 
 def render_memory(events: list[dict]) -> None:
     scoped = _events_of(events, "memory.scoped_read")
@@ -838,66 +970,25 @@ def render_memory(events: list[dict]) -> None:
     skips = _events_of(events, "memory.long_term_skip")
     if not (scoped or shared or writes or skips):
         return
+
     st.markdown('<div class="trace-section-title">Long-term memory</div>', unsafe_allow_html=True)
+
+    ltm_events = scoped + shared + writes + skips
+    _render_memory_header(scoped, shared, writes, skips)
+    _redaction_banner(ltm_events)
+
     for r in scoped + shared:
-        rp = r.get("payload") or {}
-        kind = "Agent-scoped" if r.get("type") == "memory.scoped_read" else "Shared"
-        st.markdown(
-            f":material/download: **{kind}** — {rp.get('entryCount', 0)} fact(s) injected "
-            f"({rp.get('bytesInjected', 0)} B, backend `{rp.get('backend', '?')}`)"
-        )
-        if rp.get("facts"):
-            with st.expander("Facts injected (gated by MEMORY_TRACE_VALUES)", expanded=False):
-                for f in rp["facts"]:
-                    st.markdown(f"- {f}")
+        _render_memory_read(r)
     for w in writes:
-        wp = w.get("payload") or {}
-        st.markdown(
-            f":material/save: **Write** — {wp.get('docsInserted', 0)} fact(s) · `{wp.get('primaryOutcome')}` "
-            f"(prior {wp.get('priorEntryCount')}, now {wp.get('newEntryCount')})"
-        )
-        if wp.get("extractorModelId") or wp.get("extractorLatencyMs") is not None:
-            extractor_bits = ["extractor `llm`"]
-            if wp.get("extractorModelId"):
-                extractor_bits.append(f"model `{wp['extractorModelId']}`")
-            if wp.get("extractorLatencyMs") is not None:
-                extractor_bits.append(f"{wp['extractorLatencyMs']} ms")
-            tok_in = wp.get("extractorInputTokens")
-            tok_out = wp.get("extractorOutputTokens")
-            if tok_in is not None or tok_out is not None:
-                extractor_bits.append(f"tokens in/out {tok_in or 0}/{tok_out or 0}")
-            st.caption(" · ".join(extractor_bits))
-        if wp.get("factsExtracted"):
-            with st.expander("Facts extracted", expanded=False):
-                for f in wp["factsExtracted"]:
-                    st.markdown(f"- {f}")
-        if wp.get("factCandidates"):
-            with st.expander("All candidates considered", expanded=False):
-                for c in wp["factCandidates"]:
-                    label_parts = c.get("matchedPatterns") or []
-                    if c.get("category") and c["category"] not in label_parts:
-                        label_parts = [c["category"], *label_parts]
-                    label = ", ".join(label_parts)
-                    note = c.get("note")
-                    if c.get("matched"):
-                        line = f"- :material/check: `{c.get('text')}`"
-                        if label:
-                            line += f" ({label})"
-                        if note:
-                            line += f" — _{note}_"
-                        st.markdown(line)
-                    else:
-                        line = f"- :material/close: `{c.get('text')}` — {c.get('rejectedReason')}"
-                        if note:
-                            line += f" (_{note}_)"
-                        st.markdown(line)
+        _render_memory_write(w, events)
     for s in skips:
-        sp = s.get("payload") or {}
-        st.caption(f":material/skip_next: Write skipped — {sp.get('reason')}")
+        _render_memory_skip(s)
+
+    _render_memory_related(events)
 
 
 # ---------------------------------------------------------------------------
-# 9. Errors
+# 10. Errors
 # ---------------------------------------------------------------------------
 
 def render_errors(events: list[dict]) -> None:
@@ -914,18 +1005,8 @@ def render_errors(events: list[dict]) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 10. Developer details (raw events)
+# 11. Trace meta caption
 # ---------------------------------------------------------------------------
-
-def render_developer_details(trace: dict) -> None:
-    with st.expander("Developer details — raw events", expanded=False):
-        events = trace.get("events") or []
-        st.caption(
-            f"{len(events)} event(s) · degraded={_trace_is_truncated(trace)}"
-            f" · dropped={_trace_events_dropped(trace)}"
-        )
-        _render_jsonish(events)
-
 
 def render_trace_meta(trace: dict) -> None:
     st.caption(

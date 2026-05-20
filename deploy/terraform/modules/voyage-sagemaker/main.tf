@@ -10,8 +10,11 @@ terraform {
 locals {
   # Endpoint name carries the model variant so swapping listings
   # (voyage-multimodal-3 ↔ voyage-3-5-lite) creates a new endpoint instead
-  # of confusingly reusing the previous one.
-  endpoint_name = "${var.project_name}-${var.endpoint_name_suffix}-${var.environment}"
+  # of confusingly reusing the previous one. project_name is intentionally
+  # NOT in the name — this module is instantiated by envs/shared once per
+  # (account, region, environment) and consumed by multiple per-project
+  # envs/ec2 stacks via SSM.
+  endpoint_name = "${var.endpoint_name_suffix}-${var.environment}"
 }
 
 # =============================================================================
@@ -29,11 +32,14 @@ data "aws_iam_policy_document" "sagemaker_assume" {
 }
 
 resource "aws_iam_role" "sagemaker_exec" {
-  name               = "${var.project_name}-sagemaker-voyage-exec-${var.environment}"
+  # IAM role name is env-scoped to match the shared-stack ownership: one role
+  # per (account, region, environment) regardless of how many per-project ec2
+  # stacks share the resulting SageMaker endpoint.
+  name               = "voyage-sagemaker-exec-${var.environment}"
   assume_role_policy = data.aws_iam_policy_document.sagemaker_assume.json
 
   tags = {
-    Name = "${var.project_name}-sagemaker-voyage-exec-${var.environment}"
+    Name = "voyage-sagemaker-exec-${var.environment}"
   }
 }
 

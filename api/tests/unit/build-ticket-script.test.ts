@@ -44,6 +44,13 @@ describe("build-ticket.mjs (dynamic import)", () => {
     expect(t.nextSteps).toMatch(/4 business hours/);
   });
 
+  test("HW-900 summary is truncated at 80 chars", async () => {
+    const longSymptom = "Screen is completely blank and does not respond to any input including power button presses";
+    const t = await loadAndBuild({ symptom: longSymptom, errorCodes: ["HW-900"] });
+    expect(t.priority).toBe("high");
+    expect(t.summary.length).toBeLessThanOrEqual("[HIGH] ".length + 80);
+  });
+
   test("BAT-401 → high priority", async () => {
     const t = await loadAndBuild({
       symptom: "Battery drains within 2 hours",
@@ -54,11 +61,23 @@ describe("build-ticket.mjs (dynamic import)", () => {
     expect(t.summary).toContain("[HIGH]");
   });
 
-  test("DISP-201 → high priority, summary truncated at 80 chars", async () => {
-    const longSymptom = "Screen is completely blank and does not respond to any input including power button presses";
-    const t = await loadAndBuild({ symptom: longSymptom, errorCodes: ["DISP-201"] });
+  test("DISP-201 → high priority", async () => {
+    const t = await loadAndBuild({
+      symptom: "Screen is completely blank",
+      errorCodes: ["DISP-201"],
+    });
     expect(t.priority).toBe("high");
-    expect(t.summary.length).toBeLessThanOrEqual("[HIGH] ".length + 80);
+    expect(t.requiredFields.proofOfPurchase).toBe("required");
+  });
+
+  test("BOOT-010 → medium priority", async () => {
+    const t = await loadAndBuild({
+      symptom: "Device restarts randomly",
+      errorCodes: ["BOOT-010"],
+    });
+    expect(t.priority).toBe("medium");
+    expect(t.requiredFields.serialNumber).toBe("optional");
+    expect(t.nextSteps).toMatch(/1 business day/);
   });
 
   test("BT-301 → medium priority", async () => {
@@ -68,7 +87,6 @@ describe("build-ticket.mjs (dynamic import)", () => {
     });
     expect(t.priority).toBe("medium");
     expect(t.requiredFields.serialNumber).toBe("optional");
-    expect(t.nextSteps).toMatch(/1 business day/);
   });
 
   test("FW-501 → medium priority", async () => {
@@ -101,8 +119,8 @@ describe("build-ticket.mjs (dynamic import)", () => {
 
   test("high + medium mixed codes → high priority wins", async () => {
     const t = await loadAndBuild({
-      symptom: "Hardware fault with Bluetooth also failing",
-      errorCodes: ["BT-301", "HW-900"],
+      symptom: "Hardware fault with boot loop",
+      errorCodes: ["BOOT-010", "HW-900"],
     });
     expect(t.priority).toBe("high");
   });

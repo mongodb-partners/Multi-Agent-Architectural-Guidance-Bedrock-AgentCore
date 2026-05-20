@@ -58,7 +58,7 @@ Escalate if restarts continue after a clean firmware install — may indicate ha
 4. Firmware — ensure firmware is on the latest version (companion app > Settings > Updates).
 5. Factory network reset — hold Network-Reset button for 5 seconds (LED blinks amber x3).
 If NET-204 persists after all five steps, open a return request referencing error code NET-204.`,
-    escalateTo: "ts-4-policy",
+    escalateTo: "ts-4",
     updatedAt: new Date("2024-09-20"),
   },
   {

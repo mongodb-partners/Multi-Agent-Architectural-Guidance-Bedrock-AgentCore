@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# destroy.sh — Tear down a Terraform environment (network, local, or ec2)
+# destroy.sh — Tear down a Terraform environment (network, shared, local, or ec2)
 #
 # Usage:
 #   ./deploy/scripts/destroy.sh --mode local   [--auto-approve] [--env-file <path>]
 #   ./deploy/scripts/destroy.sh --mode ec2     [--auto-approve] [--env-file <path>]
+#   ./deploy/scripts/destroy.sh --mode shared  [--auto-approve] [--env-file <path>]
 #   ./deploy/scripts/destroy.sh --mode network [--auto-approve] [--env-file <path>]
 #   ./deploy/scripts/destroy.sh --mode ec2     --with-bootstrap   # also deletes shared S3
 #
@@ -18,12 +19,15 @@
 # State keys:
 #   envs/local   :  <env>/terraform.tfstate
 #   envs/ec2     :  <env>/ec2/terraform.tfstate
+#   envs/shared  :  <SHARED_VPC_NAME>/<region>/<env>/shared/terraform.tfstate
 #   envs/network :  <SHARED_VPC_NAME>/<region>/network/terraform.tfstate
 #
-# All three share the same S3 bucket but use distinct state keys, so destroying
-# one does NOT affect the others. IMPORTANT: do not destroy the network env
-# while any per-project ec2 env in the same region is still deployed —
-# the per-project env reads its VPC + subnet IDs from SSM published by network.
+# All four share the same S3 bucket but use distinct state keys, so destroying
+# one does NOT affect the others. IMPORTANT ordering:
+#   ec2 → shared → network
+# Destroy the per-project ec2 envs first (they read SSM published by both
+# shared and network). Then destroy shared (account/region singleton). Then
+# network last.
 
 set -euo pipefail
 
@@ -49,6 +53,8 @@ ATLAS_DB_NAME="${ATLAS_DB_NAME:-${_PROJECT_SLUG}_${ENVIRONMENT}}"
 unset _PROJECT_SLUG
 VPC_CIDR="${VPC_CIDR:-10.0.0.0/16}"
 SHARED_VPC_NAME="${SHARED_VPC_NAME:-shared-network}"
+NETWORK_MODE="${NETWORK_MODE:-privatelink}"
+ATLAS_PEERING_CIDR="${ATLAS_PEERING_CIDR:-192.168.248.0/21}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -63,8 +69,8 @@ while [[ $# -gt 0 ]]; do
   shift
 done
 
-[[ "$MODE" == "local" || "$MODE" == "ec2" || "$MODE" == "network" ]] \
-  || { echo "✗ --mode is required and must be 'local', 'ec2', or 'network'" >&2; exit 1; }
+[[ "$MODE" == "local" || "$MODE" == "ec2" || "$MODE" == "shared" || "$MODE" == "network" ]] \
+  || { echo "✗ --mode is required and must be 'local', 'ec2', 'shared', or 'network'" >&2; exit 1; }
 
 TF_DIR="$TF_ROOT/envs/$MODE"
 [[ -d "$TF_DIR" ]] || { echo "✗ env dir not found: $TF_DIR" >&2; exit 1; }
@@ -106,9 +112,10 @@ export TF_VAR_atlas_project_id="${TF_VAR_atlas_project_id:-${TF_VAR_mongodb_atla
 export TF_VAR_atlas_public_key="${MONGODB_ATLAS_PUBLIC_KEY:-}"
 export TF_VAR_atlas_private_key="${MONGODB_ATLAS_PRIVATE_KEY:-}"
 
-[[ -n "${AWS_ACCESS_KEY_ID:-}" ]] || err "AWS_ACCESS_KEY_ID not set"
-ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text 2>/dev/null) \
-  || err "AWS credentials invalid or expired"
+# shellcheck source=deploy/scripts/_aws-auth.sh
+source "$SCRIPT_DIR/_aws-auth.sh"
+validate_aws_auth || err "AWS auth validation failed (see above)"
+ACCOUNT_ID="$AWS_AUTH_ACCOUNT_ID"
 ok "AWS account: $ACCOUNT_ID"
 
 SHARED_BUCKET="${PROJECT_NAME}-${ENVIRONMENT}-${ACCOUNT_ID}"
@@ -116,11 +123,19 @@ SHARED_BUCKET="${PROJECT_NAME}-${ENVIRONMENT}-${ACCOUNT_ID}"
 # Re-default SHARED_VPC_NAME after sourcing .env so a missing .env entry
 # falls back to the canonical value, and recompute STATE_KEY from post-source
 # variables so a .env override of ENVIRONMENT / AWS_REGION / SHARED_VPC_NAME
-# is honored.
+# is honored. Same for NETWORK_MODE (drives tfvars + SSM cleanup branches).
 SHARED_VPC_NAME="${SHARED_VPC_NAME:-shared-network}"
+NETWORK_MODE="${NETWORK_MODE:-privatelink}"
+ATLAS_PEERING_CIDR="${ATLAS_PEERING_CIDR:-192.168.248.0/21}"
+case "$NETWORK_MODE" in
+  privatelink|peering) ;;
+  *) err "Invalid NETWORK_MODE='${NETWORK_MODE}' — must be 'privatelink' or 'peering'" ;;
+esac
+[[ "$MODE" == "ec2" || "$MODE" == "network" ]] && ok "Network mode: ${NETWORK_MODE}"
 case "$MODE" in
   local)   STATE_KEY="${ENVIRONMENT}/terraform.tfstate" ;;
   ec2)     STATE_KEY="${ENVIRONMENT}/ec2/terraform.tfstate" ;;
+  shared)  STATE_KEY="${SHARED_VPC_NAME}/${AWS_REGION}/${ENVIRONMENT}/shared/terraform.tfstate" ;;
   network) STATE_KEY="${SHARED_VPC_NAME}/${AWS_REGION}/network/terraform.tfstate" ;;
 esac
 
@@ -141,15 +156,37 @@ case "$MODE" in
     warn "  • EC2 instance + Elastic IP + ECR repos + Cognito pool"
     warn "  • mongodb-mcp AgentCore Runtime + AgentCore Memory + AgentCore Gateway"
     warn "  • Per-cluster Route 53 private zone (atlas-privatelink-dns)"
-    warn "  • Bedrock Knowledge Base + Voyage SageMaker (if deployed)"
-    warn "  • CloudWatch log groups"
-    warn "  (Shared VPC + Atlas PrivateLink VPCE are NOT touched — they live in envs/network)"
+    warn "  • Bedrock Knowledge Base (Voyage SageMaker now lives in envs/shared)"
+    warn "  • CloudWatch GenAI Observability (Transaction Search + AgentCore log delivery)"
+    warn "  (Shared VPC + Atlas PrivateLink VPCE live in envs/network — not touched.)"
+    warn "  (Shared SageMaker + log groups + dashboards live in envs/shared — not touched.)"
+    ;;
+  shared)
+    warn "  • Voyage SageMaker endpoint + endpoint config + model + IAM exec role"
+    warn "  • CloudWatch log groups: API / UI / MCP / AgentCore / OTel / OTel-Atlas"
+    warn "  • Bedrock invocation logging + audit log group (account-scoped singleton)"
+    warn "  • Fleet / mongo / cost dashboards + 7 fleet alarms + audit metric filter"
+    warn "  • Atlas dashboard + 2 alarms (if enable_atlas_metrics=true)"
+    warn "  • Logs-Insights saved query library"
+    warn "  • SSM params under /${SHARED_VPC_NAME}/${AWS_REGION}/ (voyage_*, cw_*, bedrock_*)"
+    warn ""
+    warn "  ⚠ DO NOT proceed if any per-project envs/ec2 deployment in"
+    warn "  ⚠ account+region+environment ${AWS_REGION}/${ENVIRONMENT} is still applied —"
+    warn "  ⚠ those envs read SSM values published here, and the ADOT collector"
+    warn "  ⚠ will lose its CloudWatch log destinations."
     ;;
   network)
     warn "  • Shared VPC + public/private subnets + IGW + RT"
-    warn "  • Atlas Interface VPCE + Atlas-side endpoint binding"
-    warn "  • Atlas-PL security group"
-    warn "  • SSM params under /${SHARED_VPC_NAME}/${AWS_REGION}/"
+    if [[ "$NETWORK_MODE" == "privatelink" ]]; then
+      warn "  • Atlas Interface VPCE + Atlas-side endpoint binding"
+      warn "  • Atlas-PL security group"
+    else
+      warn "  • AWS-side VPC peering accepter + route entries (main + public RT)"
+      warn "  • Atlas-side mongodbatlas_network_peering"
+      warn "  • Atlas project IP access list peering entries"
+      warn "  • (Atlas network container is intentionally KEPT — shared across deployments)"
+    fi
+    warn "  • SSM params under /${SHARED_VPC_NAME}/${AWS_REGION}/ (network_mode + ${NETWORK_MODE} keys)"
     warn ""
     warn "  ⚠ DO NOT proceed if any per-project envs/ec2 deployment in"
     warn "  ⚠ region ${AWS_REGION} is still applied — those envs read SSM"
@@ -202,16 +239,29 @@ shared_vpc_name    = "${SHARED_VPC_NAME}"
 atlas_project_id   = "${TF_VAR_atlas_project_id}"
 atlas_db_user      = "${ATLAS_DB_USER}"
 atlas_db_name      = "${ATLAS_DB_NAME}"
+network_mode       = "${NETWORK_MODE}"
+EOF
+    ;;
+  shared)
+    cat > "$TF_DIR/terraform.tfvars" <<EOF
+aws_region              = "${AWS_REGION}"
+environment             = "${ENVIRONMENT}"
+project_name            = "${PROJECT_NAME}"
+shared_vpc_name         = "${SHARED_VPC_NAME}"
+shared_bucket_name      = "${SHARED_BUCKET}"
+shared_resource_prefix  = "${SHARED_RESOURCE_PREFIX:-multiagent}"
 EOF
     ;;
   network)
     cat > "$TF_DIR/terraform.tfvars" <<EOF
-aws_region       = "${AWS_REGION}"
-environment      = "${ENVIRONMENT}"
-project_name     = "${PROJECT_NAME}"
-shared_vpc_name  = "${SHARED_VPC_NAME}"
-vpc_cidr         = "${VPC_CIDR}"
-atlas_project_id = "${TF_VAR_atlas_project_id}"
+aws_region         = "${AWS_REGION}"
+environment        = "${ENVIRONMENT}"
+project_name       = "${PROJECT_NAME}"
+shared_vpc_name    = "${SHARED_VPC_NAME}"
+vpc_cidr           = "${VPC_CIDR}"
+atlas_project_id   = "${TF_VAR_atlas_project_id}"
+network_mode       = "${NETWORK_MODE}"
+atlas_peering_cidr = "${ATLAS_PEERING_CIDR}"
 EOF
     ;;
 esac
@@ -287,31 +337,44 @@ fi
 sep
 log "Scanning for residual AWS resources..."
 
-declare -A RESIDUES
+# Scalar residue variables. We used to use `declare -A RESIDUES` (bash 4 assoc
+# array) but macOS ships bash 3.2, which dies with `declare: -A: invalid
+# option`. Plain scalars work on every bash and shellcheck-clean.
+_RES_s3_state_bucket=""
+_RES_bedrock_kb=""
+_RES_ec2_instances=""
+_RES_sagemaker_endpoints=""
+_RES_shared_ssm_params=""
+_RES_shared_vpc=""
+_RES_atlas_vpc_peering=""
+_RES_atlas_peering_ssm=""
+_RES_bedrock_invocation_logging=""
+_RES_legacy_lambda_mcp=""
+_RES_legacy_orphans=""
 
 if aws s3api head-bucket --bucket "$SHARED_BUCKET" --region "$AWS_REGION" 2>/dev/null; then
   if [[ "$WITH_BOOTSTRAP" == "true" ]]; then
-    RESIDUES["s3_state_bucket"]="RESIDUE — bucket still exists after --with-bootstrap"
+    _RES_s3_state_bucket="RESIDUE — bucket still exists after --with-bootstrap"
   else
-    RESIDUES["s3_state_bucket"]="INTENTIONAL — kept (other env may use it; pass --with-bootstrap to delete)"
+    _RES_s3_state_bucket="INTENTIONAL — kept (other env may use it; pass --with-bootstrap to delete)"
   fi
 else
-  RESIDUES["s3_state_bucket"]="DELETED"
+  _RES_s3_state_bucket="DELETED"
   ok "S3 bucket $SHARED_BUCKET: gone"
 fi
 
-# Bedrock KB (managed by local + ec2 envs — skip in network mode).
+# Bedrock KB (managed by local + ec2 envs — skip in network/shared modes).
 # Source the KB ID from the project tag — KB module migrated from JSON state
 # file to native aws_bedrockagent_knowledge_base, so the state file is gone.
-if [[ "$MODE" != "network" ]]; then
+if [[ "$MODE" != "network" && "$MODE" != "shared" ]]; then
   _KB_NAME="${PROJECT_NAME}-troubleshooting-kb-${ENVIRONMENT}"
   _KB_ID=$(aws bedrock-agent list-knowledge-bases --region "$AWS_REGION" \
     --query "knowledgeBaseSummaries[?name=='${_KB_NAME}'].knowledgeBaseId | [0]" \
     --output text 2>/dev/null || echo "None")
   if [[ -n "$_KB_ID" && "$_KB_ID" != "None" ]]; then
-    RESIDUES["bedrock_kb"]="EXISTS — KB $_KB_ID (name: $_KB_NAME)"
+    _RES_bedrock_kb="EXISTS — KB $_KB_ID (name: $_KB_NAME)"
   else
-    RESIDUES["bedrock_kb"]="DELETED"
+    _RES_bedrock_kb="DELETED"
   fi
 fi
 
@@ -323,20 +386,45 @@ if [[ "$MODE" == "ec2" ]]; then
     --query "Reservations[].Instances[].InstanceId" \
     --output text 2>/dev/null || echo "")
   if [[ -n "$_EC2_IDS" && "$_EC2_IDS" != "None" ]]; then
-    RESIDUES["ec2_instances"]="RESIDUE — instances: $_EC2_IDS"
+    _RES_ec2_instances="RESIDUE — instances: $_EC2_IDS"
   else
-    RESIDUES["ec2_instances"]="DELETED"
+    _RES_ec2_instances="DELETED"
   fi
 fi
 
-# SageMaker endpoints (only relevant for ec2 mode)
-if [[ "$MODE" == "ec2" ]]; then
+# SageMaker endpoints (now owned by envs/shared — endpoint name is
+# "<voyage_endpoint_name_suffix>-<environment>", no project_name prefix).
+if [[ "$MODE" == "shared" ]]; then
   _SM_ENDPOINTS=$(aws sagemaker list-endpoints --region "$AWS_REGION" \
-    --name-contains "${PROJECT_NAME}" --query "Endpoints[].EndpointName" --output text 2>/dev/null || echo "")
+    --name-contains "${ENVIRONMENT}" --query "Endpoints[?ends_with(EndpointName, \`-${ENVIRONMENT}\`)].EndpointName" --output text 2>/dev/null || echo "")
   if [[ -n "$_SM_ENDPOINTS" && "$_SM_ENDPOINTS" != "None" ]]; then
-    RESIDUES["sagemaker_endpoints"]="RESIDUE — endpoints: $_SM_ENDPOINTS"
+    _RES_sagemaker_endpoints="RESIDUE — endpoints: $_SM_ENDPOINTS"
   else
-    RESIDUES["sagemaker_endpoints"]="DELETED"
+    _RES_sagemaker_endpoints="DELETED"
+  fi
+fi
+
+# Shared mode — verify SSM canary keys + dashboards actually went away
+if [[ "$MODE" == "shared" ]]; then
+  _SHARED_CANARY=$(aws ssm get-parameter \
+    --region "$AWS_REGION" \
+    --name "/${SHARED_VPC_NAME}/${AWS_REGION}/cw_api_log_group" \
+    --query "Parameter.Value" --output text 2>/dev/null || echo "")
+  if [[ -n "$_SHARED_CANARY" ]]; then
+    _RES_shared_ssm_params="RESIDUE — /${SHARED_VPC_NAME}/${AWS_REGION}/cw_api_log_group still present"
+  else
+    _RES_shared_ssm_params="DELETED"
+  fi
+
+  # Bedrock invocation logging configuration is account-scoped (one per
+  # account). Check whether the model invocation logging is still configured.
+  _BEDROCK_LOG_CFG=$(aws bedrock get-model-invocation-logging-configuration \
+    --region "$AWS_REGION" \
+    --query "loggingConfig.cloudWatchConfig.logGroupName" --output text 2>/dev/null || echo "None")
+  if [[ -n "$_BEDROCK_LOG_CFG" && "$_BEDROCK_LOG_CFG" != "None" ]]; then
+    _RES_bedrock_invocation_logging="RESIDUE — model invocation logging still configured ($_BEDROCK_LOG_CFG); run aws bedrock delete-model-invocation-logging-configuration"
+  else
+    _RES_bedrock_invocation_logging="DELETED"
   fi
 fi
 
@@ -348,9 +436,9 @@ if [[ "$MODE" == "network" ]]; then
     --filters "Name=tag:Name,Values=${_VPC_TAG_NAME}" \
     --query "Vpcs[].VpcId" --output text 2>/dev/null || echo "")
   if [[ -n "$_VPC_IDS" && "$_VPC_IDS" != "None" ]]; then
-    RESIDUES["shared_vpc"]="RESIDUE — VPC ${_VPC_IDS} (Name=${_VPC_TAG_NAME}) still exists"
+    _RES_shared_vpc="RESIDUE — VPC ${_VPC_IDS} (Name=${_VPC_TAG_NAME}) still exists"
   else
-    RESIDUES["shared_vpc"]="DELETED"
+    _RES_shared_vpc="DELETED"
   fi
 
   _SSM_LEFTOVER=$(aws ssm get-parameter \
@@ -358,12 +446,40 @@ if [[ "$MODE" == "network" ]]; then
     --name "/${SHARED_VPC_NAME}/${AWS_REGION}/vpc_id" \
     --query "Parameter.Value" --output text 2>/dev/null || echo "")
   if [[ -n "$_SSM_LEFTOVER" ]]; then
-    RESIDUES["shared_ssm_params"]="RESIDUE — /${SHARED_VPC_NAME}/${AWS_REGION}/vpc_id still present"
+    _RES_shared_ssm_params="RESIDUE — /${SHARED_VPC_NAME}/${AWS_REGION}/vpc_id still present"
   else
-    RESIDUES["shared_ssm_params"]="DELETED"
+    _RES_shared_ssm_params="DELETED"
   fi
-  warn "  Atlas endpoint service is intentionally NOT destroyed (shared resource;"
-  warn "  see modules/atlas-privatelink/scripts/discover-or-create-pl.sh)."
+
+  if [[ "$NETWORK_MODE" == "privatelink" ]]; then
+    warn "  Atlas endpoint service is intentionally NOT destroyed (shared resource;"
+    warn "  see modules/atlas-privatelink/scripts/discover-or-create-pl.sh)."
+  else
+    # Peering-side residue: VPC peering connection, peering SSM keys, container.
+    _PEERING_LEFTOVER=$(aws ec2 describe-vpc-peering-connections \
+      --region "$AWS_REGION" \
+      --filters "Name=tag:Project,Values=${SHARED_VPC_NAME}" "Name=status-code,Values=active,pending-acceptance,provisioning" \
+      --query "VpcPeeringConnections[].VpcPeeringConnectionId" --output text 2>/dev/null || echo "")
+    if [[ -n "$_PEERING_LEFTOVER" && "$_PEERING_LEFTOVER" != "None" ]]; then
+      _RES_atlas_vpc_peering="RESIDUE — VPC peering connection(s) still active: ${_PEERING_LEFTOVER}"
+    else
+      _RES_atlas_vpc_peering="DELETED"
+    fi
+
+    _PEERING_SSM_LEFTOVER=$(aws ssm get-parameter \
+      --region "$AWS_REGION" \
+      --name "/${SHARED_VPC_NAME}/${AWS_REGION}/atlas_peering_id" \
+      --query "Parameter.Value" --output text 2>/dev/null || echo "")
+    if [[ -n "$_PEERING_SSM_LEFTOVER" ]]; then
+      _RES_atlas_peering_ssm="RESIDUE — /${SHARED_VPC_NAME}/${AWS_REGION}/atlas_peering_id still present"
+    else
+      _RES_atlas_peering_ssm="DELETED"
+    fi
+
+    warn "  Atlas network container is intentionally NOT destroyed (shared resource;"
+    warn "  see modules/atlas-vpc-peering/scripts/discover-or-create-container.sh)."
+    warn "  Verify in Atlas console → Network Access → Peering if you need to free the CIDR block."
+  fi
 fi
 
 # Legacy Lambda MCP residue check (only ec2 mode). The lambda-mcp host has
@@ -373,9 +489,9 @@ fi
 if [[ "$MODE" == "ec2" ]]; then
   _LEGACY_LAMBDA_NAME="${PROJECT_NAME}-mongodb-mcp-${ENVIRONMENT}"
   if aws lambda get-function --function-name "$_LEGACY_LAMBDA_NAME" --region "$AWS_REGION" >/dev/null 2>&1; then
-    RESIDUES["legacy_lambda_mcp"]="RESIDUE — $_LEGACY_LAMBDA_NAME still exists (pre-Phase-7e leftover; delete manually)"
+    _RES_legacy_lambda_mcp="RESIDUE — $_LEGACY_LAMBDA_NAME still exists (pre-Phase-7e leftover; delete manually)"
   else
-    RESIDUES["legacy_lambda_mcp"]="DELETED"
+    _RES_legacy_lambda_mcp="DELETED"
   fi
 fi
 
@@ -452,11 +568,11 @@ if [[ -n "$_LEGACY_KB_ID" && "$_LEGACY_KB_ID" != "None" ]]; then
 fi
 
 if [[ ${#_LEGACY_FAILED[@]} -gt 0 ]]; then
-  RESIDUES["legacy_orphans"]="RESIDUE — failed to delete: ${_LEGACY_FAILED[*]}; deleted: ${_LEGACY_DELETED[*]:-none}"
+  _RES_legacy_orphans="RESIDUE — failed to delete: ${_LEGACY_FAILED[*]}; deleted: ${_LEGACY_DELETED[*]:-none}"
 elif [[ ${#_LEGACY_DELETED[@]} -gt 0 ]]; then
-  RESIDUES["legacy_orphans"]="DELETED — cleaned up legacy orphans: ${_LEGACY_DELETED[*]}"
+  _RES_legacy_orphans="DELETED — cleaned up legacy orphans: ${_LEGACY_DELETED[*]}"
 else
-  RESIDUES["legacy_orphans"]="DELETED"
+  _RES_legacy_orphans="DELETED"
 fi
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -469,14 +585,15 @@ export _DR_TS="$(date -u +"%Y-%m-%dT%H:%M:%SZ")" _DR_MODE="$MODE"
 export _DR_START="$_DESTROY_START" _DR_END="$_DESTROY_END"
 export _DR_ACCOUNT="$ACCOUNT_ID" _DR_REGION="$AWS_REGION" _DR_ENV="$ENVIRONMENT"
 export _DR_BUCKET="$SHARED_BUCKET" _DR_BOOTSTRAP="$WITH_BOOTSTRAP"
-export _DR_RES_S3="${RESIDUES[s3_state_bucket]:-N/A}"
-export _DR_RES_KB="${RESIDUES[bedrock_kb]:-N/A (network mode)}"
-export _DR_RES_EC2="${RESIDUES[ec2_instances]:-N/A (not ec2 mode)}"
-export _DR_RES_SAGE="${RESIDUES[sagemaker_endpoints]:-N/A (not ec2 mode)}"
-export _DR_RES_LAMBDA="${RESIDUES[lambda_mcp]:-N/A (not ec2 mode)}"
-export _DR_RES_LEGACY="${RESIDUES[legacy_orphans]:-N/A}"
-export _DR_RES_SHARED_VPC="${RESIDUES[shared_vpc]:-N/A (not network mode)}"
-export _DR_RES_SHARED_SSM="${RESIDUES[shared_ssm_params]:-N/A (not network mode)}"
+export _DR_RES_S3="${_RES_s3_state_bucket:-N/A}"
+export _DR_RES_KB="${_RES_bedrock_kb:-N/A (network mode)}"
+export _DR_RES_EC2="${_RES_ec2_instances:-N/A (not ec2 mode)}"
+export _DR_RES_SAGE="${_RES_sagemaker_endpoints:-N/A (not ec2 mode)}"
+export _DR_RES_LAMBDA="${_RES_lambda_mcp:-N/A (not ec2 mode)}"
+export _DR_RES_LEGACY="${_RES_legacy_orphans:-N/A}"
+export _DR_RES_SHARED_VPC="${_RES_shared_vpc:-N/A (not network mode)}"
+export _DR_RES_SHARED_SSM="${_RES_shared_ssm_params:-N/A (not network/shared mode)}"
+export _DR_RES_BEDROCK_INV="${_RES_bedrock_invocation_logging:-N/A (not shared mode)}"
 export _TF_STATE_BEFORE_FILE="$TF_STATE_BEFORE"
 
 python3 - <<'PYEOF' > "$REPORT_FILE"
@@ -490,7 +607,7 @@ except Exception:
     pass
 has_residues = any("RESIDUE" in v(k) for k in
     ["_DR_RES_S3","_DR_RES_EC2","_DR_RES_SAGE","_DR_RES_LAMBDA","_DR_RES_LEGACY",
-     "_DR_RES_SHARED_VPC","_DR_RES_SHARED_SSM"])
+     "_DR_RES_SHARED_VPC","_DR_RES_SHARED_SSM","_DR_RES_BEDROCK_INV"])
 print(json.dumps({
   "destroy_completed_at": v("_DR_TS"),
   "mode":                 v("_DR_MODE"),
@@ -510,6 +627,7 @@ print(json.dumps({
     "lambda_mcp":          v("_DR_RES_LAMBDA"),
     "shared_vpc":          v("_DR_RES_SHARED_VPC"),
     "shared_ssm_params":   v("_DR_RES_SHARED_SSM"),
+    "bedrock_invocation_logging": v("_DR_RES_BEDROCK_INV"),
     "legacy_orphans":      v("_DR_RES_LEGACY"),
   }
 }, indent=2))

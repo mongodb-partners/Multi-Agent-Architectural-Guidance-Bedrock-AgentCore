@@ -8,8 +8,8 @@ MongoDB seed scripts for the Bedrock Multi-Agent demo stack. Each script is stan
 |--------|--------------------|----|
 | `seed-customers.ts` | `customers` | 5 demo customers (standard + premium tiers) |
 | `seed-products.ts` | `products` | 9 SKUs across home / electronics / outdoor |
-| `seed-troubleshooting.ts` | `troubleshooting_docs` | 7 diagnostic articles (power, connectivity, HW fault, firmware, smart-home) |
-| `seed-orders.ts` | `orders` | 12 orders covering all status variants per customer |
+| `seed-troubleshooting.ts` | `troubleshooting_docs` | 8 seeded diagnostic playbooks (power, connectivity, HW fault, returns, firmware, smart-home) |
+| `seed-orders.ts` | `orders` | 12 orders covering shipped, processing, delivered, cancelled, and return-requested flows |
 | `seed-indexes.ts` | all + `agent_memory_facts` + `chat_sessions` + `chat_messages` | Regular indexes (including unique `{userId, factHash}` for write-side dedup) + Atlas **vector** indexes for `products`, `troubleshooting_docs`, `agent_memory_facts`, `chat_messages` + Atlas **Search (BM25)** indexes for the same four collections (used by `mongodb_hybrid_search` and the LTM hybrid retriever) + TTL on `agent_memory_facts`. Collection name overridable via **`CHAT_SESSIONS_COLLECTION`** and **`CHAT_MESSAGES_COLLECTION`**. |
 | `seed-embeddings.ts` | `products`, `troubleshooting_docs` | Backfills `embedding` field via Voyage or Bedrock; requires AWS creds. `agent_memory_facts` and `chat_messages` embeddings are populated at write time by the API and need no separate seed step. |
 | `seed-all.ts` | all (except embeddings) | Runs all of the above in order; run once per environment |
@@ -70,7 +70,7 @@ On a local/Community MongoDB server the script prints the JSON definition and sk
   "type": "vectorSearch",
   "definition": {
     "fields": [
-      { "type": "vector", "path": "embedding", "numDimensions": 1536, "similarity": "cosine" },
+      { "type": "vector", "path": "embedding", "numDimensions": 1024, "similarity": "cosine" },
       { "type": "filter", "path": "category" },
       { "type": "filter", "path": "tags" }
     ]
@@ -80,4 +80,8 @@ On a local/Community MongoDB server the script prints the JSON definition and sk
 
 ## When to run
 
-These seed scripts target the live Atlas deployment behind the AgentCore Gateway's MCP target Lambda. `deploy/scripts/deploy-project.sh` and `deploy/deploy-api.sh` now re-run `seed-indexes.ts` idempotently so newly added Atlas Search/vector indexes are reconciled even when data seeding is skipped.
+These seed scripts target the live Atlas deployment that the `mongodb-mcp-runtime` AgentCore Runtime talks to. `deploy/scripts/deploy-project.sh` and `deploy/deploy-api.sh` re-run `seed-indexes.ts` idempotently on every deploy so newly added Atlas Search/vector indexes are reconciled even when data seeding is skipped.
+
+> **Critical:** `seed-indexes.ts` is the **only** place that creates the **partial-unique** index on `troubleshooting_docs.docId` (`partialFilterExpression: { docId: { $exists: true, $type: "string" } }`). Without this index, Bedrock KB ingestion fails every document with `E11000 duplicate key error on { docId: null }`. See [`docs/debugging.md` §5 → "Bedrock KB ingestion fails every doc with `Write failure with error code -3`"](../docs/debugging.md). The seeder also includes an `IndexOptionsConflict` heal path that drops + recreates a stale plain-unique `docId_1` if it exists.
+
+> **Companion:** the canonical data-model reference is [`docs/reference/data-model.md`](../docs/reference/data-model.md) — schemas, indexes, retrieval contract.

@@ -30,7 +30,7 @@ config/skills/<skill-name>/
 
 The `SKILL.md` file is always loaded when the skill is activated. Files in `references/` are loaded on demand — only when the agent explicitly requests them during a conversation. Keep `SKILL.md` focused and delegate detail to `references/`.
 
-**`http-tools.json`** (optional) declares Strands tools that invoke **HTTPS endpoints** — typically **AWS Lambda Function URLs** or **API Gateway** HTTP APIs. Same trust model as `scripts/*.mjs`: colocated with the skill, reviewed like code. Agents enable each tool by listing **`skill-folder/localToolName`** in `.agent.md` `tools:` (e.g. `order-management/notify_fulfillment_lambda`). The skill must be **allowed and activated** before a call succeeds (like `read_skill_resource`). SSRF **host allowlists** belong in repo-root `config/http-tools.json` → `security`. Details: [Configuration Guide](configuration-guide.md#http-tools-lambda--api-gateway).
+**`http-tools.json`** (optional) declares Strands tools that invoke **HTTPS endpoints** — typically **AWS Lambda Function URLs** or **API Gateway** HTTP APIs. Same trust model as `scripts/*.mjs`: colocated with the skill, reviewed like code. Agents enable each tool by listing **`skill-folder/localToolName`** in `.agent.md` `tools:` (e.g. `order-management/notify_fulfillment_lambda`). The skill must be **allowed and activated** before a call succeeds (like `read_skill_resource`). SSRF **host allowlists** belong in repo-root `config/http-tools.json` → `security`. Details: [Configuration Guide § 6 — Skill configuration](configuration-guide.md#6-skill-configuration-configskillsskillskillmd).
 
 **Minimal `http-tools.json` example** (inside a skill folder):
 

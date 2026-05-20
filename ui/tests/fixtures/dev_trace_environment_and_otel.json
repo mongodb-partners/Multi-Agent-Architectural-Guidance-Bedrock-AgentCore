@@ -1,0 +1,44 @@
+{
+  "traceId": "dev-fixture-env-otel",
+  "sessionId": "demo-session",
+  "messageId": "demo-msg-env",
+  "userId": "demo-user",
+  "agentId": "orchestrator",
+  "createdAt": "2026-05-20T08:05:00.000Z",
+  "release": { "gitSha": "abcdef0", "imageTag": "v2026.05.20", "env": "dev" },
+  "correlation": { "requestId": "req-env-1", "userAgent": "Mozilla/5.0", "clientIp": "10.0.0.1" },
+  "otel": { "traceId": "00112233445566778899aabbccddeeff", "rootSpanId": "0011223344556677" },
+  "events": [
+    {
+      "id": "env1",
+      "ts": 0,
+      "type": "dev.environment",
+      "payload": {
+        "chatMode": "live",
+        "devMockBackends": false,
+        "mongoConfigured": true,
+        "voyageConfigured": true,
+        "agentcoreConfigured": true,
+        "logLevel": "info",
+        "swarmEnabled": false,
+        "tracePromptBodies": false
+      }
+    }
+  ],
+  "summary": {
+    "inputTokens": 0,
+    "outputTokens": 0,
+    "totalTokens": 0,
+    "toolCalls": 0,
+    "mongoQueries": 0,
+    "mongoDocsReturned": 0,
+    "mcpCalls": 0,
+    "estimatedCostUsd": null,
+    "costEstimateComplete": false,
+    "costBreakdown": {},
+    "durationMs": 0,
+    "modelIds": [],
+    "toolsUsed": [],
+    "eventsDropped": 0
+  }
+}

@@ -94,7 +94,7 @@ resource "aws_cloudwatch_log_data_protection_policy" "invocations" {
   log_group_name = aws_cloudwatch_log_group.invocations[0].name
 
   policy_document = jsonencode({
-    Name        = "${var.project_name}-${var.environment}-bedrock-pii"
+    Name        = "${var.shared_resource_prefix}-${var.environment}-bedrock-pii"
     Version     = "2021-06-01"
     Description = "Audit + Deidentify managed PII identifiers on Bedrock invocation logs."
     Statement = [
@@ -157,7 +157,7 @@ data "aws_iam_policy_document" "trust" {
 resource "aws_iam_role" "bedrock_logging" {
   count = var.enable ? 1 : 0
 
-  name               = "${var.project_name}-bedrock-invocation-logging-${var.environment}"
+  name               = "${var.shared_resource_prefix}-bedrock-invocation-logging-${var.environment}"
   assume_role_policy = data.aws_iam_policy_document.trust[0].json
 
   tags = local.common_tags

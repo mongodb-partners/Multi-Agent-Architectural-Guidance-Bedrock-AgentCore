@@ -64,20 +64,24 @@ afterEach(() => {
 });
 
 describe("cw-metrics EMF emitter", () => {
-  test("recordChatTurn emits TurnsTotal + TurnLatencyMs in Multiagent/Chat", () => {
+  test("recordChatTurn always emits TurnsTotal + TurnLatencyMs + TurnErrors (success path: TurnErrors=0)", () => {
+    // TurnErrors is emitted on EVERY turn with value 0 on success so the
+    // dashboard line stays visible and the SLO-burn alarm can compute
+    // error_rate even in quiet periods. See `recordChatTurn` in cw-metrics.ts.
     recordChatTurn({ agentId: "orchestrator", latencyMs: 1234 });
     expect(captured.length).toBe(1);
     const r = captured[0];
     expect(r._aws.CloudWatchMetrics[0].Namespace).toBe("Multiagent/Chat");
     const names = r._aws.CloudWatchMetrics[0].Metrics.map((m) => m.Name).sort();
-    expect(names).toEqual(["TurnLatencyMs", "TurnsTotal"]);
+    expect(names).toEqual(["TurnErrors", "TurnLatencyMs", "TurnsTotal"]);
     expect(r.TurnsTotal).toBe(1);
     expect(r.TurnLatencyMs).toBe(1234);
+    expect(r.TurnErrors).toBe(0);
     expect(r.agentId).toBe("orchestrator");
     expect(r._aws.CloudWatchMetrics[0].Dimensions[0]).toContain("agentId");
   });
 
-  test("recordChatTurn with error=true emits TurnErrors too", () => {
+  test("recordChatTurn with error=true raises TurnErrors to 1 and includes errorClass context", () => {
     recordChatTurn({
       agentId: "order-management",
       latencyMs: 99,
@@ -91,14 +95,15 @@ describe("cw-metrics EMF emitter", () => {
     expect(captured[0].errorClass).toBe("ThrottlingException");
   });
 
-  test("recordAgentCoreInvoke emits AgentCoreInvokes in Multiagent/Chat with mode dim", () => {
+  test("recordAgentCoreInvoke always emits Invokes + LatencyMs + Errors (success path: Errors=0)", () => {
     recordAgentCoreInvoke({ agentId: "orchestrator", mode: "ec2_to_orchestrator", latencyMs: 500 });
     expect(captured.length).toBe(1);
     const r = captured[0];
     expect(r._aws.CloudWatchMetrics[0].Namespace).toBe("Multiagent/Chat");
-    const names = r._aws.CloudWatchMetrics[0].Metrics.map((m) => m.Name);
-    expect(names).toContain("AgentCoreInvokes");
-    expect(names).toContain("AgentCoreInvokeLatencyMs");
+    const names = r._aws.CloudWatchMetrics[0].Metrics.map((m) => m.Name).sort();
+    expect(names).toEqual(["AgentCoreInvokeErrors", "AgentCoreInvokeLatencyMs", "AgentCoreInvokes"]);
+    expect(r.AgentCoreInvokes).toBe(1);
+    expect(r.AgentCoreInvokeErrors).toBe(0);
     expect(r.mode).toBe("ec2_to_orchestrator");
   });
 

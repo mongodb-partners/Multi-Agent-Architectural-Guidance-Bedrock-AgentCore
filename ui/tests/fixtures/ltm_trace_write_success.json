@@ -1,0 +1,132 @@
+{
+  "traceId": "fixture-ltm-write-success",
+  "sessionId": "fixture-session-3",
+  "agentId": "order-mgmt",
+  "createdAt": "2026-05-19T10:10:00.000Z",
+  "summary": {
+    "durationMs": 5210,
+    "modelIds": ["us.anthropic.claude-3-7-sonnet-20250219-v1:0"]
+  },
+  "events": [
+    {
+      "type": "chat.turn.start",
+      "ts": 1716115800000,
+      "payload": {
+        "sessionId": "fixture-session-3",
+        "messageId": "fixture-msg-3",
+        "agentId": "order-mgmt",
+        "userId": "user-fixture-3",
+        "startTs": 1716115800000
+      }
+    },
+    {
+      "type": "memory.scoped_read",
+      "ts": 1716115800100,
+      "payload": {
+        "scope": "scoped",
+        "userId": "user-fixture-3",
+        "agentId": "order-mgmt",
+        "facts": ["User mentioned planning a trip to Tokyo in October."],
+        "entryCount": 1,
+        "bytesInjected": 64,
+        "collectionsQueried": ["agent_memory_facts", "chat_messages"],
+        "injectionPoint": "system_prompt",
+        "latencyMs": 87,
+        "backend": "mongodb",
+        "mode": "hybrid",
+        "queryText": "actually my address changed to 200 Pine St in Seattle",
+        "embeddingSource": "voyage",
+        "embeddingModel": "voyage-3",
+        "retrieval": {
+          "topK": 14,
+          "fetchK": 24,
+          "vectorHits": 5,
+          "lexicalHits": 3,
+          "rrfMergedCount": 6,
+          "perCollection": [
+            { "collection": "agent_memory_facts", "vectorReturned": 3, "lexicalReturned": 2 },
+            { "collection": "chat_messages", "vectorReturned": 2, "lexicalReturned": 1 }
+          ]
+        }
+      }
+    },
+    {
+      "type": "model.request",
+      "ts": 1716115800180,
+      "payload": {
+        "modelId": "us.anthropic.claude-3-7-sonnet-20250219-v1:0",
+        "region": "us-east-1",
+        "systemPromptHash": "sha256:cafe9999",
+        "systemPromptBytes": 3120,
+        "priorTurnsCount": 2,
+        "userMessage": "Actually, my address changed — please ship to 200 Pine St, Seattle WA 98101 from now on."
+      }
+    },
+    {
+      "type": "memory.long_term_write",
+      "ts": 1716115802500,
+      "payload": {
+        "userId": "user-fixture-3",
+        "agentId": "order-mgmt",
+        "ts": "2026-05-19T10:10:02.500Z",
+        "factCandidates": [
+          {
+            "text": "User's shipping address changed to 200 Pine St, Seattle WA 98101.",
+            "matched": true,
+            "matchedPatterns": ["preference"],
+            "length": 64,
+            "category": "preference",
+            "note": "explicit address change request"
+          },
+          {
+            "text": "User's name is Priya.",
+            "matched": true,
+            "matchedPatterns": ["identity"],
+            "length": 20,
+            "category": "identity",
+            "note": "already saved earlier; will be deduped"
+          },
+          {
+            "text": "ok",
+            "matched": false,
+            "rejectedReason": "too_short",
+            "length": 2,
+            "category": "filler"
+          },
+          {
+            "text": "The agent confirmed the shipping change in the reply.",
+            "matched": false,
+            "rejectedReason": "llm_rejected",
+            "length": 54,
+            "category": "assistant_action",
+            "note": "describes assistant behaviour, not a user fact"
+          }
+        ],
+        "factsExtracted": [
+          "User's shipping address changed to 200 Pine St, Seattle WA 98101.",
+          "User's name is Priya."
+        ],
+        "collection": "agent_memory_facts",
+        "op": "bulkWrite",
+        "docsInserted": 1,
+        "duplicatesSkipped": 1,
+        "embeddedCount": 2,
+        "embeddingModel": "voyage-3",
+        "primaryBackend": "mongodb",
+        "primaryOutcome": "persisted",
+        "userMessageBytes": 102,
+        "userMessageBytesStored": 102,
+        "assistantReplyBytes": 458,
+        "assistantReplyBytesStored": 458,
+        "priorEntryCount": 11,
+        "newEntryCount": 12,
+        "ttlExpiresAt": "2027-05-19T10:10:02.500Z",
+        "latencyMs": 1840,
+        "extractorModelId": "us.anthropic.claude-3-7-sonnet-20250219-v1:0",
+        "extractorLatencyMs": 1620,
+        "extractorInputTokens": 1842,
+        "extractorOutputTokens": 184
+      }
+    }
+  ]
+}

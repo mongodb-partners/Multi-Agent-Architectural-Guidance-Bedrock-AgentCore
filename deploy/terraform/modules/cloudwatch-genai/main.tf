@@ -27,18 +27,25 @@ terraform {
 }
 
 locals {
-  # Prefer the ARN map when callers pass it; fall back to id-only construction
-  # for any caller still on the legacy `agentcore_memory_ids` /
-  # `agentcore_gateway_ids` variables. The map keys are the canonical resource
-  # ids; values are the full ARNs straight off the agentcore module outputs
-  # (which are partition-aware — `arn:aws:` vs `arn:aws-gov:` vs `arn:aws-cn:`).
-  memory_arn_map = length(var.agentcore_memories) > 0 ? var.agentcore_memories : {
+  # Static-key map of { id, arn } pairs — see variables.tf for the rationale.
+  # Keys must be known at plan time; values may be `(known after apply)`. The
+  # legacy `agentcore_memory_ids` list is converted into the same shape so
+  # downstream resources have one consistent path. When the list path is
+  # used, each id becomes both the map key (string already known at plan
+  # time) AND the static identifier inside the value.
+  memory_map = length(var.agentcore_memories) > 0 ? var.agentcore_memories : {
     for id in var.agentcore_memory_ids :
-    id => "arn:${data.aws_partition.current.partition}:bedrock-agentcore:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:memory/${id}"
+    id => {
+      id  = id
+      arn = "arn:${data.aws_partition.current.partition}:bedrock-agentcore:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:memory/${id}"
+    }
   }
-  gateway_arn_map = length(var.agentcore_gateways) > 0 ? var.agentcore_gateways : {
+  gateway_map = length(var.agentcore_gateways) > 0 ? var.agentcore_gateways : {
     for id in var.agentcore_gateway_ids :
-    id => "arn:${data.aws_partition.current.partition}:bedrock-agentcore:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:gateway/${id}"
+    id => {
+      id  = id
+      arn = "arn:${data.aws_partition.current.partition}:bedrock-agentcore:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:gateway/${id}"
+    }
   }
   common_tags = merge(var.tags, {
     Project     = var.project_name
@@ -162,36 +169,44 @@ resource "aws_cloudwatch_log_resource_policy" "xray_spans" {
 # -----------------------------------------------------------------------------
 
 # ----- Memory resources -----
+#
+# for_each iterates `local.memory_map` (static keys like "main"), so plan
+# succeeds on fresh deploys when each.value.id / each.value.arn are still
+# `(known after apply)`. Resource NAMES (log groups, delivery sources) must
+# include the real memory_id so CloudWatch console auto-discovery works —
+# those names resolve at apply time from each.value.id, after agentcore_memory
+# has actually been created. The static map key is only used as a state
+# address; never appears in any AWS-visible field.
 
 resource "aws_cloudwatch_log_group" "agentcore_memory" {
-  for_each = local.memory_arn_map
+  for_each = local.memory_map
 
-  name              = "/aws/vendedlogs/bedrock-agentcore/memory/APPLICATION_LOGS/${each.key}"
+  name              = "/aws/vendedlogs/bedrock-agentcore/memory/APPLICATION_LOGS/${each.value.id}"
   retention_in_days = var.agentcore_log_retention_days
 
   tags = merge(local.common_tags, {
-    Name        = "agentcore-memory-${each.key}"
-    AgentCoreId = each.key
+    Name        = "agentcore-memory-${each.value.id}"
+    AgentCoreId = each.value.id
   })
 }
 
 resource "aws_cloudwatch_log_delivery_source" "agentcore_memory" {
-  for_each = local.memory_arn_map
+  for_each = local.memory_map
 
   # CloudWatch log-delivery source names are capped at 60 chars. AgentCore
   # memory ids already include the project name and an AWS-generated 10-char
   # random suffix, so they're globally unique on their own — no need to
   # re-prefix with project_name/environment. Project/env stay on the resource
   # tags instead.
-  name         = substr("memory-${each.key}", 0, 60)
+  name         = substr("memory-${each.value.id}", 0, 60)
   log_type     = "APPLICATION_LOGS"
-  resource_arn = each.value
+  resource_arn = each.value.arn
 }
 
 resource "aws_cloudwatch_log_delivery_destination" "agentcore_memory" {
-  for_each = local.memory_arn_map
+  for_each = local.memory_map
 
-  name          = substr("memory-dst-${each.key}", 0, 60)
+  name          = substr("memory-dst-${each.value.id}", 0, 60)
   output_format = "json"
 
   delivery_destination_configuration {
@@ -200,7 +215,7 @@ resource "aws_cloudwatch_log_delivery_destination" "agentcore_memory" {
 }
 
 resource "aws_cloudwatch_log_delivery" "agentcore_memory" {
-  for_each = local.memory_arn_map
+  for_each = local.memory_map
 
   delivery_source_name     = aws_cloudwatch_log_delivery_source.agentcore_memory[each.key].name
   delivery_destination_arn = aws_cloudwatch_log_delivery_destination.agentcore_memory[each.key].arn
@@ -209,30 +224,30 @@ resource "aws_cloudwatch_log_delivery" "agentcore_memory" {
 # ----- Gateway resources -----
 
 resource "aws_cloudwatch_log_group" "agentcore_gateway" {
-  for_each = local.gateway_arn_map
+  for_each = local.gateway_map
 
-  name              = "/aws/vendedlogs/bedrock-agentcore/gateway/APPLICATION_LOGS/${each.key}"
+  name              = "/aws/vendedlogs/bedrock-agentcore/gateway/APPLICATION_LOGS/${each.value.id}"
   retention_in_days = var.agentcore_log_retention_days
 
   tags = merge(local.common_tags, {
-    Name        = "agentcore-gateway-${each.key}"
-    AgentCoreId = each.key
+    Name        = "agentcore-gateway-${each.value.id}"
+    AgentCoreId = each.value.id
   })
 }
 
 resource "aws_cloudwatch_log_delivery_source" "agentcore_gateway" {
-  for_each = local.gateway_arn_map
+  for_each = local.gateway_map
 
   # See agentcore_memory above for the 60-char rationale.
-  name         = substr("gateway-${each.key}", 0, 60)
+  name         = substr("gateway-${each.value.id}", 0, 60)
   log_type     = "APPLICATION_LOGS"
-  resource_arn = each.value
+  resource_arn = each.value.arn
 }
 
 resource "aws_cloudwatch_log_delivery_destination" "agentcore_gateway" {
-  for_each = local.gateway_arn_map
+  for_each = local.gateway_map
 
-  name          = substr("gateway-dst-${each.key}", 0, 60)
+  name          = substr("gateway-dst-${each.value.id}", 0, 60)
   output_format = "json"
 
   delivery_destination_configuration {
@@ -241,7 +256,7 @@ resource "aws_cloudwatch_log_delivery_destination" "agentcore_gateway" {
 }
 
 resource "aws_cloudwatch_log_delivery" "agentcore_gateway" {
-  for_each = local.gateway_arn_map
+  for_each = local.gateway_map
 
   delivery_source_name     = aws_cloudwatch_log_delivery_source.agentcore_gateway[each.key].name
   delivery_destination_arn = aws_cloudwatch_log_delivery_destination.agentcore_gateway[each.key].arn

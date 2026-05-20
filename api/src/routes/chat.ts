@@ -164,6 +164,29 @@ chatRoutes.post("/chat", async (c) => {
       })
     : undefined;
 
+  // Populate release + correlation metadata on the collector right away so
+  // `toJSON()` always carries them. Auth headers are *not* recorded; only an
+  // allow-listed subset of inbound headers ends up in the trace doc. The dev
+  // panel's "copy curl to reproduce" block reads from `chat.turn.start.
+  // requestHeadersPreview`; SOC2-relevant correlation lands on `trace.correlation`.
+  if (collector) {
+    collector.setRelease({
+      gitSha: process.env.GIT_SHA?.trim() || undefined,
+      deployTs: process.env.DEPLOY_TS?.trim() || undefined,
+      nodeVersion: process.versions.node,
+      bunVersion: typeof Bun !== "undefined" ? Bun.version : undefined,
+      env: process.env.DEPLOY_ENV?.trim() || process.env.NODE_ENV?.trim() || undefined,
+    });
+    collector.setCorrelation({
+      requestId,
+      apiClientIp:
+        c.req.raw.headers.get("x-forwarded-for")?.split(",")[0]?.trim() ||
+        c.req.raw.headers.get("x-real-ip") ||
+        undefined,
+      userAgent: c.req.raw.headers.get("user-agent") || undefined,
+    });
+  }
+
   // Build auth + memory context. The two lookups are independent — run them
   // in parallel so we shave one RTT off TTFB compared to awaiting each in
   // sequence. Long-term memory is retrieved via hybrid vector + lexical
@@ -280,7 +303,12 @@ chatRoutes.post("/chat", async (c) => {
       userId,
       requestId,
       startTs: Date.now(),
+      requestHeadersPreview: previewRequestHeaders(c.req.raw.headers),
     });
+    // One-shot Environment snapshot for the Developer details panel. Cheap,
+    // fixed-size; surfaces "why is this turn behaving like a mock" without
+    // the dev having to grep ENV in process logs.
+    collector?.emitEnvironment();
     collector?.event("latency.checkpoint", {
       name: "api.stream.opened",
       elapsedMs: collector ? Date.now() - collector.startTs : 0,
@@ -536,15 +564,35 @@ chatRoutes.post("/chat", async (c) => {
 
       // Dangling fact extraction: Bedrock Haiku call + Mongo write. Stays
       // off the user's clock — errors are logged but never block.
+      //
+      // The collector outlives this request via AsyncLocalStorage closure, so
+      // any `memory.long_term_write` / `memory.long_term_skip` events emitted
+      // by writeLongTermMemory still land on it. The trace was already
+      // persisted above (before `done`), so without a second persistTrace
+      // those events would never make it into the stored doc. Re-persist
+      // after the write settles. `persistTrace` is an upsert, so this is
+      // idempotent and safe to retry even if the first call also succeeded.
       if (!streamFailed && fullReply.trim()) {
         const userMessage = body.message;
         const reply = fullReply;
+        const liveCollector = collector;
         queueMicrotask(() => {
-          void writeLongTermMemory(userId, routeAgentId, userMessage, reply).catch((e) => {
-            reqLog.warn("[chat] writeLongTermMemory failed", {
-              error: e instanceof Error ? e.message : String(e),
+          void writeLongTermMemory(userId, routeAgentId, userMessage, reply)
+            .catch((e) => {
+              reqLog.warn("[chat] writeLongTermMemory failed", {
+                error: e instanceof Error ? e.message : String(e),
+              });
+            })
+            .finally(() => {
+              if (!liveCollector) return;
+              const updated = liveCollector.toJSON();
+              persistTrace(updated).catch((e) => {
+                reqLog.warn("[chat] post-write trace re-persist failed", {
+                  traceId: liveCollector.traceId,
+                  error: e instanceof Error ? e.message : String(e),
+                });
+              });
             });
-          });
         });
       }
     });
@@ -552,6 +600,30 @@ chatRoutes.post("/chat", async (c) => {
     unsubTrace?.();
   });
 });
+
+/** Inbound headers safe to embed in the trace doc for the Developer details
+ *  "copy curl to reproduce" block. Auth-bearing headers are *not* listed;
+ *  they're redacted to `***` on the off chance the allow list grows. */
+const HEADER_ALLOW_LIST = new Set([
+  "x-request-id",
+  "user-agent",
+  "x-forwarded-for",
+  "accept",
+  "content-length",
+]);
+
+function previewRequestHeaders(headers: Headers): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [k, v] of headers.entries()) {
+    const lower = k.toLowerCase();
+    if (HEADER_ALLOW_LIST.has(lower)) {
+      out[lower] = v;
+    } else if (lower === "authorization" || lower === "cookie") {
+      out[lower] = "***";
+    }
+  }
+  return out;
+}
 
 /** Locate the most recent `agentcore.invoke` span id on the collector so we
  *  can splice nested runtime trace events under it. The adapter creates

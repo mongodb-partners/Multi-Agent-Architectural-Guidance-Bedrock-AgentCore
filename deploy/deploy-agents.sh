@@ -95,8 +95,10 @@ log "Phase 2 — Loading credentials from $ENV_FILE..."
 # shellcheck source=/dev/null
 source "$ENV_FILE"
 
-ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text 2>/dev/null) \
-  || err "AWS credentials invalid or expired. Re-authenticate and update .env"
+# shellcheck source=deploy/scripts/_aws-auth.sh
+source "$SCRIPT_DIR/scripts/_aws-auth.sh"
+validate_aws_auth || err "AWS auth validation failed (see above)"
+ACCOUNT_ID="$AWS_AUTH_ACCOUNT_ID"
 ok "AWS account: $ACCOUNT_ID"
 
 SHARED_BUCKET="${PROJECT_NAME}-${ENVIRONMENT}-${ACCOUNT_ID}"

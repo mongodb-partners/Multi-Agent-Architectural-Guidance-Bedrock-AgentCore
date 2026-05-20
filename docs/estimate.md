@@ -4,7 +4,9 @@
 > **Environment:** AWS us-east-1, on-demand pricing, 24/7 availability
 > **Scope:** A POC running for one calendar month with light, demo-only traffic
 
-This is the **frozen baseline** infrastructure: 4 AgentCore Runtimes, Lambda MCP for tools, S3-code artifacts, single EC2 t3.medium, MongoDB Atlas M10, Bedrock KB. Anything in [gap-analysis.md](gap-analysis.md) marked "parked" (Voyage AI on SageMaker etc.) is not in this estimate.
+This is the **deployed baseline** infrastructure: 5 AgentCore Runtimes (orchestrator + 3 specialists + dedicated `mongodb-mcp-runtime`), S3-code artifacts for the 4 agent runtimes, a separate ARM64 container image for the MCP runtime, single EC2 t3.medium, MongoDB Atlas M10, Bedrock KB, the shared observability stack (Voyage SageMaker endpoint when `EMBEDDINGS_PROVIDER=voyage`, CloudWatch log groups, fleet/mongo/cost/atlas dashboards, Bedrock invocation logging), and an ADOT collector sidecar on EC2.
+
+Anything marked "not yet implemented" in [`architecture.md` §9](architecture.md#9-what-is-not-yet-implemented) is not in this estimate.
 
 ---
 
@@ -14,22 +16,24 @@ This is the **frozen baseline** infrastructure: 4 AgentCore Runtimes, Lambda MCP
 |---|---|---|
 | EC2 t3.medium + EBS gp3 30GB + EIP | **$36** | $30 instance + $4 EBS + $3.65 EIP if attached |
 | MongoDB Atlas M10 | **$60** | M10 dedicated, us-east-1, 3 nodes (Atlas charges separately on Atlas billing) |
-| AgentCore Runtimes (4) | **~$30-50** | Pay-per-invocation. Light demo traffic ≈ low end. |
+| AgentCore Runtimes (5 — 4 agent + 1 MCP) | **~$35-60** | Pay-per-invocation + GB-s. Light demo traffic ≈ low end. The MCP runtime adds ~10-20% on top of the 4 agent runtimes. |
 | AgentCore Memory | **~$5** | Event storage + retrieval, light usage |
-| Lambda MCP | **<$1** | 1M free requests/month covers POC |
-| Bedrock — Claude Sonnet 4.6 | **$30-100** | Token-based; depends on demo volume |
-| Bedrock — Titan embeddings | **<$5** | Embedding 100s of small docs is cheap |
+| Bedrock — Claude Sonnet 4.6 (troubleshoot + product) | **$30-100** | Token-based; depends on demo volume |
+| Bedrock — Claude Haiku 4.5 (orchestrator + order-mgmt + classifier + LTM extractor) | **~$5-15** | Haiku is ~10× cheaper than Sonnet on output tokens |
+| Bedrock — Titan embeddings (Voyage fallback) | **<$5** | Embedding 100s of small docs is cheap |
+| Voyage on SageMaker (`ml.g6.xlarge`, when `EMBEDDINGS_PROVIDER=voyage`) | **~$1800/mo if always-on** | $2.45/hr × 730. **Pause the endpoint when not demoing** — see [`reference/deploy-scripts.md`](reference/deploy-scripts.md) `deploy-shared.sh`. Titan fallback adds $0. |
 | Bedrock Knowledge Base | **~$5** | Storage + retrieval |
-| Atlas PrivateLink | **~$10** | $0.01/hr per VPC endpoint |
+| Atlas PrivateLink VPCE (PL mode) **or** VPC peering (peering mode) | **~$10** | $0.01/hr per VPCE in PL mode; peering itself is free (data-transfer-only) but the KB peering NLB adds ~$22/mo + LCU when `enable_kb_peering=true` |
+| Bedrock KB private NLB (`enable_kb_privatelink` or `enable_kb_peering`) | **~$22-30** | Internal NLB + LCU; off if you opt out (privacy regression — see [`architecture.md` §7.4](architecture.md#private-atlas-connectivity)) |
+| CloudWatch (logs + dashboards + invocation logging + Transaction Search) | **~$10-15** | 30-day API retention, 7-day aux retention, EMF metrics, span sampling at 100% |
 | ECR | **<$1** | Free tier covers POC |
 | S3 (state + KB docs + runtime zips) | **<$1** | Light usage |
-| CloudWatch Logs | **<$2** | 30-day retention, low volume |
 | Cognito | **$0** | First 50K MAU free |
 | Secrets Manager | **<$1** | $0.40/secret/month, 1 secret |
-| Route 53 private zone | **$0.50** | $0.50/hosted zone/month |
-| **Total (typical demo month)** | **~$200-260** | Excluding any spikes |
+| Route 53 private zone (PL mode only) | **$0.50** | $0.50/hosted zone/month |
+| **Total (typical demo month, Voyage paused)** | **~$220-310** | Excluding any spikes |
 
-If left running 24/7 with no usage, the **floor cost is ~$120/month** (EC2 + Atlas + EIP + endpoint + flat fees).
+If left running 24/7 with no usage, the **floor cost is ~$140/month** (EC2 + Atlas + EIP + endpoint + flat fees + private KB NLB). **With Voyage always-on, add ~$1800/mo** — pause it.
 
 ---
 
@@ -46,16 +50,17 @@ If left running 24/7 with no usage, the **floor cost is ~$120/month** (EC2 + Atl
 
 `docker compose up -d` runs API + UI as systemd-managed containers. CPU-bound work (Bedrock token streaming) is light. RAM peaks ~1.5GB. Headroom is large.
 
-### 2.2 AgentCore (4 runtimes)
+### 2.2 AgentCore (5 runtimes)
 
 AgentCore charges per **runtime invocation** + **vCPU/GB-seconds** consumed.
 
-For a POC with ~500 requests/day:
-- ~15,000 invocations/month across all 4 runtimes (orchestrator + specialist round trips)
-- Each runtime call lasts 2-8 seconds
+For a POC with ~500 requests/day on the default single-hop path (in-API classifier → specialist):
+- ~15,000 invocations/month on the agent runtimes (one specialist invocation per turn; orchestrator hop bypassed unless `USE_ORCHESTRATOR_RUNTIME=1`)
+- ~15,000-45,000 invocations/month on `mongodb-mcp-runtime` (1-3 Mongo tool calls per turn)
+- Each agent runtime call lasts 2-8 seconds; MCP calls are 100-500 ms
 - Pricing: ~$0.0005 per second of vCPU + $0.0001/GB-second of memory
 
-Estimated: **$30-50/month** at light demo traffic. Could double with heavier demo days.
+Estimated: **$35-60/month** at light demo traffic. The `USE_ORCHESTRATOR_RUNTIME=1` rollback path roughly doubles agent runtime invocations.
 
 ### 2.3 AgentCore Memory
 
@@ -66,31 +71,32 @@ Estimated: **$30-50/month** at light demo traffic. Could double with heavier dem
 
 Estimated: **~$5/month**.
 
-### 2.4 Lambda MCP
+### 2.4 (removed — Lambda MCP)
 
-- Tool calls per chat turn: 1-3 average
-- Light demo: ~1,500 invocations/day = 45,000/month
-- Average duration: 200-800 ms
-- Memory: 512 MB
-- 45,000 × 0.5s × 0.5 GB = 11,250 GB-seconds (free tier is 400,000)
+The legacy Lambda MongoDB MCP host was deleted in CLIENT_REVIEW Phase 7e. MongoDB tool calls now go through the dedicated `mongodb-mcp-runtime` AgentCore Runtime; its cost is rolled into § 2.2 above.
 
-**Cost: $0** for POC (well under free tier). Only meaningful at >> 100k requests/day.
+### 2.5 Bedrock — mixed Claude Sonnet 4.6 / Haiku 4.5
 
-### 2.5 Bedrock (Claude Sonnet 4.6)
+Today's per-agent model selection (see [`config/agents/*.agent.md`](../config/agents/)):
 
-Token pricing (us.anthropic.claude-sonnet-4-6):
-- Input: $3.00 / million tokens
-- Output: $15.00 / million tokens
+| Agent | Model | Input $/M | Output $/M |
+|---|---|---|---|
+| orchestrator | Claude Haiku 4.5 | $1.00 | $5.00 |
+| order-management | Claude Haiku 4.5 | $1.00 | $5.00 |
+| troubleshooting | Claude Sonnet 4.6 | $3.00 | $15.00 |
+| product-recommendation | Claude Sonnet 4.6 | $3.00 | $15.00 |
+| classifier fallback (in-API) | Claude Haiku 4.5 | $1.00 | $5.00 |
+| LTM fact extractor | Claude Haiku 4.5 | $1.00 | $5.00 |
 
-For a POC with ~500 turns/day:
-- Average input: 2,000 tokens (system + memory + history + question)
-- Average output: 400 tokens
-- Daily input: 1M, output: 200k
-- Monthly input: 30M, output: 6M
+For a POC with ~500 turns/day split evenly across specialists:
+- Per turn: ~2,000 input tokens (system + memory + history + question) + 400 output tokens
+- Half the turns hit Sonnet (troubleshooting + product) at ~$0.012 per turn
+- Half hit Haiku (order-management) at ~$0.004 per turn
+- Plus per-turn classifier + extractor on Haiku (~$0.001)
 
-Cost: 30 × $3.00 + 6 × $15.00 = **~$180/month** at this rate.
+Daily: 500 × (~$0.008 avg) = ~$4/day = **~$120/month** at this rate.
 
-But: most demo days will see far fewer turns. **Realistic POC range: $30-100/month.**
+But: most demo days will see far fewer turns. **Realistic POC range: $30-100/month** combined.
 
 ### 2.6 Bedrock embeddings (Titan v2)
 
@@ -121,13 +127,15 @@ Billed on Atlas, not AWS. Atlas charges to a separate credit card.
 
 ### 2.9 Networking
 
-| Item | Cost |
-|---|---|
-| Atlas PrivateLink VPC endpoint | $0.01/hr × 730 = **$7.30** |
-| Cross-AZ data transfer (Lambda → Atlas private) | $0.01/GB, light usage = $0-1 |
-| Route 53 private zone | **$0.50** |
-| Internet egress from EC2 | first 100 GB/month free, light demo = $0 |
-| **Subtotal** | **~$10** |
+| Item | Cost (PrivateLink mode) | Cost (peering mode) |
+|---|---|---|
+| Atlas Interface VPCE | $0.01/hr × 730 = **$7.30** | — |
+| VPC peering connection | — | $0 (peering itself is free) |
+| Cross-AZ data transfer | $0.01/GB, light usage = $0-1 | $0.01/GB, light usage = $0-1 |
+| Route 53 private zone (per cluster) | **$0.50** | — (peering uses Atlas-managed `-pri.mongodb.net` SRV) |
+| Bedrock KB private NLB (`enable_kb_privatelink` / `enable_kb_peering`) | **~$22 + LCU** | **~$22 + LCU (EXPERIMENTAL)** |
+| Internet egress from EC2 | first 100 GB/month free | first 100 GB/month free |
+| **Subtotal** | **~$30** | **~$25** |
 
 ### 2.10 Other AWS services
 
@@ -166,15 +174,15 @@ This drops monthly cost to ~$30 (EBS + Atlas paused storage + flat fees).
 
 ---
 
-## 4. What is NOT in this estimate
+## 4. What is NOT in this estimate (by default)
 
-- **Voyage AI Marketplace subscription** — parked. Would add ~$40/week if activated.
-- **SageMaker endpoint** for Voyage AI — parked. Would add ~$120/month for ml.m5.xlarge.
+- **Voyage AI SageMaker endpoint always-on** — ~$1800/mo on `ml.g6.xlarge`. Provisioned only when `EMBEDDINGS_PROVIDER=voyage` (otherwise the stack uses Bedrock Titan v2). Pause via `deploy-shared.sh` re-apply with `EMBEDDINGS_PROVIDER=titan` when not actively demoing.
 - **NAT Gateway** — not used. Would add $33/month if added.
 - **VPC Interface Endpoints** for Bedrock/AgentCore — not used. Would add ~$102/month.
 - **ALB/CloudFront** — not used.
 - **Auto-scaling group** — not used.
 - **Production HA (multi-AZ EC2 + RDS)** — not in scope for POC.
+- **MongoDB Atlas Prometheus scrape** (`enable_atlas_metrics=true`) — opt-in; adds the ADOT extra scrape config + custom metrics namespace ~$5-10/mo.
 
 ---
 

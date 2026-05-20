@@ -112,7 +112,7 @@ describe("TraceCollector summary + cost", () => {
     const c = makeCollector();
     c.event("mongo.vector_search", {
       embeddingSource: "mock",
-      queryText: "error E-104",
+      queryText: "error NET-204",
       scores: [0.92, 0.85, 0.8],
     });
     const s = c.summary();

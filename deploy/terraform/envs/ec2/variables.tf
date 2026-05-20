@@ -100,35 +100,47 @@ variable "enable_kb_privatelink" {
     When true, an instance of modules/bedrock-kb-privatelink is created and
     its endpoint_service_name is forwarded into module.bedrock_kb. Cost:
     fixed NLB (~$22/mo) plus per-LCU billing.
+
+    Only effective when var.network_mode='privatelink'. Ignored in peering
+    mode — switching connectivity modes requires destroy + redeploy.
   EOT
   default     = true
 }
 
-# ── Voyage AI (optional) ──────────────────────────────────────────────────────
-variable "voyage_model_package_arn" {
+# ── Connectivity mode ─────────────────────────────────────────────────────────
+variable "network_mode" {
   type        = string
-  description = "AWS Marketplace SageMaker model package ARN for Voyage embeddings. Empty disables SageMaker; non-empty must point at a voyage-multimodal-3 package."
-  default     = ""
+  default     = "privatelink"
+  description = "Connectivity mode for Atlas. Must match the value baked into the network stack (envs/network) and the SSM canary at /<shared_vpc_name>/<region>/network_mode. Switching modes requires destroy + redeploy. Privatelink and peering are MUTUALLY EXCLUSIVE — no hybrid path."
 
   validation {
-    condition = (
-      var.voyage_model_package_arn == ""
-      || can(regex("^arn:aws:sagemaker:[a-z0-9-]+:[0-9]{12}:model-package/voyage-multimodal-3($|-)", var.voyage_model_package_arn))
-    )
-    error_message = "voyage_model_package_arn must be empty or point at a voyage-multimodal-3 SageMaker Marketplace model package. Non-multimodal Voyage packages are not allowed."
+    condition     = contains(["privatelink", "peering"], var.network_mode)
+    error_message = "network_mode must be either 'privatelink' or 'peering'."
   }
 }
 
-variable "voyage_instance_type" {
-  type    = string
-  default = "ml.g6.xlarge"
+variable "enable_kb_peering" {
+  type        = bool
+  default     = true
+  description = <<-EOT
+    When network_mode='peering', provision modules/bedrock-kb-peering
+    (NLB-over-peering exposing Atlas IPs via SSM dig). Default true so peering
+    mode keeps KB ingestion private end-to-end.
+
+    EXPERIMENTAL — see modules/bedrock-kb-peering/README.md. If Bedrock's
+    MongoDB driver rejects the TLS cert when reached through this path, the
+    only remediation is to destroy the peering stack and redeploy in
+    privatelink mode (no hybrid PL+peering coexistence — those modes are
+    mutually exclusive per account).
+
+    Set false to leave KB on public SRV (privacy regression vs the default).
+    Ignored when network_mode='privatelink'.
+  EOT
 }
 
-variable "voyage_endpoint_name_suffix" {
-  type        = string
-  description = "Identifier baked into the SageMaker endpoint name. Use voyage-multimodal-3 for the SoW model or voyage-3-5-lite for the supported legacy text-only listing."
-  default     = "voyage-multimodal-3"
-}
+# Note: voyage_* variables live in envs/shared/variables.tf — the SageMaker
+# endpoint is a shared singleton per (account, region, environment). Per-
+# project stacks read the endpoint name + ARN from SSM (see local.shared_voyage_*).
 
 # ── AgentCore ─────────────────────────────────────────────────────────────────
 variable "specialist_agents" {
@@ -165,11 +177,8 @@ variable "create_agentcore_runtime_vpc_endpoints" {
   default     = true
 }
 
-# ── CloudWatch ────────────────────────────────────────────────────────────────
-variable "log_retention_days" {
-  type    = number
-  default = 30
-}
+# Note: log_retention_days lives in envs/shared/variables.tf — the API/UI/
+# MCP/AgentCore/OTel log groups are shared singletons.
 
 # ── CloudWatch GenAI Observability ────────────────────────────────────────────
 variable "enable_genai_observability" {
@@ -207,41 +216,10 @@ variable "agentcore_vended_log_retention_days" {
   default     = 7
 }
 
-# ── Bedrock invocation logging ────────────────────────────────────────────────
-variable "enable_bedrock_invocation_logging" {
-  type        = bool
-  description = "Provision modules/bedrock-invocation-logging. Account-scoped resource — set false when another stack in this AWS account already owns it."
-  default     = true
-}
-
-variable "log_prompt_bodies" {
-  type        = bool
-  description = "Deliver raw prompt + completion bodies to /aws/bedrock/invocations. Defaults FALSE for privacy. Flip true per-environment only with security sign-off (the attached Data Protection Policy still masks PII, but the body still gets written before masking)."
-  default     = false
-}
-
-variable "log_embedding_bodies" {
-  type        = bool
-  description = "Deliver raw embedding input text. Defaults FALSE — embeddings can encode user text and so leak semantically."
-  default     = false
-}
-
-variable "invocation_retention_days" {
-  type        = number
-  description = "Retention for the Bedrock invocation log group. 7 dev / 30 prod typical; longer for regulated industries."
-  default     = 7
-}
-
-variable "data_protection_identifiers" {
-  type        = list(string)
-  description = "Managed PII identifiers for the Data Protection Policy attached to the Bedrock invocation log group. Defaults cover language- + region-independent PII (always valid). Add country-scoped identifiers per environment as needed: e.g. PhoneNumber-US, PhoneNumber-GB, BankAccountNumber-US, Ssn. Full list: https://docs.aws.amazon.com/AmazonCloudWatch/latest/logs/CWL-managed-data-identifiers.html"
-  default = [
-    "EmailAddress",
-    "CreditCardNumber",
-    "AwsSecretKey",
-    "IpAddress",
-  ]
-}
+# Note: Bedrock invocation logging variables (enable_bedrock_invocation_logging,
+# log_prompt_bodies, log_embedding_bodies, invocation_retention_days,
+# data_protection_identifiers) live in envs/shared/variables.tf — Bedrock
+# invocation logging is account-scoped, owned by the shared stack.
 
 # ── ADOT Collector sidecar (Phase 2) ──────────────────────────────────────────
 variable "enable_adot_collector" {
@@ -295,33 +273,7 @@ variable "atlas_prom_host" {
   default     = ""
 }
 
-variable "atlas_replication_lag_threshold_ms" {
-  type        = number
-  description = "Alarm threshold for Atlas secondary replication lag (Phase 4)."
-  default     = 5000
-}
-
-# ── Fleet dashboards + alarms (Phase 3) ───────────────────────────────────────
-variable "enable_fleet_dashboards" {
-  type        = bool
-  description = "Provision modules/cloudwatch-fleet-dashboards (3 dashboards, 7 alarms, audit metric filter, query library). Default true."
-  default     = true
-}
-
-variable "p99_latency_threshold_ms" {
-  type        = number
-  description = "P99 chat-turn latency alarm threshold (ms)."
-  default     = 12000
-}
-
-variable "error_rate_threshold_pct" {
-  type        = number
-  description = "Error-rate alarm threshold as %."
-  default     = 2
-}
-
-variable "throttle_burst_threshold" {
-  type        = number
-  description = "Bedrock throttle alarm threshold (count of ThrottlingException per 5 minutes)."
-  default     = 5
-}
+# Note: atlas_replication_lag_threshold_ms + fleet dashboards variables
+# (enable_fleet_dashboards, p99_latency_threshold_ms, error_rate_threshold_pct,
+# throttle_burst_threshold) live in envs/shared/variables.tf — the fleet,
+# mongo, cost, and atlas dashboards are all shared singletons.

@@ -15,9 +15,9 @@ output "knowledge_base_arn" { value = module.bedrock_kb.knowledge_base_arn }
 output "kb_data_source_id" { value = module.bedrock_kb.data_source_id }
 output "atlas_secret_arn" { value = module.bedrock_kb.atlas_secret_arn }
 
-output "agentcore_memory_id"   { value = module.agentcore_memory.memory_id }
+output "agentcore_memory_id" { value = module.agentcore_memory.memory_id }
 output "agentcore_memory_name" { value = module.agentcore_memory.memory_name }
-output "agentcore_memory_arn"  { value = module.agentcore_memory.memory_arn }
+output "agentcore_memory_arn" { value = module.agentcore_memory.memory_arn }
 
 output "cloudwatch_api_log_group" { value = module.cloudwatch.api_log_group_name }
 output "cloudwatch_ui_log_group" { value = module.cloudwatch.ui_log_group_name }

@@ -37,6 +37,15 @@ class TurnSummary:
     classifications: list[dict] = field(default_factory=list)
     thinking_blocks: list[str] = field(default_factory=list)
     vector_searches: list[dict] = field(default_factory=list)
+    # Memory-write surface: populated from memory.long_term_write /
+    # memory.long_term_skip events (which land after `done` — the UI must
+    # re-fetch the persisted trace doc once to pick them up; see
+    # `merge_post_done_memory_events`).
+    learned_facts: list[str] = field(default_factory=list)
+    learned_duplicates: int = 0
+    learned_embedded: int = 0
+    learned_skip_reason: str | None = None
+    learned_embedding_model: str | None = None
 
     def has_signal(self) -> bool:
         return bool(
@@ -52,6 +61,14 @@ class TurnSummary:
             or self.thinking_blocks
             or self.vector_searches
             or self.trace_id
+            or self.has_memory_signal()
+        )
+
+    def has_memory_signal(self) -> bool:
+        return bool(
+            self.learned_facts
+            or self.learned_duplicates
+            or self.learned_skip_reason
         )
 
     def has_reasoning(self) -> bool:
@@ -161,6 +178,7 @@ def _doc_preview_from_sample(doc: dict, rank: int, collection: str | None = None
     return {
         "rank": rank,
         "collection": collection,
+        "_id": _short_text(doc.get("_id"), 120),
         "id": _short_text(doc.get("_id") or doc.get("id") or doc.get("docId") or doc.get("messageId") or doc.get("sku"), 120),
         "score": doc.get("_score"),
         "title": title,
@@ -256,7 +274,34 @@ def aggregate_summary(events: Iterable[TraceEvent]) -> TurnSummary:
             s.memory_facts_read += int(p.get("entryCount") or 0)
 
         elif t == "memory.long_term_write":
-            s.memory_facts_written += int(p.get("docsInserted") or 0)
+            inserted = int(p.get("docsInserted") or 0)
+            s.memory_facts_written += inserted
+            s.learned_duplicates += int(p.get("duplicatesSkipped") or 0)
+            s.learned_embedded += int(p.get("embeddedCount") or 0)
+            emb_model = p.get("embeddingModel")
+            if isinstance(emb_model, str) and emb_model:
+                s.learned_embedding_model = emb_model
+            # factCandidates is the authoritative list of considered facts —
+            # accepted ones have matched=true and no rejectedReason.
+            candidates = p.get("factCandidates")
+            if isinstance(candidates, list):
+                for c in candidates:
+                    if not isinstance(c, dict):
+                        continue
+                    text = c.get("text")
+                    if not isinstance(text, str) or text == "<redacted>":
+                        continue
+                    if not c.get("matched"):
+                        continue
+                    if c.get("rejectedReason"):
+                        continue
+                    if text not in s.learned_facts:
+                        s.learned_facts.append(text)
+
+        elif t == "memory.long_term_skip":
+            reason = p.get("reason")
+            if isinstance(reason, str) and reason:
+                s.learned_skip_reason = reason
 
         elif t == "agentcore.invoke":
             s.agentcore_invokes += 1
@@ -421,6 +466,8 @@ def _render_vector_sources_panel(s: TurnSummary) -> None:
                 has_url = bool(url)
                 label = f"#{rank} {title}{score_label}"
                 st.markdown(f"- {_markdown_text(label)}")
+                if mongo_id := _short_text(preview.get("_id"), 120):
+                    st.caption(f"Mongo _id: `{_markdown_text(mongo_id)}`")
                 if url:
                     st.caption(f"URL: {url}")
                 if snippet := _short_text(preview.get("snippet"), 160):
@@ -443,6 +490,109 @@ def _render_vector_sources_panel(s: TurnSummary) -> None:
 
         if hit_count > 0 and linked == 0:
             st.caption("No source URL recorded; showing collection and document identifiers when available.")
+
+
+_MEMORY_SKIP_LABELS = {
+    "no_user_id": "no signed-in user — memory write skipped",
+    "empty_assistant_reply": "assistant reply was empty — nothing to learn from",
+    "no_fact_candidates": "the extractor found no personal facts in this turn",
+    "duplicates_only": "nothing new — every candidate was a duplicate of a saved fact",
+    "llm_extractor_failed": "the fact extractor model errored — no facts were added",
+    "no_fact_acceptance": "extractor returned candidates but none matched curation rules",
+}
+
+
+def _render_memory_panel(s: TurnSummary, trace_id: str | None = None) -> None:
+    """Memory-write card: what this turn taught the system about the user.
+
+    Driven by `memory.long_term_write` / `memory.long_term_skip` events.
+    Those land AFTER the SSE `done` event, so the caller must merge a
+    post-`done` trace fetch into the streamed events before aggregating
+    (see `merge_post_done_memory_events`).
+
+    When `trace_id` is supplied and we've never toasted this trace before
+    in this session, also emit a non-blocking `st.toast()`. This makes new
+    memory writes a visible event without forcing the user to expand the
+    Memory card.
+    """
+    if not s.has_memory_signal():
+        return
+
+    toast_seen: set[str] = st.session_state.setdefault("_memory_toast_seen", set())
+    should_toast = bool(trace_id and trace_id not in toast_seen)
+
+    if s.learned_facts:
+        count = len(s.learned_facts)
+        header = f":material/psychology: Learned {count} new fact{'s' if count != 1 else ''}"
+        with st.expander(header, expanded=False):
+            for fact in s.learned_facts:
+                st.markdown(f"- {_markdown_text(fact)}")
+            meta_bits: list[str] = []
+            if s.learned_duplicates:
+                meta_bits.append(f"{s.learned_duplicates} duplicate{'s' if s.learned_duplicates != 1 else ''} skipped")
+            if s.learned_embedded:
+                meta_bits.append(f"{s.learned_embedded} embedded")
+            if s.learned_embedding_model:
+                meta_bits.append(f"model: {s.learned_embedding_model}")
+            if meta_bits:
+                st.caption(" · ".join(meta_bits))
+        if should_toast:
+            preview = s.learned_facts[0]
+            if len(preview) > 80:
+                preview = preview[:77] + "..."
+            extra = f" (+{count - 1} more)" if count > 1 else ""
+            st.toast(f"Memory updated · {preview}{extra}", icon=":material/psychology:")
+            toast_seen.add(trace_id or "")
+    elif s.learned_skip_reason:
+        label = _MEMORY_SKIP_LABELS.get(
+            s.learned_skip_reason,
+            f"memory write skipped ({s.learned_skip_reason})",
+        )
+        st.caption(f":material/psychology: {label}")
+
+
+def merge_post_done_memory_events(
+    streamed: list[TraceEvent],
+    persisted_doc: dict | None,
+) -> list[TraceEvent]:
+    """Augment streamed SSE trace events with post-`done` memory events.
+
+    The `memory.long_term_write` / `memory.long_term_skip` events emit AFTER
+    the SSE `done` event because fact extraction is intentionally dangling
+    (off the user's clock). The trace doc is re-persisted once that microtask
+    completes, so a fresh `GET /traces/:id` ~1-2 s after `done` exposes them.
+    This helper splices those events onto the streamed list without disturbing
+    existing ones.
+    """
+    if not persisted_doc:
+        return streamed
+    persisted_events = persisted_doc.get("events")
+    if not isinstance(persisted_events, list):
+        return streamed
+    seen_keys = {(ev.type, ev.id) for ev in streamed}
+    extras: list[TraceEvent] = []
+    for raw in persisted_events:
+        if not isinstance(raw, dict):
+            continue
+        if raw.get("type") not in ("memory.long_term_write", "memory.long_term_skip"):
+            continue
+        key = (raw.get("type"), raw.get("id") or "")
+        if key in seen_keys:
+            continue
+        extras.append(
+            TraceEvent(
+                type=str(raw.get("type") or ""),
+                id=str(raw.get("id") or ""),
+                ts=int(raw.get("ts") or 0),
+                payload=raw.get("payload") or {},
+                parent_id=raw.get("parentId"),
+                agent_id=raw.get("agentId"),
+                duration_ms=raw.get("durationMs"),
+            )
+        )
+    if not extras:
+        return streamed
+    return [*streamed, *extras]
 
 
 def _render_reasoning_panel(s: TurnSummary) -> None:
@@ -519,6 +669,7 @@ def render_inline_summary(
     _ = raw_events  # Metrics and raw events intentionally live only in Trace Viewer.
     _render_vector_sources_panel(s)
     tid = trace_id or trace_id_from_url(trace_url)
+    _render_memory_panel(s, trace_id=tid)
     if tid and st.button("View full trace →", key=f"view_full_trace_{tid}"):
         open_trace_viewer(tid)
 

@@ -1,0 +1,30 @@
+{
+  "traceId": "dev-fixture-retries",
+  "sessionId": "demo-session",
+  "messageId": "demo-msg-retry",
+  "userId": "demo-user",
+  "agentId": "orchestrator",
+  "createdAt": "2026-05-20T08:02:00.000Z",
+  "events": [
+    { "id": "r1", "ts": 100, "type": "model.retry", "payload": { "provider": "bedrock", "modelId": "anthropic.claude-sonnet-4-5", "attempt": 1, "previousErrorClass": "ThrottlingException", "previousErrorMessage": "rate exceeded", "backoffMs": 100 } },
+    { "id": "r2", "ts": 250, "type": "model.retry", "payload": { "provider": "bedrock", "modelId": "anthropic.claude-sonnet-4-5", "attempt": 2, "previousErrorClass": "ThrottlingException", "previousErrorMessage": "rate exceeded", "backoffMs": 400 } },
+    { "id": "r3", "ts": 700, "type": "agentcore.retry", "payload": { "arn": "arn:aws:bedrock-agentcore:us-east-1:111122223333:runtime/order-management", "targetAgentId": "order-management", "mode": "orchestrator_to_specialist", "attempt": 1, "previousErrorClass": "ServiceUnavailableException", "previousErrorMessage": "service unavailable", "backoffMs": 100, "httpStatus": 503 } }
+  ],
+  "summary": {
+    "inputTokens": 100,
+    "outputTokens": 50,
+    "totalTokens": 150,
+    "toolCalls": 0,
+    "mongoQueries": 0,
+    "mongoDocsReturned": 0,
+    "mcpCalls": 0,
+    "agentcoreHops": 1,
+    "estimatedCostUsd": 0.0008,
+    "costEstimateComplete": true,
+    "costBreakdown": { "anthropic.claude-sonnet-4-5": 0.0008 },
+    "durationMs": 4500,
+    "modelIds": ["anthropic.claude-sonnet-4-5"],
+    "toolsUsed": [],
+    "eventsDropped": 0
+  }
+}

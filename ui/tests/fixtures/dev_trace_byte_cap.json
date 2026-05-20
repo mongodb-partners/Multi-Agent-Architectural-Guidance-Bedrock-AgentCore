@@ -1,0 +1,33 @@
+{
+  "traceId": "dev-fixture-byte-cap",
+  "sessionId": "demo-session",
+  "messageId": "demo-msg-cap",
+  "userId": "demo-user",
+  "agentId": "orchestrator",
+  "createdAt": "2026-05-20T08:01:00.000Z",
+  "truncated": true,
+  "eventsDropped": 3,
+  "release": { "gitSha": "abcdef0" },
+  "events": [
+    { "id": "c1", "ts": 0, "type": "dev.byte_cap_hit", "payload": { "droppedType": "tool.call", "bytes": 4096, "reason": "per_event" } },
+    { "id": "c2", "ts": 1, "type": "dev.byte_cap_hit", "payload": { "droppedType": "model.text_delta_batch", "bytes": 8192, "reason": "per_turn" } },
+    { "id": "c3", "ts": 2, "type": "dev.byte_cap_hit", "payload": { "droppedType": "tool.call", "bytes": 16384, "reason": "per_turn" } }
+  ],
+  "summary": {
+    "inputTokens": 0,
+    "outputTokens": 0,
+    "totalTokens": 0,
+    "toolCalls": 0,
+    "mongoQueries": 0,
+    "mongoDocsReturned": 0,
+    "mcpCalls": 0,
+    "estimatedCostUsd": null,
+    "costEstimateComplete": false,
+    "costBreakdown": {},
+    "durationMs": 0,
+    "modelIds": [],
+    "toolsUsed": [],
+    "eventsDropped": 3,
+    "degraded": true
+  }
+}

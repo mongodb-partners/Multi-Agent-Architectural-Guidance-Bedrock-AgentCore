@@ -88,14 +88,14 @@ describe("buildLexicalSearchPipeline", () => {
   test("wraps a text clause + filter clauses in compound and adds $addFields _score", () => {
     const pipeline = buildLexicalSearchPipeline("waterproof", {
       indexName: "products-text-index",
-      path: "name",
+      path: "title",
       limit: 5,
       filter: { category: "audio", tags: ["outdoor", "sport"] },
     });
     const search = pipeline[0].$search as Record<string, unknown>;
     expect(search.index).toBe("products-text-index");
     const compound = search.compound as { must: unknown[]; filter?: unknown[] };
-    expect(compound.must).toEqual([{ text: { query: "waterproof", path: "name" } }]);
+    expect(compound.must).toEqual([{ text: { query: "waterproof", path: "title" } }]);
     expect(compound.filter).toEqual([
       { equals: { path: "category", value: "audio" } },
       { in: { path: "tags", value: ["outdoor", "sport"] } },

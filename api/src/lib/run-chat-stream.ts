@@ -38,6 +38,35 @@ function strandsHistory(priorTurns: ChatMessage[] | undefined): Message[] | unde
   );
 }
 
+/**
+ * Snapshot the `messages: seed` array passed into the Strands `Agent`
+ * constructor for trace persistence. We do NOT capture the live `Message`
+ * objects (they carry framework metadata); instead, we extract `role` plus
+ * the concatenated text content with a per-item preview cap of 4 KB. The
+ * collector's per-event-type truncation table additionally caps the whole
+ * array via `model.request.messagesSeed` so a 100-turn session can't blow
+ * the per-event byte cap.
+ */
+function seedPreview(seed: Message[] | undefined): Array<{
+  role: string;
+  contentBytes: number;
+  contentPreview: string;
+}> | undefined {
+  if (!seed?.length) return undefined;
+  const PER_ITEM_CAP = 4096;
+  return seed.map((m) => {
+    let text = "";
+    const blocks = (m as unknown as { content?: Array<{ text?: string }> }).content ?? [];
+    for (const b of blocks) {
+      if (typeof b?.text === "string") text += b.text;
+    }
+    const role = (m as unknown as { role?: string }).role ?? "unknown";
+    const contentBytes = Buffer.byteLength(text, "utf8");
+    const contentPreview = text.length > PER_ITEM_CAP ? text.slice(0, PER_ITEM_CAP) + "…[truncated]" : text;
+    return { role, contentBytes, contentPreview };
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Main streaming function
 // ---------------------------------------------------------------------------
@@ -97,6 +126,9 @@ export async function* runChatStream(params: {
     : template.systemPromptBase;
 
   const trace = currentTrace();
+  const systemPromptBytes = Buffer.byteLength(systemPrompt, "utf8");
+  const systemPromptHashFull = createHash("sha256").update(systemPrompt).digest("hex");
+  const systemPromptHashShort = systemPromptHashFull.slice(0, 16);
   if (trace) {
     trace.event("prompt.assembled", {
       personaBytes: Buffer.byteLength(persona, "utf8"),
@@ -107,7 +139,9 @@ export async function* runChatStream(params: {
         bytes: Buffer.byteLength(b.body, "utf8"),
         injectedVia: "system_prompt" as const,
       })),
-      totalBytes: Buffer.byteLength(systemPrompt, "utf8"),
+      totalBytes: systemPromptBytes,
+      bodyBytes: systemPromptBytes,
+      bodyHash: systemPromptHashShort,
       ...(tracePromptBodyEnabled() ? { body: systemPrompt } : {}),
     });
     for (const b of registry.activatedBlocks) {
@@ -117,6 +151,9 @@ export async function* runChatStream(params: {
         injectedVia: "system_prompt",
         bytes: Buffer.byteLength(b.body, "utf8"),
         allowed: true,
+        // 4 KB preview lets the dev panel show *which* skill body got
+        // injected without forcing them to diff the full prompt by hand.
+        bodyPreview: b.body.length > 4096 ? b.body.slice(0, 4096) : b.body,
       });
     }
   }
@@ -150,10 +187,22 @@ export async function* runChatStream(params: {
       modelSpanId = trace.start("model.request", {
         modelId,
         region: process.env.AWS_REGION,
-        systemPromptHash: createHash("sha256").update(systemPrompt).digest("hex").slice(0, 16),
-        systemPromptBytes: Buffer.byteLength(systemPrompt, "utf8"),
+        systemPromptHash: systemPromptHashShort,
+        systemPromptBytes,
         priorTurnsCount: params.priorTurns?.length ?? 0,
         userMessage: params.userMessage,
+        // Lightweight preview of the prior turns (max 6, 200 chars each).
+        priorTurnsPreview: (params.priorTurns ?? []).slice(-6).map((m) => ({
+          role: m.role,
+          bytes: Buffer.byteLength(m.content, "utf8"),
+          preview: m.content.length > 200 ? m.content.slice(0, 200) + "…" : m.content,
+        })),
+        // Source-of-truth replay: the actual `messages: seed` array the
+        // Strands Agent was constructed with. Per-item content is previewed
+        // (≤ 4 KB) and the whole array is implicitly capped at 32 KB by the
+        // per-event-type truncation table (`messagesSeed` is a debug-cap
+        // field — see `DEBUG_CAP_FIELDS` in `trace-collector.ts`).
+        messagesSeed: seedPreview(seed),
       });
     }
     logger.info("[run-chat-stream] model stream start", {
@@ -170,13 +219,17 @@ export async function* runChatStream(params: {
     // Text-delta batching — flush a model.text_delta_batch every ~250 ms.
     let textBatch = "";
     let textBatchStart = 0;
+    let cumulativeBytes = 0; // running total since model.request start
     const FLUSH_MS = 250;
     function flushTextBatch(): void {
       if (!trace || !textBatch) return;
+      const bytes = Buffer.byteLength(textBatch, "utf8");
+      cumulativeBytes += bytes;
       trace.event("model.text_delta_batch", {
         text: textBatch,
-        bytes: Buffer.byteLength(textBatch, "utf8"),
+        bytes,
         windowMs: Date.now() - textBatchStart,
+        cumulativeBytes,
       });
       textBatch = "";
       textBatchStart = 0;

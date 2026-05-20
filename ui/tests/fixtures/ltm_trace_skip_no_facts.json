@@ -1,0 +1,76 @@
+{
+  "traceId": "fixture-ltm-skip-no-facts",
+  "sessionId": "fixture-session-4",
+  "agentId": "order-mgmt",
+  "createdAt": "2026-05-19T10:15:00.000Z",
+  "summary": {
+    "durationMs": 1240,
+    "modelIds": ["us.anthropic.claude-3-7-sonnet-20250219-v1:0"]
+  },
+  "events": [
+    {
+      "type": "chat.turn.start",
+      "ts": 1716116100000,
+      "payload": {
+        "sessionId": "fixture-session-4",
+        "messageId": "fixture-msg-4",
+        "agentId": "order-mgmt",
+        "userId": "user-fixture-4",
+        "startTs": 1716116100000
+      }
+    },
+    {
+      "type": "memory.scoped_read",
+      "ts": 1716116100090,
+      "payload": {
+        "scope": "scoped",
+        "userId": "user-fixture-4",
+        "agentId": "order-mgmt",
+        "facts": [],
+        "entryCount": 0,
+        "bytesInjected": 0,
+        "collectionsQueried": ["agent_memory_facts", "chat_messages"],
+        "injectionPoint": "system_prompt",
+        "latencyMs": 72,
+        "backend": "mongodb",
+        "mode": "hybrid",
+        "queryText": "hi",
+        "embeddingSource": "voyage",
+        "embeddingModel": "voyage-3",
+        "retrieval": {
+          "topK": 14,
+          "fetchK": 24,
+          "vectorHits": 0,
+          "lexicalHits": 0,
+          "rrfMergedCount": 0,
+          "perCollection": [
+            { "collection": "agent_memory_facts", "vectorReturned": 0, "lexicalReturned": 0 },
+            { "collection": "chat_messages", "vectorReturned": 0, "lexicalReturned": 0 }
+          ]
+        }
+      }
+    },
+    {
+      "type": "model.request",
+      "ts": 1716116100200,
+      "payload": {
+        "modelId": "us.anthropic.claude-3-7-sonnet-20250219-v1:0",
+        "region": "us-east-1",
+        "systemPromptHash": "sha256:dead0000",
+        "systemPromptBytes": 2100,
+        "priorTurnsCount": 0,
+        "userMessage": "hi"
+      }
+    },
+    {
+      "type": "memory.long_term_skip",
+      "ts": 1716116101240,
+      "payload": {
+        "reason": "no_fact_candidates",
+        "userId": "user-fixture-4",
+        "agentId": "order-mgmt",
+        "userMessageExcerpt": "hi"
+      }
+    }
+  ]
+}

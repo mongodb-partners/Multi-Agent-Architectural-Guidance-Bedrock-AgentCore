@@ -241,6 +241,16 @@ log "Phase 2 — Loading credentials from $ENV_FILE..."
 # shellcheck source=/dev/null
 source "$ENV_FILE"
 
+# ── Connectivity mode (default privatelink to preserve existing behavior) ───
+NETWORK_MODE="${NETWORK_MODE:-privatelink}"
+ATLAS_PEERING_CIDR="${ATLAS_PEERING_CIDR:-192.168.248.0/21}"
+case "$NETWORK_MODE" in
+  privatelink|peering) ;;
+  *) err "Invalid NETWORK_MODE='${NETWORK_MODE}' — must be 'privatelink' or 'peering'" ;;
+esac
+export TF_VAR_network_mode="$NETWORK_MODE"
+ok "Network mode: ${NETWORK_MODE}"
+
 export TF_VAR_atlas_db_password="${TF_VAR_atlas_db_password:-${TF_VAR_mongodb_password:-}}"
 [[ -n "${TF_VAR_atlas_db_password:-}" ]] || err "Atlas DB password not set. Set TF_VAR_mongodb_password in .env"
 
@@ -252,9 +262,10 @@ export TF_VAR_atlas_private_key="${MONGODB_ATLAS_PRIVATE_KEY:-}"
 [[ -n "${TF_VAR_atlas_public_key:-}" ]]  || err "MONGODB_ATLAS_PUBLIC_KEY not set in .env"
 [[ -n "${TF_VAR_atlas_private_key:-}" ]] || err "MONGODB_ATLAS_PRIVATE_KEY not set in .env"
 
-[[ -n "${AWS_ACCESS_KEY_ID:-}" ]] || err "AWS_ACCESS_KEY_ID not set. Re-authenticate and update .env"
-ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text 2>/dev/null) \
-  || err "AWS credentials invalid or expired. Re-authenticate and update .env"
+# shellcheck source=deploy/scripts/_aws-auth.sh
+source "$SCRIPT_DIR/_aws-auth.sh"
+validate_aws_auth || err "AWS auth validation failed (see above)"
+ACCOUNT_ID="$AWS_AUTH_ACCOUNT_ID"
 ok "AWS account: $ACCOUNT_ID"
 ok "Atlas project: $TF_VAR_atlas_project_id"
 
@@ -400,14 +411,26 @@ fi
 sep
 log "Phase 3b — Verifying shared network is applied (SSM /${SHARED_VPC_NAME}/${AWS_REGION}/...)"
 
-REQUIRED_SSM_PARAMS=(
+SHARED_SSM_PARAMS=(
   "vpc_id"
   "vpc_cidr"
   "public_subnet_ids"
   "private_subnet_ids"
-  "atlas_pl_vpce_id"
-  "atlas_pl_vpce_dns_name"
+  "network_mode"
 )
+if [[ "$NETWORK_MODE" == "privatelink" ]]; then
+  MODE_SSM_PARAMS=(
+    "atlas_pl_vpce_id"
+    "atlas_pl_vpce_dns_name"
+  )
+else
+  MODE_SSM_PARAMS=(
+    "atlas_peering_id"
+    "atlas_container_id"
+    "atlas_peering_cidr"
+  )
+fi
+REQUIRED_SSM_PARAMS=("${SHARED_SSM_PARAMS[@]}" "${MODE_SSM_PARAMS[@]}")
 _MISSING=()
 for p in "${REQUIRED_SSM_PARAMS[@]}"; do
   aws ssm get-parameter \
@@ -417,9 +440,26 @@ for p in "${REQUIRED_SSM_PARAMS[@]}"; do
     || _MISSING+=("$p")
 done
 if (( ${#_MISSING[@]} > 0 )); then
-  err "Shared network not found (missing SSM params: ${_MISSING[*]}). Run ./deploy/scripts/deploy-network.sh first."
+  err "Shared network not found / wrong mode (missing SSM params: ${_MISSING[*]}). Run ./deploy/scripts/deploy-network.sh with NETWORK_MODE=${NETWORK_MODE} first."
 fi
-ok "Shared network ready (${#REQUIRED_SSM_PARAMS[@]} SSM params found)"
+ok "Shared network ready (${#REQUIRED_SSM_PARAMS[@]} SSM params found for mode=${NETWORK_MODE})"
+
+# Cross-check: SSM-recorded network_mode must match this script's NETWORK_MODE.
+# Catches the case where envs/network was applied in the other mode (envs/ec2
+# would also catch it via the `check` block but a precheck gives a nicer
+# remediation hint).
+SHARED_NETWORK_MODE=$(aws ssm get-parameter \
+  --region "$AWS_REGION" \
+  --name "/${SHARED_VPC_NAME}/${AWS_REGION}/network_mode" \
+  --query "Parameter.Value" --output text 2>/dev/null || echo "")
+if [[ "$SHARED_NETWORK_MODE" != "$NETWORK_MODE" ]]; then
+  err "NETWORK MODE MISMATCH: shared network reports mode='${SHARED_NETWORK_MODE}' but env says '${NETWORK_MODE}'.
+     PrivateLink and VPC peering are mutually exclusive per account. To switch modes run:
+       ./deploy/scripts/destroy.sh --mode ec2
+       ./deploy/scripts/destroy.sh --mode shared    # optional
+       ./deploy/scripts/destroy.sh --mode network
+     Then re-run deploy-network.sh with the desired NETWORK_MODE before re-running this script."
+fi
 
 # ══════════════════════════════════════════════════════════════════════════════
 # PHASE 4 — Generate Terraform config (envs/ec2)
@@ -462,17 +502,22 @@ embed_model_id   = "amazon.titan-embed-text-v2:0"
 ec2_instance_type = "t3.medium"
 ec2_key_pair_name = "${EC2_KEY_PAIR}"
 
-# Voyage AI SageMaker (embeds queries on EC2; leave empty to skip endpoint deploy)
-voyage_model_package_arn = "${VOYAGE_ARN}"
-voyage_instance_type     = "${VOYAGE_INSTANCE}"
-voyage_endpoint_name_suffix = "${VOYAGE_ENDPOINT_SUFFIX:-voyage-multimodal-3}"
+# Voyage AI SageMaker variables intentionally NOT passed here — the SageMaker
+# endpoint is provisioned once by envs/shared (deploy-shared.sh) per
+# (account, region, environment) and read via SSM by this per-project ec2 stack.
+# See local.shared_voyage_endpoint_{name,arn} in envs/ec2/main.tf.
 
 # AgentCore Memory TTL
 agentcore_memory_expiry_days = 30
 agentcore_runtime_deployment_mode = "${AGENTCORE_RUNTIME_DEPLOYMENT_MODE}"
 agentcore_code_artifact_prefix    = "${AGENTCORE_CODE_ARTIFACT_PREFIX}"
+
+# Connectivity mode — must match the mode the shared network was applied in
+# (verified by the SSM canary above and by the `check "network_mode_matches_shared"`
+# block in envs/ec2/main.tf). Switching modes requires destroy + redeploy.
+network_mode      = "${NETWORK_MODE}"
 EOF
-ok "terraform.tfvars written"
+ok "terraform.tfvars written (network_mode=${NETWORK_MODE})"
 
 # ── Phase 4a — Discover agents + write agents.auto.tfvars.json ────────────────
 sep
@@ -485,6 +530,43 @@ write_specialist_agents_tfvars
 sep
 log "Phase 4b — Building + uploading AgentCore direct-code artifact..."
 build_and_upload_code_artifact
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PHASE 4c — Shared-stack pre-flight check
+#
+# envs/ec2 reads /<SHARED_VPC_NAME>/<REGION>/voyage_sagemaker_endpoint_name
+# (and the rest of the shared-stack SSM keys) at plan time. Failing inside
+# `terraform plan` with a generic "ParameterNotFound" wastes a few minutes; a
+# pre-flight probe surfaces the missing-prereq case with an actionable message.
+# Only voyage_sagemaker_endpoint_name is enforced strictly here because the
+# value-vs-"_empty_" sentinel distinction is the one downstream agent IAM
+# depends on (sagemaker:InvokeEndpoint scoping).
+# ══════════════════════════════════════════════════════════════════════════════
+sep
+log "Phase 4c — Shared-stack pre-flight check..."
+SHARED_VOYAGE_PARAM="/${SHARED_VPC_NAME}/${AWS_REGION}/voyage_sagemaker_endpoint_name"
+SHARED_VOYAGE_VAL="$(aws ssm get-parameter \
+  --region "$AWS_REGION" \
+  --name "$SHARED_VOYAGE_PARAM" \
+  --query "Parameter.Value" --output text 2>/dev/null || echo "")"
+
+if [[ -z "$SHARED_VOYAGE_VAL" ]]; then
+  err "Shared stack has not been applied — SSM parameter $SHARED_VOYAGE_PARAM is missing.
+     Run: ./deploy/scripts/deploy-shared.sh --env-file $ENV_FILE
+     (or use ./deploy/deploy-full-with-privatelink.sh which does this for you.)"
+fi
+
+if [[ "$EMBEDDINGS_PROVIDER" == "voyage" ]]; then
+  if [[ "$SHARED_VOYAGE_VAL" == "_empty_" ]]; then
+    err "EMBEDDINGS_PROVIDER=voyage but the shared stack provisioned no SageMaker endpoint
+     ($SHARED_VOYAGE_PARAM is the '_empty_' sentinel — meaning VOYAGE_MODEL_PACKAGE_ARN
+     was unset when deploy-shared.sh last ran).
+     Fix: export VOYAGE_MODEL_PACKAGE_ARN in .env and re-run deploy-shared.sh."
+  fi
+  ok "Shared Voyage endpoint: $SHARED_VOYAGE_VAL"
+else
+  ok "Shared stack present (voyage endpoint: ${SHARED_VOYAGE_VAL/#_empty_/<not provisioned, EMBEDDINGS_PROVIDER=titan>})"
+fi
 
 # ══════════════════════════════════════════════════════════════════════════════
 # PHASE 4d — Pre-apply: build + push the mongodb-mcp runtime image
@@ -707,16 +789,24 @@ log "Reconciling MongoDB indexes (safe to re-run)..."
 ok "MongoDB indexes verified (seed-indexes)"
 
 # ══════════════════════════════════════════════════════════════════════════════
-# PHASE 5c — API MongoDB URI normalization (Atlas awsPrivateLink direct URI)
-# Avoid SRV DNS edge-cases in the EC2 API by using Atlas's multi-host
-# awsPrivateLink connection string. The mongodb-mcp AgentCore Runtime gets
-# its MONGODB_URI baked in by Terraform from the cluster's
-# `connection_strings.private_endpoint[*].srv_connection_string` (resolves
-# privately via the per-cluster Route 53 zone), so this normalization is now
-# API-only.
+# PHASE 5c — API MongoDB URI normalization
+#
+# privatelink mode: compute Atlas's awsPrivateLink direct URI (multi-host,
+#   tlsAllowInvalidHostnames=true) so the EC2 API avoids SRV DNS edge-cases.
+# peering mode: compute the cluster's connectionStrings.privateSrv (when
+#   "Enable Private DNS for Peering" is on) else connectionStrings.private
+#   (multi-host non-SRV). Peering hostnames are in the cluster's TLS SAN list,
+#   so NO tlsAllowInvalidHostnames is needed.
+#
+# The mongodb-mcp AgentCore Runtime gets its MONGODB_URI baked in by
+# Terraform (mode-aware in envs/ec2/main.tf), so this normalization is now
+# API-only in both modes.
 # ══════════════════════════════════════════════════════════════════════════════
-if [[ -n "$ATLAS_PRIVATELINK_ENDPOINT_ID" ]]; then
-  sep
+sep
+if [[ "$NETWORK_MODE" == "privatelink" ]]; then
+  if [[ -z "$ATLAS_PRIVATELINK_ENDPOINT_ID" ]]; then
+    err "Missing Atlas PrivateLink endpoint ID for deterministic deploy (privatelink mode)"
+  fi
   log "Phase 5c — Computing Atlas awsPrivateLink direct URI for the EC2 API..."
   if API_PRIVATE_URI=$(ATLAS_PROJECT_ID="$TF_VAR_atlas_project_id" \
     CLUSTER_NAME="${PROJECT_NAME}-${ENVIRONMENT}" \
@@ -767,7 +857,63 @@ PY
     err "Could not compute Atlas awsPrivateLink URI for the API"
   fi
 else
-  err "Missing Atlas PrivateLink endpoint ID for deterministic deploy"
+  # ── peering mode ───────────────────────────────────────────────────────────
+  log "Phase 5c — Computing Atlas peering URI for the EC2 API..."
+  if API_PRIVATE_URI=$(ATLAS_PROJECT_ID="$TF_VAR_atlas_project_id" \
+    CLUSTER_NAME="${PROJECT_NAME}-${ENVIRONMENT}" \
+    BASE_MONGODB_URI="$MONGODB_URI" \
+    MONGODB_ATLAS_PUBLIC_KEY="${MONGODB_ATLAS_PUBLIC_KEY:-}" \
+    MONGODB_ATLAS_PRIVATE_KEY="${MONGODB_ATLAS_PRIVATE_KEY:-}" \
+    python3 - <<'PY'
+import json, os, subprocess, urllib.parse
+project = os.environ["ATLAS_PROJECT_ID"]
+cluster = os.environ["CLUSTER_NAME"]
+base_uri = os.environ["BASE_MONGODB_URI"]
+public_key = os.environ.get("MONGODB_ATLAS_PUBLIC_KEY", "")
+private_key = os.environ.get("MONGODB_ATLAS_PRIVATE_KEY", "")
+if not public_key or not private_key:
+    raise SystemExit("missing Atlas API keys")
+parsed = urllib.parse.urlsplit(base_uri)
+user = urllib.parse.quote(urllib.parse.unquote(parsed.username or ""))
+pwd = urllib.parse.quote(urllib.parse.unquote(parsed.password or ""))
+resp = subprocess.check_output([
+    "curl", "-s",
+    "--user", f"{public_key}:{private_key}",
+    "--digest",
+    "-H", "Accept: application/vnd.atlas.2023-01-01+json",
+    f"https://cloud.mongodb.com/api/atlas/v2/groups/{project}/clusters/{cluster}",
+], text=True)
+data = json.loads(resp)
+conn = (data.get("connectionStrings") or {})
+# Prefer SRV form (when "Enable Private DNS for Peering" is on); fall back to
+# the multi-host non-SRV form (connection_strings[0].private). Both resolve
+# to private peering IPs from inside the peered VPC.
+priv_srv = conn.get("privateSrv") or ""
+priv_multi = conn.get("private") or ""
+if priv_srv:
+    # mongodb+srv://<host>
+    host = priv_srv.replace("mongodb+srv://", "", 1)
+    print(f"mongodb+srv://{user}:{pwd}@{host}/?retryWrites=true&w=majority")
+elif priv_multi:
+    # mongodb://<authority>[/?...]
+    no_scheme = priv_multi.replace("mongodb://", "", 1)
+    sep_char = "&" if "?" in no_scheme else "/?"
+    # Peering hostnames (*.<id>-pri.mongodb.net) ARE in the cert SAN list — no
+    # tlsAllowInvalidHostnames needed (unlike PrivateLink).
+    print(f"mongodb://{user}:{pwd}@{no_scheme}{sep_char}retryWrites=true&w=majority")
+else:
+    raise SystemExit("Atlas cluster has neither connectionStrings.privateSrv nor connectionStrings.private — peering not active yet?")
+PY
+  ); then
+    MONGODB_URI="$API_PRIVATE_URI"
+    # Sanity check — peering URIs MUST contain -pri.mongodb.net
+    if ! echo "$MONGODB_URI" | grep -q '\-pri\.mongodb\.net'; then
+      err "Computed peering URI does not contain '-pri.mongodb.net' — would route over the public SRV. Aborting to preserve privacy parity."
+    fi
+    ok "API MongoDB URI normalized to peering connection string (private DNS form: $(echo "$MONGODB_URI" | grep -q 'mongodb+srv' && echo SRV || echo multi-host))"
+  else
+    err "Could not compute Atlas peering URI for the API. Verify the peering connection is ACTIVE and that Atlas has populated the cluster's connectionStrings.private[Srv]."
+  fi
 fi
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -951,6 +1097,15 @@ MEMORY_TTL_DAYS=30
 # AccessDenied on freshly granted Bedrock accounts. Override only if you have
 # enabled a different tool-use-capable model in your account.
 MEMORY_EXTRACTION_MODEL_ID=us.anthropic.claude-haiku-4-5-20251001-v1:0
+
+# LTM / trace value gating — sourced from .env so flips are deploy-tracked
+# (no SSH/SSM hand-editing of /opt/multiagent/.env.live on EC2).
+#   MEMORY_TRACE_VALUES=1 → raw fact strings in trace events. Default 0 = "<redacted>".
+#   TRACE_PROMPT_BODY=1   → prompt.assembled.body attached (full system prompt).
+#   TRACE_REDACT=1        → blanket redactDeep pass over every event payload.
+MEMORY_TRACE_VALUES=${MEMORY_TRACE_VALUES:-0}
+TRACE_PROMPT_BODY=${TRACE_PROMPT_BODY:-0}
+TRACE_REDACT=${TRACE_REDACT:-0}
 
 # CloudWatch (API + UI log groups; journald → CW agent on EC2 ships here)
 CLOUDWATCH_LOG_GROUP=${CW_API_LOG_GROUP}
@@ -1295,6 +1450,17 @@ export _M_AC_MEM="$AGENTCORE_MEMORY_STORE_ID" _M_AC_GW="$AGENTCORE_GATEWAY_URL" 
 export _M_ATLAS_PROJ="$TF_VAR_atlas_project_id" _M_ATLAS_HOST="$ATLAS_MONGO_HOST"
 export _M_TOOL_MODE="hybrid"
 export _M_KB_SECRET_NAME="${PROJECT_NAME}-bedrock-kb-creds-${ENVIRONMENT}"
+# Capture how this deploy authenticated so post-deploy smoke / audit tooling
+# can detect a stale manifest (deploy ran under a different principal than
+# the current sts:GetCallerIdentity). validate_aws_auth populates the
+# AWS_AUTH_* exports earlier in Phase 1.
+export _M_AUTH_MODE="${AWS_AUTH_MODE:-${AUTH_MODE:-iam}}"
+export _M_AUTH_CALLER_ARN="${AWS_AUTH_CALLER_ARN:-$(aws sts get-caller-identity --query Arn --output text 2>/dev/null || echo unknown)}"
+# Connectivity mode + KB connectivity for post-deploy smoke / dashboards.
+export _M_NETWORK_MODE="$NETWORK_MODE"
+export _M_ATLAS_PEERING_CIDR="${ATLAS_PEERING_CIDR:-}"
+export _M_ATLAS_PEERING_CONN_ID="$(terraform output -raw atlas_peering_connection_id 2>/dev/null || echo "")"
+export _M_KB_CONNECTIVITY_MODE="$(terraform output -raw kb_connectivity_mode 2>/dev/null || echo "")"
 
 python3 - <<'PYEOF' > "$MANIFEST_FILE"
 import json, os
@@ -1306,6 +1472,16 @@ manifest = {
   "aws_account":   v("_M_ACCOUNT"),
   "aws_region":    v("_M_REGION"),
   "environment":   v("_M_ENV"),
+  "network": {
+    "mode":                     v("_M_NETWORK_MODE"),
+    "atlas_peering_cidr":       v("_M_ATLAS_PEERING_CIDR"),
+    "atlas_peering_conn_id":    v("_M_ATLAS_PEERING_CONN_ID"),
+    "kb_connectivity_mode":     v("_M_KB_CONNECTIVITY_MODE"),
+  },
+  "auth": {
+    "mode":        v("_M_AUTH_MODE"),
+    "caller_arn":  v("_M_AUTH_CALLER_ARN"),
+  },
   "resources": {
     "s3_state_bucket":            v("_M_BUCKET"),
     "bedrock_kb_id":              v("_M_KB"),

@@ -60,7 +60,7 @@ flowchart LR
   MCP[MongoDB MCP Runtime<br/>mcp-runtimes/mongodb-mcp/src/lib/logger.ts]
   ADOT[ADOT Collector sidecar<br/>127.0.0.1:4318 OTLP<br/>SigV4 outbound]
   CWA[amazon-cloudwatch-agent<br/>(EC2)]
-  CWG[(CloudWatch Log Groups<br/>/&lt;project&gt;/&lt;env&gt;/{api,ui,mcp,agentcore,otel})]
+  CWG[(CloudWatch Log Groups<br/>/&lt;SHARED_RESOURCE_PREFIX&gt;/&lt;env&gt;/{api,ui,mcp,agentcore,otel,otel-atlas})]
   AWS[(/aws/bedrock-agentcore/runtimes/*<br/>AWS-managed)]
   SPANS[(aws/spans<br/>Transaction Search)]
   INV[(/aws/bedrock/invocations<br/>+ Data Protection Policy)]
@@ -132,8 +132,9 @@ OpenTelemetry context lives in `@opentelemetry/context-async-hooks.AsyncLocalSto
 
 ### Why this matters operationally
 
-- `X-Trace-Id` from a single `POST /chat` matches the `trace_id` field in **every** log line emitted by that turn — in `/<project>/<env>/api`, in the AgentCore runtime's log group, and in MCP's group.
+- `X-Trace-Id` from a single `POST /chat` matches the `trace_id` field in **every** log line emitted by that turn — in `/<SHARED_RESOURCE_PREFIX>/<env>/api`, in the AgentCore runtime's log group (`/aws/bedrock-agentcore/runtimes/<runtime-id>/...`), and in any MCP runtime group.
 - The Trace Viewer's `traceId` is a **different** identifier (the `TraceCollector` UUID, persisted in MongoDB `traces`). Both coexist; both are useful. The `TraceCollector` UUID is included on the OTel span as the `trace.collector_id` attribute so they can be joined.
+- The persisted trace doc now also carries `trace.otel = { traceId, rootSpanId }` (32-hex / 16-hex) at the top level — captured at finalize time by `TraceCollector.captureOtelIds()`. The Trace Viewer's **Developer details → Identifiers** sub-section builds ServiceLens / X-Ray / Logs Insights deep links from this directly, so on-call doesn't have to copy the W3C trace id by hand. Only present on `?include=dev|full` projections (stripped from `?include=core` for client-demo size).
 
 See [`tests/integration/chat-sse-trace.integration.test.ts`](../api/tests/integration/chat-sse-trace.integration.test.ts) for the wire-level contract.
 
@@ -208,7 +209,7 @@ Test coverage:
 | `/ui` | `aux_retention_days` (default **7**) | `multiagent-ui.service` → `/var/log/multiagent-ui.log` → CW agent | `modules/cloudwatch` |
 | `/mcp` | `aux_retention_days` (default **7**) | Reserved (MongoDB MCP runs as an AgentCore Runtime; its logs land under `/aws/bedrock-agentcore/...`). | `modules/cloudwatch` |
 | `/agentcore` | `aux_retention_days` (default **7**) | Reserved — AgentCore Runtime logs are AWS-managed at `/aws/bedrock-agentcore/runtimes/<id>/`. | `modules/cloudwatch` |
-| `/<project>/<env>/otel` | `log_retention_days` (default **30**) | ADOT Collector sidecar's `awscloudwatchlogs` exporter — receives OTLP application logs from API + Streamlit. | `modules/adot-collector` |
+| `/<SHARED_RESOURCE_PREFIX>/<env>/otel` | `log_retention_days` (default **30**) | ADOT Collector sidecar's `awscloudwatchlogs` exporter — receives OTLP application logs from API + Streamlit. | `modules/adot-collector` |
 | `aws/spans` | `span_retention_days` (default **14**) | X-Ray Transaction Search ingest. Receives OTLP spans signed by the ADOT sidecar + the AgentCore Runtime's own service-vended spans. | `modules/cloudwatch-genai` |
 | `/aws/vendedlogs/bedrock-agentcore/memory/APPLICATION_LOGS/<id>` | `agentcore_log_retention_days` (default **7**) | AgentCore Memory service-vended `APPLICATION_LOGS`. | `modules/cloudwatch-genai` |
 | `/aws/vendedlogs/bedrock-agentcore/gateway/APPLICATION_LOGS/<id>` | `agentcore_log_retention_days` (default **7**) | AgentCore Gateway service-vended `APPLICATION_LOGS`. | `modules/cloudwatch-genai` |
@@ -289,7 +290,7 @@ Disable in CI / unit tests with `METRICS_EMITTER_ENABLED=0`. Dimension cardinali
 [`e2e-smoke/post-deploy-smoke.py`](../e2e-smoke/post-deploy-smoke.py) `check_cloudwatch_join`:
 
 1. `POST /chat`, capture `X-Trace-Id` from response headers.
-2. Poll `aws logs filter-log-events --log-group-name /<project>/<env>/api --filter-pattern '{ $.trace_id = "<id>" }'` for up to 90 s. Pass when ≥1 match.
+2. Poll `aws logs filter-log-events --log-group-name /<SHARED_RESOURCE_PREFIX>/<env>/api --filter-pattern '{ $.trace_id = "<id>" }'` for up to 90 s. Pass when ≥1 match.
 3. Discover `/aws/bedrock-agentcore/runtimes/*` log groups and run the same filter against up to 8 of them. Pass when ≥1 match (proves cross-boundary `_trace` propagation).
 
 Both probes are **warn-on-miss** rather than hard-fail because journald lag and AgentCore log-group provisioning are best-effort. Operators are expected to read the smoke output and notice WARN lines on first deploy.

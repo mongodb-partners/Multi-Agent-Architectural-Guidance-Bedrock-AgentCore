@@ -12,8 +12,12 @@
  *   the agent can answer "why did you return X in a previous session?"
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { getAgent } from "../../src/lib/config-scan.ts";
+import { getAgent, loadAgentPersona } from "../../src/lib/config-scan.ts";
 import { memoryIncludeAssistantMessages } from "../../src/lib/long-term-memory.ts";
+import {
+  LONG_TERM_MEMORY_RECALL_RULES,
+  withLongTermMemory,
+} from "../../src/lib/prompt.ts";
 
 describe("orchestrator long-term memory config", () => {
   test("orchestrator has memory.longTerm = true (required for LTM retrieval in chat.ts)", () => {
@@ -70,5 +74,44 @@ describe("chat_messages assistant recall (MEMORY_INCLUDE_ASSISTANT_MESSAGES)", (
   test("excluded when env var is 'false'", () => {
     process.env.MEMORY_INCLUDE_ASSISTANT_MESSAGES = "false";
     expect(memoryIncludeAssistantMessages()).toBe(false);
+  });
+});
+
+describe("framework-canonical long-term memory recall rules", () => {
+  test("LONG_TERM_MEMORY_RECALL_RULES contains the four non-negotiable instructions", () => {
+    // Lock down the headline rules: the names matter because chat-stream and
+    // the orchestrator persona used to duplicate them inline. If you add or
+    // remove a rule here, update agent personas and docs in the same change.
+    expect(LONG_TERM_MEMORY_RECALL_RULES).toContain("Memory recall rules (framework-injected)");
+    expect(LONG_TERM_MEMORY_RECALL_RULES).toContain("Use the context proactively");
+    expect(LONG_TERM_MEMORY_RECALL_RULES).toContain("Never deny having memory when the block is non-empty");
+    expect(LONG_TERM_MEMORY_RECALL_RULES).toContain("Don't ask for information you already have");
+    expect(LONG_TERM_MEMORY_RECALL_RULES).toContain("Don't make up details that aren't in memory");
+  });
+
+  test("withLongTermMemory injects the canonical rules block when context is non-empty", () => {
+    const out = withLongTermMemory("BASE", "User likes teal.");
+    expect(out).toContain("BASE");
+    expect(out).toContain("User likes teal.");
+    expect(out).toContain(LONG_TERM_MEMORY_RECALL_RULES);
+  });
+
+  test("withLongTermMemory leaves the prompt untouched when no context is provided", () => {
+    expect(withLongTermMemory("BASE", "")).toBe("BASE");
+    expect(withLongTermMemory("BASE", "   ")).toBe("BASE");
+  });
+
+  test("orchestrator persona no longer copies the recall rules inline", () => {
+    // Companion guarantee for the prompt consolidation: personas should
+    // delegate to the framework block rather than duplicate it.
+    const persona = (loadAgentPersona("orchestrator") || "").toLowerCase();
+    expect(persona).not.toContain("proactive memory recall (critical)");
+    expect(persona).not.toContain("never say \"what accounts did you share?\"");
+  });
+
+  test("order-management persona no longer copies the recall rules inline", () => {
+    const persona = (loadAgentPersona("order-management") || "").toLowerCase();
+    expect(persona).not.toContain("you do have long-term memory");
+    expect(persona).not.toContain("do not say \"i don't have the ability to recall previous conversations");
   });
 });

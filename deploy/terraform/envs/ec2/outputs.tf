@@ -17,8 +17,30 @@ output "atlas_connection_string" {
 
 # Shared Atlas Interface VPCE id (from envs/network via SSM). deploy.sh
 # Phase 5c uses this to look up the cluster's awsPrivateLink direct URI.
+# Empty in peering mode.
 output "atlas_privatelink_endpoint_id" {
   value = local.shared_atlas_pl_vpce_id
+}
+
+# ── Connectivity mode + peering visibility (mode-aware, empty in other mode) ─
+output "network_mode" {
+  value       = var.network_mode
+  description = "Connectivity mode used by this ec2 env — 'privatelink' or 'peering'. Recorded in deploy-manifest.json by deploy-project.sh."
+}
+
+output "atlas_peering_connection_id" {
+  value       = local.shared_atlas_peering_id
+  description = "AWS VPC peering connection id (pcx-...). Empty in privatelink mode."
+}
+
+output "atlas_peering_cidr" {
+  value       = local.shared_atlas_peering_cidr
+  description = "Atlas-side CIDR. Empty in privatelink mode."
+}
+
+output "kb_connectivity_mode" {
+  value       = local.kb_connectivity_mode
+  description = "Which Bedrock KB ingestion path was provisioned. One of: 'privatelink' (PL NLB+VPCE), 'peering-nlb' (peering NLB+VPCE, experimental), 'public-srv' (no NLB; uses Atlas public SRV)."
 }
 
 # ── EC2 ───────────────────────────────────────────────────────────────────────
@@ -46,13 +68,18 @@ output "kb_data_source_id" { value = module.bedrock_kb.data_source_id }
 output "atlas_secret_arn" { value = module.bedrock_kb.atlas_secret_arn }
 
 output "bedrock_kb_privatelink_enabled" {
-  value       = var.enable_kb_privatelink
-  description = "True when CLIENT_REVIEW P1-6 Option A is active (NLB + VPC Endpoint Service in front of the Atlas VPCE)."
+  value       = local.use_kb_privatelink
+  description = "True when CLIENT_REVIEW P1-6 Option A is active (PL NLB + VPC Endpoint Service in front of the Atlas VPCE). Always false in peering mode — see kb_connectivity_mode for peering-side KB path."
+}
+
+output "bedrock_kb_peering_enabled" {
+  value       = local.use_kb_peering_nlb
+  description = "True when peering-NLB KB ingestion is active (EXPERIMENTAL). See modules/bedrock-kb-peering/README.md."
 }
 
 output "bedrock_kb_endpoint_service_name" {
-  value       = length(module.bedrock_kb_privatelink) > 0 ? module.bedrock_kb_privatelink[0].endpoint_service_name : ""
-  description = "Endpoint Service name forwarded into the Bedrock KB MongoDB Atlas configuration when PrivateLink is enabled. Empty otherwise."
+  value       = local.kb_endpoint_service_name
+  description = "Endpoint Service name forwarded into the Bedrock KB MongoDB Atlas configuration. Populated for both privatelink and peering-nlb KB modes; empty for public-srv mode."
 }
 
 # ── AgentCore ─────────────────────────────────────────────────────────────────
@@ -107,13 +134,26 @@ output "mongodb_mcp_runtime_endpoint" {
   description = "Direct Streamable-HTTP MCP endpoint for the mongodb-mcp AgentCore Runtime."
 }
 
-# ── Voyage AI ─────────────────────────────────────────────────────────────────
+# ── Voyage AI (republished from envs/shared via SSM) ──────────────────────────
+# Kept as a passthrough so deploy-project.sh + e2e smoke scripts that
+# `terraform output -raw voyage_endpoint_name` keep working unchanged.
 output "voyage_endpoint_name" {
-  value = length(module.voyage_sagemaker) > 0 ? module.voyage_sagemaker[0].endpoint_name : ""
+  value       = local.shared_voyage_endpoint_name
+  description = "Voyage SageMaker endpoint name. Sourced from envs/shared via SSM. Empty when voyage_model_package_arn was unset in the shared stack."
 }
 
-# ── CloudWatch ────────────────────────────────────────────────────────────────
-output "cloudwatch_api_log_group" { value = module.cloudwatch.api_log_group_name }
-output "cloudwatch_ui_log_group" { value = module.cloudwatch.ui_log_group_name }
-output "cloudwatch_mcp_log_group" { value = module.cloudwatch.mcp_log_group_name }
-output "cloudwatch_agentcore_log_group" { value = module.cloudwatch.agentcore_log_group_name }
+# ── CloudWatch (republished from envs/shared via SSM) ─────────────────────────
+output "cloudwatch_api_log_group" { value = local.shared_cw_api_log_group }
+output "cloudwatch_ui_log_group" { value = local.shared_cw_ui_log_group }
+output "cloudwatch_mcp_log_group" { value = local.shared_cw_mcp_log_group }
+output "cloudwatch_agentcore_log_group" { value = local.shared_cw_agentcore_log_group }
+output "cloudwatch_otel_log_group" { value = local.shared_cw_otel_log_group }
+output "cloudwatch_otel_atlas_log_group" { value = local.shared_cw_otel_atlas_log_group }
+output "bedrock_invocation_log_group" {
+  value       = local.shared_bedrock_invocation_log_group
+  description = "Bedrock model-invocation log group (account-scoped). Sourced from envs/shared. Empty when invocation logging is disabled."
+}
+output "bedrock_audit_log_group" {
+  value       = local.shared_bedrock_audit_log_group
+  description = "Bedrock invocation audit-findings log group. Sourced from envs/shared. Empty when invocation logging is disabled."
+}

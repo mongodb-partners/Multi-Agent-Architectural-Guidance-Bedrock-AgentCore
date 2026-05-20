@@ -1,6 +1,12 @@
 variable "project_name" {
   type        = string
-  description = "Project name prefix used for resource naming + Project tag."
+  description = "Operator/team project name. Used only for the Project tag — resource names use shared_resource_prefix so multiple per-project envs/ec2 stacks can share the singleton Bedrock invocation logging stack owned by envs/shared."
+}
+
+variable "shared_resource_prefix" {
+  type        = string
+  description = "Prefix used in the IAM role name (\"$${prefix}-bedrock-invocation-logging-<env>\") and the Data Protection Policy name (\"$${prefix}-<env>-bedrock-pii\"). Passed in from envs/shared so renaming \"multiagent\" → anything else is one-variable change. Must be stable per (account, region, environment) because Bedrock invocation logging is an account-scoped singleton."
+  default     = "multiagent"
 }
 
 variable "environment" {

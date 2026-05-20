@@ -19,11 +19,16 @@ output "config_etag" {
 }
 
 output "otel_log_group_name" {
-  value       = aws_cloudwatch_log_group.otel.name
-  description = "Destination CW Logs group for OTLP-shipped application logs."
+  value       = var.otel_log_group_name
+  description = "Destination CW Logs group for OTLP-shipped application logs (owned by envs/shared)."
 }
 
 output "otel_log_group_arn" {
-  value       = aws_cloudwatch_log_group.otel.arn
-  description = "ARN of the OTLP application logs group."
+  value       = length(data.aws_cloudwatch_log_group.otel) > 0 ? data.aws_cloudwatch_log_group.otel[0].arn : ""
+  description = "ARN of the OTLP application logs group (resolved via data lookup against the shared stack's group)."
+}
+
+output "otel_atlas_log_group_arn" {
+  value       = length(data.aws_cloudwatch_log_group.otel_atlas) > 0 ? data.aws_cloudwatch_log_group.otel_atlas[0].arn : ""
+  description = "ARN of the OTel-atlas sibling log group used by the awsemf exporter when Atlas Prometheus scraping is on."
 }

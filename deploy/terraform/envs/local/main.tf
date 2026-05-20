@@ -119,8 +119,12 @@ module "agentcore_memory" {
 # CloudWatch — log groups for API + MCP (local processes stream here if configured)
 # ══════════════════════════════════════════════════════════════════════════════
 module "cloudwatch" {
-  source             = "../../modules/cloudwatch"
-  project_name       = var.project_name
-  environment        = var.environment
-  api_retention_days = var.log_retention_days
+  source = "../../modules/cloudwatch"
+  # Distinct prefix so envs/local log groups (/multiagent-local/<env>/api …)
+  # never collide with the envs/shared log groups (/multiagent/<env>/api …)
+  # if both happen to run in the same AWS account + region + env.
+  shared_resource_prefix = "multiagent-local"
+  project_name           = var.project_name
+  environment            = var.environment
+  api_retention_days     = var.log_retention_days
 }

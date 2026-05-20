@@ -74,12 +74,19 @@ resource "aws_s3_object" "config" {
 # Why a separate group: the OTLP path can carry richer structured fields
 # than file-tailed JSON (resource attributes, span context per line). Mixing
 # them in /api would make Logs Insights queries ambiguous.
+#
+# This module does NOT create the log group itself — the shared stack
+# (envs/shared) owns /multiagent/<env>/otel and its `-atlas` sibling so the
+# group is stable across multiple per-project envs/ec2 stacks. We look up
+# both ARNs here so a caller that wants to attach tight IAM (e.g. the EC2
+# instance role) can wire them in.
 # -----------------------------------------------------------------------------
-resource "aws_cloudwatch_log_group" "otel" {
-  name              = var.otel_log_group_name
-  retention_in_days = var.otel_retention_days
+data "aws_cloudwatch_log_group" "otel" {
+  count = var.otel_log_group_name != "" ? 1 : 0
+  name  = var.otel_log_group_name
+}
 
-  tags = merge(local.common_tags, {
-    Name = var.otel_log_group_name
-  })
+data "aws_cloudwatch_log_group" "otel_atlas" {
+  count = var.otel_log_group_name != "" ? 1 : 0
+  name  = "${var.otel_log_group_name}-atlas"
 }

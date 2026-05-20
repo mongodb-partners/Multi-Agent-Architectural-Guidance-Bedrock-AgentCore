@@ -1,0 +1,109 @@
+{
+  "traceId": "fixture-ltm-read-redacted",
+  "sessionId": "fixture-session-1",
+  "agentId": "order-mgmt",
+  "createdAt": "2026-05-19T10:00:00.000Z",
+  "summary": {
+    "durationMs": 4321,
+    "modelIds": ["us.anthropic.claude-3-7-sonnet-20250219-v1:0"],
+    "memoryBytesInjected": 1872,
+    "memoryEntriesInjected": 12
+  },
+  "events": [
+    {
+      "type": "chat.turn.start",
+      "ts": 1716115200000,
+      "payload": {
+        "sessionId": "fixture-session-1",
+        "messageId": "fixture-msg-1",
+        "agentId": "order-mgmt",
+        "userId": "user-fixture-1",
+        "requestId": "req-fixture-1",
+        "startTs": 1716115200000
+      }
+    },
+    {
+      "type": "auth.context_build",
+      "ts": 1716115200050,
+      "payload": {
+        "userId": "user-fixture-1",
+        "jwtClaims": {
+          "sub": "user-fixture-1",
+          "iss": "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_FAKEPOOL",
+          "aud": "fake-client-id"
+        },
+        "customersResolved": 1,
+        "ordersResolved": 3
+      }
+    },
+    {
+      "type": "memory.scoped_read",
+      "ts": 1716115200180,
+      "payload": {
+        "scope": "scoped",
+        "userId": "user-fixture-1",
+        "agentId": "order-mgmt",
+        "facts": [
+          "<redacted>",
+          "<redacted>",
+          "<redacted>"
+        ],
+        "entryCount": 12,
+        "bytesInjected": 1872,
+        "collectionsQueried": ["agent_memory_facts", "chat_messages"],
+        "injectionPoint": "system_prompt",
+        "latencyMs": 113,
+        "backend": "mongodb",
+        "primaryFailed": false,
+        "mode": "hybrid",
+        "queryText": "<redacted>",
+        "embeddingSource": "voyage",
+        "embeddingModel": "voyage-3",
+        "retrieval": {
+          "topK": 14,
+          "fetchK": 24,
+          "vectorHits": 18,
+          "lexicalHits": 12,
+          "rrfMergedCount": 22,
+          "perCollection": [
+            {
+              "collection": "agent_memory_facts",
+              "vectorReturned": 9,
+              "lexicalReturned": 7
+            },
+            {
+              "collection": "chat_messages",
+              "vectorReturned": 9,
+              "lexicalReturned": 5
+            }
+          ]
+        }
+      }
+    },
+    {
+      "type": "prompt.assembled",
+      "ts": 1716115200200,
+      "payload": {
+        "personaBytes": 980,
+        "discoveryBytes": 420,
+        "memoryContextBytes": 1872,
+        "activatedSkills": [
+          { "name": "order-lookup", "bytes": 1200, "injectedVia": "system_prompt" }
+        ],
+        "totalBytes": 4472
+      }
+    },
+    {
+      "type": "model.request",
+      "ts": 1716115200260,
+      "payload": {
+        "modelId": "us.anthropic.claude-3-7-sonnet-20250219-v1:0",
+        "region": "us-east-1",
+        "systemPromptHash": "sha256:abcd1234",
+        "systemPromptBytes": 4472,
+        "priorTurnsCount": 6,
+        "userMessage": "What's the status of my recent order?"
+      }
+    }
+  ]
+}

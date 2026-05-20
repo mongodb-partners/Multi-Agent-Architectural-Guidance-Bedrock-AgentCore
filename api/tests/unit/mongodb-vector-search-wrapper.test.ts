@@ -176,7 +176,7 @@ describe("transformVectorSearchArgs", () => {
     expect(out.args.collection).toBe("products");
     expect(out.args.vectorIndex).toBe("products-vector-index");
     expect(out.args.lexicalIndex).toBe("products-text-index");
-    expect(out.args.lexicalPath).toBe("name");
+    expect(out.args.lexicalPath).toBe("title");
     expect(out.args.queryText).toBe("noise cancelling");
     expect(out.args.queryVector).toEqual([7, 8, 9]);
     expect(out.args.limit).toBe(3);
@@ -279,6 +279,7 @@ describe("score extraction helpers", () => {
       expect.objectContaining({
         rank: 1,
         collection: "products",
+        _id: "p1",
         id: "p1",
         title: "Compact Widget",
         score: 0.92,
@@ -288,11 +289,46 @@ describe("score extraction helpers", () => {
       expect.objectContaining({
         rank: 2,
         collection: "products",
+        _id: "ts-1",
         id: "ts-1",
         title: "HW-900 fault",
         score: 0.81,
         snippet: "Hardware fault troubleshooting article.",
         sources: ["vector", "lexical"],
+      }),
+    ]);
+  });
+
+  test("extractDocumentPreviewsFromResult carries _id for arbitrary vector collections", () => {
+    const block = new ToolResultBlock({
+      toolUseId: "tu",
+      status: "success",
+      content: [
+        new TextBlock(
+          JSON.stringify({
+            count: 1,
+            documents: [
+              {
+                _id: "507f1f77bcf86cd799439011",
+                title: "Arbitrary Collection Hit",
+                content: "Document from any collection not known to the wrapper.",
+                _score: 0.87,
+              },
+            ],
+          }),
+        ),
+      ],
+    });
+
+    expect(extractDocumentPreviewsFromResult(block, "arbitrary_collection")).toEqual([
+      expect.objectContaining({
+        rank: 1,
+        collection: "arbitrary_collection",
+        _id: "507f1f77bcf86cd799439011",
+        id: "507f1f77bcf86cd799439011",
+        title: "Arbitrary Collection Hit",
+        snippet: "Document from any collection not known to the wrapper.",
+        score: 0.87,
       }),
     ]);
   });
@@ -606,7 +642,7 @@ describe("VectorSearchEmbedTool.stream — full embed-then-call path", () => {
     expect(forwarded.collection).toBe("products");
     expect(forwarded.vectorIndex).toBe("products-vector-index");
     expect(forwarded.lexicalIndex).toBe("products-text-index");
-    expect(forwarded.lexicalPath).toBe("name");
+    expect(forwarded.lexicalPath).toBe("title");
     expect(forwarded.queryText).toBe("noise cancelling headphones");
     expect(forwarded.queryVector).toEqual([0.1, 0.2, 0.3, 0.4]);
     // Must NOT leak the pure-vector args shape into the hybrid call.

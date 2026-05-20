@@ -145,9 +145,9 @@ Implementation: [`api/src/lib/long-term-memory.ts → readLongTermMemoryContext`
 1. **Embed the query** in query-mode (`embedQueryText`). On embed failure the retriever falls back to lexical-only mode rather than returning nothing.
 2. **Run two `$vectorSearch` + two `$search` legs in parallel** across `agent_memory_facts` (curated user facts) and `chat_messages` (raw conversation history), each scoped by `{ userId }`.
 3. **Fuse with Reciprocal Rank Fusion (k=60)** across the four ranked lists. RRF works on rank position, not raw score — it neatly handles the cosine-vs-BM25 distribution mismatch.
-4. **Apply per-collection weight** (`MEMORY_WEIGHT_FACTS=1.5` favors curated facts) and **exponential recency decay** (`MEMORY_RECENCY_HALFLIFE_DAYS=30`).
+4. **Apply per-collection weight** (`MEMORY_WEIGHT_FACTS=1.5`, `MEMORY_WEIGHT_CHAT_MESSAGES=1.2` — both favor curated facts slightly while still giving raw chat messages a fair shot at the top of the merged list) and **exponential recency decay** (`MEMORY_RECENCY_HALFLIFE_DAYS=30`).
 5. **MMR diversify** the top hits (`MEMORY_MMR_LAMBDA=0.7`) to avoid stacking near-duplicate facts.
-6. Render the merged top-K (`MEMORY_VECTOR_TOPK=6`) as a "## Relevant prior context" block and prepend to the system prompt.
+6. Render the merged top-K (`MEMORY_VECTOR_TOPK=14` — raised from `6` to `10` to `14` across 2026-05 so that conversation-specific signals like codenames, exact phrasing, or in-session list data don't lose the top-K race to higher-weighted facts; the 14-row default leaves enough headroom for transient chat-message content to coexist with fresh same-run profile facts) as a "## Relevant prior context" block and prepend to the system prompt.
 
 The retriever emits a single `memory.scoped_read` trace event (event name preserved for UI compat) enriched with `mode`, `retrieval.vectorHits`, `retrieval.lexicalHits`, `retrieval.perCollection`, and embedding metadata so the Trace Viewer can show what was fused.
 
@@ -157,7 +157,7 @@ This is why specialist flows can personalize from facts learned in a different s
 
 | Variable | Purpose | Default |
 |---|---|---|
-| `MEMORY_VECTOR_TOPK` | Final number of hits injected after RRF+MMR | `6` |
+| `MEMORY_VECTOR_TOPK` | Final number of hits injected after RRF+MMR | `14` |
 | `MEMORY_VECTOR_FETCHK` | Per-leg over-fetch before merge | `24` |
 | `MEMORY_VECTOR_NUM_CANDIDATES` | `$vectorSearch.numCandidates` width | `200` |
 | `MEMORY_SEARCH_MAX_TIME_MS` | Timeout per Atlas vector/BM25 aggregation leg | `8000` |
@@ -166,8 +166,18 @@ This is why specialist flows can personalize from facts learned in a different s
 | `MEMORY_MMR_LAMBDA` | 1 = pure relevance, 0 = pure diversity | `0.7` |
 | `MEMORY_MIN_SCORE` | Drop merged items below this RRF score | `0` |
 | `MEMORY_WEIGHT_FACTS` | Multiplier on `agent_memory_facts` RRF score | `1.5` |
-| `MEMORY_WEIGHT_CHAT_MESSAGES` | Multiplier on `chat_messages` RRF score | `1` |
+| `MEMORY_WEIGHT_CHAT_MESSAGES` | Multiplier on `chat_messages` RRF score | `1.2` |
 | `MEMORY_TRACE_VALUES` | When `1`, write fact text into the trace event | unset |
+
+> **Why the 2026-05 retune?** Live diagnostic runs (see `e2e-smoke/memory-recall-diagnostic.py`) showed that chat-message hits were routinely being evicted from the final top-K by the heavier fact weight. The bumps — `MEMORY_VECTOR_TOPK` from `6` → `10` → `14` and `MEMORY_WEIGHT_CHAT_MESSAGES` from `1.0` → `1.2` — restore conversational recall (codenames, exact phrasing, in-session list data) without disturbing the fact-priority semantics that fact-heavy queries rely on. The second TOPK bump (10 → 14) was added after the harness showed C/D failing when same-run profile facts (e.g. "favorite color is teal", "pet's name is Mango-…") crowded out a fresh transient chat-message-only codename. Re-run the harness with `--cleanup --cleanup-after` after any further retuning.
+
+### Memory-recall instructions (uniform across personas)
+
+The system prompt's "Memory recall rules" block is the **single source** of memory-recall instructions for every memory-enabled agent. It lives in [`api/src/lib/prompt.ts → LONG_TERM_MEMORY_RECALL_RULES`](../api/src/lib/prompt.ts) and is appended by `withLongTermMemory(...)`. Persona files MUST NOT copy these rules inline — `api/tests/unit/orchestrator-ltm-flag.test.ts` enforces that the orchestrator and order-management personas stay clean. To change the recall behavior, update the constant (and its lock-down test), not the persona files.
+
+### Memory-write surface in the UI
+
+`memory.long_term_write` / `memory.long_term_skip` events emit AFTER the SSE `done` event because fact extraction is intentionally dangling (off the user's clock). `POST /chat` re-persists the trace doc once the microtask settles, so a single `GET /traces/:id` ~1-2 s after `done` exposes the post-write events. The Streamlit chat panel does exactly that: see [`ui/lib/inline_summary.py → merge_post_done_memory_events`](../ui/lib/inline_summary.py) for the merge helper and `_render_memory_panel` for the "Learned …" expander + `st.toast` notification.
 
 ### Chat-invoked Mongo tools (boundary preserved)
 

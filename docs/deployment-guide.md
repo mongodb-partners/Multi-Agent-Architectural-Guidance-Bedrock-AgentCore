@@ -1,12 +1,28 @@
 # Deployment Guide
 
 > **Audience:** anyone who needs to deploy this system from scratch on a fresh AWS account, or update an existing deployment.
+>
+> **Single source of truth.** This document supersedes the older `DEV_STATUS.md` operational snapshot and `deploy/SETUP.md` setup guide; both have been folded in. The companion references in [`reference/`](reference/) hold the exhaustive catalogs (env vars, TF modules, SSM parameters, smoke tests, deploy scripts) so this guide stays prose-focused.
 
-There are three Terraform root configs (and three deploy scripts):
+There are four Terraform root configs (and matching deploy scripts):
 
-- **Network mode** — `envs/network/` provisions the **shared** VPC + subnets + Atlas PrivateLink Interface VPCE for a region, and publishes the resulting IDs to SSM Parameter Store under `/${SHARED_VPC_NAME}/${AWS_REGION}/`. Run **once per region** with `deploy-network.sh`.
-- **Local mode** — runs the API + UI on your laptop. Used for daily development and demos. Some Terraform-provisioned AWS resources are still required (Bedrock KB, Cognito, Secrets Manager). Does **not** consume the shared network.
-- **EC2 mode** — full cloud deployment. The frozen baseline. Reads the shared VPC's IDs from SSM and provisions the per-project EC2 / AgentCore Runtime / MongoDB MCP Runtime stack on top, plus a per-cluster Route 53 zone for the Atlas SRV hostname and the AWS service VPC endpoints required by the VPC-mode MongoDB MCP runtime (ECR API, ECR Docker, S3 gateway, CloudWatch Logs). Set `TF_VAR_create_agentcore_runtime_vpc_endpoints=false` when those singleton endpoints already exist in the shared VPC; EC2 mode will reuse them and ensure this deployment's security groups can reach them. The legacy Lambda MongoDB MCP host (and its Terraform module) was deleted in CLIENT_REVIEW Phase 7e. MongoDB MCP is invoked directly as an AgentCore Runtime; the AgentCore Gateway remains available for non-Mongo tools.
+- **Network mode** — `envs/network/` provisions the **shared** VPC + subnets + the Atlas connectivity primitive matching `NETWORK_MODE` (PrivateLink Interface VPCE in privatelink mode; VPC peering accepter + Atlas-side `mongodbatlas_network_peering` in peering mode), and publishes the resulting IDs to SSM Parameter Store under `/${SHARED_VPC_NAME}/${AWS_REGION}/` (including a `network_mode` canary so downstream stacks refuse to plan against a different mode). Run **once per AWS account + region** with `deploy-network.sh`.
+- **Shared mode** — `envs/shared/` provisions the **shared observability + embeddings** stack: the Voyage SageMaker endpoint, all CloudWatch log groups (`/${SHARED_RESOURCE_PREFIX}/<env>/{api,ui,mcp,agentcore,otel,otel-atlas}`), the four operational dashboards (`${SHARED_RESOURCE_PREFIX}-{fleet,mongo,cost,atlas}-<env>`), fleet + atlas alarms, metric filters, the Logs Insights query library, and the account-scoped Bedrock invocation logging configuration. Publishes its outputs to the same SSM prefix under `voyage_sagemaker_endpoint_name`, `cw_*_log_group`, and `bedrock_*_log_group` keys. Run **once per AWS account + region + environment** with `deploy-shared.sh`. Singleton — multiple per-project `envs/ec2` deployments share the resulting resources.
+- **Local mode** — runs the API + UI on your laptop. Used for daily development and demos. Some Terraform-provisioned AWS resources are still required (Bedrock KB, Cognito, Secrets Manager). Does **not** consume the shared network or shared stack — local mode is self-contained and uses its own local log group + Voyage endpoint discovery via `.env`.
+- **EC2 mode** — full cloud deployment. The frozen baseline. Reads the shared VPC's IDs and the shared SageMaker endpoint + log groups from SSM, then provisions the per-project EC2 / AgentCore Runtime / MongoDB MCP Runtime stack on top, plus a per-cluster Route 53 zone for the Atlas SRV hostname and the AWS service VPC endpoints required by the VPC-mode MongoDB MCP runtime (ECR API, ECR Docker, S3 gateway, CloudWatch Logs). Set `TF_VAR_create_agentcore_runtime_vpc_endpoints=false` when those singleton endpoints already exist in the shared VPC; EC2 mode will reuse them and ensure this deployment's security groups can reach them. The legacy Lambda MongoDB MCP host (and its Terraform module) was deleted in CLIENT_REVIEW Phase 7e. MongoDB MCP is invoked directly as an AgentCore Runtime; the AgentCore Gateway remains available for non-Mongo tools.
+
+**Apply order (clean account):** `network → shared → ec2`. The single entrypoints `deploy-full-with-privatelink.sh` (default mode) and `deploy-full-with-vpc-peering.sh` (alternative) both probe SSM canaries for each upstream stack and run the missing ones automatically; pass `--skip-network` / `--skip-shared` to bypass the canary probes when you already know they are applied. Tear down in reverse: `destroy.sh --mode ec2 → shared → network`. **PrivateLink and VPC peering are mutually exclusive per account+region** — switching modes requires destroying everything and re-running the matching orchestrator.
+
+**Migrating an existing pre-2026-05 deployment:** if you already applied `envs/ec2` with the old module layout (SageMaker + log groups + dashboards + Bedrock invocation logging all inside `envs/ec2`), tear down with `./deploy/scripts/destroy.sh --mode ec2 --auto-approve` and re-run the orchestrator. The shared-stack split changed resource names, so in-place state surgery would not help anyway; the SSM canaries (`/<SHARED_VPC_NAME>/<region>/cw_api_log_group` etc.) drive the re-create automatically.
+
+**Companion references** — open these alongside this guide:
+
+- [`reference/env-vars.md`](reference/env-vars.md) — every environment variable read by the stack, with defaults and the file that consumes it.
+- [`reference/terraform-modules.md`](reference/terraform-modules.md) — every reusable TF module, with inputs, outputs, and the envs that consume each.
+- [`reference/ssm-parameters.md`](reference/ssm-parameters.md) — the cross-stack SSM contract (network → shared → ec2).
+- [`reference/deploy-scripts.md`](reference/deploy-scripts.md) — every shell script under `deploy/`, with flags and side-effects.
+- [`reference/smoke-tests.md`](reference/smoke-tests.md) — post-deploy verification harness catalog.
+- [`debugging.md`](debugging.md) — when something goes wrong.
 
 ---
 
@@ -22,8 +38,8 @@ You need:
 - `zip` and `unzip` on PATH (for S3 code-mode artifact)
 
 You need an AWS account with:
-- Bedrock model access enabled for `us.anthropic.claude-sonnet-4-6` and `amazon.titan-embed-text-v2:0` (request via the Bedrock console; takes ~15 min for Anthropic models which need a use-case form)
-- An IAM user with admin permissions on the deploy account (the deploy script does many cross-service operations)
+- Bedrock model access enabled for **all** models referenced by `config/agents/*.agent.md` and the embedding/extraction defaults. Today that is `us.anthropic.claude-sonnet-4-6` (troubleshooting + product-recommendation), `us.anthropic.claude-haiku-4-5-20251001-v1:0` (orchestrator + order-management + LTM fact-extractor + classifier fallback), and `amazon.titan-embed-text-v2:0` (Voyage fallback). Request via the Bedrock console; takes ~15 min for Anthropic models which need a use-case form. When you change an agent model, enable access for the new one **first**.
+- AWS credentials with the permissions in [`deploy/iam/policy.json`](../deploy/iam/policy.json). This can be an **IAM user** (static long-lived keys) or — for environments that prohibit IAM users — an **IAM Role assumed via STS** (see [§ 2b](#2b-sts--sso-credentials-no-iam-user) below). The same policy document covers both cases.
 
 You need a MongoDB Atlas Organization with:
 - An organization API key (public + private)
@@ -35,10 +51,24 @@ You need a MongoDB Atlas Organization with:
 
 Everything starts with [`.env`](../.env) at the repo root. This file is committed to the repo and contains live credentials — fill in the required values before the first deploy.
 
+> **`AUTH_MODE` (iam | sts)** controls which credential block the deploy scripts validate. Default is `iam` for backward compatibility; set `AUTH_MODE=sts` when your account prohibits IAM users. The shared validator at [`deploy/scripts/_aws-auth.sh`](../deploy/scripts/_aws-auth.sh) refuses to proceed if the resolved caller ARN doesn't match the declared mode. See § 2b for the STS path; see [`deploy/iam/README.md`](../deploy/iam/README.md) for trust-policy setup.
+
 ```bash
-# AWS
-export AWS_ACCESS_KEY_ID="..."
+# Declare HOW this deploy authenticates. Default: iam.
+export AUTH_MODE="iam"   # change to "sts" if your account disallows IAM users
+
+# AWS — populate the block matching AUTH_MODE
+# ── AUTH_MODE=iam : static IAM user keys ────────────────────────────────
+export AWS_ACCESS_KEY_ID="AKIA..."
 export AWS_SECRET_ACCESS_KEY="..."
+# ── AUTH_MODE=sts : STS / SSO temporary credentials ─────────────────────
+# Obtain via: aws sts assume-role / aws configure export-credentials / aws sso login
+# export AWS_ACCESS_KEY_ID="ASIA..."        # starts with ASIA for temp creds
+# export AWS_SECRET_ACCESS_KEY="..."
+# export AWS_SESSION_TOKEN="..."            # required for all STS-issued keys
+# ── AUTH_MODE=sts : named AWS profile (SSO or assume-role) ──────────────
+# export AWS_PROFILE="uat-deploy-role"      # profile defined in ~/.aws/config
+# ────────────────────────────────────────────────────────────────────────
 export AWS_REGION="us-east-1"
 export AWS_DEFAULT_REGION="$AWS_REGION"
 
@@ -90,9 +120,86 @@ aws sts get-caller-identity   # confirms credentials are live
 
 ---
 
+## 2b. STS / SSO credentials (no IAM user)
+
+If your AWS account policy prohibits creating IAM users (a common enterprise security control), you can authenticate entirely through **STS-issued temporary credentials** tied to an IAM Role. The deploy scripts accept any of these three mechanisms — no code changes required.
+
+### What permissions the role needs
+
+The role needs **two** IAM documents:
+
+1. **Permissions policy** — [`deploy/iam/policy.json`](../deploy/iam/policy.json), attached to the role as a managed or inline policy. Grants the AWS API actions used by `deploy-network.sh`, `deploy-project.sh`, and `deploy-agents.sh`.
+2. **Trust policy** — [`deploy/iam/sts-trust-policy.json`](../deploy/iam/sts-trust-policy.json), set as the role's `AssumeRolePolicyDocument`. Defines which principals (same-account IAM, AWS IAM Identity Center / SSO, cross-account, GitHub Actions OIDC) are allowed to call `sts:AssumeRole`.
+
+Trim `sts-trust-policy.json` to the SIDs that apply to your environment and replace the placeholders (`ACCOUNT_ID`, `PERMISSION_SET_NAME`, `TRUSTED_ACCOUNT_ID`, etc.) before creating the role. End-to-end setup with both files, including the recommended `--max-session-duration` for 20-25 min Terraform applies, is documented in [`deploy/iam/README.md` → STS-assumed role setup](../deploy/iam/README.md#sts-assumed-role-setup).
+
+### Option A — Export STS env vars directly
+
+Obtain short-lived keys (valid 1–12 h depending on your org's session duration) and export them into your shell before sourcing `.env`:
+
+```bash
+# via AWS CLI assume-role
+CREDS=$(aws sts assume-role \
+  --role-arn "arn:aws:iam::<ACCOUNT_ID>:role/<UAT_DEPLOY_ROLE>" \
+  --role-session-name "multiagent-uat-deploy" \
+  --output json)
+
+export AWS_ACCESS_KEY_ID=$(echo "$CREDS"     | python3 -c "import json,sys; print(json.load(sys.stdin)['Credentials']['AccessKeyId'])")
+export AWS_SECRET_ACCESS_KEY=$(echo "$CREDS" | python3 -c "import json,sys; print(json.load(sys.stdin)['Credentials']['SecretAccessKey'])")
+export AWS_SESSION_TOKEN=$(echo "$CREDS"     | python3 -c "import json,sys; print(json.load(sys.stdin)['Credentials']['SessionToken'])")
+
+source .env
+aws sts get-caller-identity   # should show the assumed role ARN
+./deploy/deploy-full-with-privatelink.sh --auto-approve
+```
+
+Or, if you already have a profile configured, export credentials from it:
+
+```bash
+eval "$(aws configure export-credentials --profile <SSO_PROFILE> --format env)"
+# exports AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_SESSION_TOKEN
+```
+
+### Option B — Use `AWS_PROFILE` (SSO or named assume-role profile)
+
+Configure an SSO or assume-role profile in `~/.aws/config`, log in once, then set `AWS_PROFILE` in `.env`:
+
+```ini
+# ~/.aws/config
+[profile uat-deploy-role]
+sso_start_url   = https://my-org.awsapps.com/start
+sso_region      = us-east-1
+sso_account_id  = <ACCOUNT_ID>
+sso_role_name   = <UAT_DEPLOY_ROLE>
+region          = us-east-1
+```
+
+```bash
+aws sso login --profile uat-deploy-role   # opens browser, exchanges OIDC token for STS session
+
+# In .env (replace the AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY lines):
+export AWS_PROFILE="uat-deploy-role"
+export AWS_REGION="us-east-1"
+export AWS_DEFAULT_REGION="$AWS_REGION"
+```
+
+Terraform and all `aws` CLI calls in the deploy scripts inherit `AWS_PROFILE` from the environment automatically — no other changes needed.
+
+### Credential expiry
+
+STS sessions expire (typically 1–8 h). If a deploy fails with `ExpiredTokenException` mid-run, re-authenticate and restart from the failed phase:
+
+```bash
+# Re-run the full deploy — it is idempotent; completed phases are skipped.
+aws sso login --profile uat-deploy-role   # or re-export env vars from Option A
+./deploy/deploy-full-with-privatelink.sh --auto-approve --skip-network
+```
+
+---
+
 ## 3. EC2 deployment (the main path)
 
-This is what `deploy/deploy-full-with-privatelink.sh` does. It handles both phases automatically — running `deploy-network.sh` only when the shared VPC does not yet exist in SSM, then `deploy-project.sh`:
+This is what `deploy/deploy-full-with-privatelink.sh` does. It handles all three phases automatically — running `deploy-network.sh` only when the shared VPC does not yet exist in SSM, then `deploy-shared.sh` only when its `cw_api_log_group` canary is missing, then `deploy-project.sh`:
 
 ```bash
 cd mongodb-aws-bedrock-multi-agent-framework
@@ -107,14 +214,48 @@ Alternatively, run the phases manually:
 ```bash
 # Once per region (creates shared VPC + Atlas PL VPCE; publishes IDs to SSM)
 ./deploy/scripts/deploy-network.sh --auto-approve
+# Then apply the shared observability + embeddings stack — singleton per
+# (account, region, environment). Idempotent; safe to re-run.
+./deploy/scripts/deploy-shared.sh --auto-approve
 
 # Per project (consumes shared VPC via SSM)
 ./deploy/scripts/deploy-project.sh --auto-approve
 ```
 
-`deploy-project.sh` runs a Phase 3b precheck against `/${SHARED_VPC_NAME}/${AWS_REGION}/vpc_id` SSM and **fails fast** with `Run ./deploy/scripts/deploy-network.sh first` if the shared network has not been applied yet.
+`deploy-project.sh` runs a Phase 3b precheck against `/${SHARED_VPC_NAME}/${AWS_REGION}/vpc_id` SSM and **fails fast** with `Run ./deploy/scripts/deploy-network.sh first` if the shared network has not been applied yet, plus a Phase 4c precheck against `voyage_sagemaker_endpoint_name` that fails fast with `Run ./deploy/scripts/deploy-shared.sh first` if the shared observability stack is missing. When `EMBEDDINGS_PROVIDER=voyage`, the same precheck also refuses to continue if the shared stack provisioned no SageMaker endpoint (sentinel value `_empty_`).
 
-Total time: ~5 min for `deploy-network.sh` + ~20-25 min for `deploy-project.sh` (Atlas M10 cluster creation is the slowest step at ~10 min). `deploy-full-with-privatelink.sh` skips `deploy-network.sh` automatically on subsequent runs when the VPC already exists.
+Total time: ~5 min for `deploy-network.sh` + ~8 min for `deploy-shared.sh` (SageMaker endpoint creation is the slowest step at ~6–10 min) + ~20-25 min for `deploy-project.sh` (Atlas M10 cluster creation is the slowest step at ~10 min). `deploy-full-with-privatelink.sh` skips `deploy-network.sh` and `deploy-shared.sh` automatically on subsequent runs when their respective canaries already exist in SSM.
+
+### <a id="vpc-peering-mode"></a>VPC peering mode (alternative to PrivateLink)
+
+The framework supports **VPC peering** as an alternative connectivity mode for MongoDB Atlas. Use this when PrivateLink is unavailable (e.g. region/account constraints) or when you prefer routable IP connectivity over a service-endpoint model. The choice is binary per account: **PrivateLink and VPC peering are mutually exclusive — there is no hybrid mode**, and switching between them requires destroy + redeploy.
+
+**Use the matching orchestrator:**
+
+```bash
+# Set in .env (or rely on the orchestrator to export it)
+export NETWORK_MODE=peering
+export ATLAS_PEERING_CIDR="192.168.248.0/21"   # Atlas default, non-overlapping
+
+./deploy/deploy-full-with-vpc-peering.sh --auto-approve
+```
+
+The orchestrator hard-exports `NETWORK_MODE=peering` before delegating, runs the same 3-phase flow (network → shared → ec2), and refuses to proceed if SSM canary `/{SHARED_VPC_NAME}/{REGION}/network_mode` already says `privatelink` (see `./deploy/scripts/destroy.sh` to switch).
+
+**What's different vs PrivateLink mode:**
+
+| Layer | PrivateLink mode | VPC peering mode |
+|---|---|---|
+| Atlas-side networking (`envs/network`) | Interface VPCE + Atlas endpoint service | AWS-side VPC peering accepter + route entries in both route tables; Atlas-side `mongodbatlas_network_peering` + project IP access list scoped to the VPC CIDR; **Atlas Private DNS for Peering** auto-enabled via Admin API so `-pri.mongodb.net` SRV resolves to private peering IPs |
+| Runtime `MONGODB_URI` (`envs/ec2`) | Atlas `awsPrivateLink` direct multi-host URI with `tlsAllowInvalidHostnames=true` | `connectionStrings.privateSrv` (when Atlas Private DNS for Peering is on) else `connectionStrings.private` (multi-host non-SRV). Peering hostnames ARE in the cluster cert SAN — no `tlsAllowInvalidHostnames` |
+| Bedrock KB ingestion path | PL NLB + Atlas VPCE (partner-validated, SoW-aligned) | **EXPERIMENTAL** peering NLB whose targets are Atlas mongod private peering IPs discovered via `dig` from EC2 over SSM (`modules/bedrock-kb-peering`). Bedrock's MongoDB driver may reject the cluster TLS cert when reached through NLB-over-peering — see [`modules/bedrock-kb-peering/README.md`](../deploy/terraform/modules/bedrock-kb-peering/README.md) |
+| SG egress | `0.0.0.0/0` on port 27017 + 1024-65535 (constrained by VPCE routing) | Narrowed to `ATLAS_PEERING_CIDR` for defense-in-depth |
+
+**Operational caveats (peering KB ingestion):**
+
+* **mongod IP drift:** the peering NLB targets are pinned at deploy time. Atlas maintenance / scaling / failover can rotate mongod private IPs and silently break KB ingestion. Recovery: re-run `./deploy/deploy-full-with-vpc-peering.sh --skip-network --skip-shared` to re-`dig` and re-pin targets.
+* **TLS failure recovery:** if the experimental NLB-over-peering KB path fails TLS validation, the ingestion job will fail terraform apply with the driver error in `failureReasons` (we grep for `tls|certificate|ssl|handshake|hostname` and print a remediation banner). The **only** remediation is to destroy the peering stack and redeploy in PrivateLink mode (PL and peering are mutually exclusive). Alternative degradation: set `TF_VAR_enable_kb_peering=false` to keep peering for runtime traffic but use public Atlas SRV for KB ingestion (privacy regression — KB no longer end-to-end private).
+* **CIDR conflicts:** `ATLAS_PEERING_CIDR` must not overlap `VPC_CIDR`. The orchestrator runs a Python pre-flight before plan; `envs/network` has a Terraform `check` block as a second line of defense.
 
 ### 3.0 Agent-only redeployment (partial deploy)
 
@@ -183,7 +324,7 @@ Editable diagram with descriptions: [`diagrams/04-deployment-pipeline.drawio`](d
 
 | # | Phase | What it does |
 |---|---|---|
-| 1 | Preflight + credentials | Checks prerequisites (`aws`, `terraform`, `bun`, `python3`, `zip`) and validates AWS + Atlas credentials. |
+| 1 | Preflight + credentials | Checks prerequisites (`aws`, `terraform`, `bun`, `python3`, `zip`) and validates AWS + Atlas credentials via [`deploy/scripts/_aws-auth.sh`](../deploy/scripts/_aws-auth.sh) → `validate_aws_auth`. The validator declares `AUTH_MODE` (`iam` or `sts`), enforces the matching env-var shape, and asserts the resolved caller ARN matches the declared mode — catching profile-override drift before any AWS write happens. Prints a one-line banner: `[auth] mode=<mode> arn=<caller-arn>`. |
 | 2 | Bootstrap + config generation | Ensures shared S3 bucket exists, writes backend/tfvars for env. |
 | 3 | Build AgentCore code artifact | Bundles TS runtime code and uploads zip artifact to S3 (code mode). |
 | 4 | Terraform apply | Provisions/updates infrastructure and outputs. |
@@ -192,7 +333,7 @@ Editable diagram with descriptions: [`diagrams/04-deployment-pipeline.drawio`](d
 | 7 | AgentCore runtime env rollout | Updates runtime env vars and verifies deterministic runtime env state. |
 | 8 | EC2 env sync + restart | Writes `.env.live`, copies via SSM, pulls images, restarts API/UI services. |
 | 9 | Health + smoke validation | Waits for `/health`, then runs authenticated backend smoke checks. |
-| 10 | Manifest write | Writes `deploy-manifest.json` with resolved runtime/resource outputs. |
+| 10 | Manifest write | Writes `deploy-manifest.json` with resolved runtime/resource outputs. Includes an `auth` block (`{mode, caller_arn}`) recording how this deploy authenticated — useful for post-deploy audit (`auth.caller_arn` can be diffed against the current `sts:GetCallerIdentity` to detect a stale manifest from a different principal). |
 
 ### 3.2 Observability stack (deployed by default)
 
@@ -205,7 +346,7 @@ The same `terraform apply` provisions the **CloudWatch GenAI Observability** + *
 | `enable_bedrock_invocation_logging` | `true` | `/aws/bedrock/invocations` log group, KMS-encrypted, Data Protection Policy attached. **Body logging OFF**. | Metadata records only |
 | `log_prompt_bodies` | `false` | When true, raw prompts + completions land in invocation logs (still PII-masked) | Big bump — bodies dwarf metadata |
 | `log_embedding_bodies` | `false` | When true, raw embedding inputs land in invocation logs | Same |
-| `enable_adot_collector` | `true` | ADOT sidecar on EC2 + `/<project>/<env>/otel` log group | OTLP egress + storage |
+| `enable_adot_collector` | `true` | ADOT sidecar on EC2 + `/<SHARED_RESOURCE_PREFIX>/<env>/otel` log group | OTLP egress + storage |
 | `enable_fleet_dashboards` | `true` | 3 dashboards + 7 alarms + SNS topic + query library | Negligible |
 | `alarm_email` | `""` | Subscribes a single email address to the alarms SNS topic | Free |
 | `enable_atlas_metrics` | `false` | **Phase 4 opt-in.** ADOT scrapes Atlas Prometheus → `MongoDB/Atlas` CloudWatch namespace; adds Atlas dashboard + 2 alarms | Custom metrics + secret |
@@ -223,7 +364,7 @@ The same `terraform apply` provisions the **CloudWatch GenAI Observability** + *
 | Symptom | Cause | Fix |
 |---|---|---|
 | `aws sts get-caller-identity` fails | Stale credentials | Re-source `.env`, re-issue keys if needed |
-| Phase 4 fails with `Operation not allowed` on Bedrock | Model access not granted | Bedrock console → Model Access → request Anthropic Claude Sonnet 4.6 (use-case form, ~15 min) |
+| Phase 4 fails with `Operation not allowed` on Bedrock | Model access not granted | Bedrock console → Model Access → request every model referenced by `config/agents/*.agent.md` (Sonnet 4.6 + Haiku 4.5 by default) — the use-case form takes ~15 min for Anthropic models |
 | Phase 4 hangs > 15 min on Atlas | Atlas M10 cluster provisioning | Normal. M10 takes 8-12 min on first apply. |
 | Phase 6 fails: "no awsPrivateLink connection string" | Atlas PrivateLink not yet active | Re-run after 60s. Atlas takes a moment to attach the AWS endpoint to the cluster. |
 | Phase 8: "Role validation failed" | IAM trust policy not yet propagated | The `aws_bedrockagentcore_agent_runtime` resource will retry on the next `terraform apply`; if it still fails after 30s, re-run `deploy-full-with-privatelink.sh`. |
@@ -333,13 +474,24 @@ source .env
 5. Supporting services (Cognito, ECR, KB, Memory, Secrets, CloudWatch)
 6. Optional `bedrock-kb-privatelink` (NLB + VPC Endpoint Service) when `enable_kb_privatelink = true`
 
-The shared VPC, Atlas PrivateLink VPCE, and the Atlas-side endpoint binding are **not** touched by `--mode ec2`. They live in `envs/network/` and are only removed by `--mode network`. The Atlas endpoint *service* (`com.amazonaws.vpce.<region>.vpce-svc-...`) is intentionally preserved across destroys — `discover-or-create-pl.sh` reuses it on the next `deploy-network.sh`.
+The shared VPC, Atlas PrivateLink VPCE, and the Atlas-side endpoint binding are **not** touched by `--mode ec2`. They live in `envs/network/` and are only removed by `--mode network`. Similarly the Voyage SageMaker endpoint, the shared API/UI/MCP/AgentCore/OTel log groups, and the four operational dashboards live in `envs/shared/` and are only removed by `--mode shared`. The Atlas endpoint *service* (`com.amazonaws.vpce.<region>.vpce-svc-...`) is intentionally preserved across destroys — `discover-or-create-pl.sh` reuses it on the next `deploy-network.sh`.
 
-The S3 state bucket is **not** destroyed by default — it has versioning enabled and Terraform state for all three roots lives in it. To delete it manually after destroy:
+**Tear down order** (when fully removing an environment):
 
 ```bash
-aws s3 rm s3://bedrock-ma-use1-dev-483874864688 --recursive
-aws s3 rb s3://bedrock-ma-use1-dev-483874864688
+./deploy/scripts/destroy.sh --mode ec2     --auto-approve  # per-project (run once per envs/ec2 stack)
+./deploy/scripts/destroy.sh --mode shared  --auto-approve  # singleton per account+region+env
+./deploy/scripts/destroy.sh --mode network --auto-approve  # singleton per account+region
+```
+
+Running these in the wrong order (e.g. `shared` before `ec2`) leaves the per-project EC2 stack pointing at deleted SSM keys; the next `deploy-project.sh` (or any `terraform plan` in `envs/ec2`) fails immediately with `ParameterNotFound`.
+
+The S3 state bucket is **not** destroyed by default — it has versioning enabled and Terraform state for all three roots lives in it. To delete it manually after destroy (replace the bucket name with the value emitted in `deploy-manifest.json` → `shared_bucket_name`):
+
+```bash
+BUCKET=$(jq -r '.shared_bucket_name' deploy-manifest.json)
+aws s3 rm "s3://$BUCKET" --recursive
+aws s3 rb "s3://$BUCKET"
 ```
 
 ---
@@ -395,24 +547,85 @@ aws ssm send-command \
   --region us-east-1
 ```
 
-CloudWatch log groups for full log search:
+CloudWatch log groups for full log search (where `<prefix>` = `SHARED_RESOURCE_PREFIX`, default `multiagent`):
 
-- `/<project>/<env>/api` — Hono API (JSON lines from the Bun process; on EC2 also fed by **amazon-cloudwatch-agent** from `multiagent-api.service` journald)
-- `/<project>/<env>/ui` — Streamlit UI (journald `multiagent-ui.service` → same agent)
-- `/<project>/<env>/agentcore` — placeholder / optional future centralization (short retention)
-- `/<project>/<env>/mcp` — placeholder for MCP-sidecar style hosts (short retention)
-- `/aws/bedrock-agentcore/runtimes/<mongodb-mcp-runtime-id>/...` — MongoDB MCP runtime (AgentCore-managed log group; the legacy `/<project>/<env>/mcp` Lambda log group is gone post Phase 7e)
+- `/<prefix>/<env>/api` — Hono API (JSON lines from the Bun process; on EC2 also fed by **amazon-cloudwatch-agent** from `multiagent-api.service` journald)
+- `/<prefix>/<env>/ui` — Streamlit UI (journald `multiagent-ui.service` → same agent)
+- `/<prefix>/<env>/otel` — ADOT collector sidecar
+- `/<prefix>/<env>/otel-atlas` — Atlas Prometheus → CloudWatch scrape (when `enable_atlas_metrics=true`)
+- `/<prefix>/<env>/agentcore` — placeholder / optional future centralization (short retention)
+- `/<prefix>/<env>/mcp` — placeholder for MCP-sidecar style hosts (short retention)
+- `/aws/bedrock-agentcore/runtimes/<runtime-id>/...` — every AgentCore Runtime (orchestrator, 3 specialists, MongoDB MCP runtime) writes to its own AgentCore-managed log group; the legacy `/<prefix>/<env>/mcp` Lambda log group is gone post Phase 7e
+- `/aws/bedrock/invocations` + `/aws/bedrock/invocations-audit` — Bedrock invocation logging (account+region singleton; KMS-encrypted, PII Data Protection Policy attached)
+- `/aws/bedrock/knowledgebase/<KB_ID>` — Bedrock KB APPLICATION_LOGS (per-doc ingestion status)
+- `aws/spans` — X-Ray + GenAI Observability spans (`gen_ai.*` Strands instrumentation)
 
 ---
 
-## 9. Critical files reference
+## 9. CI/CD (GitHub Actions)
+
+Two workflows ship with the repo. They are **not** the primary deploy path today (the daily driver is `deploy-full-with-privatelink.sh` from a laptop or jumphost), but they are wired and runnable.
+
+### `.github/workflows/ci.yml`
+
+Runs on every push and pull request against `main` / `master`. Four jobs in parallel:
+
+| Job | What it runs |
+|---|---|
+| `api` | `bun install --frozen-lockfile`, `bun run typecheck`, `bun run validate:bun`, `bun run validate:agentcore`, `bun run test:all` |
+| `ui` | `pip install -r requirements.txt`, `python -m pytest tests/ -v` |
+| `e2e` | `bunx playwright install --with-deps chromium` then `bun run test` against the stub API server (`CHAT_MODE=stub`) |
+| `docker-images` | `docker build` for both `api/Dockerfile` (context = repo root) and `ui/Dockerfile` (context = `ui/`) — verifies images build cleanly |
+
+CI runs with **no AWS credentials**. None of the live integration paths (real Bedrock, real Atlas, real AgentCore) exercise here. The stub API (`tests/stubs/server.ts`) deterministically replays fixture answers so `e2e/` covers the SSE pipeline + the Trace Viewer page without paying Bedrock TPM.
+
+Local equivalent before pushing:
+
+```bash
+cd api && bun run typecheck && bun run validate:bun && bun run validate:agentcore && bun run test:all
+cd ../ui && python -m pytest tests/ -v
+cd ../e2e && bun install && bunx playwright install chromium && bun run test
+```
+
+### `.github/workflows/deploy.yml` — manual cloud deploy
+
+`workflow_dispatch` only (no auto-deploy on push). Inputs:
+
+| Input | Default | Effect |
+|---|---|---|
+| `auth_mode` | `iam` | `iam` consumes `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` secrets; `sts` assumes `AWS_DEPLOY_ROLE_ARN` repo variable via OIDC |
+| `auto_approve` | `true` | When `false`, runs as terraform-plan-only |
+| `skip_docker` | `false` | Reuses the latest pushed images; only re-applies infra and re-syncs env |
+| `network_mode` | `privatelink` | Selects which orchestrator script runs (`deploy-full-with-privatelink.sh` vs `deploy-full-with-vpc-peering.sh`) |
+| `atlas_peering_cidr` | `192.168.248.0/21` | Used only when `network_mode=peering` |
+
+The workflow uses a concurrency group so two simultaneous dispatches cannot race the Terraform state.
+
+**Required GitHub repo secrets (for `auth_mode=iam`):**
+
+- `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION`
+- `MONGODB_ATLAS_PUBLIC_KEY`, `MONGODB_ATLAS_PRIVATE_KEY`, `TF_VAR_MONGODB_ATLAS_ORG_ID`, `TF_VAR_MONGODB_ATLAS_PROJECT_ID`, `TF_VAR_ATLAS_DB_PASSWORD`
+- `PROJECT_NAME`, `ENVIRONMENT`, `SHARED_VPC_NAME` (repo variables, not secrets)
+- For `sts`: replace AWS keys with `AWS_DEPLOY_ROLE_ARN` (repo variable). The role's trust policy must include the `AllowGitHubActionsOidcFederation` SID from [`deploy/iam/sts-trust-policy.json`](../deploy/iam/sts-trust-policy.json).
+
+**When to use the workflow vs the laptop script:**
+
+- Laptop / jumphost — daily driver. Iteration loop with full SSM access for debugging.
+- GitHub Actions — release tags, scheduled rebuilds, or environments without local AWS credentials. Audit trail in the Actions log.
+
+There is currently **no automatic destroy workflow**. Teardown is laptop-only (`./deploy/scripts/destroy.sh --mode {ec2,shared,network}`).
+
+---
+
+## 10. Critical files reference
 
 | File | Purpose |
 |---|---|
 | [`.env`](../.env) | Live credentials + project identity (fill in before first deploy) |
 | [`.env.live`](../.env.live) | Generated by Phase 9. Holds runtime config (gitignored). |
 | [`deploy/deploy-full-with-privatelink.sh`](../deploy/deploy-full-with-privatelink.sh) | **Main entrypoint** — provisions network (if needed) then project stack |
-| [`deploy/scripts/deploy-network.sh`](../deploy/scripts/deploy-network.sh) | Shared VPC + Atlas PrivateLink VPCE (run once per region) |
+| [`deploy/scripts/deploy-network.sh`](../deploy/scripts/deploy-network.sh) | Shared VPC + Atlas PrivateLink VPCE (run once per account + region) |
+| [`deploy/scripts/deploy-shared.sh`](../deploy/scripts/deploy-shared.sh) | Shared observability + embeddings — Voyage SageMaker endpoint, CloudWatch log groups, fleet/mongo/cost/atlas dashboards, Bedrock invocation logging (run once per account + region + environment) |
 | [`deploy/scripts/deploy-project.sh`](../deploy/scripts/deploy-project.sh) | Per-project EC2 deploy orchestrator (full infra + agents) |
 | [`deploy/deploy-api.sh`](../deploy/deploy-api.sh) | API-only redeploy — rebuilds/pushes API image, syncs `.env.live`, restarts `multiagent-api`, runs backend smoke. Skips Terraform/UI/AgentCore runtime changes. |
 | [`deploy/deploy-agents.sh`](../deploy/deploy-agents.sh) | Agent-only redeploy — rebuilds artifact, targeted tf apply on runtime modules, env injection, API config/cache refresh. Skips Atlas/EC2/KB/Docker/API restart. |
@@ -420,8 +633,9 @@ CloudWatch log groups for full log search:
 | [`deploy/scripts/deploy-local.sh`](../deploy/scripts/deploy-local.sh) | Local mode supporting infra |
 | [`deploy/scripts/destroy.sh`](../deploy/scripts/destroy.sh) | Tear down (`--mode local`/`ec2`/`network`) |
 | [`deploy/scripts/docker-build-push.sh`](../deploy/scripts/docker-build-push.sh) | Code-only image rebuild |
-| [`deploy/terraform/envs/network/main.tf`](../deploy/terraform/envs/network/main.tf) | Shared VPC + Atlas PL VPCE root module |
-| [`deploy/terraform/envs/ec2/main.tf`](../deploy/terraform/envs/ec2/main.tf) | Per-project EC2 mode root module (consumes shared VPC via SSM) |
+| [`deploy/terraform/envs/network/main.tf`](../deploy/terraform/envs/network/main.tf) | Shared VPC + Atlas PL VPCE root module (account + region singleton) |
+| [`deploy/terraform/envs/shared/main.tf`](../deploy/terraform/envs/shared/main.tf) | Shared observability + embeddings root module — SageMaker endpoint, CloudWatch log groups, fleet/atlas dashboards, Bedrock invocation logging (account + region + env singleton). Publishes `voyage_sagemaker_endpoint_*` and `cw_*_log_group` + `bedrock_*_log_group` SSM params. |
+| [`deploy/terraform/envs/ec2/main.tf`](../deploy/terraform/envs/ec2/main.tf) | Per-project EC2 mode root module (consumes shared VPC + shared observability via SSM) |
 | [`deploy/terraform/envs/local/main.tf`](../deploy/terraform/envs/local/main.tf) | Local mode root module |
 | [`deploy/terraform/modules/atlas-privatelink/`](../deploy/terraform/modules/atlas-privatelink/) | AWS Interface VPCE + Atlas-side binding + CIDR-scoped SG (envs/network) |
 | [`deploy/terraform/modules/atlas-privatelink-dns/`](../deploy/terraform/modules/atlas-privatelink-dns/) | Per-cluster Route 53 private zone + wildcard CNAME — DNS half of Atlas PrivateLink (envs/ec2) |

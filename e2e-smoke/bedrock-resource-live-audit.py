@@ -208,14 +208,15 @@ def static_checks() -> None:
         f"{len(mem_tf_refs)} block(s) use module.agentcore_memory.memory_id (Terraform-managed)",
     )
 
-    # Confirm the env-var link also exists in deploy.sh as belt-and-suspenders
-    deploy_sh = ROOT / "deploy" / "scripts" / "deploy.sh"
+    # Confirm the env-var link also exists in deploy-project.sh as belt-and-suspenders
+    deploy_sh = ROOT / "deploy" / "scripts" / "deploy-project.sh"
     if deploy_sh.exists():
         env_link = _grep(deploy_sh, r'AGENTCORE_MEMORY_STORE_ID')
-        check(bool(env_link), "memory.env_var_also_in_deploy_sh",
-              f"{len(env_link)} reference(s) in deploy/scripts/deploy.sh (belt-and-suspenders)")
+        check(bool(env_link), "memory.env_var_also_in_deploy_project_sh",
+              f"{len(env_link)} reference(s) in deploy/scripts/deploy-project.sh (belt-and-suspenders)")
     else:
-        warned("memory.env_var_also_in_deploy_sh", "deploy/scripts/deploy.sh not found — skipped")
+        warned("memory.env_var_also_in_deploy_project_sh",
+               "deploy/scripts/deploy-project.sh not found — skipped")
 
     # ── 5. Agent runtime — 5 instances in ec2 ────────────────────────────────
     print("\n── 5. AgentCore runtime instances ──────────────────")
@@ -534,7 +535,7 @@ def _check_gateway_targets(gateway_id: str, region: str) -> None:
                 failed(
                     "agentcore_gateway.live.NO_TARGETS",
                     "Gateway has ZERO targets — Terraform fix (create_mcp_server_target=true) "
-                    "has not been applied yet. Run: ./deploy/scripts/deploy.sh --auto-approve",
+                    "has not been applied yet. Run: ./deploy/deploy-full-with-privatelink.sh --auto-approve",
                 )
         except json.JSONDecodeError:
             warned("agentcore_gateway.live.targets_parse", out[:200])

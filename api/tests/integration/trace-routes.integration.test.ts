@@ -193,4 +193,161 @@ describe("Trace routes — auth ownership matrix", () => {
     });
     expect(res.status).toBe(404);
   });
+
+  // -------------------------------------------------------------------------
+  // /traces?sessionId= + ?excludeTraceId= filters
+  //
+  // The Trace Viewer's prev/next-turn-in-session arrows depend on these
+  // filters returning a session-scoped, deterministic ordering so the UI
+  // can find the previous/next traceId without paging.
+  // -------------------------------------------------------------------------
+
+  test("GET /traces?sessionId= filters to a single session", async () => {
+    await persistTrace(makeTrace({ traceId: "sess-a-1", sessionId: "sess-a", messageId: "m1", userId: "user-a" }));
+    await persistTrace(makeTrace({ traceId: "sess-a-2", sessionId: "sess-a", messageId: "m2", userId: "user-a" }));
+    await persistTrace(makeTrace({ traceId: "sess-b-1", sessionId: "sess-b", messageId: "m1", userId: "user-a" }));
+    const tok = await jwtFor("user-a");
+    const res = await app.request("http://localhost/traces?sessionId=sess-a", {
+      headers: { Authorization: `Bearer ${tok}` },
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { traces: Array<{ traceId: string; sessionId: string }> };
+    const ids = body.traces.map((t) => t.traceId).sort();
+    expect(ids).toEqual(["sess-a-1", "sess-a-2"]);
+    for (const t of body.traces) expect(t.sessionId).toBe("sess-a");
+  });
+
+  test("GET /traces?excludeTraceId= drops the named trace from the list", async () => {
+    await persistTrace(makeTrace({ traceId: "exc-1", sessionId: "exc", messageId: "m1", userId: "user-a" }));
+    await persistTrace(makeTrace({ traceId: "exc-2", sessionId: "exc", messageId: "m2", userId: "user-a" }));
+    const tok = await jwtFor("user-a");
+    const res = await app.request(
+      "http://localhost/traces?sessionId=exc&excludeTraceId=exc-1",
+      { headers: { Authorization: `Bearer ${tok}` } },
+    );
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { traces: Array<{ traceId: string }> };
+    const ids = body.traces.map((t) => t.traceId);
+    expect(ids).not.toContain("exc-1");
+    expect(ids).toContain("exc-2");
+  });
+
+  test("GET /traces?sessionId= scopes to caller — never leaks another user's session", async () => {
+    await persistTrace(makeTrace({ traceId: "shared-sess-a", sessionId: "shared", messageId: "m1", userId: "user-a" }));
+    await persistTrace(makeTrace({ traceId: "shared-sess-b", sessionId: "shared", messageId: "m2", userId: "user-b" }));
+    const tok = await jwtFor("user-a");
+    const res = await app.request("http://localhost/traces?sessionId=shared", {
+      headers: { Authorization: `Bearer ${tok}` },
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { traces: Array<{ traceId: string }> };
+    const ids = body.traces.map((t) => t.traceId);
+    expect(ids).toContain("shared-sess-a");
+    expect(ids).not.toContain("shared-sess-b");
+  });
+
+  // -------------------------------------------------------------------------
+  // ?include=core|dev|full + X-Trace-Include response header
+  //
+  // The Streamlit Trace Viewer opts into core for the initial fast load and
+  // fetches dev on-demand when the user clicks "Show developer details".
+  // The header round-trip lets the client assert it got back what it asked
+  // for (api_client.get_trace asserts this) so a routing regression that
+  // silently downgrades the projection becomes a test failure, not a
+  // missing-developer-detail mystery.
+  // -------------------------------------------------------------------------
+
+  test("GET /traces/:id?include=core returns X-Trace-Include=core and strips dev-only top-level fields", async () => {
+    const trace = makeTrace({
+      traceId: "trc-core",
+      userId: "user-a",
+      events: [
+        {
+          id: "e1",
+          ts: Date.now(),
+          type: "dev.environment",
+          payload: { chatMode: "live" } as never,
+        },
+        {
+          id: "e2",
+          ts: Date.now(),
+          type: "prompt.assembled",
+          payload: {
+            body: "x".repeat(800),
+            bodyBytes: 800,
+            totalBytes: 800,
+            personaBytes: 0,
+            discoveryBytes: 0,
+            memoryContextBytes: 0,
+          } as never,
+        },
+      ],
+    });
+    trace.release = { gitSha: "deadbeef" } as never;
+    trace.otel = { traceId: "a".repeat(32), rootSpanId: "b".repeat(16) } as never;
+    await persistTrace(trace);
+    const tok = await jwtFor("user-a");
+    const res = await app.request("http://localhost/traces/trc-core?include=core", {
+      headers: { Authorization: `Bearer ${tok}` },
+    });
+    expect(res.status).toBe(200);
+    expect(res.headers.get("x-trace-include")).toBe("core");
+    const body = (await res.json()) as Trace & { release?: unknown; otel?: unknown };
+    // Dev-only top-level fields stripped.
+    expect(body.release).toBeUndefined();
+    expect(body.otel).toBeUndefined();
+    // Dev-only event type dropped.
+    expect(body.events.find((e) => e.type === "dev.environment")).toBeUndefined();
+    // Heavy field replaced with the sentinel.
+    const prompt = body.events.find((e) => e.type === "prompt.assembled");
+    expect((prompt?.payload as any).body._omittedForCoreMode).toBe(true);
+  });
+
+  test("GET /traces/:id?include=dev returns the full doc and X-Trace-Include=dev", async () => {
+    const trace = makeTrace({ traceId: "trc-dev", userId: "user-a" });
+    trace.release = { gitSha: "abc" } as never;
+    await persistTrace(trace);
+    const tok = await jwtFor("user-a");
+    const res = await app.request("http://localhost/traces/trc-dev?include=dev", {
+      headers: { Authorization: `Bearer ${tok}` },
+    });
+    expect(res.status).toBe(200);
+    expect(res.headers.get("x-trace-include")).toBe("dev");
+    const body = (await res.json()) as Trace & { release?: { gitSha?: string } };
+    expect(body.release?.gitSha).toBe("abc");
+  });
+
+  test("GET /traces/:id with no include defaults to full + X-Trace-Include=full (back-compat)", async () => {
+    await persistTrace(makeTrace({ traceId: "trc-default", userId: "user-a" }));
+    const tok = await jwtFor("user-a");
+    const res = await app.request("http://localhost/traces/trc-default", {
+      headers: { Authorization: `Bearer ${tok}` },
+    });
+    expect(res.status).toBe(200);
+    expect(res.headers.get("x-trace-include")).toBe("full");
+  });
+
+  test("GET /trace by sessionId+messageId honors ?include= and sets X-Trace-Include", async () => {
+    await persistTrace(
+      makeTrace({ traceId: "trc-via-msg", sessionId: "s-i", messageId: "m-i", userId: "user-a" }),
+    );
+    const tok = await jwtFor("user-a");
+    const res = await app.request(
+      "http://localhost/trace?sessionId=s-i&messageId=m-i&include=core",
+      { headers: { Authorization: `Bearer ${tok}` } },
+    );
+    expect(res.status).toBe(200);
+    expect(res.headers.get("x-trace-include")).toBe("core");
+  });
+
+  test("Unknown ?include= value falls back to full (server default)", async () => {
+    await persistTrace(makeTrace({ traceId: "trc-bad-include", userId: "user-a" }));
+    const tok = await jwtFor("user-a");
+    const res = await app.request(
+      "http://localhost/traces/trc-bad-include?include=nonsense",
+      { headers: { Authorization: `Bearer ${tok}` } },
+    );
+    expect(res.status).toBe(200);
+    expect(res.headers.get("x-trace-include")).toBe("full");
+  });
 });

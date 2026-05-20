@@ -4,9 +4,9 @@ Agents are the specialists in this framework. Each agent owns a domain, has a di
 
 > **Where agents run depends on the deployment mode** (see [`architecture.md` §8](architecture.md#8-two-modes-local-dev-vs-ec2-production)):
 > - **Local dev** — all agents run in-process inside the Hono API via the Strands SDK. Multi-agent orchestration uses `ORCHESTRATOR_MODE=swarm`.
-> - **EC2 production** — each agent runs in its own AgentCore Runtime container. The orchestrator routes by calling `InvokeAgentRuntime` on a specialist's ARN. `ORCHESTRATOR_MODE=runtime`.
+> - **EC2 production (default)** — the Hono API classifies the message in-process (`api/src/lib/agent-classifier.ts`) using the orchestrator's `handoffs:` roster as the candidate set, then invokes the matching specialist's AgentCore Runtime directly. The orchestrator runtime is only reached when `USE_ORCHESTRATOR_RUNTIME=1` is set.
 >
-> The `.agent.md` format below is identical in both modes. The same files drive both the in-process Strands path and the AgentCore Runtime path — only the host changes.
+> The `.agent.md` format below is identical in both modes. The same files drive the in-process Strands path, the in-API classifier, and every AgentCore Runtime container — only the host changes.
 
 ---
 
@@ -61,7 +61,7 @@ tools:
   - run_skill_script
   - read_skill_resource
   - order-management/notify_fulfillment_lambda   # per-skill HTTP tool (Lambda Function URL)
-model: anthropic.claude-3-5-sonnet-20240620-v1:0
+model: us.anthropic.claude-haiku-4-5-20251001-v1:0
 temperature: 0.3
 memory:
   shortTerm: true
@@ -217,7 +217,7 @@ Tools include **built-in** Strands tools (MongoDB, KB, embeddings, …), **skill
 | `activate_skill` | Loads the full `SKILL.md` body for a named skill into the current context | Always registered (not listed in `tools:`) |
 | `read_skill_resource` | Loads a file from `references/` or `scripts/` under a skill; **skill must be on this agent's `skills:` list and activated** | Live |
 | `run_skill_script` | Dynamically imports `scripts/*.mjs` for a **skillName** + args; same allowlist/activation as `read_skill_resource` | Live |
-| **`{skill}/{localName}`** | **Per-skill HTTP tool** — `POST`/`GET`/… to a URL (e.g. Lambda Function URL). Defined in `config/skills/<skill>/http-tools.json`. Listed in `tools:` as **`order-management/notify_fulfillment_lambda`**. Same **allowlist + activation** as `read_skill_resource`. SSRF allowlists live in root `config/http-tools.json` → `security`. | Live — see [Configuration Guide](configuration-guide.md#http-tools-lambda--api-gateway) |
+| **`{skill}/{localName}`** | **Per-skill HTTP tool** — `POST`/`GET`/… to a URL (e.g. Lambda Function URL). Defined in `config/skills/<skill>/http-tools.json`. Listed in `tools:` as **`order-management/notify_fulfillment_lambda`**. Same **allowlist + activation** as `read_skill_resource`. SSRF allowlists live in root `config/http-tools.json` → `security`. | Live — see [Skills authoring guide](skills-authoring-guide.md#file-structure) |
 | **Short name** (no `/`) | **Global HTTP tool** from root `config/http-tools.json` → `tools` (optional). No skill activation gate. | Live |
 | `mongodb_query` | Runs find / findOne / aggregate / updateOne against MongoDB | Live — proxied through the dedicated MongoDB MCP AgentCore Runtime |
 | `mongodb_vector_search` | Performs semantic/vector search against a MongoDB Atlas collection | Live — Atlas `$vectorSearch` via the same MongoDB MCP runtime |
@@ -228,7 +228,7 @@ Tools include **built-in** Strands tools (MongoDB, KB, embeddings, …), **skill
 
 - `activate_skill` is registered for every agent automatically. You do not list it in `tools:`.
 - All Mongo-shaped tools resolve to MCP tool calls against the MongoDB MCP AgentCore Runtime (`MONGODB_MCP_RUNTIME_ARN` / `MONGODB_MCP_RUNTIME_ENDPOINT`). The agent runtime never opens a MongoDB connection itself.
-- **`HTTP_TOOLS_MOCK=1`** skips real outbound HTTP for all HTTP tools (skill + global); useful for demos without Lambda deployed. **`GET /http-tools`** lists configured tools (see [API Reference](api-reference.md#list-http-tools-lambda--api-config)).
+- **`HTTP_TOOLS_MOCK=1`** skips real outbound HTTP for all HTTP tools (skill + global); useful for demos without Lambda deployed. **`GET /http-tools`** lists configured tools (see [`api-reference.md` § `GET /http-tools`](api-reference.md#10-get-http-tools)).
 
 Only list tools that the agent's skills actually use. Giving an agent tools it has no instructions for does not add capability — it adds surface area for unexpected behavior.
 
@@ -305,7 +305,7 @@ tools:
   - bedrock_kb_retrieve
   - mongodb_query
   - read_skill_resource
-model: anthropic.claude-3-5-sonnet-20240620-v1:0
+model: us.anthropic.claude-sonnet-4-6
 temperature: 0.2
 memory:
   shortTerm: true
@@ -398,7 +398,7 @@ cd ui && streamlit run app.py       # starts the Streamlit UI (separate terminal
 
 Or via Docker: `docker compose up --build` from the repo root.
 
-See the [Configuration Guide](configuration-guide.md) and [`DEV_STATUS.md`](../DEV_STATUS.md) for env vars and local setup.
+See the [Configuration Guide](configuration-guide.md) and [`reference/env-vars.md`](reference/env-vars.md) for env vars and local setup.
 
 ---
 

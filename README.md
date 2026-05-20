@@ -1,19 +1,35 @@
 # MongoDB + AWS Bedrock Multi-Agent Framework
 
-A **configuration-driven multi-agent reference architecture** built on **AWS Bedrock** (Strands), **MongoDB Atlas**, and optional **JWT-secured** HTTP APIs — with **AgentCore** and fuller cloud wiring called out in [`TASKS.md`](TASKS.md). Add agents and domain behavior by editing markdown config; many paths need **no TypeScript changes**.
+A **configuration-driven multi-agent reference architecture** on **AWS Bedrock** (Strands Agents TypeScript SDK), **MongoDB Atlas**, and **JWT-secured** HTTP APIs. Add specialists by editing markdown config — no TypeScript changes for most flows.
+
+> **Start here for handover:** [`docs/README.md`](docs/README.md) is the single client-handover entry point — first-day checklist, reading orders, doc map, authoritative source files.
 
 ---
 
-## Quick Start
+## What this is
 
-The Hono API is a thin proxy in front of an AgentCore Runtime, so it requires AWS credentials and a real `AGENTCORE_ORCHESTRATOR_ARN`. The fastest local loop is to deploy the EC2 stack, copy `.env.live` into your shell, and run the API + UI against the same runtime ARN.
+A user types a question into a Streamlit UI → the Hono API receives it → an **in-API classifier** picks the right specialist agent → that specialist runs as an **AgentCore Runtime** on AWS Bedrock and streams the answer back over SSE. Mongo tools route through a **dedicated MongoDB MCP AgentCore Runtime** behind the AgentCore Gateway. Long-term memory is **hybrid vector + BM25** across Atlas. Observability lands in CloudWatch + OTel + X-Ray.
+
+The product goal: ship a reusable foundation that MongoDB field, partner, and professional-services teams can deploy for customer-specific multi-agent solutions. Domain behavior lives in `.agent.md` + `SKILL.md` files. Add a new vertical = add a new agent + skill, redeploy.
+
+**Five AgentCore Runtimes:** orchestrator + 3 specialists (order-management, product-recommendation, troubleshooting) + 1 MongoDB MCP runtime. The default request path is **single-hop** (in-API classifier → specialist runtime); `USE_ORCHESTRATOR_RUNTIME=1` toggles a two-hop rollback path through the orchestrator runtime.
+
+**Two co-equal connectivity modes** (mutually exclusive per account):
+- `NETWORK_MODE=privatelink` (default, partner-validated, SoW-aligned)
+- `NETWORK_MODE=peering` (alternative, with experimental KB ingestion via `bedrock-kb-peering`)
+
+Switching modes requires destroy + redeploy. KB ingestion is **private by default in both modes**; public Atlas SRV is an explicit privacy-regression opt-out only.
+
+---
+
+## Quick start
 
 ```bash
-# 0. One-time: AWS creds + Atlas keys + a deployed AgentCore Runtime
-source .env && source .env.live   # exports AGENTCORE_ORCHESTRATOR_ARN, AWS creds, etc.
+# 0. One-time: AWS creds + Atlas keys + deployed AgentCore Runtimes
+source .env && source .env.live
 
 # Terminal 1 — API
-export PATH="$HOME/.bun/bin:$PATH"   # if bun is not on PATH
+export PATH="$HOME/.bun/bin:$PATH"
 cd api && bun install
 bun run typecheck && bun run validate:bun && bun run validate:agentcore
 bun run dev
@@ -25,141 +41,53 @@ cd ui && pip install -r requirements.txt && streamlit run app.py
 docker compose up --build
 ```
 
-See [`DEV_STATUS.md`](DEV_STATUS.md) for the full runbook (deploy, MongoDB, Swarm, auth, Docker).
+See [`docs/deployment-guide.md`](docs/deployment-guide.md) for the full deploy runbook.
 
 ---
 
-## Deployment (run from your laptop — no CI pipeline)
-
-All deploys are driven from your local shell. GitHub is used **only to preserve code** — there is no deploy workflow. Four scripts do the work:
-
-| Script | Provisions | When to use |
-|---|---|---|
-| `deploy/scripts/deploy-network.sh` | Shared VPC + subnets + Atlas PrivateLink Interface VPCE + SSM-published IDs. **Run once per region.** | First time per region, or when changing VPC CIDR. |
-| `deploy/scripts/deploy-local.sh` | Atlas M10 + Bedrock KB + Cognito + Secrets Manager. Runs API + UI on `localhost`. | Day-to-day development. |
-| `deploy/deploy-full-with-privatelink.sh` | **Main entrypoint** — runs `deploy-network.sh` (if network not yet deployed) then `deploy-project.sh`. Provisions EC2 + ECR + AgentCore Memory + AgentCore Gateway + per-cluster Route 53 (+ optional Voyage AI SageMaker). | Full POC stack on EC2. |
-| `deploy/scripts/destroy.sh` | Tears down one environment (`--mode local`, `--mode ec2`, or `--mode network`). | Cleanup. |
-
-### One-time setup
-
-**1. AWS IAM user.** Create a dedicated IAM user (not root, not SSO) and attach the consolidated policy shipped in this repo:
-
-```bash
-aws iam create-policy \
-  --policy-name MultiAgentDeployPolicy \
-  --policy-document file://deploy/iam/policy.json
-
-aws iam attach-user-policy \
-  --user-name <your-deploy-user> \
-  --policy-arn arn:aws:iam::<your-account-id>:policy/MultiAgentDeployPolicy
-```
-
-The policy covers every AWS service the stack touches (EC2, VPC, ECR, Lambda, Bedrock, AgentCore, SageMaker, S3, Cognito, Secrets Manager, SSM, CloudWatch, Route 53) with **scoped IAM** — no `iam:*` wildcard, and an explicit Deny on privilege escalation (user/group/access-key mutations, SAML/OIDC providers, account password policy). See [`deploy/iam/README.md`](deploy/iam/README.md) for the full rationale and what the policy cannot do by design.
-
-Generate an access key for this user — you'll paste it into `.env` below.
-
-**2. MongoDB Atlas API key.** In Atlas → Organization → Access Manager → API Keys, create a key with **Organization Project Creator** role. Also grab your Org ID and Project ID.
-
-**3. Fill in your `.env`.** This file is committed to the repo and holds every credential and override. Open it and populate the required values:
-
-```bash
-# edit .env and fill in the REQUIRED values
-```
-
-Only six variables are actually required — AWS access key + secret, Atlas public + private key, Atlas project ID, and the MongoDB user password you want created. Everything else (region, project name, instance type, Voyage AI ARN) has a sensible default and is commented out.
-
-### Verify access before deploying
-
-Before running a full deploy, use `probe-resources.sh` to verify this AWS account can create and delete every resource the stack needs. It creates each resource with the exact name terraform would use, validates it, deletes it, then prints an access matrix.
+## Deployment
 
 ```bash
 source .env
 
-# Fast check (~5 min) — all resources except VPC, EC2, Atlas cluster, KB
-bash deploy/scripts/probe-resources.sh
+# Verify AWS permissions (probes 30 resources, ~5–30 min)
+bash deploy/scripts/probe-resources.sh [--all]
 
-# Full EC2 production check (~25 min) — everything including VPC+EC2+Atlas+KB
-bash deploy/scripts/probe-resources.sh --all
-```
-
-**Flags:**
-
-| Flag | What it adds | Time |
-|---|---|---|
-| _(none)_ | Bedrock InvokeModel, S3, IAM (all roles), Secrets Manager, CloudWatch, ECR, Cognito, Lambda, SageMaker API, AgentCore Memory+Gateway, Route53, Atlas IP list + DB user | ~5 min |
-| `--with-ec2` | VPC + 2×public + 2×private subnet + IGW + route table + SG + EIP + t3.medium launch + SSM check | +5 min |
-| `--with-cluster` | Atlas M10 cluster + collection + vector search index | +20 min |
-| `--with-bedrock-kb` | Bedrock KB + data source (requires `--with-cluster`) | +5 min |
-| `--with-sagemaker` | SageMaker endpoint-config (requires `VOYAGE_MODEL_PACKAGE_ARN`) | +1 min |
-| `--all` | All of the above | ~30 min |
-
-**Resource coverage (30 resources, both local and EC2 modes):**
-
-| Service | Resources probed |
-|---|---|
-| **Bedrock** | InvokeModel (Titan + Claude), bedrock-agent API, KB create/delete |
-| **S3** | Bootstrap bucket + KB doc objects |
-| **IAM** | 5 roles (KB, EC2, SageMaker, AgentCore GW, Lambda) + instance profile |
-| **Secrets Manager** | `<project>-bedrock-kb-creds-<env>` (e.g. `mongodb-multiagent-bedrock-kb-creds-dev`) |
-| **CloudWatch** | 3 log groups (`/<project>/<env>/{api,mcp,agentcore}`) |
-| **ECR** | `{project}-api` + `{project}-ui` repositories |
-| **Cognito** | User pool + app client |
-| **Lambda** | Function + IAM role |
-| **SageMaker** | Endpoint config (Voyage AI) |
-| **AgentCore** | Memory Store + Gateway + Gateway Target |
-| **VPC/EC2** | VPC, subnets (4), IGW, route table, SG, EIP, t3.medium instance, SSM |
-| **Route53** | Private hosted zone (Atlas PrivateLink) |
-| **MongoDB Atlas** | IP access list, DB user, M10 cluster, collection, vector search index |
-
-### Every deploy afterwards
-
-```bash
-source .env
-./deploy/scripts/deploy-network.sh --auto-approve  # once per region (shared VPC + Atlas PL VPCE)
-./deploy/scripts/deploy-local.sh --auto-approve    # local dev
+# Run the orchestrator that matches your NETWORK_MODE
+./deploy/deploy-full-with-privatelink.sh --auto-approve     # PrivateLink (default)
 # or
-./deploy/deploy-full-with-privatelink.sh --auto-approve  # full EC2 POC (auto-provisions network if needed)
+./deploy/deploy-full-with-vpc-peering.sh --auto-approve     # VPC peering
+
+# Post-deploy smoke
+python3 e2e-smoke/post-deploy-smoke.py
+
+# Targeted redeploys
+./deploy/deploy-api.sh                # API image only
+./deploy/deploy-ui.sh                 # UI image only
+./deploy/deploy-agents.sh             # Re-bundle agent code + AgentCore Runtimes only
+./deploy/scripts/deploy-shared.sh     # SageMaker + log groups + dashboards (singleton per account+region+env)
+
+# Tear down (run ec2 → shared → network)
+./deploy/scripts/destroy.sh --mode local   --auto-approve
+./deploy/scripts/destroy.sh --mode ec2     --auto-approve
+./deploy/scripts/destroy.sh --mode shared  --auto-approve
+./deploy/scripts/destroy.sh --mode network --auto-approve
 ```
 
-`deploy-full-with-privatelink.sh` checks SSM for an existing VPC and only runs `deploy-network.sh` if needed, then always runs `deploy-project.sh`.
+Full reference: [`docs/reference/deploy-scripts.md`](docs/reference/deploy-scripts.md).
 
-Pulling new code? Re-check `.env` — if new variables appear, add them and re-`source`. The scripts fail fast with a clear error if a required variable is missing.
+### Terraform stack split
 
-To tear down:
+Four root configs share one S3 state bucket, separate state keys:
 
-```bash
-source .env
-./deploy/scripts/destroy.sh --mode local   --auto-approve   # local resources only
-./deploy/scripts/destroy.sh --mode ec2     --auto-approve   # one project; leaves shared VPC + Atlas PL alone
-./deploy/scripts/destroy.sh --mode network --auto-approve   # shared VPC + Atlas PL — only after every ec2 env in the region is gone
-```
+| Env | Scope | Singleton scope | State key |
+|---|---|---|---|
+| `envs/network` | Shared VPC + Atlas connectivity (PL or peering) + SSM publishers | account + region | `<SHARED_VPC_NAME>/<region>/network/terraform.tfstate` |
+| `envs/shared` | Voyage SageMaker endpoint + 6 CloudWatch log groups + 4 dashboards + alarms + Bedrock invocation logging | account + region + env | `<env>/shared/terraform.tfstate` |
+| `envs/ec2` | Atlas M10 + Bedrock KB + EC2 + ECR + Cognito + 5 AgentCore Runtimes + AgentCore Gateway + ADOT sidecar | per-project | `<env>/ec2/terraform.tfstate` |
+| `envs/local` | Cognito + Bedrock KB + Secrets Manager for laptop dev | per-laptop | `<env>/terraform.tfstate` |
 
-### Voyage AI (EC2 mode, optional)
-
-Bedrock Titan embeddings are the default and work everywhere. To use Voyage AI instead:
-
-```bash
-./deploy/scripts/setup-voyage-marketplace.sh
-```
-
-It walks you through the one-time Marketplace subscription, discovers the model package ARN via `aws sagemaker list-model-packages`, and appends `VOYAGE_MODEL_PACKAGE_ARN` to your `.env` automatically.
-
-### Architecture notes
-
-Full architecture rationale, module tree, and apply-order cheat sheet live in [`deploy/terraform/.design.md`](deploy/terraform/.design.md). Key decisions:
-
-- **Three Terraform root configs, not conditional flags** — `envs/network/` (shared per region), `envs/local/`, and `envs/ec2/` (per project) are separate root modules with separate state keys in the same S3 bucket.
-- **Shared network is consumed via SSM** — `envs/network` publishes VPC ID, subnet IDs, Atlas PL VPCE ID, and the PrivateLink DNS hostname under `/${SHARED_VPC_NAME}/${AWS_REGION}/`; `envs/ec2` reads them with `data "aws_ssm_parameter"`. No `terraform_remote_state` cross-state coupling.
-- **EC2 shell is SSM only** — no port 22, no SSH keys. `deploy-project.sh` uses `aws ssm send-command` to push `.env.live` and restart services.
-- **Atlas PrivateLink lives in the shared network env** — local mode bypasses it and uses the public SRV endpoint with your laptop IP added to the Atlas access list (see `TF_VAR_my_ip` in `.env`). The per-cluster Route 53 zone (cluster SRV host → VPCE) is created in `envs/ec2` so each project owns its DNS without colliding.
-
----
-
-## What This Is
-
-This framework gives MongoDB field, partner, and professional services teams a reusable foundation for deploying customer-specific multi-agent solutions. The core runtime is shared across all use cases. Domain-specific behavior is defined entirely in configuration files.
-
-A user interacts through a Streamlit chat interface. Their message is forwarded by the Hono API to an **AgentCore Runtime** that hosts the orchestrator; the orchestrator picks a specialist (also an AgentCore Runtime) using **Strands Swarm**. Each agent uses its **persona** (`.agent.md`) and **domain knowledge** (`SKILL.md`), runs against **AWS Bedrock**, and calls **MongoDB tools over MCP through the AgentCore Gateway**. JWT verification is required for long-term memory and for the gateway's tool authentication.
+Rationale: [`deploy/terraform/.design.md`](deploy/terraform/.design.md). Module catalog: [`docs/reference/terraform-modules.md`](docs/reference/terraform-modules.md). Cross-stack SSM contract: [`docs/reference/ssm-parameters.md`](docs/reference/ssm-parameters.md).
 
 ---
 
@@ -167,359 +95,148 @@ A user interacts through a Streamlit chat interface. Their message is forwarded 
 
 ### Agents
 
-An **agent** is a specialist that handles a specific domain. This framework ships with an **orchestrator** plus **three specialists** (four agent definitions total):
+An **agent** is a specialist handling a specific domain. The reference ships **1 orchestrator + 3 specialists**:
 
-| Agent | What it does |
-|-------|-------------|
-| Orchestrator | Receives every message and routes it to the right specialist |
-| Order Management | Handles order lookups, status checks, tracking, and returns |
-| Product Recommendation | Finds and recommends products using semantic search |
-| Troubleshooting | Diagnoses problems using knowledge base and documentation |
+| Agent | Default model | What it does |
+|---|---|---|
+| Orchestrator | Claude Haiku 4.5 | (Rollback path) classifier-style routing to specialists |
+| Order Management | Claude Haiku 4.5 | Order lookups, status, tracking, returns |
+| Product Recommendation | Claude Sonnet 4.6 | Semantic search over `products` |
+| Troubleshooting | Claude Sonnet 4.6 | RAG over `troubleshooting_docs` + Bedrock KB |
 
-Agents are defined in `.agent.md` files inside `config/agents/`. Adding a new agent means creating a new file — the API **rescans `config/agents/` on each request**, so edits hot-reload without restarting the server.
+Agents are defined in `config/agents/<name>.agent.md`. Add a new agent = add a new file, redeploy. The API rescans `config/agents/` on every request, so config-only edits hot-reload without a restart.
+
+The **default production request path** is in-API classification (`agent-classifier.ts`) → direct specialist invocation. The orchestrator AgentCore Runtime is provisioned but only invoked when `USE_ORCHESTRATOR_RUNTIME=1`.
 
 ### Skills
 
-A **skill** is a package of domain knowledge that an agent loads to become an expert in a specific area. Skills follow the [agentskills.io open specification](https://agentskills.io/specification) and are inspired by [how Claude Code implements agent skills](https://docs.claude.com/en/docs/agent-sdk/skills).
-
-Each skill lives in `config/skills/` as a directory:
+A **skill** is a package of domain knowledge an agent loads to become an expert. Skills follow the [agentskills.io specification](https://agentskills.io/specification).
 
 ```
-config/skills/
-└── order-management/
-    ├── SKILL.md            ← instructions the agent follows
-    ├── http-tools.json     ← optional: HTTPS tools (e.g. Lambda Function URLs)
-    ├── scripts/            ← optional executable policy (`.mjs`) + on-demand assets
-    │   └── validate-return.mjs
-    └── references/         ← detailed docs loaded on demand
-        └── order-schema.md
+config/skills/order-management/
+├── SKILL.md              ← instructions the agent follows
+├── http-tools.json       ← optional: HTTPS tools (Lambda Function URLs, etc.)
+├── scripts/
+│   └── validate-return.mjs   ← executable policy (run_skill_script)
+└── references/
+    └── order-schema.md       ← detailed docs loaded on demand (read_skill_resource)
 ```
 
-When an agent is asked an order-related question, it activates the `order-management` skill. The skill tells the agent exactly which queries to run, how to format responses, and how to handle edge cases — without any of that logic living in code.
+**Progressive disclosure:** only the skill name + description are loaded at startup; the body is loaded when the skill is activated; references + scripts are loaded on demand.
 
-**Lambda / API calls without new TypeScript:** optional **`http-tools.json`** next to `SKILL.md` defines HTTP tools (URLs, methods, JSON bodies). The agent lists them as **`order-management/my_lambda_tool`**. Same **skill allowlist + activation** rules as `read_skill_resource`. Host allowlists for SSRF live in root **`config/http-tools.json`**. See [`docs/configuration-guide.md`](docs/configuration-guide.md#http-tools-lambda--api-gateway) and [`docs/api-reference.md`](docs/api-reference.md#list-http-tools-lambda--api-config).
-
-Skills use **progressive disclosure** to stay efficient:
-
-1. At startup, only the skill name and description are loaded (a few tokens each).
-2. When an agent activates a skill, the full `SKILL.md` instructions are loaded into the system prompt.
-3. During a conversation, reference files and scripts are loaded only if the agent needs them.
-
-### How Agents and Skills Work Together
-
-```
-config/agents/order-management.agent.md
- ├── persona     →  who the agent is and how it behaves
- ├── skills      →  ['order-management']  ← which domain knowledge to load
- ├── tools       →  which data tools are available
- └── handoffs    →  which agents to delegate to and when
-
-config/skills/order-management/SKILL.md
- ├── description →  used to decide when this skill is relevant
- └── body        →  step-by-step instructions, query patterns, edge cases
-```
-
-At runtime the agent's system prompt is assembled as: **persona + loaded skill instructions**. The agent then uses **generic data tools** (MongoDB, vector search, knowledge base retrieval), **skill scripts** (`run_skill_script`), and optional **skill HTTP tools** (Lambda/API Gateway via `http-tools.json`), guided by the skill's instructions.
+**HTTP / Lambda tools without TypeScript:** add `http-tools.json` next to `SKILL.md`. The agent lists each tool as `<skill>/<localToolName>`. SSRF allowlists in root `config/http-tools.json` (`security` block). Full guide: [`docs/skills-authoring-guide.md`](docs/skills-authoring-guide.md).
 
 ### Memory
 
-**Short-term (today):** conversation history for a `sessionId` is replayed into the Strands agent on each turn. **Default:** stored in an in-memory `Map` in the API process — lost on restart. **Optional durability:** set **`PERSIST_CHAT_SESSIONS=1`** and **`MONGODB_URI`** to persist the same history in MongoDB (`chat_sessions` by default; see [Configuration Guide](docs/configuration-guide.md#short-term-memory) and [API Reference](docs/api-reference.md#health-check)). **`GET /health`** reports `dependencies.chatSessions` as `memory`, `mongodb`, or `unavailable`. AgentCore Memory as the primary session store remains planned.
+**Short-term:** conversation history is replayed into the Strands `Agent` on each turn. Stored in an in-memory `Map` plus (when `MONGODB_URI` is set) the `chat_sessions` collection. Default-on; opt out with `PERSIST_CHAT_SESSIONS=0`. AgentCore Memory as the primary store is wired and feature-flagged.
 
-**Long-term (Phase 5 MVP — implemented):** per-user conversation history that persists across sessions, injected into the agent's system prompt on each new turn.
+**Long-term:** hybrid vector + BM25 retrieval across `agent_memory_facts` (LLM-curated facts) + `chat_messages` (per-turn mirror). Fused with Reciprocal Rank Fusion, recency-decayed, MMR-diversified, and prepended to the system prompt as `## Relevant prior context`. Keyed by JWT `sub` (`userId`) — requires auth + Atlas.
 
-#### How to enable long-term memory
-
-**Step 1 — opt the agent in** (`.agent.md` frontmatter):
+Enable per agent:
 
 ```yaml
+# config/agents/<name>.agent.md frontmatter
 memory:
   longTerm: true
-  # Optional: override the collection name (default: agent_memory_facts)
-  longTermCollection: agent_memory_facts
 ```
 
-**Step 2 — ensure the caller is authenticated.** Memory is keyed by the JWT `sub` claim (`userId`). Auth is mandatory: the API refuses to boot without `AUTH_JWKS_URI` + `AUTH_ISSUER` (see [Authentication](docs/api-reference.md#authentication)) and every protected request must carry a valid Bearer JWT.
-
-**Step 3 — point at MongoDB** (production):
-
-```bash
-MONGODB_URI=mongodb+srv://user:pass@cluster.mongodb.net
-# Project+env-derived (underscored). For PROJECT_NAME=mongodb-multiagent and
-# ENVIRONMENT=dev this resolves to mongodb_multiagent_dev.
-MONGODB_DB=mongodb_multiagent_dev
-```
-
-TTL indexes on `agent_memory_facts` and `chat_messages` are **auto-created on the first production write** (90-day expiry; production deploy default is 30 days via `MEMORY_TTL_DAYS=30`). Vector + Atlas Search (BM25) indexes are seeded by `db-seeding/seed-indexes.ts`.
-
-**Step 4 — tune retrieval** (optional — full table in [`docs/memory-architecture.md`](docs/memory-architecture.md)):
-
-```bash
-MEMORY_VECTOR_TOPK=6                  # how many items to inject (default: 6)
-MEMORY_VECTOR_FETCHK=24               # over-fetch per leg before fusion
-MEMORY_RECENCY_HALFLIFE_DAYS=30       # exponential recency decay
-MEMORY_MMR_LAMBDA=0.7                 # MMR diversification weight
-MEMORY_WEIGHT_FACTS=1.5               # RRF weight for agent_memory_facts
-MEMORY_WEIGHT_CHAT_MESSAGES=1.0       # RRF weight for chat_messages
-```
-
-#### What gets stored
-
-- **`agent_memory_facts`** — LLM-extracted facts of the form `{ userId, agentId, fact, source, ts, factHash, embedding?, embeddingModel? }`. Each fact is embedded with `embedDocumentText`, content-hashed (`factHash`), and `bulkWrite` upserted on `{ userId, factHash }` so duplicates collapse.
-- **`chat_messages`** — A vector-searchable mirror of each chat turn `{ messageId, sessionId, userId?, agentId?, role, content, timestamp, ts, embedding?, embeddingModel? }`, written by a microtask so the chat hot path never waits on the embedder. `DELETE /sessions/:id` cascade-deletes the mirror.
-
-On each new turn `readLongTermMemoryContext(userId, message, { agentId })` runs a hybrid `$vectorSearch` + `$search` (BM25) across both collections, fuses the results with Reciprocal Rank Fusion, applies recency decay and MMR diversification, and prepends:
-
-```
-## Relevant prior context
-- [fact] User prefers concise replies.
-- [chat 2024-01-15] User: … / Assistant: …
-```
-
-If the embedder is unavailable on a given write, the row is persisted without `embedding` and the lexical (BM25) leg still surfaces it; vector recall returns when the embedding provider is healthy again.
+Tune via env vars — defaults are `MEMORY_VECTOR_TOPK=14`, `MEMORY_WEIGHT_FACTS=1.5`, `MEMORY_WEIGHT_CHAT_MESSAGES=1.2`, `MEMORY_RECENCY_HALFLIFE_DAYS=30`, `MEMORY_MMR_LAMBDA=0.7`. Full catalog: [`docs/reference/env-vars.md`](docs/reference/env-vars.md). Architecture: [`docs/long-term-memory-design.md`](docs/long-term-memory-design.md).
 
 ---
 
-## Defining Agents
+## Authentication
 
-Create a file at `config/agents/<name>.agent.md`. The frontmatter declares configuration; the markdown body is the agent's persona and core instructions.
+JWKS auth is **mandatory**. The API refuses to start without `AUTH_JWKS_URI` + `AUTH_ISSUER` (`assertJwksAuthConfigured()` in `api/src/lib/jwt-verify.ts`). Every protected route requires `Authorization: Bearer <jwt>`. The JWT `sub` claim becomes `userId` for session scoping and long-term memory. No `ALLOW_UNAUTHENTICATED` / `REQUIRE_AUTH=false` bypass.
 
-```markdown
----
-name: My Agent
-description: One sentence used by the orchestrator to decide when to route here
-id: my-agent
-skills: ['my-skill']
-tools: ['mongodb_query', 'mongodb_vector_search']
-model: anthropic.claude-3-5-sonnet-20240620-v1:0
-# Optional: temperature (default 0.7), maxTokens (default 4096), handoffs: []
----
-
-# My Agent
-
-You are a [role]. Your job is to [purpose].
-
-## Guidelines
-- Guideline one
-- Guideline two
-```
-
-**Fields:**
-
-| Field | Required | Description |
-|-------|----------|-------------|
-| `name` | Yes | Display name |
-| `description` | Yes | Short description used by orchestrator for routing |
-| `id` | Yes | Unique slug, matches filename |
-| `skills` | Yes | List of skill names to load into system prompt |
-| `tools` | Yes | List of data tools available to this agent |
-| `model` | No | Bedrock model ID (defaults to Claude Sonnet) |
-| `maxTokens` | No | Default: 4096 |
-| `temperature` | No | Default: 0.7 |
-| `memory.shortTerm` | No | Enable in-session history replay (default: true) |
-| `memory.longTerm` | No | Hybrid vector + BM25 retrieval over `agent_memory_facts` + `chat_messages` (requires `userId` from JWT `sub`) |
-| `handoffs` | No | Agents this agent can delegate to (omit when empty) |
-
-Omit **`maxTokens`**, **`temperature`** (when 0.7 is fine), and **`handoffs`** when you do not need to override defaults.
+The Streamlit UI obtains tokens via Cognito (`streamlit-cognito-auth`) when `STREAMLIT_COGNITO_*` is set. Local dev: `DEV_MOCK_BACKENDS=1` + any non-empty stub Bearer token.
 
 ---
 
-## Defining Skills
+## Observability
 
-Create a directory at `config/skills/<name>/` with a `SKILL.md` file. Follow the [agentskills.io specification](https://agentskills.io/specification).
+- **Structured logs:** JSON lines via `api/src/lib/logger.ts`. `LOG_LEVEL=error|warn|info|debug` (default `info`).
+- **OTel + X-Ray:** when `OTEL_EXPORTER_OTLP_ENDPOINT` is set (EC2 default `http://127.0.0.1:4318`, ADOT sidecar), the API installs `NodeTracerProvider` + `BatchSpanProcessor` + `OTLPTraceExporter`. Strands TS SDK auto-instruments.
+- **CloudWatch:** 6 log groups (`/<SHARED_RESOURCE_PREFIX>/<env>/{api,ui,mcp,agentcore,otel,otel-atlas}`), 4 dashboards (`<SHARED_RESOURCE_PREFIX>-{fleet,mongo,cost,atlas}-<env>`), EMF metrics for `Multiagent/{Chat,Mongo,Memory}`.
+- **Trace Viewer:** debug-grade Streamlit page with `?include=core|dev|full` projections and `X-Trace-Include` enforcement.
 
-See [`docs/skills-authoring-guide.md`](docs/skills-authoring-guide.md) for the full authoring guide with examples and best practices.
+Full runbook: [`docs/observability-runbook.md`](docs/observability-runbook.md).
 
-**Minimal example:**
-
-```markdown
----
-name: my-skill
-description: >-
-  What this skill does and when it should be used. Write this carefully —
-  the agent uses this to decide when to activate the skill.
 ---
 
-# My Skill
-
-## What you can do
-
-Describe the available data and tools.
-
-## How to handle common requests
-
-Step-by-step instructions for the most frequent tasks.
-
-## Edge cases
-
-How to handle ambiguous, missing, or unexpected inputs.
-```
-
-**With references, scripts, and optional HTTP tools:**
+## Project layout
 
 ```
-config/skills/my-skill/
-├── SKILL.md
-├── http-tools.json     ← optional: POST/GET to Lambda URLs; list as my-skill/tool_name in agent tools:
-├── references/
-│   └── schema.md       ← loaded by agent on demand via read_skill_resource
-└── scripts/
-    └── helper.mjs      ← invoked via run_skill_script (dynamic import)
-```
-
-Reference files are not loaded by default — the agent requests them during a conversation when it needs deeper context. Keep `SKILL.md` under 500 lines and move detail into `references/`.
-
----
-
-## Adding a New Use Case
-
-1. Create `config/skills/<domain>/SKILL.md` with instructions for the new domain.
-2. Create `config/agents/<name>.agent.md` referencing that skill.
-3. Save the files — the next API request picks up the new agent and skill (no restart required for config-only changes).
-
-No TypeScript changes required for markdown-only flows. To call **AWS Lambda** (Function URL or API Gateway) from an agent, add **`http-tools.json`** under the skill and list **`skill-folder/tool_name`** in the agent’s `tools:` — still no API code changes. Terraform/IaC only if you provision new cloud resources.
-
----
-
-## Project Layout
-
-```
+api/             — Bun + Hono API server (SSE streaming, JWT/JWKS, rate limiting)
+ui/              — Streamlit chat client (Chat + Sessions + Trace Viewer)
+mcp-runtimes/    — Container-mode AgentCore Runtimes (MongoDB MCP)
 config/
-  agents/       ← .agent.md files (one per specialist agent)
-  skills/       ← SKILL.md directories (domain knowledge packages)
+  agents/        — .agent.md files (one per specialist)
+  skills/        — SKILL.md folders (domain knowledge packages)
   environment.yaml
-
-api/            ← Bun + Hono API server (SSE streaming, optional JWT/JWKS, rate limiting)
-  Dockerfile    ← production image (build from **repo root**; embeds `config/`)
-  src/
-    lib/        ← skill loader, prompt builder, Strands agent factory, tools, jwt-verify,
-    |             logger (LOG_LEVEL → JSON lines), long-term-memory + vector-retrieval +
-    |             chat-messages-collection (hybrid LTM over agent_memory_facts + chat_messages)
-    routes/     ← chat, agents, skills, sessions, health, http-tools (metadata)
-    middleware/ ← auth (Bearer + optional JWKS), rate-limit, request-id
-    adapters/   ← resolve-model (BedrockModel), agentcore-runtime, bedrock-retrieval, mongodb-mcp-client
-
-compose.yaml    ← `docker compose up` — API + UI (still needs AGENTCORE_ORCHESTRATOR_ARN + AWS creds)
-Makefile        ← `make docker-up` / `docker-build` (optional)
-
-ui/             ← Streamlit chat interface (Python)
-  Dockerfile    ← container image (Chat + Sessions pages)
-  app.py        ← main **Chat** page
-  pages/        ← multipage UI (e.g. **Sessions** — list, open in chat, delete)
-  lib/          ← settings, API client, sidebar, chat panel
-
-.env            ← credentials + project identity (fill in before first deploy)
-
+  demo-prompts.yaml
+db-seeding/      — Atlas data + index seed scripts
 deploy/
-  deploy-full-with-privatelink.sh ← main entrypoint: auto-provisions network if needed, then runs deploy-project.sh
-  scripts/
-    deploy-project.sh               ← per-project EC2 POC: consumes shared VPC, provisions EC2 + AgentCore
-    deploy-network.sh               ← shared VPC + Atlas PrivateLink VPCE (run once per region; SSM-publishes IDs)
-    deploy-local.sh                 ← localhost API/UI against Atlas + Bedrock KB (no EC2)
-    destroy.sh                      ← teardown; `--mode local|ec2|network` required, `--with-bootstrap` optional
-    setup-voyage-marketplace.sh     ← one-time Voyage AI Marketplace subscription + ARN discovery
-    docker-build.sh / docker-push-ecr.sh / docker-build-push.sh   ← API + UI image helpers
-  iam/
-    policy.json   ← consolidated IAM policy for the deploy user (scoped, no iam:* wildcard)
-    README.md     ← rationale, attach commands, privilege-escalation Deny list
+  deploy-full-with-privatelink.sh   ← orchestrator: PrivateLink mode
+  deploy-full-with-vpc-peering.sh   ← orchestrator: VPC peering mode
+  deploy-api.sh / deploy-ui.sh / deploy-agents.sh
+  scripts/                           — deploy-network, deploy-shared, deploy-project, destroy, etc.
+  iam/                                — consolidated deploy policy + STS role
   terraform/
-    bootstrap/    ← one-time: shared S3 state bucket + DynamoDB lock table
-    envs/
-      network/    ← root module for deploy-network.sh (VPC + Atlas PrivateLink VPCE + SSM publishers)
-      local/      ← root module for deploy-local.sh (Atlas + KB + Cognito + Secrets Manager)
-      ec2/        ← root module for deploy.sh (consumes shared VPC via SSM; EC2/AgentCore/Lambda + per-cluster Route 53)
-    modules/
-      networking/          ← VPC, subnets, EIP, security groups, S3 gateway endpoint
-      mongodb-atlas/       ← Atlas M10 cluster + DB user + IP allowlist
-      atlas-privatelink/   ← AWS Interface VPCE + Atlas-side endpoint binding + CIDR-scoped SG (envs/network)
-      atlas-privatelink-dns/ ← per-cluster Route 53 private zone + wildcard CNAME — DNS half of Atlas PrivateLink (envs/ec2)
-      ec2/                 ← EC2 instance profile + user-data (SSM-only, no SSH)
-      ecr/                 ← private ECR repos for API + UI images
-      cognito/             ← Cognito User Pool + App Client for JWT auth
-      bedrock-kb/          ← Bedrock Knowledge Base (native aws_bedrockagent_knowledge_base + data_source)
-      lambda-mcp/          ← MongoDB MCP Lambda (rollback target — not the active tool path)
-      agentcore-memory/    ← AgentCore Memory Store (native aws_bedrockagentcore_memory)
-      agentcore-gateway/   ← AgentCore Gateway + mcp_server target → MongoDB MCP runtime (native aws_bedrockagentcore_gateway)
-      agentcore-agent-runtime/ ← AgentCore Runtime (native aws_bedrockagentcore_agent_runtime; 4 chat agents + 1 MongoDB MCP runtime)
-      voyage-sagemaker/    ← optional Voyage AI SageMaker endpoint (embeddings)
-      cloudwatch/          ← log groups for every service (/<project>/<env>/*)
-  kb-docs/        ← versioned KB source documents (.txt) uploaded to S3 on apply
-
-.dockerignore   ← excludes ui/tests/docs from API image build context
-
-docs/           ← authoring guides and API reference
+    bootstrap/                       — S3 state bucket + DynamoDB lock
+    envs/{network,shared,ec2,local}/ — 4 root configs
+    modules/                         — 25+ reusable modules
+  kb-docs/                           — versioned KB sources uploaded to S3
+e2e/             — Playwright API smoke specs
+e2e-smoke/       — Python live-AWS smoke + memory recall diagnostic
+docs/            — canonical handover pack (read docs/README.md first)
+.github/workflows/  — ci.yml (typecheck + unit tests) + deploy.yml (release deploy)
+.env.sample      — every env var, commented
 ```
 
-### Structured logging
-
-The API emits **JSON log lines** to stdout/stderr. Control verbosity with the **`LOG_LEVEL`** env var:
-
-```
-LOG_LEVEL=debug   # error | warn | info (default) | debug
-```
-
-Each line: `{ "level": "info", "ts": "…", "msg": "…", ...ctx }`. Errors and warnings go to stderr; info and debug go to stdout. Useful for containerized deployments where log aggregators (CloudWatch, Datadog) consume JSON streams.
-
-### Session user-scoping
-
-The JWT `sub` claim is attached to every `SessionRecord`. `GET /sessions` only returns the calling user's sessions; `DELETE /sessions/:id` enforces ownership; sessions belonging to other users are 404 from `GET /sessions/:id`.
-
-### API authentication
-
-JWKS auth is **always required**. The API refuses to start without **`AUTH_JWKS_URI`** + **`AUTH_ISSUER`** (`assertJwksAuthConfigured()` in `api/src/lib/jwt-verify.ts`). Every protected route requires `Authorization: Bearer <jwt>` from the configured Cognito (or other OIDC) pool. Optional **`AUTH_APP_CLIENT_ID`** and **`AUTH_TOKEN_USE`** match Cognito ID vs access tokens. There is no `ALLOW_UNAUTHENTICATED` / `REQUIRE_AUTH=false` bypass — local dev uses the same security posture as the deploy. Copy [`.env.example`](.env.example) and see **[Authentication](docs/api-reference.md#authentication)** in the API reference.
-
-The Streamlit UI obtains API **`Authorization: Bearer`** tokens **only via Cognito** when **`STREAMLIT_COGNITO_*`** is set (`streamlit-cognito-auth`); there is no static UI token env var (see [`.env.example`](.env.example) and [`docs/configuration-guide.md`](docs/configuration-guide.md)).
-
-### Docker (full stack)
-
-From the repository root:
-
-```bash
-docker compose up --build
-# or: make docker-up
-```
-
-Serves the API at **http://localhost:3000** and Streamlit at **http://localhost:8501**. The API still requires **`AGENTCORE_ORCHESTRATOR_ARN`** and AWS credentials in your shell or `.env` file; without them the API refuses to start. The API image **bakes in** [`config/`](config/) at build time, so changing agents/skills means rebuilding the API image.
-
-See [`.env.docker.example`](.env.docker.example) for **`API_PORT`**, **`STREAMLIT_PORT`**, and optional **`MONGODB_URI`**, **AWS**, and **auth** overrides.
-
-Full deploy commands (driven from your laptop — no CI):
-
-- **Shared network (per region, run once):** `./deploy/scripts/deploy-network.sh --auto-approve` (VPC + subnets + Atlas PrivateLink VPCE + SSM publishers)
-- **Local dev stack:** `./deploy/scripts/deploy-local.sh --auto-approve` (Atlas + Bedrock KB; API + UI on `localhost`)
-- **Full EC2 POC:** `./deploy/deploy-full-with-privatelink.sh --auto-approve` (auto-provisions shared VPC if needed, then EC2 + AgentCore Memory + Gateway, per-cluster Route 53)
-- **Tear down:** `./deploy/scripts/destroy.sh --mode local --auto-approve`, `--mode ec2`, or `--mode network` (only after every per-project `--mode ec2` in the region is destroyed). Add `--with-bootstrap` to also remove the shared S3 state bucket + DynamoDB lock table.
-- **Build both images:** `./deploy/scripts/docker-build.sh` (optional **`TAG=mytag`**)
-- **Push to ECR:** `./deploy/scripts/docker-push-ecr.sh` (requires **`AWS_ACCOUNT_ID`**, **`AWS_REGION`**; optional **`SOURCE_TAG`**, **`ECR_PREFIX`**, **`TAG`** — see [`docs/deployment-guide.md`](docs/deployment-guide.md#step-5--build-and-push-application-images))
-
-All deploy/destroy scripts source `.env` from the repo root — see the [Deployment](#deployment-run-from-your-laptop--no-ci-pipeline) section at the top for the one-time setup (IAM policy, Atlas API key, fill in `.env`).
+Full per-folder rationale: [`PROJECT_STRUCTURE.md`](PROJECT_STRUCTURE.md).
 
 ---
 
 ## Documentation
 
 | Document | What it covers |
-|----------|----------------|
-| [`DEV_STATUS.md`](DEV_STATUS.md) | How to run locally, env vars, what is implemented vs planned |
-| [`TASKS.md`](TASKS.md) | Implementation checklist vs the action plan |
-| [`memory.md`](memory.md) | **Persistent** pitfalls only (same issue >2× or critical guardrails; see file header) |
-| [`AGENTS.md`](AGENTS.md) | Contributor conventions for this repo (AI + human) |
-| [`docs/agent-authoring-guide.md`](docs/agent-authoring-guide.md) | How to define agents with `.agent.md` files |
-| [`docs/skills-authoring-guide.md`](docs/skills-authoring-guide.md) | How to write effective `SKILL.md` files |
-| [`docs/configuration-guide.md`](docs/configuration-guide.md) | Agents, models, memory, **HTTP/Lambda tools** (`http-tools.json`) |
-| [`docs/deployment-guide.md`](docs/deployment-guide.md) | Terraform (target AWS), **Docker / Compose / ECR** (implemented), ECS alignment notes |
-| [`docs/demo-script.md`](docs/demo-script.md) | Step-by-step “wow” demo (local mock + Swarm) |
-| [`docs/api-reference.md`](docs/api-reference.md) | API endpoints, SSE format, auth |
-| [`docs/architecture.md`](docs/architecture.md) | System design with diagrams |
-| [`ACTION_PLAN.md`](ACTION_PLAN.md) | Full implementation plan |
+|---|---|
+| [`docs/README.md`](docs/README.md) | **Client handover entry point** — first-day checklist, reading orders, doc map |
+| [`docs/architecture.md`](docs/architecture.md) | System overview, 5-runtime topology, request flow, AWS infra |
+| [`docs/deployment-guide.md`](docs/deployment-guide.md) | Deploy runbook (PrivateLink + VPC peering), CI/CD, teardown |
+| [`docs/configuration-guide.md`](docs/configuration-guide.md) | Env vars, mode flags, agent + skill schema |
+| [`docs/api-reference.md`](docs/api-reference.md) | HTTP + SSE contract, auth, projections |
+| [`docs/agent-authoring-guide.md`](docs/agent-authoring-guide.md) | `.agent.md` schema |
+| [`docs/skills-authoring-guide.md`](docs/skills-authoring-guide.md) | `SKILL.md`, progressive disclosure, scripts, http-tools |
+| [`docs/memory-architecture.md`](docs/memory-architecture.md) + [`docs/long-term-memory-design.md`](docs/long-term-memory-design.md) | Short-term + long-term memory |
+| [`docs/hybrid-search.md`](docs/hybrid-search.md) | `mongodb_vector_search` + hybrid BM25 |
+| [`docs/logging-architecture.md`](docs/logging-architecture.md) + [`docs/observability-runbook.md`](docs/observability-runbook.md) | Logs, OTel, dashboards, alarms |
+| [`docs/trace-ui-system-overview.md`](docs/trace-ui-system-overview.md) + Trace Viewer guides | Inline card + Trace Viewer page |
+| [`docs/agentcore-runtime-design.md`](docs/agentcore-runtime-design.md) | 5-runtime topology, code vs container artifact |
+| [`docs/debugging.md`](docs/debugging.md) | Developer playbook (EC2 access, common failures, persistent pitfalls, validation scripts) |
+| [`docs/estimate.md`](docs/estimate.md) | Monthly AWS cost estimate |
+| [`docs/demo-script.md`](docs/demo-script.md) + [`docs/demo-mode-guide.md`](docs/demo-mode-guide.md) | Demo walkthrough + trace UI knobs |
+| **Reference appendix** | |
+| [`docs/reference/env-vars.md`](docs/reference/env-vars.md) | Every env var |
+| [`docs/reference/terraform-modules.md`](docs/reference/terraform-modules.md) | Every Terraform module |
+| [`docs/reference/ssm-parameters.md`](docs/reference/ssm-parameters.md) | Cross-stack SSM contract |
+| [`docs/reference/data-model.md`](docs/reference/data-model.md) | Every Mongo collection, indexes, TTL |
+| [`docs/reference/smoke-tests.md`](docs/reference/smoke-tests.md) | Every `e2e-smoke/*` script |
+| [`docs/reference/deploy-scripts.md`](docs/reference/deploy-scripts.md) | Every shell script under `deploy/` |
+| [`AGENTS.md`](AGENTS.md) | Contributor conventions (AI + human) |
+| [`PROJECT_STRUCTURE.md`](PROJECT_STRUCTURE.md) | Per-folder rationale |
 
 ---
 
-## Built With
+## Built with
 
 - [Strands Agents SDK](https://github.com/strands-agents/sdk-typescript) — agent orchestration (runs inside the AgentCore Runtime container)
-- [Hono](https://hono.dev/) — HTTP API
-- [jose](https://github.com/panva/jose) — JWT verification when JWKS env vars are set
-- [MongoDB Atlas](https://www.mongodb.com/atlas) — data and (when wired) vector search / long-term memory
-- [AWS Bedrock](https://aws.amazon.com/bedrock/) — language models, knowledge bases
-- [Bedrock AgentCore SDK](https://github.com/aws/bedrock-agentcore-sdk-typescript) — planned for cloud runtime, gateway, identity ([`TASKS.md`](TASKS.md))
+- [Hono](https://hono.dev/) — HTTP API + SSE
+- [jose](https://github.com/panva/jose) — JWT verification
+- [MongoDB Atlas](https://www.mongodb.com/atlas) — data + vector search + long-term memory
+- [AWS Bedrock](https://aws.amazon.com/bedrock/) — Claude Sonnet / Haiku + Titan embeddings + Knowledge Bases
+- [Bedrock AgentCore](https://docs.aws.amazon.com/bedrock-agentcore/) — Runtime, Gateway, Memory
+- [Voyage AI on SageMaker](https://aws.amazon.com/marketplace/pp/prodview-hrid2zxusacxy) — `voyage-multimodal-3` embeddings (SoW-aligned)
 - [Agent Skills specification](https://agentskills.io/specification) — skill format
+- [Streamlit](https://streamlit.io/) — chat client + Trace Viewer
+- [OpenTelemetry](https://opentelemetry.io/) + AWS Distro for OpenTelemetry — tracing

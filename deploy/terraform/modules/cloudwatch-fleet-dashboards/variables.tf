@@ -1,6 +1,12 @@
 variable "project_name" {
   type        = string
-  description = "Project name prefix used for resource naming + Project tag."
+  description = "Operator/team project name. Used for the Project tag only — dashboard / alarm / metric-filter / query-definition names use shared_resource_prefix so they are stable per (account, region, environment) across multiple per-project envs/ec2 stacks."
+}
+
+variable "shared_resource_prefix" {
+  type        = string
+  description = "Prefix used in dashboard names ($${prefix}-fleet-<env>, $${prefix}-mongo-<env>, $${prefix}-cost-<env>), alarm names, metric-filter names, and Logs-Insights query names. Passed in from envs/shared so renaming \"multiagent\" → anything else is one-variable change."
+  default     = "multiagent"
 }
 
 variable "environment" {

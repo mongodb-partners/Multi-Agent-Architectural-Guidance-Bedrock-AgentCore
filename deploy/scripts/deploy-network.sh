@@ -33,16 +33,20 @@ BOOTSTRAP_DIR="$TF_ROOT/bootstrap"
 
 ENV_FILE="$REPO_ROOT/.env"
 AUTO_APPROVE=false
+ALLOW_MODE_SWITCH=false
 AWS_REGION="${AWS_REGION:-us-east-1}"
 ENVIRONMENT="${ENVIRONMENT:-dev}"
 PROJECT_NAME="${PROJECT_NAME:-multiagent-mongodb-framework}"
 SHARED_VPC_NAME="${SHARED_VPC_NAME:-shared-network}"
 VPC_CIDR="${VPC_CIDR:-10.0.0.0/16}"
+NETWORK_MODE="${NETWORK_MODE:-privatelink}"
+ATLAS_PEERING_CIDR="${ATLAS_PEERING_CIDR:-192.168.248.0/21}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --auto-approve) AUTO_APPROVE=true ;;
-    --env-file)     ENV_FILE="$2"; shift ;;
+    --auto-approve)       AUTO_APPROVE=true ;;
+    --allow-mode-switch)  ALLOW_MODE_SWITCH=true ;;
+    --env-file)           ENV_FILE="$2"; shift ;;
     -h|--help)
       sed -n '2,22p' "$0"; exit 0 ;;
     *) echo "  [network] Unknown arg: $1" >&2; exit 1 ;;
@@ -119,6 +123,32 @@ ENVIRONMENT="${ENVIRONMENT:-dev}"
 PROJECT_NAME="${PROJECT_NAME:-multiagent-mongodb-framework}"
 SHARED_VPC_NAME="${SHARED_VPC_NAME:-shared-network}"
 VPC_CIDR="${VPC_CIDR:-10.0.0.0/16}"
+NETWORK_MODE="${NETWORK_MODE:-privatelink}"
+ATLAS_PEERING_CIDR="${ATLAS_PEERING_CIDR:-192.168.248.0/21}"
+
+# Validate NETWORK_MODE
+case "$NETWORK_MODE" in
+  privatelink|peering) ;;
+  *) err "Invalid NETWORK_MODE='${NETWORK_MODE}' — must be 'privatelink' or 'peering'" ;;
+esac
+
+# ── Pre-flight: CIDR overlap check (peering mode only) ──────────────────────
+# Fails fast before terraform plan (saves ~30s vs catching the precondition).
+if [[ "$NETWORK_MODE" == "peering" ]]; then
+  python3 - <<PY || err "CIDR pre-flight failed — see message above"
+import ipaddress, sys
+v = ipaddress.ip_network('${VPC_CIDR}')
+a = ipaddress.ip_network('${ATLAS_PEERING_CIDR}')
+if v.overlaps(a):
+    sys.stderr.write(
+        f"CIDR overlap: VPC_CIDR={v} overlaps ATLAS_PEERING_CIDR={a}.\n"
+        f"  Pick a non-overlapping ATLAS_PEERING_CIDR (Atlas default 192.168.248.0/21 is reserved\n"
+        f"  and does not overlap the default vpc_cidr 10.0.0.0/16).\n"
+    )
+    sys.exit(1)
+PY
+  ok "CIDR pre-flight: ${VPC_CIDR} (VPC) and ${ATLAS_PEERING_CIDR} (Atlas) do not overlap"
+fi
 
 export TF_VAR_atlas_project_id="${TF_VAR_atlas_project_id:-${TF_VAR_mongodb_atlas_project_id:-}}"
 [[ -n "${TF_VAR_atlas_project_id:-}" ]] || err "Atlas Project ID not set. Set TF_VAR_mongodb_atlas_project_id in .env"
@@ -128,15 +158,40 @@ export TF_VAR_atlas_private_key="${MONGODB_ATLAS_PRIVATE_KEY:-}"
 [[ -n "${TF_VAR_atlas_public_key:-}" ]]  || err "MONGODB_ATLAS_PUBLIC_KEY not set in .env"
 [[ -n "${TF_VAR_atlas_private_key:-}" ]] || err "MONGODB_ATLAS_PRIVATE_KEY not set in .env"
 
-[[ -n "${AWS_ACCESS_KEY_ID:-}" ]] || err "AWS_ACCESS_KEY_ID not set. Re-authenticate and update .env"
-ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text 2>/dev/null) \
-  || err "AWS credentials invalid or expired."
+# shellcheck source=deploy/scripts/_aws-auth.sh
+source "$SCRIPT_DIR/_aws-auth.sh"
+validate_aws_auth || err "AWS auth validation failed (see above)"
+ACCOUNT_ID="$AWS_AUTH_ACCOUNT_ID"
 ok "AWS account: $ACCOUNT_ID"
 ok "Atlas project: $TF_VAR_atlas_project_id"
 ok "Shared VPC name: $SHARED_VPC_NAME"
 ok "Region: $AWS_REGION"
+ok "Network mode: ${NETWORK_MODE}"
+[[ "$NETWORK_MODE" == "peering" ]] && ok "Atlas peering CIDR: ${ATLAS_PEERING_CIDR}"
 
 SHARED_BUCKET="${PROJECT_NAME}-${ENVIRONMENT}-${ACCOUNT_ID}"
+
+# ── Pre-flight: mode-switch guard ───────────────────────────────────────────
+# If SSM /network_mode already exists from a previous apply, refuse to flip
+# the mode without an explicit --allow-mode-switch (and even then, operator
+# must have already run destroy.sh — otherwise resources from both modes
+# will collide).
+EXISTING_MODE=$(aws ssm get-parameter \
+  --region "$AWS_REGION" \
+  --name "/${SHARED_VPC_NAME}/${AWS_REGION}/network_mode" \
+  --query "Parameter.Value" --output text 2>/dev/null || echo "")
+if [[ -n "$EXISTING_MODE" && "$EXISTING_MODE" != "$NETWORK_MODE" ]]; then
+  if [[ "$ALLOW_MODE_SWITCH" != "true" ]]; then
+    err "MODE MISMATCH: SSM /${SHARED_VPC_NAME}/${AWS_REGION}/network_mode says '${EXISTING_MODE}' but env says '${NETWORK_MODE}'.
+       PrivateLink and VPC peering are mutually exclusive per account — to switch modes run:
+         ./deploy/scripts/destroy.sh --mode ec2
+         ./deploy/scripts/destroy.sh --mode shared    # optional
+         ./deploy/scripts/destroy.sh --mode network
+       Then re-run with the desired NETWORK_MODE. Override with --allow-mode-switch only after the
+       destroy completes successfully (otherwise resources from both modes will collide)."
+  fi
+  warn "MODE SWITCH detected (${EXISTING_MODE} → ${NETWORK_MODE}). --allow-mode-switch is set; proceeding."
+fi
 
 # ══════════════════════════════════════════════════════════════════════════════
 # PHASE 3 — Bootstrap (idempotent)
@@ -175,15 +230,17 @@ ok "backend.hcl written (state key: ${SHARED_VPC_NAME}/${AWS_REGION}/network/ter
 
 cat > "$TF_DIR/terraform.tfvars" <<EOF
 # Shared network — generated by deploy-network.sh
-aws_region       = "${AWS_REGION}"
-environment      = "${ENVIRONMENT}"
-project_name     = "${PROJECT_NAME}"
-shared_vpc_name  = "${SHARED_VPC_NAME}"
-vpc_cidr         = "${VPC_CIDR}"
-atlas_project_id = "${TF_VAR_atlas_project_id}"
+aws_region         = "${AWS_REGION}"
+environment        = "${ENVIRONMENT}"
+project_name       = "${PROJECT_NAME}"
+shared_vpc_name    = "${SHARED_VPC_NAME}"
+vpc_cidr           = "${VPC_CIDR}"
+atlas_project_id   = "${TF_VAR_atlas_project_id}"
+network_mode       = "${NETWORK_MODE}"
+atlas_peering_cidr = "${ATLAS_PEERING_CIDR}"
 # atlas_public_key / atlas_private_key → TF_VAR env vars
 EOF
-ok "terraform.tfvars written"
+ok "terraform.tfvars written (network_mode=${NETWORK_MODE})"
 
 # ══════════════════════════════════════════════════════════════════════════════
 # PHASE 5 — terraform apply (envs/network)
@@ -199,8 +256,16 @@ terraform plan -input=false -out="$TF_DIR/.tfplan"
 ok "plan complete"
 
 sep
-log "NOTE: First apply discovers/creates the Atlas PrivateLink endpoint service"
-log "(reused across all per-project deployments in this Atlas project + region)."
+if [[ "$NETWORK_MODE" == "privatelink" ]]; then
+  log "NOTE: First apply discovers/creates the Atlas PrivateLink endpoint service"
+  log "(reused across all per-project deployments in this Atlas project + region)."
+else
+  log "NOTE: First apply discovers/creates the Atlas network container for VPC peering"
+  log "(reused across all per-project deployments in this Atlas project + region)."
+  log "Atlas Private DNS for Peering is auto-enabled via the Admin API. If the API"
+  log "key lacks GROUP_OWNER scope the toggle fails (warning only) and the runtime"
+  log "URI silently falls back to the multi-host non-SRV form (still private)."
+fi
 
 if [[ "$AUTO_APPROVE" == "true" ]]; then
   log "Applying..."
@@ -219,17 +284,32 @@ ok "Terraform apply complete"
 sep
 log "Phase 6 — Verifying SSM params under /${SHARED_VPC_NAME}/${AWS_REGION}/..."
 
-REQUIRED_PARAMS=(
+SHARED_PARAMS=(
   "vpc_id"
   "vpc_cidr"
   "public_subnet_ids"
   "private_subnet_ids"
-  "atlas_pl_vpce_id"
-  "atlas_pl_vpce_dns_name"
-  "atlas_pl_security_group_id"
-  "atlas_endpoint_service_name"
-  "atlas_private_link_id"
+  "network_mode"
 )
+
+if [[ "$NETWORK_MODE" == "privatelink" ]]; then
+  MODE_PARAMS=(
+    "atlas_pl_vpce_id"
+    "atlas_pl_vpce_dns_name"
+    "atlas_pl_security_group_id"
+    "atlas_endpoint_service_name"
+    "atlas_private_link_id"
+  )
+else
+  MODE_PARAMS=(
+    "atlas_peering_id"
+    "atlas_container_id"
+    "atlas_peering_cidr"
+    "atlas_private_dns_enabled"
+  )
+fi
+
+REQUIRED_PARAMS=("${SHARED_PARAMS[@]}" "${MODE_PARAMS[@]}")
 
 for p in "${REQUIRED_PARAMS[@]}"; do
   val=$(aws ssm get-parameter \
@@ -238,29 +318,54 @@ for p in "${REQUIRED_PARAMS[@]}"; do
     --query "Parameter.Value" --output text 2>/dev/null || echo "")
   [[ -n "$val" ]] || err "SSM param missing or empty: /${SHARED_VPC_NAME}/${AWS_REGION}/${p}"
 done
-ok "All ${#REQUIRED_PARAMS[@]} SSM params populated"
+ok "All ${#REQUIRED_PARAMS[@]} SSM params populated (${#SHARED_PARAMS[@]} shared + ${#MODE_PARAMS[@]} ${NETWORK_MODE})"
 
 VPC_ID=$(terraform output -raw vpc_id 2>/dev/null || echo "")
 PUB_SUBNETS=$(terraform output -json public_subnet_ids 2>/dev/null || echo "")
 PRIV_SUBNETS=$(terraform output -json private_subnet_ids 2>/dev/null || echo "")
-VPCE_ID=$(terraform output -raw atlas_pl_vpce_id 2>/dev/null || echo "")
-VPCE_DNS=$(terraform output -raw atlas_pl_vpce_dns_name 2>/dev/null || echo "")
-PL_ID=$(terraform output -raw atlas_private_link_id 2>/dev/null || echo "")
 
 sep
 ok "Shared network deployment complete!"
 echo ""
 echo "  Shared VPC name : ${SHARED_VPC_NAME}"
 echo "  Region          : ${AWS_REGION}"
+echo "  Network mode    : ${NETWORK_MODE}"
 echo "  VPC             : ${VPC_ID}"
 echo "  Public subnets  : ${PUB_SUBNETS}"
 echo "  Private subnets : ${PRIV_SUBNETS}"
-echo "  Atlas VPCE      : ${VPCE_ID}"
-echo "  VPCE DNS        : ${VPCE_DNS}"
-echo "  Atlas PL id     : ${PL_ID}"
+
+if [[ "$NETWORK_MODE" == "privatelink" ]]; then
+  VPCE_ID=$(terraform output -raw atlas_pl_vpce_id 2>/dev/null || echo "")
+  VPCE_DNS=$(terraform output -raw atlas_pl_vpce_dns_name 2>/dev/null || echo "")
+  PL_ID=$(terraform output -raw atlas_private_link_id 2>/dev/null || echo "")
+  echo "  Atlas VPCE      : ${VPCE_ID}"
+  echo "  VPCE DNS        : ${VPCE_DNS}"
+  echo "  Atlas PL id     : ${PL_ID}"
+else
+  PEERING_ID=$(terraform output -raw atlas_peering_connection_id 2>/dev/null || echo "")
+  CONTAINER_ID=$(terraform output -raw atlas_network_container_id 2>/dev/null || echo "")
+  ATLAS_CIDR=$(terraform output -raw atlas_peering_cidr 2>/dev/null || echo "")
+  PRIVATE_DNS=$(terraform output -raw atlas_private_dns_enabled 2>/dev/null || echo "false")
+  echo "  Atlas peering id: ${PEERING_ID}"
+  echo "  Atlas container : ${CONTAINER_ID}"
+  echo "  Atlas CIDR      : ${ATLAS_CIDR}"
+  echo "  Private DNS     : ${PRIVATE_DNS} (when true, SRV-form peering URI is used; multi-host non-SRV is always available as fallback)"
+  if [[ "$PRIVATE_DNS" != "true" ]]; then
+    echo ""
+    warn "Atlas 'Private DNS for Peering' is NOT enabled — the runtime uses the multi-host non-SRV"
+    warn "peering URI. To enable the SRV form, either:"
+    warn "  1. Re-run with an Atlas API key that has GROUP_OWNER scope (auto-enable will retry)"
+    warn "  2. Enable it manually in Atlas: Project → Network Access → Peering → 'Use private IPs/DNS'"
+  fi
+fi
+
 echo ""
 echo "  SSM prefix      : /${SHARED_VPC_NAME}/${AWS_REGION}/"
 echo "  State key       : ${SHARED_VPC_NAME}/${AWS_REGION}/network/terraform.tfstate"
 echo ""
-echo "  Next: ./deploy/deploy-full-with-privatelink.sh   (or ./deploy/scripts/deploy-project.sh directly)"
+if [[ "$NETWORK_MODE" == "privatelink" ]]; then
+  echo "  Next: ./deploy/deploy-full-with-privatelink.sh   (or ./deploy/scripts/deploy-project.sh directly)"
+else
+  echo "  Next: ./deploy/deploy-full-with-vpc-peering.sh   (or ./deploy/scripts/deploy-project.sh directly)"
+fi
 sep

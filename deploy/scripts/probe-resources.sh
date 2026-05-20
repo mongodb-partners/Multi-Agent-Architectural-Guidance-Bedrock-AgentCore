@@ -560,7 +560,7 @@ if [[ "$WITH_EC2" == "false" ]]; then
     && { ok "EC2 API reachable"; rec "vpc+ec2:API" "(api-only)" "✓" "n/a"; } \
     || { no "EC2 API"; rec "vpc+ec2:API" "✗" "-" "n/a"; }
   inf "use --with-ec2 for full VPC+EC2 CRUD (~5 min)"
-  for R in "vpc:VPC($VPC_NAME)" "vpc:internet-gateway" "vpc:subnet-public(x2)" "vpc:subnet-private(x2)" "vpc:route-table" "ec2:security-group" "ec2:EIP" "ec2:instance($PROJECT_NAME-poc-$ENVIRONMENT)" "ec2:ssm-access"; do
+  for R in "vpc:VPC($VPC_NAME)" "vpc:internet-gateway" "vpc:subnet-public(x2)" "vpc:subnet-private(x2)" "vpc:route-table" "ec2:security-group" "ec2:EIP" "ec2:instance($PROJECT_NAME-ec2-$ENVIRONMENT)" "ec2:ssm-access"; do
     rec "$R" "skipped" "-" "-"
   done
 else
@@ -681,7 +681,7 @@ else
         --subnet-id "$_PUB_SUBNET1" --security-group-ids "$_SG_ID" \
         --associate-public-ip-address \
         --iam-instance-profile "Name=$EC2_PROFILE_NAME" \
-        --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=${PROJECT_NAME}-poc-${ENVIRONMENT}},{Key=Project,Value=$PROJECT_NAME}]" \
+        --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=${PROJECT_NAME}-ec2-${ENVIRONMENT}},{Key=Project,Value=$PROJECT_NAME}]" \
         --region "$AWS_REGION" \
         --query 'Instances[0].InstanceId' --output text 2>/dev/null)
       if [[ "$_INSTANCE_ID" == i-* ]]; then
@@ -699,19 +699,19 @@ else
           --filters "Key=InstanceIds,Values=$_INSTANCE_ID" \
           --query 'InstanceInformationList[0].PingStatus' --output text 2>/dev/null)
         inf "SSM status: ${_SSM:-not-yet-registered}"
-        rec "ec2:instance(${PROJECT_NAME}-poc-${ENVIRONMENT})" "✓" "✓" "-"
+        rec "ec2:instance(${PROJECT_NAME}-ec2-${ENVIRONMENT})" "✓" "✓" "-"
         rec "ec2:ssm-access" "(api-only)" "${_SSM:-pending}" "n/a"
       else
         ERR2=$(aws ec2 run-instances --image-id "$_AMI_ID" --instance-type t3.medium \
           --subnet-id "$_PUB_SUBNET1" --security-group-ids "$_SG_ID" \
           --associate-public-ip-address --region "$AWS_REGION" 2>&1 | tail -1)
         no "launch EC2 — $ERR2"
-        rec "ec2:instance(${PROJECT_NAME}-poc-${ENVIRONMENT})" "✗" "-" "-"
+        rec "ec2:instance(${PROJECT_NAME}-ec2-${ENVIRONMENT})" "✗" "-" "-"
         rec "ec2:ssm-access" "✗" "-" "n/a"
       fi
     else
       wrn "skipping EC2 launch — subnet/SG not created"
-      rec "ec2:instance(${PROJECT_NAME}-poc-${ENVIRONMENT})" "skipped" "-" "-"
+      rec "ec2:instance(${PROJECT_NAME}-ec2-${ENVIRONMENT})" "skipped" "-" "-"
       rec "ec2:ssm-access" "skipped" "-" "n/a"
     fi
 

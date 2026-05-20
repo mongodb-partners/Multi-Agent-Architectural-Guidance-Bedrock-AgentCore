@@ -783,7 +783,17 @@ const CHAT_MESSAGES_VECTOR_INDEX = "chat_messages-vector-index";
 const CHAT_MESSAGES_LEXICAL_INDEX = "chat_messages-text-index";
 
 function memoryTopK(): number {
-  return Math.max(1, Number(process.env.MEMORY_VECTOR_TOPK ?? 6));
+  // Default raised from 6 → 10 → 14 (2026-05): with the original cap, 24+24
+  // chat_messages hits routinely lost the final top-K race to the user's many
+  // curated facts (MEMORY_WEIGHT_FACTS=1.5 vs chat=1.2). The 10-row interim
+  // helped, but a fresh same-run profile fact (e.g. "favorite color is teal",
+  // "pet's name is Mango") still crowded out a transient chat_messages-only
+  // codename when both were brand new. Raising to 14 gives the chat_messages
+  // bucket enough headroom (~4 extra slots) to coexist with the curated facts
+  // without inflating the system prompt unduly. Empirically validated on the
+  // live stack with `memory-recall-diagnostic.py` scenarios B+C running back-
+  // to-back — see commit history + DEV_STATUS.md for the diagnostic notes.
+  return Math.max(1, Number(process.env.MEMORY_VECTOR_TOPK ?? 14));
 }
 
 function memoryFetchK(): number {
@@ -816,8 +826,13 @@ function memoryWeightFacts(): number {
 }
 
 function memoryWeightChatMessages(): number {
-  const raw = Number(process.env.MEMORY_WEIGHT_CHAT_MESSAGES ?? 1);
-  return Number.isFinite(raw) ? raw : 1;
+  // Default raised from 1.0 → 1.2 (2026-05). Combined with the TOPK 6 → 10 bump,
+  // this lets a top-ranked chat_messages hit beat the 3rd-ranked fact, which
+  // restores recall of specific recent statements (codenames, exact phrasing).
+  // Facts still keep their 1.5 priority — this only narrows the gap, it does
+  // not equalize. See e2e-smoke/memory-recall-diagnostic.py verdict H4.
+  const raw = Number(process.env.MEMORY_WEIGHT_CHAT_MESSAGES ?? 1.2);
+  return Number.isFinite(raw) ? raw : 1.2;
 }
 
 /**

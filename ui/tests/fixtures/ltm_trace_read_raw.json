@@ -1,0 +1,120 @@
+{
+  "traceId": "fixture-ltm-read-raw",
+  "sessionId": "fixture-session-2",
+  "agentId": "order-mgmt",
+  "createdAt": "2026-05-19T10:05:00.000Z",
+  "summary": {
+    "durationMs": 3987,
+    "modelIds": ["us.anthropic.claude-3-7-sonnet-20250219-v1:0"],
+    "memoryBytesInjected": 1456,
+    "memoryEntriesInjected": 8
+  },
+  "events": [
+    {
+      "type": "chat.turn.start",
+      "ts": 1716115500000,
+      "payload": {
+        "sessionId": "fixture-session-2",
+        "messageId": "fixture-msg-2",
+        "agentId": "order-mgmt",
+        "userId": "user-fixture-2",
+        "requestId": "req-fixture-2",
+        "startTs": 1716115500000
+      }
+    },
+    {
+      "type": "memory.scoped_read",
+      "ts": 1716115500120,
+      "payload": {
+        "scope": "scoped",
+        "userId": "user-fixture-2",
+        "agentId": "order-mgmt",
+        "facts": [
+          "User prefers shipping updates via SMS.",
+          "[2026-05-15 user] Mentioned they live in Austin, TX.",
+          "[2026-05-15 assistant] Confirmed Austin TX shipping address on file.",
+          "User's preferred contact is the secondary email priya.dev@example.com.",
+          "Has 3 active orders as of 2026-05-19.",
+          "Loyalty tier: gold (since 2024-08).",
+          "Asks about return windows frequently.",
+          "Previously requested a refund on order ORD-9921."
+        ],
+        "entryCount": 8,
+        "bytesInjected": 1456,
+        "collectionsQueried": ["agent_memory_facts", "chat_messages"],
+        "injectionPoint": "system_prompt",
+        "latencyMs": 98,
+        "backend": "mongodb",
+        "primaryFailed": false,
+        "mode": "hybrid",
+        "queryText": "what's the status of my recent order",
+        "embeddingSource": "voyage",
+        "embeddingModel": "voyage-3",
+        "retrieval": {
+          "topK": 14,
+          "fetchK": 24,
+          "vectorHits": 16,
+          "lexicalHits": 10,
+          "rrfMergedCount": 19,
+          "perCollection": [
+            {
+              "collection": "agent_memory_facts",
+              "vectorReturned": 8,
+              "lexicalReturned": 6
+            },
+            {
+              "collection": "chat_messages",
+              "vectorReturned": 8,
+              "lexicalReturned": 4
+            }
+          ]
+        }
+      }
+    },
+    {
+      "type": "prompt.assembled",
+      "ts": 1716115500160,
+      "payload": {
+        "personaBytes": 980,
+        "discoveryBytes": 420,
+        "memoryContextBytes": 1456,
+        "activatedSkills": [
+          { "name": "order-lookup", "bytes": 1200, "injectedVia": "system_prompt" }
+        ],
+        "totalBytes": 4056,
+        "body": "# Persona\n\nYou are the order-mgmt agent...\n\n## Relevant prior context\n\n- User prefers shipping updates via SMS.\n- Has 3 active orders as of 2026-05-19.\n\n# Skills\n\n## order-lookup\n..."
+      }
+    },
+    {
+      "type": "model.request",
+      "ts": 1716115500220,
+      "payload": {
+        "modelId": "us.anthropic.claude-3-7-sonnet-20250219-v1:0",
+        "region": "us-east-1",
+        "systemPromptHash": "sha256:beef5678",
+        "systemPromptBytes": 4056,
+        "priorTurnsCount": 4,
+        "userMessage": "What's the status of my recent order?"
+      }
+    },
+    {
+      "type": "mongo.vector_search",
+      "ts": 1716115500300,
+      "payload": {
+        "collection": "agent_memory_facts",
+        "mode": "hybrid",
+        "scores": [0.81, 0.74, 0.69],
+        "documentPreviews": [
+          {
+            "rank": 1,
+            "collection": "agent_memory_facts",
+            "id": "fact-1",
+            "score": 0.81,
+            "title": "User prefers shipping updates via SMS.",
+            "snippet": "User prefers shipping updates via SMS."
+          }
+        ]
+      }
+    }
+  ]
+}

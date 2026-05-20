@@ -3,14 +3,9 @@ variable "aws_region" {
   description = "AWS region"
 }
 
-variable "project_name" {
-  type        = string
-  description = "Resource name prefix"
-}
-
 variable "environment" {
   type        = string
-  description = "Deployment environment"
+  description = "Deployment environment. Used in the endpoint + IAM role names (env-scoped, not project-scoped, since envs/shared owns this module)."
 }
 
 variable "voyage_model_package_arn" {

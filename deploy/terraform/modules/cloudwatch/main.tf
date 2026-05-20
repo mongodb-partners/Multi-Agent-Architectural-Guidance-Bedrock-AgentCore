@@ -11,9 +11,15 @@ locals {
     ManagedBy   = "terraform"
   }
 
-  # Log group prefix — project + env so multiple deployments in one account/region
-  # do not collide. Resolves to e.g. "/mongodb-multiagent/dev".
-  log_group_prefix = "/${var.project_name}/${var.environment}"
+  # Log group prefix — env-scoped so a single shared set of
+  # /<shared_resource_prefix>/<env>/* groups serves every per-project envs/ec2
+  # stack in the (account, region). The shared stack (envs/shared) creates
+  # these once and publishes the names via SSM; per-project envs read them.
+  #
+  # envs/local also instantiates this module on its own to keep local dev
+  # self-contained — that uses "local" as the environment, producing
+  # /<shared_resource_prefix>/local/* (distinct from any deployed environment).
+  log_group_prefix = "/${var.shared_resource_prefix}/${var.environment}"
 }
 
 resource "aws_cloudwatch_log_group" "api" {

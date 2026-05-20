@@ -22,6 +22,8 @@ import {
   listRecentTraces,
 } from "../lib/trace-store.ts";
 import type { Trace, TraceEvent } from "../lib/trace-types.ts";
+import { parseIncludeMode, projectTraceForInclude } from "../lib/trace-projection.ts";
+import { logger } from "../lib/logger.ts";
 
 export const traceRoutes = new Hono();
 
@@ -64,9 +66,18 @@ traceRoutes.get("/traces/:traceId", async (c) => {
   const traceId = c.req.param("traceId");
   const userId = c.get("jwtPayload")?.sub;
   const requestId = c.get("requestId") ?? "unknown";
+  // ?include=core|dev|full — server default is `full` for back-compat with
+  // `verify-trace-ui-shape.py` and any pre-PR2 UI build. The Streamlit Trace
+  // Viewer opts into `core` (initial load) / `dev` (on-demand) explicitly.
+  const include = parseIncludeMode(c.req.query("include"));
   const trace = await getTraceById(traceId);
   if (!trace || !userOwnsTrace(trace, userId)) return notFound(c, requestId);
-  return c.json(trace);
+  // SOC2 audit: who fetched which trace at which projection level. Filter
+  // on `channel=audit && msg="[trace] fetch"` in CloudWatch Logs Insights.
+  logger.audit().info("[trace] fetch", { traceId, userId, requestId, include });
+  const projected = projectTraceForInclude(trace, include);
+  c.header("X-Trace-Include", include);
+  return c.json(projected);
 });
 
 traceRoutes.get("/trace", async (c) => {
@@ -74,6 +85,7 @@ traceRoutes.get("/trace", async (c) => {
   const messageId = c.req.query("messageId");
   const requestId = c.get("requestId") ?? "unknown";
   const userId = c.get("jwtPayload")?.sub;
+  const include = parseIncludeMode(c.req.query("include"));
   if (!sessionId || !messageId) {
     return c.json(
       {
@@ -88,7 +100,16 @@ traceRoutes.get("/trace", async (c) => {
   }
   const trace = await getTraceForMessage(sessionId, messageId);
   if (!trace || !userOwnsTrace(trace, userId)) return notFound(c, requestId);
-  return c.json(trace);
+  logger.audit().info("[trace] fetch", {
+    traceId: trace.traceId,
+    userId,
+    requestId,
+    include,
+    via: "session+message",
+  });
+  const projected = projectTraceForInclude(trace, include);
+  c.header("X-Trace-Include", include);
+  return c.json(projected);
 });
 
 traceRoutes.get("/trace/mongo", async (c) => {
@@ -126,7 +147,21 @@ traceRoutes.get("/trace/mongo", async (c) => {
   });
 });
 
-/** Lightweight listing for the sidebar metrics — scoped to the authenticated user. */
+/**
+ * Lightweight listing for the sidebar metrics — scoped to the authenticated user.
+ *
+ * Optional filters:
+ *   `?sessionId=...`       — restrict to a single session (powers the Trace
+ *                            Viewer's prev/next-turn-in-session arrows).
+ *   `?excludeTraceId=...`  — drop a specific trace from the list (handy when
+ *                            the UI already shows the current turn).
+ *
+ * When `sessionId` is set we over-fetch (4× requested limit, capped at 500)
+ * and post-filter in-process. The trace ring-buffer + Mongo TTL window are
+ * small enough that this stays cheap, and adding a `sessionId` index path
+ * through `listRecentTraces` would require touching the store API for marginal
+ * benefit. Same `userOwnsTrace` enforcement applies.
+ */
 traceRoutes.get("/traces", async (c) => {
   const userId = c.get("jwtPayload")?.sub;
   const requestId = c.get("requestId") ?? "unknown";
@@ -137,10 +172,21 @@ traceRoutes.get("/traces", async (c) => {
     );
   }
   const limit = Math.max(1, Math.min(100, Number(c.req.query("limit") ?? 25)));
-  // Pass userId into the store so both the ring-buffer and Mongo queries are
-  // pre-filtered; userOwnsTrace is a final safety-net for any stale ring entries.
-  const all = await listRecentTraces(limit, userId);
-  const visible = all.filter((t) => userOwnsTrace(t, userId));
+  const sessionIdFilter = c.req.query("sessionId")?.trim() || undefined;
+  const excludeTraceId = c.req.query("excludeTraceId")?.trim() || undefined;
+  // When filtering by session, over-fetch so we have a chance of finding all
+  // matches even when the ring buffer has many concurrent sessions ahead of
+  // the requested one.
+  const fetchLimit = sessionIdFilter ? Math.min(500, limit * 4) : limit;
+  const all = await listRecentTraces(fetchLimit, userId);
+  let visible = all.filter((t) => userOwnsTrace(t, userId));
+  if (sessionIdFilter) {
+    visible = visible.filter((t) => t.sessionId === sessionIdFilter);
+  }
+  if (excludeTraceId) {
+    visible = visible.filter((t) => t.traceId !== excludeTraceId);
+  }
+  visible = visible.slice(0, limit);
   return c.json({
     traces: visible.map((t) => ({
       traceId: t.traceId,

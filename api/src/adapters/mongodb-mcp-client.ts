@@ -167,7 +167,7 @@ const DEFAULT_LEXICAL_INDEX_BY_COLLECTION: Record<
   string,
   { index: string; path: string }
 > = {
-  products: { index: "products-text-index", path: "name" },
+  products: { index: "products-text-index", path: "title" },
   troubleshooting_docs: { index: "troubleshooting-text-index", path: "title" },
   agent_memory_facts: { index: "agent_memory_facts-text-index", path: "fact" },
   chat_messages: { index: "chat_messages-text-index", path: "content" },
@@ -571,6 +571,10 @@ function docId(doc: Record<string, unknown>): string | undefined {
   return previewString(doc._id ?? doc.id ?? doc.docId ?? doc.messageId ?? doc.sku, 120);
 }
 
+function mongoId(doc: Record<string, unknown>): string | undefined {
+  return previewString(doc._id, 120);
+}
+
 function docTitle(doc: Record<string, unknown>): string | undefined {
   return previewString(doc.title ?? doc.name ?? doc.sku ?? doc.code ?? doc.fact ?? docId(doc), 120);
 }
@@ -589,6 +593,7 @@ export function extractDocumentPreviewsFromResult(
 ): Array<{
   rank: number;
   collection?: string;
+  _id?: string;
   id?: string;
   score?: number;
   title?: string;
@@ -639,6 +644,7 @@ export function extractDocumentPreviewsFromResult(
       {
         rank: idx + 1,
         collection,
+        _id: mongoId(doc),
         id: docId(doc),
         score: typeof doc._score === "number" ? doc._score : undefined,
         title: docTitle(doc),
@@ -761,25 +767,26 @@ export class VectorSearchEmbedTool extends Tool {
     let underlying: Tool;
     if (transform.mode === "hybrid") {
       if (!this.hybridUnderlying) {
-        trace?.event("mongo.vector_search", {
-          collection: stringArg(transform.args.collection),
-          embeddingSource: transform.embed.source,
-          embeddingModelId: transform.embed.modelId,
-          queryText: transform.queryText,
-          queryVectorPreview: transform.vectorPreview,
-          numCandidates: numericArg(transform.args.numCandidates),
-          limit: numericArg(transform.args.limit),
-          filter: transform.args.filter,
-          scores: [],
-        });
-        return new ToolResultBlock({
-          toolUseId,
-          status: "error",
-          content: [
-            new TextBlock(
-              JSON.stringify({
-                status: "error",
-                code: "hybrid_unsupported",
+      trace?.event("mongo.vector_search", {
+        collection: stringArg(transform.args.collection),
+        embeddingSource: transform.embed.source,
+        embeddingModelId: transform.embed.modelId,
+        indexName: vectorIndexFromTransformArgs(transform.args),
+        queryText: transform.queryText,
+        queryVectorPreview: transform.vectorPreview,
+        numCandidates: numericArg(transform.args.numCandidates),
+        limit: numericArg(transform.args.limit),
+        filter: transform.args.filter,
+        scores: [],
+      });
+      return new ToolResultBlock({
+        toolUseId,
+        status: "error",
+        content: [
+          new TextBlock(
+            JSON.stringify({
+              status: "error",
+              code: "hybrid_unsupported",
                 message:
                   "Hybrid mode requires the mongodb_hybrid_search helper, which is not exposed by this MCP runtime. " +
                   "Retry with hybrid: false, or update the MongoDB MCP runtime.",
@@ -814,6 +821,7 @@ export class VectorSearchEmbedTool extends Tool {
         collection: stringArg(transform.args.collection),
         embeddingSource: transform.embed.source,
         embeddingModelId: transform.embed.modelId,
+        indexName: vectorIndexFromTransformArgs(transform.args),
         queryText: transform.queryText,
         queryVectorPreview: transform.vectorPreview,
         numCandidates: numericArg(transform.args.numCandidates),
@@ -831,6 +839,7 @@ export class VectorSearchEmbedTool extends Tool {
       collection,
       embeddingSource: transform.embed.source,
       embeddingModelId: transform.embed.modelId,
+      indexName: vectorIndexFromTransformArgs(transform.args),
       queryText: transform.queryText,
       queryVectorPreview: transform.vectorPreview,
       numCandidates: numericArg(transform.args.numCandidates),
@@ -853,6 +862,22 @@ function stringArg(v: JSONValue | undefined): string | undefined {
 
 function numericArg(v: JSONValue | undefined): number | undefined {
   return typeof v === "number" && Number.isFinite(v) ? v : undefined;
+}
+
+/**
+ * Surface the Atlas Vector Search / Atlas Search index name the wrapper
+ * forwarded to the MCP runtime. The transform builds two shapes depending
+ * on mode: `{ vectorIndex, lexicalIndex }` for hybrid, `{ index }` for pure
+ * vector. The dev panel renders this as a chip so reviewers can confirm
+ * the runtime is hitting the expected index (matches `db-seeding/seed-indexes.ts`).
+ */
+export function vectorIndexFromTransformArgs(args: Record<string, JSONValue | undefined>): string | undefined {
+  return (
+    stringArg(args.vectorIndex) ??
+    stringArg(args.index) ??
+    stringArg(args.indexName) ??
+    undefined
+  );
 }
 
 /**

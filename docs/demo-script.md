@@ -1,8 +1,8 @@
-# Demo script — live multi-agent (Nova models + real Atlas data)
+# Demo script — live multi-agent (Claude models + real Atlas data)
 
-Use this for **live screen share** demos against the running local stack.
+Use this for **live screen share** demos against the running local stack or a deployed environment.
 
-**Stack:** API `:3000` + Streamlit UI `:8501` — Nova Lite (orchestrator) + Nova Pro (specialists) + MongoDB Atlas M10 + Bedrock KB.
+**Stack:** API `:3000` + Streamlit UI `:8501` — Claude Haiku 4.5 (orchestrator + order-management) + Claude Sonnet 4.6 (troubleshooting + product-recommendation) + MongoDB Atlas M10 + Bedrock KB.
 
 **Audience:** technical buyers, platform engineers, or leadership who care that **new behavior ships by editing markdown** (`config/agents/`, `config/skills/`) rather than forking JavaScript.
 
@@ -75,7 +75,7 @@ My device has a serious hardware error — HW-900 error, three red blinks. Dana 
 **Call out:**
 - Handoff to **troubleshooting**
 - Agent immediately escalates (HW-900 is non-recoverable — no self-service steps)
-- Ticket created with ID + 4-hour SLA + express replacement offer
+- Ticket payload generated with ID, priority, required fields, and next steps
 
 **Presenter line:** *”The escalation rule is in `SKILL.md` — three lines of markdown. No code change required to add or modify it.”*
 
@@ -149,8 +149,8 @@ Switch to the **repo** (IDE or GitHub):
 
 ## After the demo
 
-- Point to [`DEV_STATUS.md`](../DEV_STATUS.md) for the full env matrix. Optional setup (persistence, auth, real backends) is summarized in **[Before the demo](#before-the-demo)** above.
-- Point to [`TASKS.md`](../TASKS.md) demo acceptance for what’s still open for a **full** production story (auth, persistent memory, Atlas, etc.).
+- Point to [`reference/env-vars.md`](reference/env-vars.md) for the full env matrix. Optional setup (persistence, auth, real backends) is summarized in **[Before the demo](#before-the-demo)** above.
+- Point to [`README.md`](README.md) "Authoritative source files" for what’s still open in the production story (multi-tenancy, AgentCore Code Interpreter, etc.).
 - **Docker option:** run `docker compose up --build` (or `make docker-up`) from the repo root to show the full stack in containers — no Bun or Python install required. The API still requires `AGENTCORE_ORCHESTRATOR_ARN` and AWS credentials in the environment.
 
 ---
@@ -166,7 +166,7 @@ Use this after a demo session so someone else can **run it again** and **explain
 | 3 | **Where config lives** | Open `config/agents/*.agent.md` (persona + `handoffs` + `tools`) and `config/skills/*/SKILL.md` (domain instructions + progressive disclosure). |
 | 4 | **Tool path** | All Mongo tools resolve to MCP calls against the MongoDB MCP AgentCore Runtime (`MONGODB_MCP_RUNTIME_ARN` / `MONGODB_MCP_RUNTIME_ENDPOINT`); Gateway remains for non-Mongo tools. |
 | 5 | **API contract** | Name `POST /chat` (SSE), `GET /agents`, `GET /skills`, `GET /sessions`, `DELETE /sessions/:id`, `GET /http-tools`, and where events are documented ([`docs/api-reference.md`](api-reference.md)). |
-| 6 | **What’s actually missing** | List at least three **not implemented** items (configurable behavior belongs in [Before the demo](#before-the-demo)): e.g. **multi-instance** coherence for Mongo-backed **`chat_sessions`**; **AgentCore** Code Interpreter wired into product flows; **full Terraform/ECS/ALB** rollout beyond stubs/images; **long-term memory** still raw turn excerpts, not PII-safe extraction + vector recall. Source of truth: [`TASKS.md`](../TASKS.md), [`DEV_STATUS.md`](../DEV_STATUS.md). |
+| 6 | **What’s actually missing** | List at least three **not implemented** items (configurable behavior belongs in [Before the demo](#before-the-demo)): e.g. **multi-instance** coherence for Mongo-backed **`chat_sessions`**; **AgentCore Code Interpreter** wired into product flows; **CI/CD** as the primary deploy path; **ECS/ALB** rollout beyond EC2 + container images. Source of truth: [`README.md`](README.md). |
 | 7 | **Extend a vertical** | Describe the steps to add a new skill folder + reference an agent’s `skills:` list (or walk through [`docs/skills-authoring-guide.md`](skills-authoring-guide.md) / [`docs/agent-authoring-guide.md`](agent-authoring-guide.md)). |
 | 8 | **Regression** | Run `cd api && bun run typecheck && bun test` before a big demo or config change. |
 

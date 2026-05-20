@@ -73,3 +73,67 @@ output "privatelink_ports" {
   value       = local._pl_ports
   description = "Atlas PrivateLink listener ports advertised by the matching private endpoint connection string."
 }
+
+# ─── VPC Peering connection strings ───────────────────────────────────────────
+# Peering uses different connection_strings[0] fields than PrivateLink:
+#   - connection_strings[0].private       — multi-host non-SRV
+#     (mongodb://shard-00-00.xxx-shard-0.xxxxx-pri.mongodb.net:27017,...)
+#     Always populated once a peering connection exists for the cluster's
+#     project + region.
+#   - connection_strings[0].private_srv   — SRV form
+#     (mongodb+srv://cluster.xxxxx-pri.mongodb.net)
+#     ONLY populated when the Atlas project has "Enable Private DNS for
+#     Peering" toggled on. The atlas-vpc-peering module auto-enables this via
+#     enable-private-dns.sh, but if the API key lacks GROUP_OWNER scope the
+#     toggle fails and this output stays empty — callers fall back to
+#     peering_connection_string (multi-host) which is functionally equivalent.
+#
+# NO `tlsAllowInvalidHostnames=true` here because peering hostnames are in the
+# Atlas TLS SAN list (unlike the PrivateLink `pl-X-…` hostnames which need the
+# flag).
+#
+# Returns "" when peering isn't configured / Atlas hasn't populated the field.
+locals {
+  # try() is preferred over lookup() for object attribute access — lookup() is
+  # only guaranteed on map types, while connection_strings[0] is an object with
+  # statically-defined attributes (Atlas TS provider schema). try() returns the
+  # default when the attribute is unset OR null OR the underlying expression
+  # errors (covers the "peering not yet active" race where Atlas hasn't yet
+  # populated the field on the cluster doc).
+  _peering_raw     = try(mongodbatlas_cluster.main.connection_strings[0].private, "")
+  _peering_srv_raw = try(mongodbatlas_cluster.main.connection_strings[0].private_srv, "")
+
+  # Strip mongodb+srv:// prefix from the SRV form so we can emit it with creds.
+  _peering_srv_host = local._peering_srv_raw == "" ? "" : replace(local._peering_srv_raw, "mongodb+srv://", "")
+
+  # Authority (host:port,host:port,...) for the multi-host non-SRV form.
+  _peering_authority = local._peering_raw == "" ? "" : split("/?", replace(local._peering_raw, "mongodb://", ""))[0]
+}
+
+output "peering_connection_string" {
+  value = local._peering_raw == "" ? "" : format(
+    "mongodb://%s:%s@%s%sretryWrites=true&w=majority",
+    urlencode(var.db_username),
+    urlencode(var.db_password),
+    replace(local._peering_raw, "mongodb://", ""),
+    can(regex("\\?", local._peering_raw)) ? "&" : "?"
+  )
+  sensitive   = true
+  description = "Multi-host non-SRV peering connection string with credentials. Always populated when an Atlas-side network peering exists for this cluster's project+region. NO tlsAllowInvalidHostnames because peering hostnames are in the cert SAN list."
+}
+
+output "peering_srv_host" {
+  value       = local._peering_srv_host
+  description = "Atlas peering SRV hostname without scheme (e.g. cluster.xxxxx-pri.mongodb.net). Empty when 'Private DNS for Peering' is not enabled on the Atlas project."
+}
+
+output "peering_connection_srv_string" {
+  value = local._peering_srv_raw == "" ? "" : format(
+    "mongodb+srv://%s:%s@%s/?retryWrites=true&w=majority",
+    urlencode(var.db_username),
+    urlencode(var.db_password),
+    local._peering_srv_host
+  )
+  sensitive   = true
+  description = "SRV-form peering connection string with credentials. Empty when peering_srv_host is empty — callers should coalesce to peering_connection_string in that case."
+}

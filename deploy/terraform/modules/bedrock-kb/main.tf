@@ -412,12 +412,42 @@ resource "null_resource" "ingestion" {
           # **partial** unique index"). Surfacing the failure reasons here
           # makes that class of regression impossible to miss in CI.
           echo "ERROR: Bedrock KB ingestion FAILED. Failure reasons:"
-          aws bedrock-agent get-ingestion-job \
+          FAILURE_JSON=$(aws bedrock-agent get-ingestion-job \
             --knowledge-base-id "$KB_ID" \
             --data-source-id "$DS_ID" \
             --ingestion-job-id "$JOB_ID" \
             --region "$REGION" \
-            --query 'ingestionJob.{Stats:statistics,Errors:failureReasons}' --output json || true
+            --query 'ingestionJob.{Stats:statistics,Errors:failureReasons}' --output json 2>/dev/null || echo '{}')
+          echo "$FAILURE_JSON"
+          # TLS-keyword detection — catches the experimental peering-NLB-for-KB
+          # path failing TLS validation (Bedrock's MongoDB driver may reject
+          # the standard cluster cert when reached through NLB-over-peering).
+          # PrivateLink path won't hit these keywords on a normal ingestion;
+          # this banner only fires when the driver explicitly reports a TLS
+          # issue, so it's safe to print unconditionally.
+          if echo "$FAILURE_JSON" | grep -qiE "tls|certificate|ssl|handshake|hostname|unable to verify"; then
+            echo ""
+            echo "════════════════════════════════════════════════════════════════════"
+            echo " TLS / CERTIFICATE FAILURE detected in Bedrock KB ingestion."
+            echo ""
+            echo " If you are running in VPC peering mode (NETWORK_MODE=peering),"
+            echo " the NLB-over-peering path for KB ingestion is EXPERIMENTAL and"
+            echo " not partner-validated. Bedrock's MongoDB driver may reject the"
+            echo " standard cluster certificate when reached through the NLB."
+            echo ""
+            echo " PrivateLink and VPC peering are mutually exclusive per account."
+            echo " To recover, switch the entire deployment back to PrivateLink:"
+            echo "   ./deploy/scripts/destroy.sh --mode ec2"
+            echo "   ./deploy/scripts/destroy.sh --mode shared    # optional"
+            echo "   ./deploy/scripts/destroy.sh --mode network"
+            echo "   # Set NETWORK_MODE=privatelink in .env (or unset for default)"
+            echo "   ./deploy/deploy-full-with-privatelink.sh"
+            echo ""
+            echo " Alternative: set TF_VAR_enable_kb_peering=false to keep peering"
+            echo " for runtime traffic but use public Atlas SRV for KB ingestion"
+            echo " (privacy regression — KB ingestion no longer end-to-end private)."
+            echo "════════════════════════════════════════════════════════════════════"
+          fi
           echo "→ enable APPLICATION_LOGS on the KB and grep status_reasons for the real driver error before assuming it's a network/PrivateLink issue."
           exit 1
         fi

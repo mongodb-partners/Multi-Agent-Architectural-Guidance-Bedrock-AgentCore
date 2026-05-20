@@ -115,10 +115,12 @@ log "Phase 2 — Loading credentials from $ENV_FILE..."
 source "$ENV_FILE"
 
 # ── Required variables — ALL must be set in .env, no silent defaults ──────
+# AWS auth is checked separately below because there are three valid modes
+# (static IAM user keys, STS env vars with AWS_SESSION_TOKEN, or AWS_PROFILE),
+# and a single hard list cannot express the "one of these credential blocks
+# must be present" rule.
 _REQUIRED_VARS=(
   AWS_REGION
-  AWS_ACCESS_KEY_ID
-  AWS_SECRET_ACCESS_KEY
   ENVIRONMENT
   PROJECT_NAME
   ATLAS_DB_USER
@@ -136,9 +138,14 @@ if [[ ${#_missing[@]} -gt 0 ]]; then
   err "The following required variables are not set in .env — add them before running:
 $(printf '    %s\n' "${_missing[@]}")"
 fi
+
+# AWS credentials — delegated to the shared AUTH_MODE-aware validator.
+# Mode is controlled by AUTH_MODE in .env (defaults to "iam" for backward compat).
+# shellcheck source=deploy/scripts/_aws-auth.sh
+source "$SCRIPT_DIR/_aws-auth.sh"
+validate_aws_auth || err "AWS auth validation failed (see above)"
 ok "All required variables present (region=$AWS_REGION, env=$ENVIRONMENT, project=$PROJECT_NAME)"
-ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text 2>/dev/null) \
-  || err "AWS credentials invalid or expired. Re-authenticate and update .env"
+ACCOUNT_ID="$AWS_AUTH_ACCOUNT_ID"
 ok "AWS account: $ACCOUNT_ID"
 ok "Atlas project: $TF_VAR_atlas_project_id"
 

@@ -14,24 +14,35 @@ terraform {
 
 locals {
   # One tag, everywhere. Filter Cost Explorer / resourcegroupstaggingapi
-  # on Project=multiagent-mongodb-framework to find/delete every resource.
+  # on Project=<project_name> to find/delete every resource.
   common_tags = {
     Project = var.project_name
   }
   agentcore_code_entrypoint  = ["agent-runtime-code.js"]
   agentcore_runtime_repo_url = var.agentcore_runtime_deployment_mode == "container" ? aws_ecr_repository.agent_runtime[0].repository_url : ""
 
-  # Forward-reference safe: returns the Voyage SageMaker endpoint ARN when the
-  # voyage_sagemaker module was instantiated (var.voyage_model_package_arn != "")
-  # and "" otherwise. Each agent runtime conditionally adds sagemaker:InvokeEndpoint
-  # only when this is non-empty, so deployments without a Voyage Marketplace
-  # subscription do not get extra SageMaker permissions.
-  voyage_sagemaker_endpoint_arn = length(module.voyage_sagemaker) > 0 ? module.voyage_sagemaker[0].endpoint_arn : ""
-
   # SSM prefix mirrors the network env exactly. Single source of truth for
-  # discovering the shared VPC + Atlas PrivateLink VPCE. envs/network publishes
-  # under this same prefix.
+  # discovering the shared VPC + Atlas connectivity (published by envs/network)
+  # AND the shared SageMaker endpoint + log groups + invocation logging targets
+  # (published by envs/shared).
   ssm_prefix = "/${var.shared_vpc_name}/${var.aws_region}"
+
+  # Mode booleans used throughout this file. privatelink and peering are
+  # mutually exclusive per account — there is no hybrid path. To change modes
+  # the operator must run destroy + redeploy.
+  is_privatelink_mode = var.network_mode == "privatelink"
+  is_peering_mode     = var.network_mode == "peering"
+  use_kb_privatelink  = local.is_privatelink_mode && var.enable_kb_privatelink
+  use_kb_peering_nlb  = local.is_peering_mode && var.enable_kb_peering
+
+  # Single switch driving downstream wiring of bedrock-kb endpoint_service_name
+  # and kb_endpoint_host. "public-srv" means KB ingestion uses Atlas public
+  # SRV (still private at TLS+auth, just not at the network layer).
+  kb_connectivity_mode = (
+    local.use_kb_privatelink ? "privatelink" :
+    local.use_kb_peering_nlb ? "peering-nlb" :
+    "public-srv"
+  )
 }
 
 provider "aws" {
@@ -76,12 +87,93 @@ data "aws_ssm_parameter" "shared_private_subnet_ids" {
   name = "${local.ssm_prefix}/private_subnet_ids"
 }
 
+# ── Mode canary — guards against silent mode mixing between deploys ─────────
+# envs/network publishes /network_mode every apply. If this env's tfvars say
+# 'privatelink' but the canary says 'peering' (or vice versa), the lifecycle
+# precondition on local.shared_network_mode below fails the plan with a clear
+# remediation message.
+data "aws_ssm_parameter" "shared_network_mode" {
+  name = "${local.ssm_prefix}/network_mode"
+}
+
+# ── PrivateLink-only SSM reads — gated to privatelink mode ──────────────────
+# In peering mode the keys don't exist and `aws_ssm_parameter` would fail
+# with ParameterNotFound. for_each on a mode-gated set keeps the read off
+# when peering is active.
 data "aws_ssm_parameter" "shared_atlas_pl_vpce_id" {
-  name = "${local.ssm_prefix}/atlas_pl_vpce_id"
+  for_each = local.is_privatelink_mode ? toset(["pl"]) : toset([])
+  name     = "${local.ssm_prefix}/atlas_pl_vpce_id"
 }
 
 data "aws_ssm_parameter" "shared_atlas_pl_vpce_dns_name" {
-  name = "${local.ssm_prefix}/atlas_pl_vpce_dns_name"
+  for_each = local.is_privatelink_mode ? toset(["pl"]) : toset([])
+  name     = "${local.ssm_prefix}/atlas_pl_vpce_dns_name"
+}
+
+# ── Peering-only SSM reads — gated to peering mode ──────────────────────────
+data "aws_ssm_parameter" "shared_atlas_peering_id" {
+  for_each = local.is_peering_mode ? toset(["peering"]) : toset([])
+  name     = "${local.ssm_prefix}/atlas_peering_id"
+}
+
+data "aws_ssm_parameter" "shared_atlas_container_id" {
+  for_each = local.is_peering_mode ? toset(["peering"]) : toset([])
+  name     = "${local.ssm_prefix}/atlas_container_id"
+}
+
+data "aws_ssm_parameter" "shared_atlas_peering_cidr" {
+  for_each = local.is_peering_mode ? toset(["peering"]) : toset([])
+  name     = "${local.ssm_prefix}/atlas_peering_cidr"
+}
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Shared-stack discovery — read SageMaker endpoint name/ARN, the five
+# CloudWatch log group names, and the two Bedrock invocation-logging targets
+# from SSM (published by envs/shared). If any of these parameters are missing,
+# envs/shared has not been applied yet — run deploy-shared.sh first.
+#
+# Values are stored as "_empty_" sentinel when the corresponding feature is
+# disabled (e.g. voyage_model_package_arn unset in the shared stack), so per-
+# project logic can distinguish "feature off" from "shared stack not applied".
+# ══════════════════════════════════════════════════════════════════════════════
+data "aws_ssm_parameter" "shared_voyage_endpoint_name" {
+  name = "${local.ssm_prefix}/voyage_sagemaker_endpoint_name"
+}
+
+data "aws_ssm_parameter" "shared_voyage_endpoint_arn" {
+  name = "${local.ssm_prefix}/voyage_sagemaker_endpoint_arn"
+}
+
+data "aws_ssm_parameter" "shared_cw_api_log_group" {
+  name = "${local.ssm_prefix}/cw_api_log_group"
+}
+
+data "aws_ssm_parameter" "shared_cw_ui_log_group" {
+  name = "${local.ssm_prefix}/cw_ui_log_group"
+}
+
+data "aws_ssm_parameter" "shared_cw_mcp_log_group" {
+  name = "${local.ssm_prefix}/cw_mcp_log_group"
+}
+
+data "aws_ssm_parameter" "shared_cw_agentcore_log_group" {
+  name = "${local.ssm_prefix}/cw_agentcore_log_group"
+}
+
+data "aws_ssm_parameter" "shared_cw_otel_log_group" {
+  name = "${local.ssm_prefix}/cw_otel_log_group"
+}
+
+data "aws_ssm_parameter" "shared_cw_otel_atlas_log_group" {
+  name = "${local.ssm_prefix}/cw_otel_atlas_log_group"
+}
+
+data "aws_ssm_parameter" "shared_bedrock_invocation_log_group" {
+  name = "${local.ssm_prefix}/bedrock_invocation_log_group"
+}
+
+data "aws_ssm_parameter" "shared_bedrock_audit_log_group" {
+  name = "${local.ssm_prefix}/bedrock_audit_log_group"
 }
 
 data "aws_vpc" "shared" {
@@ -90,19 +182,68 @@ data "aws_vpc" "shared" {
 
 locals {
   # SSM data sources mark `.value` sensitive by default (intended for secrets).
-  # Our values are infrastructure identifiers (VPC ID, subnet IDs, VPCE DNS),
-  # not secrets, so we wrap with nonsensitive() to keep them usable in tags,
-  # outputs, and downstream module inputs.
+  # Our values are infrastructure identifiers (VPC ID, subnet IDs, VPCE DNS,
+  # log-group names, SageMaker endpoint), not secrets, so we wrap with
+  # nonsensitive() to keep them usable in tags, outputs, and downstream module
+  # inputs.
   shared_vpc_id             = nonsensitive(data.aws_ssm_parameter.shared_vpc_id.value)
   shared_vpc_cidr           = nonsensitive(data.aws_ssm_parameter.shared_vpc_cidr.value)
   shared_public_subnet_ids  = split(",", nonsensitive(data.aws_ssm_parameter.shared_public_subnet_ids.value))
   shared_private_subnet_ids = split(",", nonsensitive(data.aws_ssm_parameter.shared_private_subnet_ids.value))
-  shared_atlas_pl_vpce_id   = nonsensitive(data.aws_ssm_parameter.shared_atlas_pl_vpce_id.value)
-  shared_vpce_dns_name      = nonsensitive(data.aws_ssm_parameter.shared_atlas_pl_vpce_dns_name.value)
+  shared_network_mode       = nonsensitive(data.aws_ssm_parameter.shared_network_mode.value)
+
+  # Mode-gated reads: only populated in the matching mode (the data source is
+  # for_each-gated so it doesn't try to read non-existent SSM keys in the
+  # other mode).
+  shared_atlas_pl_vpce_id   = local.is_privatelink_mode ? nonsensitive(data.aws_ssm_parameter.shared_atlas_pl_vpce_id["pl"].value) : ""
+  shared_vpce_dns_name      = local.is_privatelink_mode ? nonsensitive(data.aws_ssm_parameter.shared_atlas_pl_vpce_dns_name["pl"].value) : ""
+  shared_atlas_peering_id   = local.is_peering_mode ? nonsensitive(data.aws_ssm_parameter.shared_atlas_peering_id["peering"].value) : ""
+  shared_atlas_container_id = local.is_peering_mode ? nonsensitive(data.aws_ssm_parameter.shared_atlas_container_id["peering"].value) : ""
+  shared_atlas_peering_cidr = local.is_peering_mode ? nonsensitive(data.aws_ssm_parameter.shared_atlas_peering_cidr["peering"].value) : ""
+
+  # Shared-stack lookups — see comment block above. Treat the "_empty_"
+  # sentinel as a real empty value so consumers can keep using
+  # `length(...) > 0` checks without special-casing.
+  _voyage_endpoint_name_raw   = nonsensitive(data.aws_ssm_parameter.shared_voyage_endpoint_name.value)
+  _voyage_endpoint_arn_raw    = nonsensitive(data.aws_ssm_parameter.shared_voyage_endpoint_arn.value)
+  shared_voyage_endpoint_name = local._voyage_endpoint_name_raw == "_empty_" ? "" : local._voyage_endpoint_name_raw
+  shared_voyage_endpoint_arn  = local._voyage_endpoint_arn_raw == "_empty_" ? "" : local._voyage_endpoint_arn_raw
+
+  shared_cw_api_log_group        = nonsensitive(data.aws_ssm_parameter.shared_cw_api_log_group.value)
+  shared_cw_ui_log_group         = nonsensitive(data.aws_ssm_parameter.shared_cw_ui_log_group.value)
+  shared_cw_mcp_log_group        = nonsensitive(data.aws_ssm_parameter.shared_cw_mcp_log_group.value)
+  shared_cw_agentcore_log_group  = nonsensitive(data.aws_ssm_parameter.shared_cw_agentcore_log_group.value)
+  shared_cw_otel_log_group       = nonsensitive(data.aws_ssm_parameter.shared_cw_otel_log_group.value)
+  shared_cw_otel_atlas_log_group = nonsensitive(data.aws_ssm_parameter.shared_cw_otel_atlas_log_group.value)
+
+  _bedrock_invocation_log_group_raw   = nonsensitive(data.aws_ssm_parameter.shared_bedrock_invocation_log_group.value)
+  _bedrock_audit_log_group_raw        = nonsensitive(data.aws_ssm_parameter.shared_bedrock_audit_log_group.value)
+  shared_bedrock_invocation_log_group = local._bedrock_invocation_log_group_raw == "_empty_" ? "" : local._bedrock_invocation_log_group_raw
+  shared_bedrock_audit_log_group      = local._bedrock_audit_log_group_raw == "_empty_" ? "" : local._bedrock_audit_log_group_raw
+
+  # Each agent runtime conditionally adds sagemaker:InvokeEndpoint only when
+  # this is non-empty, so deployments without a Voyage Marketplace subscription
+  # do not get extra SageMaker permissions.
+  voyage_sagemaker_endpoint_arn = local.shared_voyage_endpoint_arn
+}
+
+# ── Network mode canary — refuse to plan when modes disagree ────────────────
+# Catches the case where deploy-project.sh stamps NETWORK_MODE=peering into
+# tfvars but envs/network was applied with privatelink (or vice versa). Hard-
+# fails at plan time with a remediation message.
+check "network_mode_matches_shared" {
+  assert {
+    condition     = local.shared_network_mode == var.network_mode
+    error_message = "NETWORK MODE MISMATCH — envs/ec2 tfvars say '${var.network_mode}' but the network stack at ${local.ssm_prefix}/network_mode says '${local.shared_network_mode}'. Switching connectivity modes requires destroy + redeploy: run ./deploy/scripts/destroy.sh --mode ec2, --mode shared (optional), --mode network in that order, then redeploy with the desired NETWORK_MODE."
+  }
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
 # MongoDB Atlas — M10 cluster + database user
+# Mode-aware: PrivateLink mode forwards the shared PL VPCE id (so the
+# mongodb-atlas module can emit the privatelink_* connection strings).
+# Peering mode forwards the VPC CIDR + network_mode (so the IP access list is
+# scoped to the peered VPC and the peering_* outputs are populated).
 # ══════════════════════════════════════════════════════════════════════════════
 module "mongodb_atlas" {
   source = "../../modules/mongodb-atlas"
@@ -114,6 +255,8 @@ module "mongodb_atlas" {
   db_password             = var.atlas_db_password
   project_tag             = var.project_name
   privatelink_endpoint_id = local.shared_atlas_pl_vpce_id
+  network_mode            = var.network_mode
+  vpc_cidr                = local.shared_vpc_cidr
 }
 
 # Atlas Search indexes that belong to application data (`products`,
@@ -146,10 +289,11 @@ resource "null_resource" "seed_mongodb_indexes" {
 # Bedrock KB PrivateLink (CLIENT_REVIEW P1-6 Option A — opt-in)
 # Provisions an NLB + VPC Endpoint Service so Bedrock-managed ingestion
 # connects to Atlas via AWS PrivateLink instead of the public SRV hostname.
-# Disabled by default — see var.enable_kb_privatelink.
+# Only when network_mode='privatelink' AND var.enable_kb_privatelink=true —
+# PrivateLink and peering are mutually exclusive at the account level.
 # ══════════════════════════════════════════════════════════════════════════════
 module "bedrock_kb_privatelink" {
-  count  = var.enable_kb_privatelink ? 1 : 0
+  count  = local.use_kb_privatelink ? 1 : 0
   source = "../../modules/bedrock-kb-privatelink"
 
   project_name       = var.project_name
@@ -162,12 +306,64 @@ module "bedrock_kb_privatelink" {
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Bedrock Knowledge Base
-# Default: Atlas public SRV for ingestion (P1-6 Option B, documented exception).
-# When var.enable_kb_privatelink = true, the bedrock-kb-privatelink module
-# above produces an endpoint_service_name and Bedrock routes ingestion through
-# the NLB → Atlas VPCE path (P1-6 Option A, SoW-aligned PrivateLink end-to-end).
+# Bedrock KB peering (EXPERIMENTAL) — NLB-over-peering for KB ingestion
+# Only when network_mode='peering' AND var.enable_kb_peering=true. Discovers
+# Atlas mongod private peering IPs via SSM dig from the EC2 host, fronts them
+# with an NLB and a VPC Endpoint Service so Bedrock can dial Atlas privately.
+# See modules/bedrock-kb-peering/README.md — TLS validation is NOT partner-
+# validated; if Bedrock's driver rejects the cert the only remediation is to
+# destroy + redeploy in privatelink mode.
 # ══════════════════════════════════════════════════════════════════════════════
+module "bedrock_kb_peering" {
+  count  = local.use_kb_peering_nlb ? 1 : 0
+  source = "../../modules/bedrock-kb-peering"
+
+  project_name       = var.project_name
+  environment        = var.environment
+  aws_region         = var.aws_region
+  vpc_id             = local.shared_vpc_id
+  private_subnet_ids = local.shared_private_subnet_ids
+
+  # Use the `-pri.mongodb.net` peering host (populated by Atlas only after
+  # awsCustomDNS=true on the project — modules/atlas-vpc-peering enables that
+  # idempotently). The standard mongo_host resolves to PUBLIC IPs on dig,
+  # which then fails the discover script's ATLAS_PEERING_CIDR sanity check.
+  atlas_srv_host          = module.mongodb_atlas.peering_srv_host
+  atlas_connection_string = module.mongodb_atlas.peering_connection_string
+  cluster_name            = module.mongodb_atlas.cluster_name
+  ec2_instance_id         = module.ec2.instance_id
+  atlas_peering_cidr      = local.shared_atlas_peering_cidr
+  tags                    = local.common_tags
+
+  # EC2 must be SSM-reachable, peering routes must be in place (envs/network
+  # owns them), cluster must exist before the SRV lookup makes sense.
+  depends_on = [
+    module.ec2,
+    module.mongodb_atlas,
+  ]
+}
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Bedrock Knowledge Base — 3-arm endpoint switch (mutually exclusive arms)
+#   1. privatelink + enable_kb_privatelink=true  → PL NLB endpoint service
+#   2. peering     + enable_kb_peering=true       → peering-NLB endpoint service (experimental)
+#   3. *           + *=false                      → public SRV (privacy regression)
+# ══════════════════════════════════════════════════════════════════════════════
+locals {
+  kb_endpoint_service_name = (
+    local.use_kb_privatelink ? module.bedrock_kb_privatelink[0].endpoint_service_name :
+    local.use_kb_peering_nlb ? module.bedrock_kb_peering[0].endpoint_service_name :
+    ""
+  )
+
+  # kb_endpoint_host: in PL mode we override with the cluster-specific PL SRV
+  # so Bedrock's TLS SNI matches the PL cert. In peering mode we leave it
+  # empty so Bedrock dials the standard cluster hostname (whose cert SAN
+  # includes the standard hostname) through the NLB. In public-SRV mode we
+  # also leave it empty so Bedrock uses the default cluster SRV.
+  kb_endpoint_host = local.use_kb_privatelink ? module.mongodb_atlas.privatelink_srv_host : ""
+}
+
 module "bedrock_kb" {
   source = "../../modules/bedrock-kb"
 
@@ -182,7 +378,7 @@ module "bedrock_kb" {
   atlas_project_id   = var.atlas_project_id
   atlas_cluster_name = module.mongodb_atlas.cluster_name
   atlas_srv_host     = module.mongodb_atlas.mongo_host
-  kb_endpoint_host   = var.enable_kb_privatelink ? module.mongodb_atlas.privatelink_srv_host : ""
+  kb_endpoint_host   = local.kb_endpoint_host
   atlas_db_user      = var.atlas_db_user
   atlas_db_password  = var.atlas_db_password
   atlas_db_name      = var.atlas_db_name
@@ -192,11 +388,7 @@ module "bedrock_kb" {
   kb_docs_path             = "${path.module}/../../../kb-docs"
   ensure_collection_script = "${path.module}/../../../../db-seeding/ensure-collection.ts"
 
-  endpoint_service_name = (
-    var.enable_kb_privatelink && length(module.bedrock_kb_privatelink) > 0
-    ? module.bedrock_kb_privatelink[0].endpoint_service_name
-    : ""
-  )
+  endpoint_service_name = local.kb_endpoint_service_name
 
   common_tags = local.common_tags
 
@@ -262,8 +454,7 @@ module "adot_collector" {
   environment               = var.environment
   aws_region                = var.aws_region
   shared_bucket_name        = data.aws_s3_bucket.shared.id
-  otel_log_group_name       = "/${var.project_name}/${var.environment}/otel"
-  otel_retention_days       = var.log_retention_days
+  otel_log_group_name       = local.shared_cw_otel_log_group
   enable_atlas_metrics      = var.enable_atlas_metrics
   atlas_scrape_interval_sec = var.atlas_scrape_interval_sec
   atlas_secret_arn          = var.enable_atlas_metrics ? aws_secretsmanager_secret.atlas_prometheus[0].arn : ""
@@ -286,23 +477,27 @@ module "ec2" {
   ecr_api_image         = "${module.ecr.api_repository_url}:latest"
   ecr_ui_image          = "${module.ecr.ui_repository_url}:latest"
   ecr_registry          = "${module.ecr.registry_id}.dkr.ecr.${var.aws_region}.amazonaws.com"
-  cw_log_group_api      = module.cloudwatch.api_log_group_name
-  cw_log_group_ui       = module.cloudwatch.ui_log_group_name
+  cw_log_group_api      = local.shared_cw_api_log_group
+  cw_log_group_ui       = local.shared_cw_ui_log_group
   adot_collector_image  = var.adot_collector_image
   adot_config_s3_bucket = var.enable_adot_collector ? module.adot_collector[0].config_s3_bucket : ""
   adot_config_s3_key    = var.enable_adot_collector ? module.adot_collector[0].config_s3_key : ""
   adot_config_etag      = var.enable_adot_collector ? module.adot_collector[0].config_etag : ""
   otel_sample_ratio     = var.otel_sample_ratio
   atlas_prom_secret_arn = var.enable_atlas_metrics ? aws_secretsmanager_secret.atlas_prometheus[0].arn : ""
+  network_mode          = var.network_mode
+  atlas_peering_cidr    = local.shared_atlas_peering_cidr
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Atlas PrivateLink DNS — per-cluster Route 53 private zone pointing at the
-# shared Atlas Interface VPCE (envs/network owns the VPCE itself). This is
-# the per-cluster DNS half of the Atlas PrivateLink setup; the regional VPCE
-# half lives in modules/atlas-privatelink/.
+# shared Atlas Interface VPCE. PrivateLink mode only — in peering mode the
+# cluster's <name>-pri.mongodb.net SRV resolves to private peering IPs
+# natively (when Atlas Private DNS for Peering is enabled), so the per-cluster
+# Route 53 zone is unnecessary.
 # ══════════════════════════════════════════════════════════════════════════════
 module "atlas_privatelink_dns" {
+  count  = local.is_privatelink_mode ? 1 : 0
   source = "../../modules/atlas-privatelink-dns"
 
   project_name   = var.project_name
@@ -356,31 +551,38 @@ resource "aws_ecr_lifecycle_policy" "mongodb_mcp_runtime" {
 # ══════════════════════════════════════════════════════════════════════════════
 resource "aws_security_group" "mongodb_mcp_runtime" {
   name        = "${var.project_name}-sg-mcp-runtime-${var.environment}"
-  description = "AgentCore Runtime: mongodb-mcp - outbound to Atlas PrivateLink"
+  description = "AgentCore Runtime: mongodb-mcp - outbound to Atlas (PrivateLink or peering, per network_mode)"
   vpc_id      = local.shared_vpc_id
 
+  # MongoDB TLS to Atlas — narrowed to atlas_peering_cidr in peering mode for
+  # defense-in-depth. In privatelink mode the Atlas VPCE ENIs sit on private
+  # IPs that vary, so 0.0.0.0/0 (constrained by VPCE routing) is the only
+  # workable option.
   egress {
-    description = "MongoDB TLS to Atlas PrivateLink"
+    description = "MongoDB TLS to Atlas"
     from_port   = 27017
     to_port     = 27017
     protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
+    cidr_blocks = local.is_peering_mode ? [local.shared_atlas_peering_cidr] : ["0.0.0.0/0"]
   }
 
   egress {
-    description = "HTTPS for AWS service calls (CloudWatch Logs, etc.)"
+    description = "HTTPS for AWS service calls (CloudWatch Logs, ECR, etc.)"
     from_port   = 443
     to_port     = 443
     protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
   }
 
+  # Atlas allocates mongod listener ports dynamically per cluster in the
+  # 1024-65535 range (e.g. 1051, 1052, 1053 for a 3-node M10). Same narrowing
+  # logic as port 27017.
   egress {
-    description = "Atlas PrivateLink mongod listener ports (Atlas allocates dynamically per cluster)"
+    description = "Atlas mongod listener ports (dynamic per cluster)"
     from_port   = 1024
     to_port     = 65535
     protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
+    cidr_blocks = local.is_peering_mode ? [local.shared_atlas_peering_cidr] : ["0.0.0.0/0"]
   }
 
   tags = {
@@ -560,13 +762,46 @@ resource "null_resource" "existing_agentcore_vpce_access" {
 # AgentCore Runtime — mongodb-mcp MCP server
 #
 # Hosts the Streamable-HTTP MCP server defined under mcp-runtimes/mongodb-mcp/.
-# Network mode = VPC so the runtime can reach Atlas through the existing
-# PrivateLink VPCE (preserves the runtime PrivateLink claim). serverProtocol
-# is MCP per the AgentCore MCP runtime contract:
+# Network mode = VPC so the runtime can reach Atlas privately:
+#   * privatelink mode → through the Atlas Interface VPCE on the -pl hostname
+#   * peering mode     → through the peering route on the -pri hostname
+# serverProtocol is MCP per the AgentCore MCP runtime contract:
 # https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/runtime-mcp.html
 # ══════════════════════════════════════════════════════════════════════════════
 locals {
   mongodb_mcp_runtime_image = "${aws_ecr_repository.mongodb_mcp_runtime.repository_url}:latest"
+
+  # MONGODB_URI selection — mode-aware with NO public-SRV fallback in peering
+  # mode (HARD privacy constraint). PrivateLink mode keeps its existing
+  # behavior (privatelink_connection_string is always populated when envs/network
+  # PL module is applied; the ternary is preserved for back-compat).
+  # Peering mode: prefer the SRV form (when Atlas Private DNS for Peering is
+  # on) and fall back to the multi-host non-SRV form. Both are -pri.mongodb.net
+  # — see precondition below.
+  _mcp_uri_peering = coalesce(
+    module.mongodb_atlas.peering_connection_srv_string,
+    module.mongodb_atlas.peering_connection_string,
+    # Sentinel — caught by the precondition. Picked to be obviously broken.
+    "PEERING_URI_UNAVAILABLE"
+  )
+  _mcp_uri_privatelink = module.mongodb_atlas.privatelink_connection_string != "" ? module.mongodb_atlas.privatelink_connection_string : module.mongodb_atlas.connection_string
+  mcp_mongodb_uri      = local.is_peering_mode ? local._mcp_uri_peering : local._mcp_uri_privatelink
+}
+
+# Privacy guardrail — fail-loud if peering mode somehow lands on a public-SRV
+# URI (Atlas hostname without the -pri token). Catches API regressions in the
+# mongodb-atlas module outputs before they ship to runtime env vars.
+check "mcp_uri_is_private_in_peering_mode" {
+  assert {
+    condition = (
+      !local.is_peering_mode ||
+      (
+        local.mcp_mongodb_uri != "PEERING_URI_UNAVAILABLE"
+        && can(regex("-pri\\.mongodb\\.net", local.mcp_mongodb_uri))
+      )
+    )
+    error_message = "Peering-mode MONGODB_URI does not look private (missing '-pri.mongodb.net'). Resolved value: ${local.mcp_mongodb_uri}. Check that module.mongodb_atlas.peering_connection_string or peering_connection_srv_string is populated — the cluster's connection_strings[0].private should be populated whenever a mongodbatlas_network_peering exists for this project+region."
+  }
 }
 
 module "mongodb_mcp_runtime" {
@@ -587,7 +822,7 @@ module "mongodb_mcp_runtime" {
   environment_variables = {
     AWS_REGION          = var.aws_region
     LOG_LEVEL           = "info"
-    MONGODB_URI         = module.mongodb_atlas.privatelink_connection_string != "" ? module.mongodb_atlas.privatelink_connection_string : module.mongodb_atlas.connection_string
+    MONGODB_URI         = local.mcp_mongodb_uri
     MONGODB_DB          = var.atlas_db_name
     MONGODB_ALLOW_WRITE = var.mongodb_allow_write ? "1" : "0"
   }
@@ -751,56 +986,53 @@ module "acr_orchestrator" {
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Voyage AI SageMaker — optional; only when Marketplace ARN is set
+# Voyage AI SageMaker, CloudWatch log groups, fleet/mongo/cost/atlas dashboards,
+# and Bedrock invocation logging now live in envs/shared (single instance per
+# account+region+environment). Per-project resources here read their names
+# from the SSM data sources at the top of this file.
 # ══════════════════════════════════════════════════════════════════════════════
-module "voyage_sagemaker" {
-  source = "../../modules/voyage-sagemaker"
-  count  = var.voyage_model_package_arn != "" ? 1 : 0
-
-  aws_region               = var.aws_region
-  project_name             = var.project_name
-  environment              = var.environment
-  voyage_model_package_arn = var.voyage_model_package_arn
-  instance_type            = var.voyage_instance_type
-  endpoint_name_suffix     = var.voyage_endpoint_name_suffix
-}
 
 # ══════════════════════════════════════════════════════════════════════════════
-# CloudWatch — log groups for API, MCP, AgentCore
-# ══════════════════════════════════════════════════════════════════════════════
-module "cloudwatch" {
-  source             = "../../modules/cloudwatch"
-  project_name       = var.project_name
-  environment        = var.environment
-  api_retention_days = var.log_retention_days
-}
-
-# ══════════════════════════════════════════════════════════════════════════════
-# CloudWatch Generative AI Observability — enables the managed AgentCore Agents
-# tab + Model Invocations tab, plus the Transaction Search infrastructure that
-# the ADOT sidecar (Phase 2) signs OTLP spans into.
+# CloudWatch Generative AI Observability — STAYS PER-PROJECT.
+# Wires AgentCore Memory + Gateway service-vended log delivery (memory/gateway
+# dashboards stay empty without this), which references per-project AgentCore
+# IDs (module.agentcore_memory + module.agentcore_gateway) — so this module
+# cannot live in envs/shared where those resources are out of scope.
 #
-# Pass AgentCore memory + gateway IDs so the module wires up service-vended
-# log delivery (memory/gateway dashboards stay empty without this).
+# Singleton-conflict safety valve: when two per-project ec2 stacks coexist in
+# the same account+region, only one of them should have
+# var.enable_genai_observability=true (the /aws/spans Transaction Search
+# toggle is account-scoped). Set false on the loser.
 # ══════════════════════════════════════════════════════════════════════════════
 module "cloudwatch_genai" {
   count  = var.enable_genai_observability ? 1 : 0
   source = "../../modules/cloudwatch-genai"
 
-  project_name                    = var.project_name
-  environment                     = var.environment
-  span_retention_days             = var.span_retention_days
-  span_sampling_percent           = var.span_sampling_percent
+  project_name                     = var.project_name
+  environment                      = var.environment
+  span_retention_days              = var.span_retention_days
+  span_sampling_percent            = var.span_sampling_percent
   enable_transaction_search_toggle = var.enable_transaction_search_toggle
-  agentcore_log_retention_days    = var.agentcore_vended_log_retention_days
-  # Pass the full ARNs (not ids) so log_delivery_source.resource_arn is
-  # partition-aware (arn:aws / arn:aws-gov / arn:aws-cn) and not derived from
-  # a hardcoded "arn:aws:bedrock-agentcore:..." prefix.
+  agentcore_log_retention_days     = var.agentcore_vended_log_retention_days
+  # Pass { id, arn } via STATIC keys ("main"). The id is used inside the
+  # AWS-mandated log-group path (/aws/vendedlogs/bedrock-agentcore/memory/
+  # APPLICATION_LOGS/<memory-id>) so console auto-discovery still works;
+  # the static key keeps for_each plan-able on fresh deploys without a
+  # two-pass apply (memory_id / gateway_id are `known after apply` and
+  # used to be the map key, which broke the first `terraform apply`).
+  # ARN stays in the value so log_delivery_source.resource_arn is
+  # partition-aware (arn:aws / arn:aws-gov / arn:aws-cn) without hardcoding.
   agentcore_memories = {
-    (module.agentcore_memory.memory_id) = module.agentcore_memory.memory_arn
+    main = {
+      id  = module.agentcore_memory.memory_id
+      arn = module.agentcore_memory.memory_arn
+    }
   }
   agentcore_gateways = {
-    (module.agentcore_gateway.gateway_id) = module.agentcore_gateway.gateway_arn
+    main = {
+      id  = module.agentcore_gateway.gateway_id
+      arn = module.agentcore_gateway.gateway_arn
+    }
   }
   tags = local.common_tags
 
@@ -810,62 +1042,8 @@ module "cloudwatch_genai" {
   ]
 }
 
-# ══════════════════════════════════════════════════════════════════════════════
-# Bedrock model invocation logging — account-scoped. Captures per-call
-# metadata (modelId, token counts, latency, requestMetadata, error) by default;
-# prompt + completion bodies are OFF unless var.log_prompt_bodies is true.
-#
-# Set var.enable_bedrock_invocation_logging = false when another stack in this
-# AWS account already owns the singleton.
-# ══════════════════════════════════════════════════════════════════════════════
-module "bedrock_invocation_logging" {
-  source = "../../modules/bedrock-invocation-logging"
-
-  project_name                = var.project_name
-  environment                 = var.environment
-  enable                      = var.enable_bedrock_invocation_logging
-  log_prompt_bodies           = var.log_prompt_bodies
-  log_embedding_bodies        = var.log_embedding_bodies
-  retention_days              = var.invocation_retention_days
-  data_protection_identifiers = var.data_protection_identifiers
-  tags                        = local.common_tags
-}
-
-# ══════════════════════════════════════════════════════════════════════════════
-# CloudWatch Fleet Dashboards + Alarms (Phase 3) — SNS topic, 3 dashboards
-# (fleet / mongo / cost), 7 alarms, audit metric filter, query library.
-# Wires log groups from cloudwatch + adot-collector + bedrock-invocation-logging
-# so a single apply produces a working ops console.
-# ══════════════════════════════════════════════════════════════════════════════
-module "cloudwatch_fleet_dashboards" {
-  count  = var.enable_fleet_dashboards ? 1 : 0
-  source = "../../modules/cloudwatch-fleet-dashboards"
-
-  project_name              = var.project_name
-  environment               = var.environment
-  aws_region                = var.aws_region
-  api_log_group_name        = module.cloudwatch.api_log_group_name
-  ui_log_group_name         = module.cloudwatch.ui_log_group_name
-  invocation_log_group_name     = var.enable_bedrock_invocation_logging ? module.bedrock_invocation_logging.log_group_name : ""
-  audit_findings_log_group_name = var.enable_bedrock_invocation_logging ? module.bedrock_invocation_logging.audit_log_group_name : ""
-  otel_log_group_name       = var.enable_adot_collector ? module.adot_collector[0].otel_log_group_name : ""
-  p99_latency_threshold_ms  = var.p99_latency_threshold_ms
-  error_rate_threshold_pct  = var.error_rate_threshold_pct
-  throttle_burst_threshold  = var.throttle_burst_threshold
-  tags                      = local.common_tags
-}
-
-# ══════════════════════════════════════════════════════════════════════════════
-# Atlas dashboard + alarms (Phase 4) — consumes the MongoDB/Atlas CloudWatch
-# namespace published by the ADOT collector's prometheus -> awsemf pipeline.
-# ══════════════════════════════════════════════════════════════════════════════
-module "cloudwatch_atlas_dashboard" {
-  count  = var.enable_atlas_metrics ? 1 : 0
-  source = "../../modules/cloudwatch-atlas-dashboard"
-
-  project_name                 = var.project_name
-  environment                  = var.environment
-  aws_region                   = var.aws_region
-  replication_lag_threshold_ms = var.atlas_replication_lag_threshold_ms
-  tags                         = local.common_tags
-}
+# Note: module.bedrock_invocation_logging (account-scoped), module.cloudwatch_fleet_dashboards,
+# and module.cloudwatch_atlas_dashboard all moved to envs/shared. Their outputs are
+# now consumed via the SSM lookups at the top of this file (republished in
+# envs/ec2/outputs.tf so smoke scripts that `terraform output -raw <name>`
+# keep working unchanged).

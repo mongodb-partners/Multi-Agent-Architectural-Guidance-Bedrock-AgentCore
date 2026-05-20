@@ -48,9 +48,28 @@ export function readSkillResourceWithRegistry(
       hint: "Call activate_skill with this skillName first (or use a specialist agent that pre-loads skills).",
     };
   }
+  const t0 = Date.now();
   const r = readSkillResourceFile(skillName, resourcePath);
   if (!r.ok) {
     return { ok: false, error: r.error, skillName, path: resourcePath };
+  }
+  // Roll up the read into the trace collector so the Developer details
+  // panel can render a per-skill "Resources read this turn" table. The
+  // flat `tool.call` event keeps streaming live independently; this is
+  // metadata only. Wrapped in try/catch because metadata emission must
+  // never destabilize a tool callback.
+  try {
+    const trace = currentTrace();
+    if (trace) {
+      trace.recordSkillResourceRead({
+        skillName,
+        resourcePath,
+        bytes: Buffer.byteLength(r.content, "utf8"),
+        latencyMs: Date.now() - t0,
+      });
+    }
+  } catch {
+    // metadata roll-up failures must not destabilize the tool callback
   }
   return { ok: true, skillName, path: resourcePath, content: r.content };
 }

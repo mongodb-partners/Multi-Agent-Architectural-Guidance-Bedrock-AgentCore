@@ -1,18 +1,33 @@
 name: Deploy (EC2)
 
 # Manual trigger only — deploys the envs/ec2 Terraform stack + EC2 services.
-# Uses the deploy-user AWS access key (stored in GitHub Secrets) to run
-# `./deploy/scripts/deploy.sh`, which handles:
+# Supports two auth modes via the `auth_mode` input:
+#   - iam : static AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY from GitHub Secrets
+#   - sts : OIDC role-to-assume via the AWS_DEPLOY_ROLE_ARN repo variable
+#           (no long-lived keys in the repo; needs the role's trust policy to
+#            include the AllowGitHubActionsOidcFederation SID from
+#            deploy/iam/sts-trust-policy.json)
+#
+# Runs `./deploy/deploy-full-with-privatelink.sh` (default) or
+# `./deploy/deploy-full-with-vpc-peering.sh` (when network_mode=peering),
+# which orchestrates:
 #   - bootstrap S3 bucket (one-time)
-#   - terraform apply for envs/ec2
+#   - terraform apply for envs/network + envs/shared + envs/ec2
 #   - docker build + ECR push
 #   - .env.live sync + systemctl restart via SSM
 #
-# See deploy/terraform/.design.md for the full architecture.
+# PrivateLink and VPC peering are mutually exclusive per account — switching
+# modes requires the destroy workflow first. See deploy/terraform/.design.md
+# and docs/deployment-guide.md#vpc-peering-mode for the full trade-offs.
 
 on:
   workflow_dispatch:
     inputs:
+      auth_mode:
+        description: "iam = static AWS keys from secrets; sts = OIDC role-to-assume (AWS_DEPLOY_ROLE_ARN repo var)"
+        type: choice
+        options: [iam, sts]
+        default: iam
       auto_approve:
         description: "Auto-approve terraform apply (off = dry-run / plan only)"
         type: boolean
@@ -21,11 +36,24 @@ on:
         description: "Skip docker build + ECR push (infra-only reapply)"
         type: boolean
         default: false
+      network_mode:
+        description: "Atlas connectivity mode — privatelink (SoW-aligned) or peering (EXPERIMENTAL KB ingestion via NLB-over-peering). Mutually exclusive; switching modes requires destroying the current stack first."
+        type: choice
+        options: [privatelink, peering]
+        default: privatelink
+      atlas_peering_cidr:
+        description: "Atlas-side peering CIDR (ignored when network_mode=privatelink). Default 192.168.248.0/21 is Atlas's reserved peering CIDR and does not overlap the default VPC_CIDR (10.0.0.0/16)."
+        type: string
+        default: "192.168.248.0/21"
 
 # Serialize deploys — no two runs of this workflow race the same Terraform state.
 concurrency:
   group: deploy-ec2
   cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write   # required for AUTH_MODE=sts (OIDC federation)
 
 jobs:
   deploy:
@@ -36,7 +64,9 @@ jobs:
     defaults:
       run:
         shell: bash
-        working-directory: mongodb-aws-bedrock-multi-agent-framework
+        # actions/checkout@v4 lands the repo at ${{ github.workspace }},
+        # not in a subdirectory named after the repo.
+        working-directory: ${{ github.workspace }}
 
     env:
       AWS_REGION: us-east-1
@@ -47,12 +77,22 @@ jobs:
         uses: actions/checkout@v4
 
       # ── AWS auth ─────────────────────────────────────────────────────────────
-      - name: Configure AWS credentials
+      # Two parallel steps; exactly one runs based on inputs.auth_mode.
+      - name: Configure AWS credentials (IAM user keys)
+        if: inputs.auth_mode == 'iam'
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region:            ${{ env.AWS_REGION }}
+
+      - name: Configure AWS credentials (OIDC assume-role)
+        if: inputs.auth_mode == 'sts'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume:    ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          role-session-name: gh-actions-${{ github.run_id }}
+          aws-region:        ${{ env.AWS_REGION }}
 
       - name: Verify AWS identity
         run: aws sts get-caller-identity
@@ -111,17 +151,27 @@ jobs:
           export TF_VAR_mongodb_atlas_project_id="${MONGODB_ATLAS_PROJECT_ID}"
           export TF_VAR_mongodb_password="${MONGODB_PASSWORD}"
           export VOYAGE_MODEL_PACKAGE_ARN="${VOYAGE_MODEL_PACKAGE_ARN:-}"
+          export NETWORK_MODE="${{ inputs.network_mode }}"
+          export ATLAS_PEERING_CIDR="${{ inputs.atlas_peering_cidr }}"
           EOF
           echo "Wrote $CI_ENV_FILE ($(wc -l < "$CI_ENV_FILE") lines)"
 
       # ── Deploy ───────────────────────────────────────────────────────────────
-      - name: Run deploy.sh
+      - name: Run deploy
+        env:
+          AUTH_MODE: ${{ inputs.auth_mode }}
         run: |
           set -euo pipefail
           args=( "--env-file" "$CI_ENV_FILE" )
           [[ "${{ inputs.auto_approve }}" == "true" ]] && args+=( "--auto-approve" )
           [[ "${{ inputs.skip_docker }}"  == "true" ]] && args+=( "--skip-docker" )
-          ./deploy/scripts/deploy.sh "${args[@]}"
+
+          if [[ "${{ inputs.network_mode }}" == "peering" ]]; then
+            echo "Running VPC peering orchestrator (EXPERIMENTAL KB ingestion path — see docs/deployment-guide.md#vpc-peering-mode)"
+            ./deploy/deploy-full-with-vpc-peering.sh "${args[@]}"
+          else
+            ./deploy/deploy-full-with-privatelink.sh "${args[@]}"
+          fi
 
       # ── Artifacts ────────────────────────────────────────────────────────────
       - name: Upload deploy manifest
@@ -129,7 +179,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: deploy-manifest-${{ github.run_id }}
-          path: mongodb-aws-bedrock-multi-agent-framework/deploy-manifest.json
+          path: ${{ github.workspace }}/deploy-manifest.json
           if-no-files-found: ignore
           retention-days: 30
 

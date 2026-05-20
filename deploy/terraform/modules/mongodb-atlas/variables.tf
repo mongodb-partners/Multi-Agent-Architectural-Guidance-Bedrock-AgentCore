@@ -36,3 +36,20 @@ variable "privatelink_endpoint_id" {
   default     = ""
 }
 
+variable "network_mode" {
+  type        = string
+  default     = "privatelink"
+  description = "Connectivity mode. 'privatelink' (default) keeps the existing 0.0.0.0/0 IP access list entry — Bedrock KB ingestion uses public SRV when enable_kb_privatelink=false. 'peering' replaces the open entry with var.vpc_cidr — runtime + Bedrock KB both reach Atlas privately via VPC peering."
+
+  validation {
+    condition     = contains(["privatelink", "peering"], var.network_mode)
+    error_message = "network_mode must be either 'privatelink' or 'peering'."
+  }
+}
+
+variable "vpc_cidr" {
+  type        = string
+  default     = ""
+  description = "Customer VPC CIDR. REQUIRED when network_mode='peering' — used as the peering IP access list entry so only this VPC can reach Atlas in peering mode. Ignored when network_mode='privatelink'."
+}
+

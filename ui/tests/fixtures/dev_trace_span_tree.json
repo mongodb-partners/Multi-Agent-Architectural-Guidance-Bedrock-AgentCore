@@ -1,0 +1,55 @@
+{
+  "traceId": "dev-fixture-span-tree",
+  "sessionId": "demo-session",
+  "messageId": "demo-msg-1",
+  "userId": "demo-user",
+  "agentId": "orchestrator",
+  "createdAt": "2026-05-20T08:00:00.000Z",
+  "release": { "gitSha": "abcdef0", "env": "dev" },
+  "correlation": { "requestId": "req-demo-1" },
+  "otel": { "traceId": "1234567890abcdef1234567890abcdef", "rootSpanId": "abcdef1234567890" },
+  "spanTree": [
+    {
+      "id": "n-1",
+      "type": "chat.turn.start",
+      "ts": 0,
+      "durationMs": 1240,
+      "agentId": "orchestrator",
+      "children": [
+        {
+          "id": "n-2",
+          "type": "model.request",
+          "ts": 5,
+          "durationMs": 900,
+          "agentId": "orchestrator",
+          "children": [
+            { "id": "n-3", "type": "tool.call", "ts": 50, "durationMs": 320, "agentId": "orchestrator", "children": [] },
+            { "id": "n-4", "type": "tool.call", "ts": 400, "durationMs": 180, "agentId": "orchestrator", "children": [] }
+          ]
+        }
+      ]
+    }
+  ],
+  "events": [
+    { "id": "n-1", "ts": 0, "type": "chat.turn.start", "payload": { "sessionId": "demo-session", "messageId": "demo-msg-1", "agentId": "orchestrator", "startTs": 0 } },
+    { "id": "n-2", "ts": 5, "type": "model.request", "payload": { "modelId": "anthropic.claude-sonnet-4-5", "region": "us-east-1", "systemPromptHash": "h-1", "systemPromptBytes": 1024, "priorTurnsCount": 2 } },
+    { "id": "n-3", "ts": 50, "type": "tool.call", "payload": { "toolName": "lookup_order", "phase": "start" } },
+    { "id": "e-3-end", "parentId": "n-3", "ts": 370, "durationMs": 320, "type": "tool.call", "payload": { "phase": "end" } }
+  ],
+  "summary": {
+    "inputTokens": 1024,
+    "outputTokens": 512,
+    "totalTokens": 1536,
+    "toolCalls": 2,
+    "mongoQueries": 0,
+    "mongoDocsReturned": 0,
+    "mcpCalls": 0,
+    "estimatedCostUsd": 0.0046,
+    "costEstimateComplete": true,
+    "costBreakdown": { "anthropic.claude-sonnet-4-5": 0.0046 },
+    "durationMs": 1240,
+    "modelIds": ["anthropic.claude-sonnet-4-5"],
+    "toolsUsed": ["lookup_order"],
+    "eventsDropped": 0
+  }
+}

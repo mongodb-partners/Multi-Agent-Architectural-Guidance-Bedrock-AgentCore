@@ -106,9 +106,11 @@ if [[ -n "$HELPER_ARN" && "$HELPER_ARN" != "None" ]]; then
     --query 'Credentials.[AccessKeyId,SecretAccessKey,SessionToken]' \
     --output text 2>/dev/null || true)"
   if [[ -n "$HELPER_CREDS" ]]; then
-    ORIG_KEY="$AWS_ACCESS_KEY_ID"
-    ORIG_SECRET="$AWS_SECRET_ACCESS_KEY"
+    # AUTH_MODE-aware capture: ORIG_KEY may be empty if the caller used AWS_PROFILE.
+    ORIG_KEY="${AWS_ACCESS_KEY_ID:-}"
+    ORIG_SECRET="${AWS_SECRET_ACCESS_KEY:-}"
     ORIG_TOKEN="${AWS_SESSION_TOKEN:-}"
+    ORIG_PROFILE="${AWS_PROFILE:-}"
     export AWS_ACCESS_KEY_ID="$(echo "$HELPER_CREDS" | awk '{print $1}')"
     export AWS_SECRET_ACCESS_KEY="$(echo "$HELPER_CREDS" | awk '{print $2}')"
     export AWS_SESSION_TOKEN="$(echo "$HELPER_CREDS" | awk '{print $3}')"
@@ -175,11 +177,24 @@ for legacy_name in "${LEGACY_KB_NAMES[@]}"; do
   fi
 done
 
-# Restore original credentials after Bedrock operations
+# Restore original credentials after Bedrock operations.
+# AUTH_MODE-aware: when the caller had no static keys (used AWS_PROFILE),
+# unset the helper-role vars so the profile chain re-resolves.
 if [[ "${USE_HELPER:-0}" -eq 1 ]]; then
-  export AWS_ACCESS_KEY_ID="$ORIG_KEY"
-  export AWS_SECRET_ACCESS_KEY="$ORIG_SECRET"
-  export AWS_SESSION_TOKEN="$ORIG_TOKEN"
+  if [[ -n "${ORIG_KEY:-}" ]]; then
+    export AWS_ACCESS_KEY_ID="$ORIG_KEY"
+    export AWS_SECRET_ACCESS_KEY="$ORIG_SECRET"
+    if [[ -n "${ORIG_TOKEN:-}" ]]; then
+      export AWS_SESSION_TOKEN="$ORIG_TOKEN"
+    else
+      unset AWS_SESSION_TOKEN
+    fi
+  else
+    unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
+  fi
+  if [[ -n "${ORIG_PROFILE:-}" ]]; then
+    export AWS_PROFILE="$ORIG_PROFILE"
+  fi
   info "Restored original credentials"
 fi
 

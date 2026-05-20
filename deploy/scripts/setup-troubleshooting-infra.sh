@@ -673,10 +673,15 @@ success "Helper role policies updated"
 info "Waiting 10s for helper role IAM propagation..."
 sleep 10
 
-# Assume helper role and swap credentials for Phases 9–10
-ORIG_KEY="$AWS_ACCESS_KEY_ID"
-ORIG_SECRET="$AWS_SECRET_ACCESS_KEY"
+# Assume helper role and swap credentials for Phases 9–10.
+# Capture pattern is AUTH_MODE-aware so AWS_PROFILE callers restore correctly:
+#   - If the caller had static keys, ORIG_KEY is non-empty → restore by re-exporting.
+#   - If the caller used AWS_PROFILE (no static keys in env), ORIG_KEY is empty →
+#     restore by `unset`-ing the three vars so AWS_PROFILE takes effect again.
+ORIG_KEY="${AWS_ACCESS_KEY_ID:-}"
+ORIG_SECRET="${AWS_SECRET_ACCESS_KEY:-}"
 ORIG_TOKEN="${AWS_SESSION_TOKEN:-}"
+ORIG_PROFILE="${AWS_PROFILE:-}"
 
 HELPER_CREDS="$(aws sts assume-role \
   --role-arn "$HELPER_ARN" \
@@ -804,10 +809,23 @@ for i in $(seq 1 30); do
   sleep 10
 done
 
-# Restore original credentials after Bedrock operations
-export AWS_ACCESS_KEY_ID="$ORIG_KEY"
-export AWS_SECRET_ACCESS_KEY="$ORIG_SECRET"
-export AWS_SESSION_TOKEN="$ORIG_TOKEN"
+# Restore original credentials after Bedrock operations.
+# When the caller used AWS_PROFILE (no static keys in env), unset the three
+# helper-role vars so the CLI re-resolves credentials via the profile.
+if [[ -n "$ORIG_KEY" ]]; then
+  export AWS_ACCESS_KEY_ID="$ORIG_KEY"
+  export AWS_SECRET_ACCESS_KEY="$ORIG_SECRET"
+  if [[ -n "$ORIG_TOKEN" ]]; then
+    export AWS_SESSION_TOKEN="$ORIG_TOKEN"
+  else
+    unset AWS_SESSION_TOKEN
+  fi
+else
+  unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
+fi
+if [[ -n "$ORIG_PROFILE" ]]; then
+  export AWS_PROFILE="$ORIG_PROFILE"
+fi
 info "Restored original credentials"
 
 # =============================================================================

@@ -1,0 +1,60 @@
+{
+  "traceId": "dev-fixture-vector-index",
+  "sessionId": "demo-session",
+  "messageId": "demo-msg-vec",
+  "userId": "demo-user",
+  "agentId": "orchestrator",
+  "createdAt": "2026-05-20T08:03:00.000Z",
+  "events": [
+    {
+      "id": "v1",
+      "ts": 0,
+      "type": "mongo.vector_search",
+      "payload": {
+        "collection": "products",
+        "embeddingSource": "voyage",
+        "indexName": "products-vector-index",
+        "queryText": "Looking for a compact, lightweight widget for travel.",
+        "scores": [0.92, 0.88, 0.81, 0.74, 0.62],
+        "documentPreviews": [
+          { "rank": 1, "title": "Compact Travel Widget", "snippet": "Lightweight widget, ideal for travel.", "fields": { "sku": "SKU-101" } },
+          { "rank": 2, "title": "Pocket Widget Pro", "snippet": "Pro-grade compact widget.", "fields": { "sku": "SKU-102" } },
+          { "rank": 3, "title": "Mini Widget", "snippet": "Small footprint, decent power.", "fields": { "sku": "SKU-103" } }
+        ],
+        "embedLatencyMs": 88,
+        "searchLatencyMs": 41,
+        "scoreSummary": { "min": 0.62, "max": 0.92, "mean": 0.794 }
+      }
+    },
+    {
+      "id": "v2",
+      "ts": 200,
+      "type": "mongo.vector_search",
+      "payload": {
+        "collection": "chat_messages",
+        "embeddingSource": "voyage",
+        "indexName": "chat_messages_vector",
+        "queryText": "previous notebook codename",
+        "scores": [0.83, 0.71],
+        "embedLatencyMs": 64,
+        "searchLatencyMs": 18
+      }
+    }
+  ],
+  "summary": {
+    "inputTokens": 200,
+    "outputTokens": 100,
+    "totalTokens": 300,
+    "toolCalls": 0,
+    "mongoQueries": 0,
+    "mongoDocsReturned": 5,
+    "mcpCalls": 0,
+    "estimatedCostUsd": null,
+    "costEstimateComplete": false,
+    "costBreakdown": {},
+    "durationMs": 350,
+    "modelIds": [],
+    "toolsUsed": [],
+    "eventsDropped": 0
+  }
+}

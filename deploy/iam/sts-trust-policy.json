@@ -1,0 +1,63 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "AllowSameAccountIamPrincipalsWithMfa",
+      "Effect": "Allow",
+      "Principal": {
+        "AWS": "arn:aws:iam::ACCOUNT_ID:root"
+      },
+      "Action": "sts:AssumeRole",
+      "Condition": {
+        "Bool": {
+          "aws:MultiFactorAuthPresent": "true"
+        },
+        "NumericLessThanEquals": {
+          "aws:MultiFactorAuthAge": "43200"
+        }
+      }
+    },
+    {
+      "Sid": "AllowAwsIdentityCenterSsoUsers",
+      "Effect": "Allow",
+      "Principal": {
+        "AWS": "arn:aws:iam::ACCOUNT_ID:root"
+      },
+      "Action": "sts:AssumeRole",
+      "Condition": {
+        "ArnLike": {
+          "aws:PrincipalArn": "arn:aws:iam::ACCOUNT_ID:role/aws-reserved/sso.amazonaws.com/AWSReservedSSO_PERMISSION_SET_NAME_*"
+        }
+      }
+    },
+    {
+      "Sid": "AllowCrossAccountTrustedPrincipal",
+      "Effect": "Allow",
+      "Principal": {
+        "AWS": "arn:aws:iam::TRUSTED_ACCOUNT_ID:role/TRUSTED_ROLE_NAME"
+      },
+      "Action": "sts:AssumeRole",
+      "Condition": {
+        "StringEquals": {
+          "sts:ExternalId": "REPLACE_WITH_GENERATED_EXTERNAL_ID"
+        }
+      }
+    },
+    {
+      "Sid": "AllowGitHubActionsOidcFederation",
+      "Effect": "Allow",
+      "Principal": {
+        "Federated": "arn:aws:iam::ACCOUNT_ID:oidc-provider/token.actions.githubusercontent.com"
+      },
+      "Action": "sts:AssumeRoleWithWebIdentity",
+      "Condition": {
+        "StringEquals": {
+          "token.actions.githubusercontent.com:aud": "sts.amazonaws.com"
+        },
+        "StringLike": {
+          "token.actions.githubusercontent.com:sub": "repo:GITHUB_ORG/GITHUB_REPO:ref:refs/heads/main"
+        }
+      }
+    }
+  ]
+}

@@ -88,8 +88,8 @@ Accept: text/event-stream
 | Field | Required | Notes |
 |---|---|---|
 | `message` | yes | The user's question |
-| `sessionId` | yes | Any string. The API keys session state to this. |
-| `agentId` | no | Default: `orchestrator`. Direct addressing of a specialist (e.g. `troubleshooting`) is allowed — bypasses orchestration. |
+| `sessionId` | yes | Any string ≥ 1 char. The API pads it to ≥ 33 chars internally before invoking AgentCore (runtime session-id requirement). |
+| `agentId` | no | Default: in-API classifier picks the specialist (heuristic + Haiku fallback). Pass an explicit specialist id (e.g. `troubleshooting`) to bypass classification, or `orchestrator` to force the in-API classifier path even when an upstream client pinned a different agent. When `USE_ORCHESTRATOR_RUNTIME=1`, every request goes through the orchestrator runtime regardless of this field. |
 
 **Response:** `text/event-stream` with a sequence of named events.
 
@@ -98,29 +98,42 @@ Accept: text/event-stream
 | Event | Payload | When |
 |---|---|---|
 | `agent_info` | `{agentId, agentName}` | Once at start of the response |
-| `token` | `{text}` | Each token (in-process Strands) or one burst (AgentCore Runtime) |
+| `stream` | `ChatStreamPart` JSON (`{type: "token" \| "tool_call" \| "skill_loaded" \| ...}`) | One per streamed part forwarded from the specialist runtime. The runtime container emits `event: stream` per SSE frame; the API forwards verbatim. |
+| `token` | `{text}` | Legacy event — still emitted in local-dev / stub paths and by `swarm-chat-stream.ts`. AgentCore Runtime path emits `stream` instead. |
 | `skill_loaded` | `{skillName}` | When the agent activates a skill |
 | `tool_call` | `{tool, status}` | When a tool is invoked. `status` is `started` / `completed` / `failed` |
 | `agent_active` | `{agentId, agentName}` | When orchestration switches active agent (Swarm mode only) |
-| `handoff` | `{from, to, label}` | When orchestrator routes to a specialist |
-| `trace` | `{id, ts, type, parentId?, agentId?, durationMs?, payload}` | Per emitted trace event (gated by `TRACING_ENABLED`, default `1`). See [Trace event types](#trace-event-types). |
+| `handoff` | `{from, to, label}` | When the in-API classifier (or orchestrator) routes to a specialist |
+| `trace` | `{id, ts, type, parentId?, agentId?, durationMs?, payload}` | Per emitted trace event (gated by `TRACING_ENABLED`, default `1`). `model.text_delta_batch` trace forwarding is throttled to `TRACE_SSE_THROTTLE_MS` (default 100 ms) to keep the trace channel from contending with token frames; the full batch still lands in the persisted trace. See [Trace event types](#trace-event-types). |
 | `error` | `{code, message, requestId}` | Terminal failure. Followed by `done`. |
 | `done` | `{sessionId, messageId, traceId?, error?}` | Always emitted last. `traceId` set when tracing is enabled. |
 
-**Example: order tracking question (Path A — AgentCore Runtime)**
+**Example: order tracking question (default path — in-API classifier → AgentCore Runtime, true SSE streaming)**
 
 ```
 event: agent_info
-data: {"agentId": "orchestrator", "agentName": "Orchestrator Agent"}
-
-event: token
-data: {"text": "Your order ORD-1234 is currently in transit and is expected to arrive on 2026-05-04. Tracking number: ..."}
+data: {"agentId": "order-management", "agentName": "Order Management Agent"}
 
 event: handoff
-data: {"from": "orchestrator", "to": "order-management", "label": ""}
+data: {"from": "orchestrator", "to": "order-management", "label": "classifier:heuristic"}
+
+event: stream
+data: {"type": "token", "text": "Your order "}
+
+event: stream
+data: {"type": "token", "text": "ORD-1234 is currently in transit"}
+
+event: stream
+data: {"type": "tool_call", "tool": "mongodb_query", "status": "started"}
+
+event: stream
+data: {"type": "tool_call", "tool": "mongodb_query", "status": "completed"}
+
+event: stream
+data: {"type": "token", "text": " and is expected to arrive on 2026-05-04."}
 
 event: done
-data: {"sessionId": "session-abc-123", "messageId": "msg_a1b2c3d4e5f6"}
+data: {"sessionId": "session-abc-123", "messageId": "msg_a1b2c3d4e5f6", "traceId": "..."}
 ```
 
 **Example: troubleshooting question (Path B — Strands Swarm in local dev)**
@@ -283,7 +296,7 @@ Returns all loaded agent configs (parsed from `config/agents/*.agent.md`).
     {
       "id": "orchestrator",
       "name": "Orchestrator Agent",
-      "model": "us.anthropic.claude-sonnet-4-6",
+      "model": "us.anthropic.claude-haiku-4-5-20251001-v1:0",
       "tools": ["..."],
       "skills": ["..."],
       "memory": {"shortTerm": true, "longTerm": false}
@@ -413,13 +426,25 @@ MongoDB op, handoff decision, etc.). Traces are persisted to MongoDB
 (`traces` collection with a TTL index — see `TRACE_TTL_DAYS`, default 30)
 plus an in-process ring buffer (`TRACE_RING_BUFFER_SIZE`, default 100).
 
-### `GET /traces/:traceId`
+### `GET /traces/:traceId[?include=core|dev|full]`
 
-Fetch a complete trace. Returns 404 when not found or the calling user
-doesn't own it (auth ownership: if `trace.userId` is set, the caller's JWT
-`sub` must match).
+Fetch a trace. Returns 404 when not found or the calling user doesn't own it
+(auth ownership: if `trace.userId` is set, the caller's JWT `sub` must match).
 
-### `GET /trace?sessionId=…&messageId=…`
+`?include=` controls server-side projection — see `api/src/lib/trace-projection.ts`:
+
+| Mode | Behavior | Used by |
+|---|---|---|
+| `full` (default, back-compat) | Identity — full trace document. | `e2e-smoke/verify-trace-ui-shape.py`, external callers. |
+| `core` | Strips heavy debug payload fields into `{ _omittedForCoreMode: true, bytesAvailable: N, wasRedacted? }` sentinels; drops dev-only event types (`dev.environment`, `dev.byte_cap_hit`, `model.retry`, `agentcore.retry`, `model.text_delta_batch`, `latency.checkpoint`); removes dev-only top-level fields (`release`, `correlation`, `otel`, `spanTree`). | Streamlit Trace Viewer initial load. |
+| `dev` | Identity, including dev-only fields. | Streamlit Trace Viewer "Developer details" on-demand fetch. |
+
+Every response sets `X-Trace-Include: core|dev|full` so the client can
+assert the projection round-tripped. The UI `api_client.get_trace` raises if
+the header doesn't match the requested mode. The audit log channel records
+`[trace] fetch` with the `include` field for SOC2 review.
+
+### `GET /trace?sessionId=…&messageId=…[&include=core|dev|full]`
 
 Same as above, looked up by `(sessionId, messageId)`. Useful when the UI
 only has the message id from a session listing.
@@ -429,10 +454,19 @@ only has the message id from a session listing.
 Trace projection containing only the `mongo.*` events. Cheaper to render
 than the full document when the dashboard only needs the MongoDB panel.
 
-### `GET /traces?limit=25`
+### `GET /traces?limit=25[&sessionId=…][&excludeTraceId=…]`
 
 Recent traces visible to the caller. Used by the sidebar's "Live metrics"
 block to compute aggregate cost / latency / token totals.
+
+Optional filters:
+
+* `?sessionId=…` — restrict to a single session. Powers the Trace Viewer's
+  prev/next-turn-in-session arrows. Over-fetches `4 × limit` server-side
+  then filters; capped at 500.
+* `?excludeTraceId=…` — drop a specific trace from the list (the UI uses
+  this to omit the currently displayed turn from "Other turns in this
+  session").
 
 #### Trace event types
 
@@ -453,9 +487,22 @@ Highlights:
 | `tool.http` / `tool.mcp` | Specialised tool events for HTTP- and MCP-flavoured tools |
 | `handoff.decision` | Orchestrator → specialist routing decision (with attribution) |
 | `agent.activate` | A node became active in the Swarm graph |
-| `mongo.*` | MongoDB intent / query / plan / result / diagnostic / vector_search / schema. `mongo.vector_search` includes query-vector preview, score summary/histogram, and compact `documentPreviews[]` metadata for the retrieved source documents; Streamlit uses those previews for chat-side source pills and the Trace Viewer vector panel. |
-| `agentcore.invoke` / `agentcore.nested_trace` / `agentcore.classification` | AgentCore Runtime hops (with nested-trace splicing) |
+| `mongo.*` | MongoDB intent / query / plan / result / diagnostic / vector_search / schema. `mongo.vector_search` includes query-vector preview, score summary/histogram, and compact `documentPreviews[]` metadata for the retrieved source documents, including native Mongo `_id` when present; Streamlit uses those previews for chat-side source pills and the Trace Viewer vector panel. |
+| `agentcore.invoke` / `agentcore.nested_trace` / `agentcore.classification` | AgentCore Runtime hops (with nested-trace splicing). `agentcore.invoke` carries `responseBody` + `requestHeadersPreview` / `responseHeadersPreview` for the Developer details panel. |
+| `dev.environment` | One-shot snapshot of the runtime env knobs (`chatMode`, `devMockBackends`, `mongoConfigured`, `voyageConfigured`, `logLevel`, …). Emitted once per turn by `chat.ts`. Powers the Developer details Environment sub-section. |
+| `dev.byte_cap_hit` | Emitted when a payload was trimmed by the per-event or per-turn byte cap. Carries `{ droppedType, bytes, reason: "per_event" \| "per_turn" }`. Capped at 50 emissions per turn to prevent spam. |
+| `model.retry` / `agentcore.retry` | One event per retry attempt with `attempt`, `previousErrorClass`, `backoffMs`. Powers the Developer details Retries sub-section. |
 | `error` | Surfaced as a child event with `parentId` pointing to the failing span |
+
+Top-level trace document fields (alongside `events[]` + `summary`):
+
+| Field | Meaning |
+|---|---|
+| `release` | `{ gitSha, imageTag?, env }` — release metadata for the Developer details Identifiers section. |
+| `correlation` | `{ requestId, userAgent?, clientIp? }` — request correlation IDs. |
+| `otel` | `{ traceId, rootSpanId }` — OTel trace + span IDs used to deep-link to CloudWatch ServiceLens / X-Ray. |
+| `spanTree` | Hierarchical `{ id, type, ts, durationMs, agentId?, children[] }` array, pre-computed at finalize time so the UI doesn't have to reconstruct from `parentId`. |
+| `truncated` / `eventsDropped` | Byte-cap status — set when the per-turn cap fired. |
 
 Env knobs:
 

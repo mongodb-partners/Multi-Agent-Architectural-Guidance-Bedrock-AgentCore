@@ -1,419 +1,310 @@
-# Project Structure Guide
+# Project structure
 
-This document explains every folder and key file in this repository — what lives there and why it exists.
+A per-folder map of the repository as it ships today. Each entry explains **what it is** and **why it exists** so a new owner can navigate without having to grep for the canonical source.
 
----
-
-## Top-Level Overview
-
-```
-mongodb-aws-bedrock-multi-agent-framework/
-├── api/               ← Hono/Bun backend API (the agent runtime)
-├── ui/                ← Streamlit Python chat UI
-├── config/            ← Agent + skill definitions (no code — markdown + JSON)
-├── db-seeding/        ← Scripts to seed MongoDB Atlas with data + embeddings
-├── deploy/            ← All deployment artifacts (Terraform, shell scripts, KB docs)
-├── e2e/               ← Playwright end-to-end tests against the running UI
-├── lambda/            ← Future Lambda adapters for AgentCore Gateway mode
-├── docs/              ← Detailed documentation (architecture, guides, API reference)
-└── .github/           ← CI/CD workflow (GitHub Actions)
-```
+> Companion: [`docs/README.md`](docs/README.md) — handover entry point, reading orders.
 
 ---
 
-## `api/` — Backend API (Hono + Bun + Strands)
+## Top-level layout
 
-The heart of the system. A TypeScript API server that runs the multi-agent loop and streams responses to the UI.
+```
+.
+├── api/                    Bun + Hono API + shared AgentCore Runtime bundle
+├── ui/                     Streamlit chat client (Chat + Sessions + Trace Viewer)
+├── mcp-runtimes/
+│   └── mongodb-mcp/        MongoDB MCP server as an AgentCore Runtime (ARM64 container)
+├── config/
+│   ├── agents/             *.agent.md — runtime LLM agent definitions
+│   ├── skills/             SKILL.md folders — domain knowledge + scripts + http-tools
+│   ├── environment.yaml    API defaults (port, CORS, etc.)
+│   ├── demo-prompts.yaml   Sidebar "Try a prompt" entries
+│   └── http-tools.json     Optional global HTTP tools + SSRF allowlist
+├── db-seeding/             Atlas data + Atlas Search/vector index seed scripts
+├── deploy/                 All deploy assets — Terraform, scripts, IAM
+├── e2e/                    Playwright API smoke specs
+├── e2e-smoke/              Python live-AWS smoke + memory recall diagnostic
+├── docs/                   Canonical handover pack (read docs/README.md first)
+├── .github/workflows/      ci.yml + deploy.yml
+├── compose.yaml            Local docker-compose for API + UI
+├── Makefile                docker-up / docker-build / docker-down / docker-logs shortcuts
+├── .env.sample             Every env var, commented (copy to .env)
+├── .env.docker.example     Docker-compose overrides
+├── README.md               Project overview (points at docs/README.md for handover)
+├── AGENTS.md               Contributor conventions (AI + human)
+└── PROJECT_STRUCTURE.md    This file
+```
 
-**Why it exists:** All agent orchestration, tool execution, session management, and streaming happen here. The UI is a thin client — everything intelligent is in this process.
+`lambda/` has been retired — the MongoDB MCP tool path moved into `mcp-runtimes/mongodb-mcp/` (AgentCore Runtime).
+
+---
+
+## `api/` — Bun + Hono API + AgentCore Runtime bundle
+
+TypeScript service, two entrypoints from one bundle:
+
+| Entry | Hosted as | What it runs |
+|---|---|---|
+| `src/index.ts` | API process (EC2 systemd / laptop / Docker) | HTTP + SSE on port 3000, in-API classifier, sessions, trace persistence, LTM read+write |
+| `src/agent-runtime-code.ts` | AgentCore Runtime (`NODE_22` code artifact) | Stateless agent loop — receives the full turn payload (message + memory context) and returns an SSE stream |
 
 ```
 api/
 ├── src/
-│   ├── index.ts              ← Entry point: starts the Hono server on :3000
-│   ├── app.ts                ← Registers all routes and middleware on the Hono app
-│   ├── env.d.ts              ← TypeScript types for environment variables
-│   │
-│   ├── routes/               ← HTTP endpoint handlers
-│   │   ├── chat.ts           ← POST /chat — receives messages, runs agent, streams SSE response
-│   │   ├── agents.ts         ← GET /agents — lists available agents from config/agents/
-│   │   ├── skills.ts         ← GET /skills — lists available skills from config/skills/
-│   │   ├── sessions.ts       ← GET/DELETE /sessions — session management (user-scoped)
-│   │   ├── health.ts         ← GET /health — liveness check + dependency status
-│   │   └── http-tools-meta.ts← GET /http-tools — lists configured HTTP tool integrations
-│   │
-│   ├── middleware/           ← Request pipeline (runs before every route)
-│   │   ├── auth.ts           ← JWT validation via JWKS (Cognito-compatible); always required (assertJwksAuthConfigured at boot)
-│   │   ├── rate-limit.ts     ← Per-IP / per-token rate limiting
-│   │   ├── request-id.ts     ← Attaches a unique requestId to every request for log correlation
-│   │   └── access-log.ts     ← Structured JSON access log per request
-│   │
-│   ├── lib/                  ← Core business logic
-│   │   ├── create-strands-agent.ts  ← Assembles a Strands Agent from an .agent.md config (persona + tools + memory)
-│   │   ├── run-chat-stream.ts       ← Single-agent SSE streaming pipeline
-│   │   ├── swarm-chat-stream.ts     ← Multi-agent Swarm pipeline (ORCHESTRATOR_MODE=swarm)
-│   │   ├── skill-loader.ts          ← Loads SKILL.md files on demand; progressive disclosure pattern
-│   │   ├── long-term-memory.ts      ← Hybrid LTM: extracts + embeds + bulk-upserts facts; readLongTermMemoryContext
-│   │   ├── vector-retrieval.ts      ← Shared $vectorSearch + $search pipeline builders, RRF/MMR/recency helpers
-│   │   ├── chat-messages-collection.ts ← chat_messages mirror schema + persistChatMessage + cascade delete
-│   │   ├── embed-query.ts           ← embedQueryText / embedDocumentText (Voyage + Bedrock providers)
-│   │   ├── session-store.ts         ← In-memory or MongoDB-backed chat session storage (mirrors to chat_messages)
-│   │   ├── base-tools.ts            ← Defines the 6 generic agent tools (mongodb_query, vector_search, kb_retrieve, etc.)
-│   │   ├── prompt.ts                ← Builds agent system prompts (persona + skill blocks + memory context)
-│   │   ├── http-tools-runtime.ts    ← Executes HTTP tool calls to Lambda/API Gateway URLs
-│   │   ├── http-tools-load.ts       ← Loads root config/http-tools.json
-│   │   ├── skill-http-tools-load.ts ← Loads per-skill http-tools.json files
-│   │   ├── jwt-verify.ts            ← JWKS-based JWT signature verification
-│   │   ├── logger.ts                ← Structured JSON logger (LOG_LEVEL env var)
-│   │   ├── environment-config.ts    ← Parses config/environment.yaml for API defaults
-│   │   ├── config-scan.ts           ← Scans config/ directory at startup for agents + skills
-│   │   ├── orchestrator-mode.ts     ← Reads ORCHESTRATOR_MODE (swarm | single)
-│   │   ├── schemas.ts               ← Zod schemas for validating .agent.md frontmatter
-│   │   ├── paths.ts                 ← Canonical paths to config directories
-│   │   ├── mongo-client.ts          ← Shared MongoDB Atlas client singleton
-│   │   ├── chat-sessions-collection.ts ← MongoDB collection for persistent chat sessions
-│   │   ├── health-status.ts         ← Builds the /health response object
-│   │   └── json-safe.ts             ← Utility to safely serialize tool results
-│   │
-│   └── adapters/             ← Swappable backend integrations
-│       ├── resolve-model.ts       ← Builds the BedrockModel for an agent
-│       ├── agentcore-runtime.ts   ← invokeAgentRuntime + the AGENTCORE_ORCHESTRATOR_ARN startup guard
-│       ├── voyage-embedding.ts    ← SageMaker embedding adapter for Voyage AI multimodal-3
-│       └── bedrock-retrieval.ts   ← Bedrock Knowledge Base retrieve + Bedrock embedding helpers
-│
-├── tests/
-│   ├── unit/             ← Fast tests with no network calls (mock everything)
-│   ├── integration/      ← Tests that spin up the real API server with mocked AgentCore Runtime
-│   ├── system/           ← Tests that call live AWS + MongoDB (requires credentials)
-│   ├── fixtures/         ← Shared test data used across test suites
-│   └── helpers/          ← Test utilities (SSE parser, request helpers, etc.)
-│
+│   ├── index.ts                  API boot (assertJwksAuthConfigured, assertAgentcoreOrchestratorArn, …)
+│   ├── agent-runtime-code.ts     Shared AgentCore Runtime entrypoint (AGENT_ID selects persona)
+│   ├── routes/                   chat, sessions, agents, traces, health, agent-config-refresh, …
+│   ├── middleware/               auth (jose JWT), rate-limit, request-id, otel, cors
+│   ├── lib/                      Domain — agent-classifier, run-chat-stream, prompt, long-term-memory,
+│   │                             session-store, trace-collector, embed-query, mongo-client, …
+│   ├── adapters/                 agentcore-runtime, mongodb-mcp-client, resolve-model, voyage-embedding
+│   └── lib/base-tools.ts         In-process Strands tools (bedrock_kb_retrieve, generate_embedding, read_skill_resource)
 ├── scripts/
-│   ├── validate-agentcore-memory.ts ← Smoke-tests the AgentCore Memory SDK connection
-│   └── validate-bun-compat.ts       ← Checks Bun runtime compatibility with AWS SDK packages
-│
-├── Dockerfile            ← Container image for the API (used by ECS and docker-compose)
-├── package.json          ← Dependencies: hono, @strands-agents/sdk, mongodb, aws-sdk, jose, zod
-└── tsconfig.json         ← TypeScript config (Bun-compatible, strict mode)
+│   ├── validate-bun-compat.ts          Bun + Node 22 smoke
+│   ├── validate-agentcore-memory.ts    AgentCore Memory SDK contract
+│   ├── validate-strands-otel.ts        Strands ↔ OTel peer-dep drift
+│   ├── validate-strands-retries.ts     Strands retry-hook surface (TracingRetryStrategy)
+│   └── bench-chat-ttfb.ts              TTFB benchmark
+├── tests/
+│   ├── unit/                     Fast Bun-runner unit tests
+│   ├── integration/              Real-backend integration tests (env-gated)
+│   └── fixtures/                 Test fixtures
+├── Dockerfile                    API image (build context = repo root, embeds config/)
+├── Dockerfile.agentcore          Container-mode AgentCore Runtime image (fallback)
+├── package.json                  Pinned: Strands TS 0.7, OTel 1.30.x line
+├── README.md                     Developer onboarding
+└── tsconfig.json
 ```
 
-**Key environment variables:**
-
-| Variable | Purpose |
-|---|---|
-| `AGENTCORE_ORCHESTRATOR_ARN` | **Required at startup.** ARN of the orchestrator AgentCore Runtime the API forwards every chat turn to. |
-| `MONGODB_MCP_RUNTIME_ARN` / `MONGODB_MCP_RUNTIME_ENDPOINT` | Direct MongoDB MCP AgentCore Runtime target. |
-| `AGENTCORE_GATEWAY_URL` / `MCP_SERVER_URL` | AgentCore Gateway MCP endpoint for non-Mongo Gateway tools. |
-| `ORCHESTRATOR_MODE` | `swarm` (default for the orchestrator runtime) or `single`. |
-| `MONGODB_URI` | Atlas connection string used by the API for chat session persistence, `chat_messages` mirroring, and hybrid long-term memory (vector + BM25) over `agent_memory_facts`. |
-| `BEDROCK_KB_ID` | Bedrock Knowledge Base ID for RAG retrieval. |
-| `AUTH_JWKS_URI` / `AUTH_ISSUER` | **Required at startup.** OIDC pool used to verify the Bearer JWT on every protected request (`assertJwksAuthConfigured()`). |
-| `VOYAGE_SAGEMAKER_ENDPOINT` | SageMaker endpoint name for Voyage AI embeddings. |
+See [`api/README.md`](api/README.md) for the validation-script catalog.
 
 ---
 
-## `ui/` — Streamlit Chat Interface
-
-A Python-based web UI that users interact with. Renders the streaming chat response, shows agent handoffs and active skills in the sidebar.
-
-**Why it exists:** The API speaks raw HTTP + SSE. The UI handles all browser-facing concerns: authentication, session management, message rendering, and streaming display. It is intentionally stateless — all data lives in the API.
+## `ui/` — Streamlit chat client
 
 ```
 ui/
-├── app.py               ← Main Streamlit entrypoint; renders the chat page
+├── app.py                        Main Chat page
 ├── pages/
-│   └── 1_Sessions.py    ← "Sessions" page — lists and deletes active sessions
-│
+│   ├── 1_Sessions.py             Past sessions (filtered by JWT sub)
+│   └── 2_Trace_Viewer.py         Debug-grade Trace Viewer (?include=core|dev|full)
 ├── lib/
-│   ├── api_client.py    ← HTTP client for the Hono API; handles SSE parsing and token streaming
-│   ├── chat_panel.py    ← Chat message rendering (user/assistant bubbles, tool badges, handoff indicators)
-│   ├── cognito_gate.py  ← Cognito OAuth 2.0 login flow; blocks access until user authenticates
-│   ├── config.py        ← Reads env vars (API URL, Cognito IDs, feature flags)
-│   ├── session_state.py ← Manages Streamlit session state (current session, history, active agent)
-│   └── sidebar.py       ← Sidebar: active agent, skill badges, session controls
-│
-├── tests/
-│   ├── test_config.py       ← Unit tests for config loading
-│   └── test_cognito_gate.py ← Unit tests for the Cognito auth gate
-│
-├── Dockerfile           ← Container image for Streamlit (used by ECS and docker-compose)
-└── requirements.txt     ← Python dependencies: streamlit, streamlit-cognito-auth, requests, sseclient
+│   ├── api_client.py             Typed HTTP client (SSE chat, sessions, agents, traces)
+│   ├── cognito_gate.py           Hosted-UI redirect / embedded login / STREAMLIT_AUTH_DISABLED
+│   ├── chat_panel.py             Main chat flow + suggested prompts + sidebar
+│   ├── inline_summary.py         Per-turn inline card (skills, vector search previews, LTM toast)
+│   ├── client_trace_view.py      Demo-friendly Trace Viewer renderers
+│   ├── developer_trace_view.py   Debug-grade Trace Viewer renderers (?include=dev lazy load)
+│   ├── trace_view_helpers.py     Shared (_omittedForCoreMode sentinels, byte-cap badges)
+│   └── log.py                    Structured JSON logging — grep same way as the API
+├── scripts/
+│   ├── render_dev_fixture.py     Render captured trace fixture for screenshot review
+│   └── render_ltm_fixture.py     Render LTM fixture in isolation
+├── tests/                        Pytest for helpers + Cognito gate
+├── Dockerfile                    Streamlit container (build context = ui/)
+├── requirements.txt
+└── README.md                     Developer onboarding
 ```
 
 ---
 
-## `config/` — Agent and Skill Definitions
+## `mcp-runtimes/mongodb-mcp/` — MongoDB MCP runtime
 
-The configuration layer of the system. **No TypeScript code lives here** — only markdown and JSON files. Adding or changing an agent or skill requires no code changes.
+Container-mode AgentCore Runtime (ARM64) running a streamable-HTTP MCP server on `0.0.0.0:8000/mcp`. Exposes `mongodb_query`, `mongodb_vector_search`, `mongodb_aggregate`. Reached by the API + every other AgentCore Runtime through `bedrock-agentcore:InvokeAgentRuntime`.
 
-**Why it exists:** The design principle of this framework is that agents are configuration, not code. A new domain (e.g., billing support) can be added by dropping in a new `.agent.md` and `SKILL.md` without touching the API codebase. Config is hot-reloaded on every request.
+```
+mcp-runtimes/mongodb-mcp/
+├── src/
+│   ├── server.ts                 MCP server boot
+│   └── vendor/                   Canonical home for tool implementations
+│       ├── handlers.mjs          mongodb_query / vector_search / aggregate / hybrid_search
+│       ├── guards.mjs            Operation allowlist, write gate, $out/$merge denylist, limit cap
+│       ├── tracing.mjs           Per-call trace collector
+│       └── diagnostics.mjs       Healthcheck + introspection
+├── Dockerfile                    --platform=linux/arm64 (AgentCore Runtime MCP requirement)
+├── package.json
+└── README.md
+```
+
+`api/src/adapters/mongodb-mcp-client.ts` is the API-side client.
+
+---
+
+## `config/` — Runtime configuration
 
 ```
 config/
-├── agents/                      ← One .agent.md per agent
-│   ├── orchestrator.agent.md    ← Routes messages to the right specialist; never answers directly
-│   ├── order-management.agent.md    ← Handles order lookup, status, returns
-│   ├── product-recommendation.agent.md ← Recommends products by need, budget, or as replacements
-│   └── troubleshooting.agent.md     ← Diagnoses product issues; escalates via support tickets
-│
-├── skills/                      ← One directory per skill domain
+├── agents/
+│   ├── orchestrator.agent.md         Haiku 4.5 — rollback two-hop classifier
+│   ├── order-management.agent.md     Haiku 4.5
+│   ├── product-recommendation.agent.md   Sonnet 4.6
+│   └── troubleshooting.agent.md      Sonnet 4.6
+├── skills/
 │   ├── order-management/
-│   │   ├── SKILL.md             ← Step-by-step instructions telling the agent what tools to call and how
-│   │   ├── http-tools.json      ← HTTP tool config: Lambda URLs the agent can call (e.g. validate-return)
-│   │   ├── references/          ← Deep reference docs loaded on-demand via read_skill_resource tool
-│   │   └── scripts/             ← .mjs scripts the agent runs via run_skill_script tool
-│   │
+│   │   ├── SKILL.md
+│   │   ├── scripts/validate-return.mjs
+│   │   ├── references/order-schema.md
+│   │   └── http-tools.example.json
 │   ├── product-recommendation/
-│   │   ├── SKILL.md             ← Vector search patterns, ranking logic, presentation rules
-│   │   ├── references/          ← Catalog field reference, search pattern examples
-│   │   └── scripts/             ← score-recommendations.mjs: ranks products by relevance
-│   │
+│   │   ├── SKILL.md
+│   │   └── references/
 │   └── troubleshooting/
-│       ├── SKILL.md             ← Symptom → doc lookup → escalation workflow
-│       ├── references/          ← Error code table, common issues symptom map
-│       └── scripts/             ← build-ticket.mjs: generates support ticket payloads
-│
-├── environment.yaml             ← API defaults: port, CORS origins (overridden by env vars)
-├── http-tools.json              ← Global HTTP tool allowlist + SSRF security policy
-└── http-tools.example.json      ← Example of how to define HTTP tools
+│       ├── SKILL.md
+│       ├── references/{common-issues,error-codes}.md
+│       └── scripts/{build-ticket,escalation-checklist}.mjs
+├── environment.yaml                  API port + CORS defaults
+├── demo-prompts.yaml                 Streamlit "Try a prompt" entries
+└── http-tools.json                   Optional global HTTP tools + SSRF host allowlist
 ```
 
-**How `.agent.md` files work:**
-Each file has a YAML frontmatter block (model, tools, skills, memory settings) followed by a markdown body (the agent persona). The API parses this with Zod on every request.
-
-**How `SKILL.md` files work:**
-These are the agent's domain playbook. They tell the agent which tools to call, in what order, and how to present results. The agent sees the full SKILL.md in its system prompt once the skill is activated.
+The API rescans this folder on every chat request, so config-only edits hot-reload without an API restart. AgentCore Runtimes pick up changes only after `./deploy/deploy-agents.sh` rebundles + redeploys.
 
 ---
 
-## `db-seeding/` — MongoDB Atlas Data Setup
+## `db-seeding/` — Atlas seeders
 
-Scripts to populate a fresh MongoDB Atlas cluster with the data the agents need to function.
+`bun db-seeding/seed-all.ts` seeds customers, products, troubleshooting docs, orders, then runs `seed-indexes.ts` (TTL on `agent_memory_facts`, unique `{userId, factHash}`, partial-unique `troubleshooting_docs.docId`, Atlas vector + Search BM25 indexes on 4 collections). `seed-embeddings.ts` backfills `embedding` via Voyage or Bedrock Titan.
 
-**Why it exists:** The agents query real MongoDB data. Before the system can work in live mode, the Atlas cluster needs collections, documents, vector indexes, and embeddings. These scripts handle that one-time setup.
+Idempotent — `deploy-project.sh` and `deploy-api.sh` re-run `seed-indexes.ts` on every deploy.
 
-```
-db-seeding/
-├── seed-all.ts          ← Orchestrator: runs all seed scripts in the right order
-├── seed-customers.ts    ← Inserts sample customer records
-├── seed-orders.ts       ← Inserts sample orders (linked to customers)
-├── seed-products.ts     ← Inserts product catalog with tags and metadata
-├── seed-troubleshooting.ts ← Inserts troubleshooting documents (ts-1 through ts-10)
-├── seed-embeddings.ts   ← Generates vector embeddings for products + troubleshooting docs
-│                           Supports both Titan (Bedrock) and Voyage AI (SageMaker)
-│                           Set REWIRE_EMBEDDINGS=1 to wipe and re-embed with new model
-├── seed-indexes.ts      ← Creates MongoDB Atlas Vector Search + Atlas Search (BM25) indexes for
-│                           products, troubleshooting_docs, agent_memory_facts, chat_messages
-│                           plus regular/TTL indexes incl. unique { userId, factHash }
-│                           Default dimension: 1024 (Voyage AI); Titan fallback: 1536
-├── connect.ts           ← Shared Atlas connection helper used by all seed scripts
-├── package.json         ← Separate package (runs with Bun or node --experimental-strip-types)
-└── README.md            ← Usage instructions + env var reference
-```
+Companion: [`docs/reference/data-model.md`](docs/reference/data-model.md).
 
 ---
 
-## `deploy/` — All Deployment Artifacts
-
-Everything needed to provision infrastructure and ship the application to AWS.
+## `deploy/` — Infrastructure as Code + scripts
 
 ```
 deploy/
-├── kb-docs/             ← Source documents for the Bedrock Knowledge Base
-│   ├── power-boot-guide.txt          ← Troubleshooting guide: power and boot issues
-│   ├── connectivity-guide.txt        ← Troubleshooting guide: Wi-Fi and connectivity
-│   ├── hardware-escalation-guide.txt ← When and how to escalate hardware faults
-│   └── warranty-support-tiers.txt    ← Warranty coverage and support tier policies
-│
-│   These .txt files are uploaded to S3 by the bedrock-kb Terraform module,
-│   ingested by Bedrock, embedded, and indexed in Atlas for RAG retrieval.
-│
+├── deploy-full-with-privatelink.sh   Orchestrator — PrivateLink mode (default)
+├── deploy-full-with-vpc-peering.sh   Orchestrator — VPC peering mode
+├── deploy-api.sh                     Rebuild + push API image, refresh .env.live, restart multiagent-api
+├── deploy-ui.sh                      Rebuild + push UI image, restart multiagent-ui
+├── deploy-agents.sh                  Re-bundle agent code, targeted apply on runtime modules
 ├── scripts/
-│   ├── deploy-project.sh            ← MAIN DEPLOY SCRIPT — runs full stack deployment (8 phases)
-│   │                                   Phase 1: Prerequisites check
-│   │                                   Phase 2: Load .env, map credentials to TF_VAR_* env vars
-│   │                                   Phase 3: Bootstrap S3 + DynamoDB (idempotent)
-│   │                                   Phase 4: Generate backend.hcl + terraform.tfvars
-│   │                                   Phase 5: terraform init + plan + apply
-│   │                                   Phase 6: docker build API+UI → ECR push
-│   │                                   Phase 7: ECS force-new-deployment + wait for stability
-│   │                                   Phase 8: Write .env.live, print app URL
-│   │
-│   ├── destroy.sh                   ← Tears down all Terraform-managed infrastructure
-│   ├── docker-build.sh              ← Builds API + UI Docker images locally
-│   ├── docker-push-ecr.sh           ← Tags and pushes local images to ECR
-│   ├── setup-troubleshooting-infra.sh  ← Legacy shell-based infra setup (pre-Terraform); idempotent
-│   └── teardown-troubleshooting-infra.sh ← Tears down resources created by setup script
-│
-└── terraform/
-    ├── main.tf              ← Root: providers (aws, random, mongodbatlas) + all module calls
-    ├── variables.tf         ← All input variables with types, descriptions, and defaults
-    ├── outputs.tf           ← Outputs exposed after apply (ALB URL, ECR URLs, Cognito IDs, etc.)
-    ├── terraform.tfvars     ← Runtime variable values (gitignored; generated by deploy.sh)
-    ├── terraform.tfvars.example ← Template showing all required variables with placeholders
-    ├── backend.hcl          ← S3 backend config (gitignored; generated by deploy.sh)
-    ├── backend.hcl.example  ← Template for backend.hcl
-    │
-    ├── bootstrap/           ← One-time setup: creates the S3 bucket + DynamoDB table
-    │   └── main.tf          │  used for Terraform remote state. Run before main terraform init.
-    │
-    └── modules/             ← Reusable infrastructure modules
-        │
-        ├── networking/      ← VPC, subnets, routing, security groups, VPC endpoints
-        │                       Creates: VPC (10.0.0.0/16), 2 public + 2 private subnets across 2 AZs,
-        │                       internet gateway, NAT gateway, route tables, security groups for
-        │                       ALB / ECS / VPC endpoints, interface endpoints for ECR/Bedrock/
-        │                       SageMaker/Secrets Manager/CloudWatch Logs, S3 gateway endpoint.
-        │                       Why: ECS tasks run in private subnets for security; VPC endpoints
-        │                       keep AWS API traffic off the public internet.
-        │
-        ├── cognito/         ← Cognito User Pool + App Client + Hosted UI domain
-        │                       Why: Provides OAuth 2.0 authentication. The API validates JWTs
-        │                       issued by this pool on every request — JWKS auth is mandatory.
-        │
-        ├── ecr/             ← ECR repositories for the API and UI container images
-        │                       Why: ECS pulls images from ECR. Repos must exist before docker push.
-        │
-        ├── alb/             ← Application Load Balancer: internet-facing, target groups, listeners
-        │                       Routes: /ui/* → Streamlit target group, /* → API target group
-        │                       Optional HTTPS when certificate_arn is provided.
-        │                       Why: Single public entry point; no direct public access to ECS tasks.
-        │
-        ├── cloudwatch/      ← CloudWatch log groups, CPU alarms, dashboard
-        │                       Log groups: /ecs/<project>-api-<env> and /ecs/<project>-ui-<env>
-        │                       Why: Log groups must exist before ECS tasks start or the awslogs
-        │                       driver fails. Alarms + dashboard provide production observability.
-        │
-        ├── ecs/             ← ECS Fargate cluster, task definitions, IAM roles, ECS services
-        │                       API task: Hono/Bun, 512 CPU / 1024 MB, env vars injected directly
-        │                       UI task: Streamlit, 256 CPU / 512 MB
-        │                       IAM task role: Bedrock invoke, KB retrieve, SageMaker invoke,
-        │                       Secrets Manager read, S3 read, CloudWatch logs
-        │                       Why: Runs the application in managed, auto-scaling containers
-        │                       behind the ALB without managing EC2 instances.
-        │
-        ├── bedrock-kb/      ← Bedrock Knowledge Base with MongoDB Atlas vector storage
-        │                       Uploads kb-docs/*.txt to S3 and creates the KB + S3 data source
-        │                       via native aws_bedrockagent_knowledge_base + aws_bedrockagent_data_source
-        │                       (provider 6.27+, MONGO_DB_ATLAS storage supported). A small null_resource
-        │                       still triggers the ingestion job and bootstraps the Atlas collection — both
-        │                       are actions, not infrastructure, so no native resource exists for them.
-        │                       Why: Provides RAG retrieval for the troubleshooting agent.
-        │
-        ├── voyage-sagemaker/← SageMaker model + endpoint for Voyage AI multimodal-3 embeddings
-        │                       Conditional: only deployed when voyage_model_package_arn is set
-        │                       (requires AWS Marketplace subscription).
-        │                       Why: Voyage AI produces higher-quality embeddings than Titan.
-        │                       The API routes generate_embedding calls to this endpoint when
-        │                       VOYAGE_SAGEMAKER_ENDPOINT is set; falls back to Titan otherwise.
-        │
-        ├── atlas-privatelink/← AWS Interface VPCE + Atlas-side endpoint binding (envs/network only)
-        │                       Creates the AWS VPC interface endpoint, the Atlas-side
-        │                       privatelink_endpoint_service binding, and a CIDR-scoped security
-        │                       group (ingress on var.vpc_cidr, no per-app SG references).
-        │                       Owned by the shared envs/network root config so a single VPCE
-        │                       per region is reused by every per-project envs/ec2 deployment.
-        │                       Why: Without PrivateLink, Atlas traffic goes over the public
-        │                       internet. PrivateLink keeps all MongoDB traffic inside the VPC.
-        │
-        └── atlas-privatelink-dns/ ← per-cluster Route 53 private hosted zone + wildcard CNAME — DNS half of Atlas PrivateLink
-                                 (envs/ec2 only). One zone per Atlas cluster SRV host, attached
-                                 to the shared VPC. Splits per-cluster DNS away from the shared
-                                 PrivateLink VPCE so each project owns its own zone without
-                                 collisions.
+│   ├── _aws-auth.sh                  Shared AUTH_MODE=iam/sts validator
+│   ├── _agents-common.sh             Shared helpers for deploy-agents.sh + deploy-project.sh agent phase
+│   ├── deploy-network.sh             account+region singleton — VPC + Atlas connectivity
+│   ├── deploy-shared.sh              account+region+env singleton — SageMaker + log groups + dashboards
+│   ├── deploy-project.sh             per-project EC2 + ECR + AgentCore + KB
+│   ├── deploy-local.sh               localhost API+UI against Atlas + Bedrock KB
+│   ├── destroy.sh                    Teardown — --mode {network,shared,ec2,local}
+│   ├── docker-build.sh / docker-push-ecr.sh / docker-build-push.sh
+│   ├── probe-resources.sh            Pre-flight permission check (30 resources)
+│   ├── list-resources.sh             Inventory deployed resources
+│   ├── setup-voyage-marketplace.sh   One-time Voyage AI Marketplace subscription
+│   ├── setup-troubleshooting-infra.sh / teardown-troubleshooting-infra.sh
+│   └── backend-smoke.py              Backend smoke check (used by deploy-api.sh)
+├── iam/
+│   ├── policy.json                   Consolidated deploy policy (scoped, no iam:*)
+│   ├── trust-policy.json             STS assume-role trust policy
+│   └── README.md                     Rationale + attach commands + STS setup
+├── terraform/
+│   ├── bootstrap/                    S3 state bucket + DynamoDB lock table
+│   ├── envs/
+│   │   ├── network/                  account+region singleton — shared VPC + Atlas PL/peering + SSM
+│   │   ├── shared/                   account+region+env singleton — SageMaker + log groups + dashboards + Bedrock invocation logging
+│   │   ├── ec2/                      per-project — EC2 + ECR + Cognito + KB + 5 AgentCore Runtimes + ADOT sidecar
+│   │   └── local/                    per-laptop — Cognito + KB + Secrets Manager
+│   ├── modules/
+│   │   ├── networking/                       VPC + subnets + IGW + route table + SG + EIP
+│   │   ├── mongodb-atlas/                    Atlas M10 cluster + DB user + IP allowlist
+│   │   ├── atlas-privatelink/                AWS Interface VPCE + Atlas-side binding (envs/network)
+│   │   ├── atlas-privatelink-dns/            Per-cluster Route 53 zone + wildcard CNAME (envs/ec2)
+│   │   ├── atlas-vpc-peering/                AWS VPC peering + Atlas network_peering + Private DNS for Peering
+│   │   ├── bedrock-kb/                       Bedrock KB + data source
+│   │   ├── bedrock-kb-privatelink/           Per-cluster NLB to Atlas VPCE for KB ingestion (privatelink mode)
+│   │   ├── bedrock-kb-peering/               NLB to discovered Atlas peering IPs for KB ingestion (peering mode, EXPERIMENTAL)
+│   │   ├── ec2/                              EC2 instance profile + user-data (SSM-only, no SSH)
+│   │   ├── ecr/                              Private ECR repos for API + UI + MCP images
+│   │   ├── cognito/                          User Pool + App Client (Cognito hosted UI + JWKS)
+│   │   ├── agentcore-memory/                 AgentCore Memory Store
+│   │   ├── agentcore-gateway/                AgentCore Gateway + mcp_server target → MongoDB MCP runtime
+│   │   ├── agentcore-agent-runtime/          AgentCore Runtime (5 runtimes — 4 chat code-mode + 1 MCP container-mode)
+│   │   ├── voyage-sagemaker/                 SageMaker real-time endpoint for voyage-multimodal-3
+│   │   ├── cloudwatch/                       Shared log groups (envs/shared)
+│   │   ├── cloudwatch-fleet-dashboards/      Fleet + Mongo + Cost dashboards + 7 fleet alarms
+│   │   ├── cloudwatch-atlas-dashboard/       Atlas Prometheus scrape + dashboard + 2 alarms
+│   │   ├── cloudwatch-genai/                 X-Ray sampling rules + service-map config
+│   │   ├── adot-collector/                   ADOT sidecar on EC2 — OTel → X-Ray + CloudWatch
+│   │   └── bedrock-invocation-logging/       Account-scoped Bedrock model invocation logging
+│   └── .design.md                            Stack rationale (start here for IaC questions)
+└── kb-docs/                          Versioned KB source documents uploaded to S3 on apply
 ```
+
+Companions:
+- [`docs/reference/deploy-scripts.md`](docs/reference/deploy-scripts.md) — every script + flag + phase index
+- [`docs/reference/terraform-modules.md`](docs/reference/terraform-modules.md) — every module + inputs/outputs
+- [`docs/reference/ssm-parameters.md`](docs/reference/ssm-parameters.md) — cross-stack SSM contract
+- [`deploy/terraform/.design.md`](deploy/terraform/.design.md) — the **why** behind non-obvious Terraform choices
 
 ---
 
-## `e2e/` — End-to-End Tests (Playwright)
+## `e2e/` + `e2e-smoke/` — Smoke tests
 
-Browser-level tests that drive the Streamlit UI and verify complete user workflows — from sending a message to confirming the right agent responded with the right data.
+| Folder | Stack | When |
+|---|---|---|
+| `e2e/` | Playwright + Bun | Against deployed API — `/health`, `/agents`, `/skills` |
+| `e2e-smoke/` | Python | Post-deploy live AWS — `post-deploy-smoke.py`, `memory-recall-diagnostic.py` |
 
-**Why it exists:** Unit and integration tests verify the API in isolation. E2E tests verify the complete stack: UI → API → agents → MongoDB → UI rendering. These catch integration failures that unit tests cannot.
-
-```
-e2e/
-├── playwright.config.ts      ← Playwright config: browser targets, base URL, timeouts
-├── helpers.ts                ← Shared utilities: waitForResponse, getLastMessage, etc.
-│
-├── tests/
-│   └── api.spec.ts           ← API-level E2E tests (no browser; calls /chat endpoint directly)
-│
-├── orchestrator.spec.ts      ← Tests that the orchestrator routes to the right specialist
-├── order-management.spec.ts  ← Order lookup, status queries, return flows
-├── product-recommendation.spec.ts ← Product search, replacement, budget filter flows
-├── troubleshooting.spec.ts   ← Symptom diagnosis, error code lookup, ticket escalation
-│
-└── demo-videos/              ← Recorded Playwright videos of successful E2E runs
-    ├── order-management/
-    ├── product-recommendation/
-    └── troubleshooting/
-```
+Companion: [`docs/reference/smoke-tests.md`](docs/reference/smoke-tests.md).
 
 ---
 
-## `lambda/` — Future AgentCore Gateway Adapters
-
-Placeholder directories for Lambda functions that will wrap the base tools when AgentCore Gateway mode is activated (Phase 4).
-
-**Why it exists:** MongoDB tool calls go through the dedicated MongoDB MCP AgentCore Runtime. Other agent tools (`bedrock_kb_retrieve`, embedding generation, per-skill HTTP tools) still run in-process inside the AgentCore Runtime container. These per-tool Lambda placeholders are reserved for a future migration where each tool becomes its own gateway target.
-
-```
-lambda/
-└── base-tools/
-    ├── README.md             ← Explains the purpose and future implementation plan
-    ├── mongodb-query/        ← Future: Lambda handler for mongodb_query tool
-    ├── mongodb-vector-search/← Future: Lambda handler for mongodb_vector_search tool
-    ├── bedrock-kb-retrieve/  ← Future: Lambda handler for bedrock_kb_retrieve tool
-    ├── generate-embedding/   ← Future: Lambda handler for generate_embedding tool
-    └── read-skill-resource/  ← Future: Lambda handler for read_skill_resource tool
-```
-
----
-
-## `docs/` — Technical Documentation
-
-In-depth documentation for developers working on or extending the system.
+## `docs/` — Documentation pack
 
 ```
 docs/
-├── architecture.md          ← Full system design: components, data flows, sequence diagrams
-├── api-reference.md         ← Every HTTP endpoint: method, path, request/response schema
-├── agent-authoring-guide.md ← How to write a new .agent.md file (frontmatter fields, persona)
-├── skills-authoring-guide.md← How to write SKILL.md, references/, and scripts/
-├── configuration-guide.md   ← All environment variables and config/environment.yaml options
-├── deployment-guide.md      ← Step-by-step guide to deploy to AWS
-└── demo-script.md           ← Scripted demo walkthrough for showing the system to stakeholders
+├── README.md                          ← CLIENT HANDOVER ENTRY POINT
+├── architecture.md
+├── deployment-guide.md                ← deploy + CI/CD + teardown
+├── configuration-guide.md
+├── api-reference.md
+├── agent-authoring-guide.md
+├── skills-authoring-guide.md
+├── memory-architecture.md
+├── long-term-memory-design.md
+├── hybrid-search.md
+├── logging-architecture.md
+├── observability-runbook.md
+├── trace-ui-system-overview.md
+├── trace-viewer-client-guide.md
+├── trace-viewer-developer-guide.md
+├── agentcore-runtime-design.md
+├── debugging.md                       ← developer playbook + persistent pitfalls + validation scripts
+├── estimate.md
+├── demo-script.md
+├── demo-mode-guide.md
+├── dashboards/
+│   ├── README.md                      Widget catalog + console URLs + alarm thresholds
+│   └── *.png                          (Illustrative — names will differ in your env)
+├── diagrams/                          (Historical — see diagrams/README.md)
+└── reference/
+    ├── env-vars.md
+    ├── terraform-modules.md
+    ├── ssm-parameters.md
+    ├── data-model.md
+    ├── smoke-tests.md
+    └── deploy-scripts.md
 ```
 
 ---
 
-## `.github/` — CI/CD
+## `.github/workflows/`
 
-```
-.github/
-└── workflows/
-    └── ci.yml    ← GitHub Actions: runs on every push/PR
-                     Steps: install deps → typecheck → unit tests → integration tests
-                     Mocks the AgentCore Runtime invoker so no AWS credentials are needed in CI
-```
+| Workflow | Trigger | What it does |
+|---|---|---|
+| `ci.yml` | push / PR | `bun run typecheck` + `bun run validate:bun` + `bun run validate:agentcore` + `bun test tests/unit` |
+| `deploy.yml` | manual / tag | Mirror of `deploy-full-with-privatelink.sh` / `deploy-full-with-vpc-peering.sh` against a long-lived AWS environment |
+
+Documented in [`docs/deployment-guide.md` § CI/CD](docs/deployment-guide.md).
 
 ---
 
-## Root-Level Files
+## Naming disambiguation
 
-| File | Purpose |
+| Name | Meaning |
 |---|---|
-| `README.md` | Project overview and quick-start instructions |
-| `AGENTS.md` | Summary of the four agents and their responsibilities |
-| `TASKS.md` | Implementation task tracker with validation gates (G0–G6) |
-| `ACTION_PLAN.md` | Phased delivery plan (Phase 1–5) aligned to the SOW |
-| `DEV_STATUS.md` | Current implementation status — what's live vs planned |
-| `compose.yaml` | Docker Compose file for running the full stack locally (API + UI) |
-| `Makefile` | Convenience targets: `make dev`, `make test`, `make build`, `make seed` |
-| `.env` | AWS + Atlas credentials for local development (gitignored — never commit) |
-| `.env.live` | Runtime env vars generated by deploy-project.sh after terraform apply (gitignored) |
-| `.env.example` | Template for local development env vars |
-| `.env.docker.example` | Template for Docker Compose env vars |
-| `.gitignore` | Excludes: `.env`, `env.sh`, `.env.live`, `terraform.tfvars`, `*.tfstate`, `node_modules` |
-| `memory.md` | Dev session notes (internal working document) |
+| **`AGENTS.md`** at the repo root | Instructions for **coding agents / human contributors** |
+| **`PROJECT_STRUCTURE.md`** (this file) | Per-folder map of the repo |
+| **`config/agents/*.agent.md`** | Runtime LLM agent personas (orchestrator, order, product, troubleshoot) |
+| **`config/skills/<name>/SKILL.md`** | Runtime skill instructions for a domain |
