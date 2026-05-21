@@ -105,10 +105,16 @@ apply_with_retry() {
     if (( attempt > 1 )); then
       log "Retry $((attempt - 1))/$((max_attempts - 1)) — sleeping 30s, then re-planning to refresh against current state..."
       sleep 30
+      if declare -F deploy_diag_checkpoint >/dev/null 2>&1; then
+        deploy_diag_checkpoint "terraform retry plan attempt ${attempt}/${max_attempts}: terraform plan -input=false -out=${plan_file}"
+      fi
       terraform plan -input=false -out="$plan_file"
       ok "re-plan complete"
     fi
     log "Apply attempt ${attempt}/${max_attempts}..."
+    if declare -F deploy_diag_checkpoint >/dev/null 2>&1; then
+      deploy_diag_checkpoint "terraform apply attempt ${attempt}/${max_attempts}: terraform apply -input=false ${plan_file}"
+    fi
     set +e
     terraform apply -input=false "$plan_file" 2>&1 | tee "$log_file"
     rc=${PIPESTATUS[0]}
@@ -300,6 +306,11 @@ export TF_VAR_atlas_private_key="${MONGODB_ATLAS_PRIVATE_KEY:-}"
 [[ -n "${TF_VAR_atlas_public_key:-}" ]]  || err "MONGODB_ATLAS_PUBLIC_KEY not set in .env"
 [[ -n "${TF_VAR_atlas_private_key:-}" ]] || err "MONGODB_ATLAS_PRIVATE_KEY not set in .env"
 
+DEPLOY_DIAG_LABEL="ec2"
+# shellcheck source=deploy/scripts/_deploy-diagnostics.sh
+source "$SCRIPT_DIR/_deploy-diagnostics.sh"
+deploy_diag_install_error_trap
+
 # shellcheck source=deploy/scripts/_aws-auth.sh
 source "$SCRIPT_DIR/_aws-auth.sh"
 validate_aws_auth || err "AWS auth validation failed (see above)"
@@ -309,6 +320,7 @@ ACCOUNT_ID="$AWS_AUTH_ACCOUNT_ID"
 # shellcheck source=deploy/scripts/_preflight-checks.sh
 source "$SCRIPT_DIR/_preflight-checks.sh"
 preflight_validate project-pre-apply
+deploy_diag_after_preflight "project-pre-apply" "$ENV_FILE"
 
 ok "AWS account: $ACCOUNT_ID"
 ok "Atlas project: $TF_VAR_atlas_project_id"
@@ -435,8 +447,11 @@ if aws s3api head-bucket --bucket "$SHARED_BUCKET" 2>/dev/null; then
   ok "Shared bucket exists — skipping bootstrap"
 else
   log "Bucket not found — running bootstrap (one-time)..."
+  deploy_diag_terraform_context "bootstrap terraform" "$BOOTSTRAP_DIR" "" ""
   cd "$BOOTSTRAP_DIR"
+  deploy_diag_checkpoint "terraform bootstrap init: terraform init -input=false -no-color"
   terraform init -input=false -no-color
+  deploy_diag_checkpoint "terraform bootstrap apply: terraform apply -input=false -auto-approve -var account_id=<account> -var aws_region=${AWS_REGION} -var environment=${ENVIRONMENT} -var project_name=${PROJECT_NAME}"
   terraform apply -input=false -auto-approve \
     -var="account_id=$ACCOUNT_ID" \
     -var="aws_region=$AWS_REGION" \
@@ -654,7 +669,9 @@ fi
 # ══════════════════════════════════════════════════════════════════════════════
 sep
 cd "$TF_DIR"
+deploy_diag_terraform_context "ec2 terraform init" "$TF_DIR" "$TF_DIR/backend.hcl" "$TF_DIR/.tfplan"
 log "Phase 5 — terraform init..."
+deploy_diag_checkpoint "terraform init start: terraform init -input=false -reconfigure -backend-config=${TF_DIR}/backend.hcl"
 terraform init -input=false -reconfigure -backend-config="$TF_DIR/backend.hcl"
 ok "init complete"
 
@@ -681,6 +698,7 @@ if [[ "$SKIP_DOCKER" != "true" ]]; then
   # full plan owns it and can manage the lifecycle policy idempotently.
   if ! terraform state list 2>/dev/null | awk '$0 == "aws_ecr_repository.mongodb_mcp_runtime" { found = 1 } END { exit !found }'; then
     log "  importing ECR repo into Terraform state → aws_ecr_repository.mongodb_mcp_runtime"
+    deploy_diag_checkpoint "terraform import start: terraform import -input=false aws_ecr_repository.mongodb_mcp_runtime ${MCP_RUNTIME_REPO_NAME}"
     terraform import -input=false aws_ecr_repository.mongodb_mcp_runtime "$MCP_RUNTIME_REPO_NAME" >/dev/null
   fi
 
@@ -700,6 +718,7 @@ fi
 
 sep
 log "Running terraform plan..."
+deploy_diag_checkpoint "terraform plan start: terraform plan -input=false -out=${TF_DIR}/.tfplan"
 terraform plan -input=false -out="$TF_DIR/.tfplan"
 ok "plan complete"
 

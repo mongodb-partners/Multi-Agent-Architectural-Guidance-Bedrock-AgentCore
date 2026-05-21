@@ -95,10 +95,16 @@ apply_with_retry() {
     if (( attempt > 1 )); then
       _ac_log "Retry $((attempt - 1))/$((max_attempts - 1)) — sleeping 30s, then re-planning..."
       sleep 30
+      if declare -F deploy_diag_checkpoint >/dev/null 2>&1; then
+        deploy_diag_checkpoint "terraform retry plan attempt ${attempt}/${max_attempts}: terraform plan -input=false ${plan_args[*]} -out=${plan_file}"
+      fi
       terraform plan -input=false "${plan_args[@]}" -out="$plan_file"
       _ac_ok "re-plan complete"
     fi
     _ac_log "Apply attempt ${attempt}/${max_attempts}..."
+    if declare -F deploy_diag_checkpoint >/dev/null 2>&1; then
+      deploy_diag_checkpoint "terraform apply attempt ${attempt}/${max_attempts}: terraform apply -input=false ${plan_file}"
+    fi
     set +e
     terraform apply -input=false "$plan_file" 2>&1 | tee "$log_file"
     rc=${PIPESTATUS[0]}

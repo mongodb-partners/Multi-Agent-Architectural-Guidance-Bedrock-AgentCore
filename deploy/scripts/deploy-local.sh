@@ -70,10 +70,16 @@ apply_with_retry() {
     if (( attempt > 1 )); then
       log "Retry $((attempt - 1))/$((max_attempts - 1)) — sleeping 30s, then re-planning to refresh against current state..."
       sleep 30
+      if declare -F deploy_diag_checkpoint >/dev/null 2>&1; then
+        deploy_diag_checkpoint "terraform retry plan attempt ${attempt}/${max_attempts}: terraform plan -input=false -out=${plan_file}"
+      fi
       terraform plan -input=false -out="$plan_file"
       ok "re-plan complete"
     fi
     log "Apply attempt ${attempt}/${max_attempts}..."
+    if declare -F deploy_diag_checkpoint >/dev/null 2>&1; then
+      deploy_diag_checkpoint "terraform apply attempt ${attempt}/${max_attempts}: terraform apply -input=false ${plan_file}"
+    fi
     set +e
     terraform apply -input=false "$plan_file" 2>&1 | tee "$log_file"
     rc=${PIPESTATUS[0]}
@@ -141,9 +147,16 @@ fi
 
 # AWS credentials — delegated to the shared AUTH_MODE-aware validator.
 # Mode is controlled by AUTH_MODE in .env (defaults to "iam" for backward compat).
+DEPLOY_DIAG_LABEL="local"
+# shellcheck source=deploy/scripts/_deploy-diagnostics.sh
+source "$SCRIPT_DIR/_deploy-diagnostics.sh"
+deploy_diag_install_error_trap
+
 # shellcheck source=deploy/scripts/_aws-auth.sh
 source "$SCRIPT_DIR/_aws-auth.sh"
 validate_aws_auth || err "AWS auth validation failed (see above)"
+deploy_diag_checkpoint "aws auth validated; deploy-local has no centralized preflight profile"
+deploy_diag_auth_context "$ENV_FILE"
 ok "All required variables present (region=$AWS_REGION, env=$ENVIRONMENT, project=$PROJECT_NAME)"
 ACCOUNT_ID="$AWS_AUTH_ACCOUNT_ID"
 ok "AWS account: $ACCOUNT_ID"
@@ -180,8 +193,11 @@ if aws s3api head-bucket --bucket "$SHARED_BUCKET" 2>/dev/null; then
   ok "Shared bucket exists — skipping bootstrap"
 else
   log "Bucket not found — running bootstrap (one-time)..."
+  deploy_diag_terraform_context "bootstrap terraform" "$BOOTSTRAP_DIR" "" ""
   cd "$BOOTSTRAP_DIR"
+  deploy_diag_checkpoint "terraform bootstrap init: terraform init -input=false -no-color"
   terraform init -input=false -no-color
+  deploy_diag_checkpoint "terraform bootstrap apply: terraform apply -input=false -auto-approve -var account_id=<account> -var aws_region=${AWS_REGION} -var environment=${ENVIRONMENT} -var project_name=${PROJECT_NAME}"
   terraform apply -input=false -auto-approve \
     -var="account_id=$ACCOUNT_ID" \
     -var="aws_region=$AWS_REGION" \
@@ -242,10 +258,13 @@ ok "terraform.tfvars written (local mode — Atlas + Bedrock KB + CloudWatch)"
 sep
 log "Phase 5 — terraform init..."
 cd "$TF_DIR"
+deploy_diag_terraform_context "local terraform init" "$TF_DIR" "$TF_DIR/backend.hcl" "$TF_DIR/.tfplan"
+deploy_diag_checkpoint "terraform init start: terraform init -input=false -reconfigure -backend-config=${TF_DIR}/backend.hcl"
 terraform init -input=false -reconfigure -backend-config="$TF_DIR/backend.hcl"
 ok "init complete"
 
 log "Running terraform plan..."
+deploy_diag_checkpoint "terraform plan start: terraform plan -input=false -out=${TF_DIR}/.tfplan"
 terraform plan -input=false -out="$TF_DIR/.tfplan"
 ok "plan complete"
 

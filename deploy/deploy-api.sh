@@ -128,6 +128,11 @@ log "Phase 2 — Loading credentials and Terraform outputs..."
 # shellcheck source=/dev/null
 source "$ENV_FILE"
 
+DEPLOY_DIAG_LABEL="api"
+# shellcheck source=deploy/scripts/_deploy-diagnostics.sh
+source "$SCRIPT_DIR/scripts/_deploy-diagnostics.sh"
+deploy_diag_install_error_trap
+
 # shellcheck source=deploy/scripts/_aws-auth.sh
 source "$SCRIPT_DIR/scripts/_aws-auth.sh"
 validate_aws_auth || err "AWS auth validation failed (see above)"
@@ -137,10 +142,14 @@ ACCOUNT_ID="$AWS_AUTH_ACCOUNT_ID"
 # shellcheck source=deploy/scripts/_preflight-checks.sh
 source "$SCRIPT_DIR/scripts/_preflight-checks.sh"
 preflight_validate api
+deploy_diag_after_preflight "api" "$ENV_FILE"
 
 ok "AWS account: $ACCOUNT_ID"
 
+deploy_diag_terraform_context "api terraform output init" "$TF_DIR" "$TF_DIR/backend.hcl" ""
+deploy_diag_checkpoint "terraform init start: terraform -chdir=${TF_DIR} init -input=false -reconfigure -backend-config=${TF_DIR}/backend.hcl -no-color"
 terraform -chdir="$TF_DIR" init -input=false -reconfigure -backend-config="$TF_DIR/backend.hcl" -no-color >/dev/null
+deploy_diag_checkpoint "terraform outputs start: reading EC2/API/ECR/Cognito/AgentCore outputs from ${TF_DIR}"
 
 EC2_IP="$(tf_raw ec2_public_ip)"
 EC2_INSTANCE_ID="$(tf_raw ec2_instance_id)"

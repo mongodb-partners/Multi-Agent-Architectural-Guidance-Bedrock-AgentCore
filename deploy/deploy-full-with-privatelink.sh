@@ -101,12 +101,20 @@ source "$ENV_FILE"
 
 AWS_REGION="${AWS_REGION:-us-east-1}"
 SHARED_VPC_NAME="${SHARED_VPC_NAME:-shared-network}"
+DEPLOY_DIAG_LABEL="full-deploy"
+# shellcheck source=deploy/scripts/_deploy-diagnostics.sh
+source "$REPO_ROOT/deploy/scripts/_deploy-diagnostics.sh"
+deploy_diag_install_error_trap
 
 # ── Centralized preflight checks (see docs/deployment-preflight-checks.md) ──
 # Bypass with PREFLIGHT_SKIP=<id>,<id> or PREFLIGHT_SKIP=*
 # shellcheck source=deploy/scripts/_preflight-checks.sh
 source "$REPO_ROOT/deploy/scripts/_preflight-checks.sh"
 preflight_validate orchestrator-privatelink
+# shellcheck source=deploy/scripts/_aws-auth.sh
+source "$REPO_ROOT/deploy/scripts/_aws-auth.sh"
+validate_aws_auth || err "AWS auth validation failed after preflight (see above)"
+deploy_diag_after_preflight "orchestrator-privatelink" "$ENV_FILE"
 
 # ── HARD override — this orchestrator owns NETWORK_MODE=privatelink ─────────
 # Export so sub-scripts see it even if the shell still has NETWORK_MODE=peering
@@ -117,6 +125,7 @@ fi
 export NETWORK_MODE=privatelink
 
 # Fail fast if SSM says this shared VPC was applied in peering mode.
+deploy_diag_checkpoint "checking network mode canary: aws ssm get-parameter --region ${AWS_REGION} --name /${SHARED_VPC_NAME}/${AWS_REGION}/network_mode"
 EXISTING_MODE=$(aws ssm get-parameter \
   --region "$AWS_REGION" \
   --name "/${SHARED_VPC_NAME}/${AWS_REGION}/network_mode" \
@@ -139,6 +148,7 @@ if [[ "$SKIP_NETWORK" == "true" ]]; then
 else
   log "Phase 1 — Checking whether shared VPC already exists..."
   log "  SSM key : /${SHARED_VPC_NAME}/${AWS_REGION}/vpc_id"
+  deploy_diag_checkpoint "checking network VPC canary: aws ssm get-parameter --region ${AWS_REGION} --name /${SHARED_VPC_NAME}/${AWS_REGION}/vpc_id"
 
   EXISTING_VPC_ID=$(aws ssm get-parameter \
     --region "$AWS_REGION" \
@@ -155,6 +165,7 @@ else
     NETWORK_ARGS=("--env-file" "$ENV_FILE")
     [[ "$AUTO_APPROVE" == "true" ]] && NETWORK_ARGS+=("--auto-approve")
 
+    deploy_diag_checkpoint "launching child script: bash ${NETWORK_SCRIPT} ${NETWORK_ARGS[*]}"
     bash "$NETWORK_SCRIPT" "${NETWORK_ARGS[@]}"
 
     sep
@@ -173,6 +184,7 @@ if [[ "$SKIP_SHARED" == "true" ]]; then
 else
   log "Phase 1.5 — Checking whether shared stack already exists..."
   log "  SSM key : /${SHARED_VPC_NAME}/${AWS_REGION}/cw_api_log_group"
+  deploy_diag_checkpoint "checking shared stack canary: aws ssm get-parameter --region ${AWS_REGION} --name /${SHARED_VPC_NAME}/${AWS_REGION}/cw_api_log_group"
 
   EXISTING_SHARED=$(aws ssm get-parameter \
     --region "$AWS_REGION" \
@@ -190,6 +202,7 @@ else
     SHARED_ARGS=("--env-file" "$ENV_FILE")
     [[ "$AUTO_APPROVE" == "true" ]] && SHARED_ARGS+=("--auto-approve")
 
+    deploy_diag_checkpoint "launching child script: bash ${SHARED_SCRIPT} ${SHARED_ARGS[*]}"
     bash "$SHARED_SCRIPT" "${SHARED_ARGS[@]}"
 
     sep
@@ -208,6 +221,7 @@ PROJECT_ARGS=("--env-file" "$ENV_FILE")
 [[ "$AUTO_APPROVE" == "true" ]] && PROJECT_ARGS+=("--auto-approve")
 [[ "$SKIP_DOCKER"  == "true" ]] && PROJECT_ARGS+=("--skip-docker")
 
+deploy_diag_checkpoint "launching child script: bash ${PROJECT_SCRIPT} ${PROJECT_ARGS[*]}"
 bash "$PROJECT_SCRIPT" "${PROJECT_ARGS[@]}"
 
 sep

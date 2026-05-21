@@ -104,6 +104,11 @@ ERROR_RATE_THRESHOLD_PCT="${ERROR_RATE_THRESHOLD_PCT:-2}"
 THROTTLE_BURST_THRESHOLD="${THROTTLE_BURST_THRESHOLD:-5}"
 ATLAS_REPLICATION_LAG_THRESHOLD_MS="${ATLAS_REPLICATION_LAG_THRESHOLD_MS:-5000}"
 
+DEPLOY_DIAG_LABEL="shared"
+# shellcheck source=deploy/scripts/_deploy-diagnostics.sh
+source "$SCRIPT_DIR/_deploy-diagnostics.sh"
+deploy_diag_install_error_trap
+
 # shellcheck source=deploy/scripts/_aws-auth.sh
 source "$SCRIPT_DIR/_aws-auth.sh"
 validate_aws_auth || err "AWS auth validation failed (see above)"
@@ -113,6 +118,7 @@ ACCOUNT_ID="$AWS_AUTH_ACCOUNT_ID"
 # shellcheck source=deploy/scripts/_preflight-checks.sh
 source "$SCRIPT_DIR/_preflight-checks.sh"
 preflight_validate shared
+deploy_diag_after_preflight "shared" "$ENV_FILE"
 
 ok "AWS account: $ACCOUNT_ID"
 ok "Shared VPC name: $SHARED_VPC_NAME"
@@ -200,11 +206,14 @@ ok "terraform.tfvars written"
 # ══════════════════════════════════════════════════════════════════════════════
 sep
 cd "$TF_DIR"
+deploy_diag_terraform_context "shared terraform init" "$TF_DIR" "$TF_DIR/backend.hcl" "$TF_DIR/.tfplan"
 log "Phase 5 — terraform init..."
+deploy_diag_checkpoint "terraform init start: terraform init -input=false -reconfigure -backend-config=${TF_DIR}/backend.hcl"
 terraform init -input=false -reconfigure -backend-config="$TF_DIR/backend.hcl"
 ok "init complete"
 
 log "Running terraform plan..."
+deploy_diag_checkpoint "terraform plan start: terraform plan -input=false -out=${TF_DIR}/.tfplan"
 terraform plan -input=false -out="$TF_DIR/.tfplan"
 ok "plan complete"
 
@@ -214,11 +223,13 @@ log "      Subsequent applies are fast (log group / dashboard updates only)."
 
 if [[ "$AUTO_APPROVE" == "true" ]]; then
   log "Applying..."
+  deploy_diag_checkpoint "terraform apply start: terraform apply -input=false ${TF_DIR}/.tfplan"
   terraform apply -input=false "$TF_DIR/.tfplan"
 else
   echo ""
   read -r -p "  Apply? [y/N] " CONFIRM
   [[ "$CONFIRM" =~ ^[Yy]$ ]] || { log "Cancelled."; exit 0; }
+  deploy_diag_checkpoint "terraform apply start: terraform apply -input=false ${TF_DIR}/.tfplan"
   terraform apply -input=false "$TF_DIR/.tfplan"
 fi
 ok "Terraform apply complete"

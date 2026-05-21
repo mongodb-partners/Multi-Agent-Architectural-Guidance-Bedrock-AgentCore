@@ -115,10 +115,17 @@ export TF_VAR_atlas_project_id="${TF_VAR_atlas_project_id:-${TF_VAR_mongodb_atla
 export TF_VAR_atlas_public_key="${MONGODB_ATLAS_PUBLIC_KEY:-}"
 export TF_VAR_atlas_private_key="${MONGODB_ATLAS_PRIVATE_KEY:-}"
 
+DEPLOY_DIAG_LABEL="destroy:${MODE}"
+# shellcheck source=deploy/scripts/_deploy-diagnostics.sh
+source "$SCRIPT_DIR/_deploy-diagnostics.sh"
+deploy_diag_install_error_trap
+
 # shellcheck source=deploy/scripts/_aws-auth.sh
 source "$SCRIPT_DIR/_aws-auth.sh"
 validate_aws_auth || err "AWS auth validation failed (see above)"
 ACCOUNT_ID="$AWS_AUTH_ACCOUNT_ID"
+deploy_diag_checkpoint "aws auth validated; destroy has no centralized preflight profile"
+deploy_diag_auth_context "$ENV_FILE"
 ok "AWS account: $ACCOUNT_ID"
 
 SHARED_BUCKET="${PROJECT_NAME}-${ENVIRONMENT}-${ACCOUNT_ID}"
@@ -276,6 +283,8 @@ ok "backend.hcl + terraform.tfvars written"
 sep
 cd "$TF_DIR"
 log "terraform init..."
+deploy_diag_terraform_context "destroy terraform init" "$TF_DIR" "$TF_DIR/backend.hcl" ""
+deploy_diag_checkpoint "terraform init start: terraform init -input=false -reconfigure -backend-config=${TF_DIR}/backend.hcl"
 terraform init -input=false -reconfigure -backend-config="$TF_DIR/backend.hcl"
 ok "init complete"
 
@@ -294,8 +303,10 @@ if [[ "$MODE" == "ec2" ]]; then
   cleanup_project_security_group_references || true
 fi
 if [[ "$AUTO_APPROVE" == "true" ]]; then
+  deploy_diag_checkpoint "terraform destroy start: terraform destroy -input=false -auto-approve"
   terraform destroy -input=false -auto-approve
 else
+  deploy_diag_checkpoint "terraform destroy start: terraform destroy -input=false"
   terraform destroy -input=false
 fi
 _DESTROY_END="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
@@ -325,12 +336,16 @@ print(f'Deleted {len(items)} object version(s)')
 " B="$SHARED_BUCKET" R="$AWS_REGION" || true
 
   cd "$BOOTSTRAP_DIR"
+  deploy_diag_terraform_context "bootstrap destroy terraform" "$BOOTSTRAP_DIR" "" ""
+  deploy_diag_checkpoint "terraform bootstrap init: terraform init -input=false -no-color"
   terraform init -input=false -no-color
   if [[ "$AUTO_APPROVE" == "true" ]]; then
+    deploy_diag_checkpoint "terraform bootstrap destroy start: terraform destroy -input=false -auto-approve -var account_id=<account> -var aws_region=${AWS_REGION} -var environment=${ENVIRONMENT} -var project_name=${PROJECT_NAME}"
     terraform destroy -input=false -auto-approve \
       -var="account_id=$ACCOUNT_ID" -var="aws_region=$AWS_REGION" \
       -var="environment=$ENVIRONMENT" -var="project_name=$PROJECT_NAME"
   else
+    deploy_diag_checkpoint "terraform bootstrap destroy start: terraform destroy -input=false -var account_id=<account> -var aws_region=${AWS_REGION} -var environment=${ENVIRONMENT} -var project_name=${PROJECT_NAME}"
     terraform destroy -input=false \
       -var="account_id=$ACCOUNT_ID" -var="aws_region=$AWS_REGION" \
       -var="environment=$ENVIRONMENT" -var="project_name=$PROJECT_NAME"

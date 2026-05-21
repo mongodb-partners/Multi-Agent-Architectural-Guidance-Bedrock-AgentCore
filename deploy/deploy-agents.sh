@@ -95,6 +95,11 @@ log "Phase 2 — Loading credentials from $ENV_FILE..."
 # shellcheck source=/dev/null
 source "$ENV_FILE"
 
+DEPLOY_DIAG_LABEL="agents"
+# shellcheck source=deploy/scripts/_deploy-diagnostics.sh
+source "$SCRIPT_DIR/scripts/_deploy-diagnostics.sh"
+deploy_diag_install_error_trap
+
 # shellcheck source=deploy/scripts/_aws-auth.sh
 source "$SCRIPT_DIR/scripts/_aws-auth.sh"
 validate_aws_auth || err "AWS auth validation failed (see above)"
@@ -104,6 +109,7 @@ ACCOUNT_ID="$AWS_AUTH_ACCOUNT_ID"
 # shellcheck source=deploy/scripts/_preflight-checks.sh
 source "$SCRIPT_DIR/scripts/_preflight-checks.sh"
 preflight_validate agents
+deploy_diag_after_preflight "agents" "$ENV_FILE"
 
 ok "AWS account: $ACCOUNT_ID"
 
@@ -167,6 +173,8 @@ build_and_upload_code_artifact
 sep
 log "Phase 6 — terraform init..."
 cd "$TF_DIR"
+deploy_diag_terraform_context "agents terraform init" "$TF_DIR" "$TF_DIR/backend.hcl" "$TF_DIR/.tfplan-agents"
+deploy_diag_checkpoint "terraform init start: terraform init -input=false -reconfigure -backend-config=${TF_DIR}/backend.hcl -no-color"
 terraform init -input=false -reconfigure -backend-config="$TF_DIR/backend.hcl" -no-color
 ok "init complete"
 
@@ -175,6 +183,7 @@ AGENT_TF_TARGETS=(
   -target=module.acr_specialists
   -target=module.acr_orchestrator
 )
+deploy_diag_checkpoint "terraform plan start: terraform plan -input=false ${AGENT_TF_TARGETS[*]} -out=${TF_DIR}/.tfplan-agents"
 terraform plan -input=false "${AGENT_TF_TARGETS[@]}" -out="$TF_DIR/.tfplan-agents"
 ok "plan complete"
 
