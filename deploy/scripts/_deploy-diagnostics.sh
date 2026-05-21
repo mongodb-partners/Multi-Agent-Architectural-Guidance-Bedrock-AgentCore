@@ -46,7 +46,10 @@ deploy_diag_on_error() {
 }
 
 deploy_diag_install_error_trap() {
-  set -E
+  # Do not enable errtrace (-E): preflight helpers intentionally run commands
+  # that may return non-zero so they can classify and report them. A top-level
+  # ERR trap still catches the deploy handoff failures we care about, such as a
+  # Terraform init/plan/apply command not starting.
   trap 'deploy_diag_on_error "$?" "$BASH_COMMAND" "$LINENO"' ERR
 }
 

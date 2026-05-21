@@ -782,7 +782,10 @@ pf_check_env_required_keys_filled() {
     EMBEDDINGS_PROVIDER
   )
   # AUTH_MODE=sts substitutes AWS_SESSION_TOKEN/AWS_PROFILE for the static keys.
-  if [[ "${AUTH_MODE:-iam}" == "sts" ]]; then
+  # Match _aws-auth.sh behavior by treating AUTH_MODE case-insensitively.
+  local auth_mode_normalized
+  auth_mode_normalized="$(echo "${AUTH_MODE:-iam}" | tr '[:upper:]' '[:lower:]')"
+  if [[ "$auth_mode_normalized" == "sts" ]]; then
     REQUIRED_KEYS=(
       AWS_REGION ENVIRONMENT PROJECT_NAME SHARED_VPC_NAME
       MONGODB_ATLAS_PUBLIC_KEY MONGODB_ATLAS_PRIVATE_KEY
@@ -1460,6 +1463,12 @@ pf_check_iam_deploy_actions() {
     _pf_skip pf_check_iam_deploy_actions "could not resolve caller ARN"
     return 0
   fi
+  local simulation_arn="$arn"
+  if [[ "$arn" =~ ^arn:aws:sts::([0-9]+):assumed-role/([^/]+)/.+$ ]]; then
+    # iam:SimulatePrincipalPolicy does not accept STS session ARNs. In
+    # AUTH_MODE=sts, simulate against the backing IAM role instead.
+    simulation_arn="arn:aws:iam::${BASH_REMATCH[1]}:role/${BASH_REMATCH[2]}"
+  fi
   # iam:SimulatePrincipalPolicy honors SCPs and permissions boundaries.
   # Comprehensive list across every Terraform module the deploy uses.
   # API caps each call at ~50 actions; we batch in groups of 25 for safety.
@@ -1507,11 +1516,13 @@ pf_check_iam_deploy_actions() {
     for (( j=i; j<i+batch_size && j<total; j++ )); do
       this_batch+=("${actions[$j]}")
     done
+    set +e
     out="$(aws iam simulate-principal-policy \
-      --policy-source-arn "$arn" \
+      --policy-source-arn "$simulation_arn" \
       --action-names "${this_batch[@]}" \
       --output json 2>&1)"
     rc=$?
+    set -e
     if (( rc != 0 )); then
       if echo "$out" | grep -qiE 'AccessDenied|not authorized.*SimulatePrincipalPolicy'; then
         _pf_warn "Caller cannot self-introspect via iam:SimulatePrincipalPolicy. Skipping comprehensive IAM simulation. Add 'iam:SimulatePrincipalPolicy' to the deploy policy for full coverage."
@@ -1538,7 +1549,7 @@ PY
 )
   done
   if (( ${#denied[@]} == 0 )); then
-    _pf_pass pf_check_iam_deploy_actions "all ${total} required actions allowed for ${arn}"
+    _pf_pass pf_check_iam_deploy_actions "all ${total} required actions allowed for ${simulation_arn}"
     return 0
   fi
 
