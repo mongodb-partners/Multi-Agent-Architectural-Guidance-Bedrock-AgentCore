@@ -99,6 +99,15 @@ module "atlas_vpc_peering" {
   vpc_main_route_table_id   = module.networking.main_route_table_id
   vpc_public_route_table_id = module.networking.public_route_table_id
   aws_account_id            = data.aws_caller_identity.current.account_id
+
+  # Whitelist the operator laptop on the Atlas project IP access list so
+  # local-exec provisioners (db-seeding/ensure-collection.ts, KB ingestion
+  # polls, atlas-admin curl helpers in modules/*) can connect from the
+  # machine running terraform. In peering mode the public-IP entry that
+  # mongodb-atlas defaults to 0.0.0.0/0 is flipped to var.vpc_cidr, so
+  # WITHOUT this the operator can't talk to Atlas and the apply hangs on
+  # 18× server-selection timeouts.
+  operator_ip_cidr = var.operator_ip_cidr
 }
 
 # Second-line-of-defense CIDR overlap guard (shell pre-flight is the fast path).
@@ -146,9 +155,10 @@ resource "aws_ssm_parameter" "private_subnet_ids" {
 
 # Always-published — guards against silent mode mixing between deploys.
 resource "aws_ssm_parameter" "network_mode" {
-  name  = "${local.ssm_prefix}/network_mode"
-  type  = "String"
-  value = var.network_mode
+  name      = "${local.ssm_prefix}/network_mode"
+  type      = "String"
+  value     = var.network_mode
+  overwrite = true
 }
 
 # ── PrivateLink-only SSM keys ────────────────────────────────────────────────

@@ -23,7 +23,8 @@ The two are **not interchangeable** — `policy.json` has no `Principal` field a
 | `IamRolesAndPolicies` | Allow | **Scoped IAM** — only role, role-policy, customer-managed-policy, instance-profile, and service-linked-role lifecycle actions. No `iam:*` wildcard. |
 | `IdentityAndSecrets` | Allow | STS identity lookups, Cognito user pools, Secrets Manager, KMS (read + encrypt only — no key create/schedule-deletion) |
 | `StorageAndState` | Allow | S3 (state bucket + KB docs), DynamoDB (optional state lock table) |
-| `BedrockAndAgentCore` | Allow | `bedrock:*` (covers Foundation Models, Bedrock Runtime, Bedrock Agent, Bedrock Agent Runtime, Bedrock Knowledge Base — all one IAM namespace) + `bedrock-agentcore:*` (Memory + Gateway, both control and data plane) |
+| `BedrockAndAgentCore` | Allow | `bedrock:*` (foundation models, Runtime, Knowledge Base / data-source / ingestion — IAM prefix `bedrock:` even though CLI is `aws bedrock-agent`) **plus** `bedrock-agentcore:*` (Memory, Gateway, Agent Runtime — separate namespace; required for `bedrock-agentcore:GetGateway`). `bedrock:*` alone does not grant AgentCore. |
+| `BedrockKnowledgeBaseRetrieve` | Allow | `bedrock:Retrieve` + `bedrock-agent-runtime:Retrieve` — explicit KB query path used by `bedrock_kb_retrieve` and `GET /health` (`bedrockKnowledgeBase`). The EC2 app role also needs these via `modules/ec2` `BedrockKBRetrieve`; updating only this deploy principal policy does not change the running instance role until Terraform apply or a manual inline-policy edit on `*-ec2-role-*`. |
 | `SageMakerAndMarketplace` | Allow | SageMaker endpoints (Voyage AI) + Marketplace subscribe flows + License Manager reads |
 | `ObservabilityAndDelivery` | Allow | CloudWatch Logs, CloudWatch metrics, EventBridge, Scheduler, CloudFront |
 | `XRayObservability` | Allow | X-Ray trace ingestion, Transaction Search indexing rules, groups, sampling rules, resource policies |
@@ -227,7 +228,14 @@ source .env && ./deploy/deploy-full-with-privatelink.sh --auto-approve
 ./deploy/scripts/list-resources.sh
 
 # 4. if a step failed with AccessDenied, read the exact action from the error,
-#    add it to policy.json, publish a new version, and re-run deploy.sh.
+#    add it to policy.json, publish a new policy version on the IAM user/role,
+#    and re-run deploy. Customer-managed policies are capped at 6,144 characters
+#    (whitespace excluded) — do not duplicate wildcard grants with long explicit
+#    action lists in policy.json or the console rejects the upload.
+#
+#    Common peering-deploy miss: bedrock-agentcore:GetGateway — means the principal
+#    has bedrock:* but NOT bedrock-agentcore:* yet. Ensure BedrockAndAgentCore
+#    includes both wildcards and set that policy version as default.
 
 # 5. tear down before the next iteration (scoped, idempotent)
 ./deploy/scripts/destroy.sh --mode ec2   # or --mode local

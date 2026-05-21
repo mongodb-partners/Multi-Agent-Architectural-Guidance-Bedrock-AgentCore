@@ -29,6 +29,7 @@ import {
   VECTOR_SEARCH_TOOL_SPEC,
   VectorSearchEmbedTool,
   extractDocumentPreviewsFromResult,
+  enrichVectorSearchTraceEvents,
   extractScoresFromResult,
   isInternalOnlyMcpTool,
   scoreHistogram,
@@ -357,6 +358,34 @@ describe("score extraction helpers", () => {
     expect(scoreHistogram([0.05, 0.25, 0.45, 0.65, 0.85])).toEqual([1, 1, 1, 1, 1]);
     expect(scoreHistogram([0.99, 0.999])).toEqual([0, 0, 0, 0, 2]);
     expect(scoreHistogram([])).toEqual([0, 0, 0, 0, 0]);
+  });
+});
+
+describe("enrichVectorSearchTraceEvents", () => {
+  test("backfills scoreSummary on mongo.vector_search from mongo.intent + mongo.result", () => {
+    const events = enrichVectorSearchTraceEvents([
+      { type: "mongo.intent", payload: { collection: "products" } },
+      {
+        type: "mongo.result",
+        payload: {
+          sampleDocs: [{ sku: "SKU-7", _score: 0.88 }, { sku: "SKU-1", _score: 0.71 }],
+        },
+      },
+      {
+        type: "mongo.vector_search",
+        payload: {
+          collection: "products",
+          embeddingSource: "voyage",
+          queryText: "outdoor",
+          scores: [],
+        },
+      },
+    ]);
+    const vs = events.find((e) => e.type === "mongo.vector_search");
+    expect(vs).toBeDefined();
+    const payload = vs!.payload as { scores?: number[]; scoreSummary?: { avg: number } };
+    expect(payload.scores).toEqual([0.88, 0.71]);
+    expect(payload.scoreSummary?.avg).toBeCloseTo(0.795, 5);
   });
 });
 

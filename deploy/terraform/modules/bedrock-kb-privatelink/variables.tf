@@ -8,6 +8,11 @@ variable "environment" {
   description = "Deployment environment (dev, staging, prod)"
 }
 
+variable "aws_region" {
+  type        = string
+  description = "AWS region — passed to the local-exec target registration script when discovering Atlas VPCE ENI private IPs."
+}
+
 variable "vpc_id" {
   type        = string
   description = "VPC ID where the NLB and VPC Endpoint Service live (must match the VPC that hosts the Atlas Interface VPCE)."
@@ -25,7 +30,18 @@ variable "atlas_vpce_id" {
 
 variable "atlas_ports" {
   type        = list(number)
-  description = "Atlas PrivateLink listener ports advertised by the Atlas private endpoint connection string. For MONGOD private endpoints this is typically three high ports such as 1051, 1052, 1053."
+  description = "Atlas PrivateLink listener ports advertised by the Atlas private endpoint connection string. For MONGOD private endpoints this is typically three high ports such as 1051, 1052, 1053. Values may be `(known after apply)` when sourced from mongodbatlas_cluster connection_strings — use atlas_port_slot_count for plan-time for_each keys."
+}
+
+variable "atlas_port_slot_count" {
+  type        = number
+  default     = 3
+  description = "Number of NLB listener/target-group slots to provision. Each slot maps to var.atlas_ports[index] at apply time. Default 3 matches a typical 3-node M10 PrivateLink connection string."
+
+  validation {
+    condition     = var.atlas_port_slot_count >= 1 && var.atlas_port_slot_count <= 7
+    error_message = "atlas_port_slot_count must be between 1 and 7."
+  }
 }
 
 variable "allowed_principals" {

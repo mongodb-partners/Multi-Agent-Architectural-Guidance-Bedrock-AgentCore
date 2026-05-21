@@ -99,6 +99,12 @@ source "$ENV_FILE"
 source "$SCRIPT_DIR/scripts/_aws-auth.sh"
 validate_aws_auth || err "AWS auth validation failed (see above)"
 ACCOUNT_ID="$AWS_AUTH_ACCOUNT_ID"
+
+# ── Centralized preflight checks (see docs/deployment-preflight-checks.md) ──
+# shellcheck source=deploy/scripts/_preflight-checks.sh
+source "$SCRIPT_DIR/scripts/_preflight-checks.sh"
+preflight_validate agents
+
 ok "AWS account: $ACCOUNT_ID"
 
 SHARED_BUCKET="${PROJECT_NAME}-${ENVIRONMENT}-${ACCOUNT_ID}"

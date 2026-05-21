@@ -65,3 +65,14 @@ variable "atlas_peering_cidr" {
     error_message = "atlas_peering_cidr must be a valid IPv4 CIDR."
   }
 }
+
+variable "operator_ip_cidr" {
+  type        = string
+  default     = ""
+  description = "Operator/laptop public IP in CIDR form (e.g. 203.0.113.42/32). Used ONLY when network_mode='peering' to add the laptop to the Atlas project IP access list so local-exec provisioners that talk to Atlas (db-seeding, ensure-collection, KB ingestion-status polls) can connect. Pass via env.sh OPERATOR_IP_CIDR; when empty, deploy-network.sh auto-detects via `curl https://checkip.amazonaws.com` and exports it. PrivateLink mode doesn't need this — all Atlas traffic goes via the VPCE."
+
+  validation {
+    condition     = var.operator_ip_cidr == "" || can(cidrnetmask(var.operator_ip_cidr))
+    error_message = "operator_ip_cidr must be empty or a valid IPv4 CIDR."
+  }
+}

@@ -4,7 +4,7 @@ Python + Streamlit chat UI for the Bedrock Multi-Agent stack. Connects to the AP
 
 > **Authoritative docs:**
 >
-> - [`docs/demo-mode-guide.md`](../docs/demo-mode-guide.md) — demo flow + env knobs
+> - [`docs/demo/demo-mode-guide.md`](../docs/demo/demo-mode-guide.md) — demo flow + env knobs
 > - [`docs/trace-viewer-client-guide.md`](../docs/trace-viewer-client-guide.md) — client-friendly Trace Viewer walkthrough
 > - [`docs/trace-viewer-developer-guide.md`](../docs/trace-viewer-developer-guide.md) — debug-grade Trace Viewer
 > - [`docs/configuration-guide.md`](../docs/configuration-guide.md) + [`docs/reference/env-vars.md`](../docs/reference/env-vars.md) — env vars

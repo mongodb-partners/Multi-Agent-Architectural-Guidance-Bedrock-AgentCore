@@ -531,14 +531,100 @@ function extractDocumentsFromResult(result: ToolResultBlock): unknown[] {
   return [];
 }
 
-export function extractScoresFromResult(result: ToolResultBlock): number[] {
-  const docs = extractDocumentsFromResult(result);
+function extractScoresFromDocuments(docs: unknown[]): number[] {
   const scores: number[] = [];
   for (const d of docs) {
     if (d && typeof d === "object" && typeof (d as { _score?: unknown })._score === "number") {
       scores.push((d as { _score: number })._score);
     }
   }
+  return scores;
+}
+
+export function extractScoresFromResult(result: ToolResultBlock): number[] {
+  return extractScoresFromDocuments(extractDocumentsFromResult(result));
+}
+
+/** Scores from MCP runtime trace events (`mongo.result.sampleDocs`). */
+export function extractScoresFromMcpTraceEvents(
+  traces: Array<{ type?: string; payload?: Record<string, unknown> }>,
+): number[] {
+  const scores: number[] = [];
+  for (const ev of traces) {
+    if (ev.type !== "mongo.result") continue;
+    const sampleDocs = ev.payload?.sampleDocs;
+    if (!Array.isArray(sampleDocs)) continue;
+    scores.push(...extractScoresFromDocuments(sampleDocs));
+  }
+  return scores;
+}
+
+/**
+ * When AgentCore forwards nested traces, `mongo.vector_search` is emitted by the
+ * API wrapper after the MCP envelope is stripped — occasionally before scores
+ * are re-parsed from the tool result. Backfill from sibling `mongo.result`
+ * events (which carry `sampleDocs` with `_score` from the runtime).
+ */
+export function enrichVectorSearchTraceEvents<T extends { type: string; payload?: unknown }>(
+  events: T[],
+): T[] {
+  const scoresByCollection = new Map<string, number[]>();
+  let lastIntentCollection = "";
+  for (const ev of events) {
+    if (ev.type === "mongo.intent") {
+      const coll = (ev.payload as { collection?: string } | undefined)?.collection;
+      if (typeof coll === "string" && coll.trim()) lastIntentCollection = coll.trim();
+      continue;
+    }
+    if (ev.type !== "mongo.result") continue;
+    const payload = (ev.payload ?? {}) as { collection?: string; sampleDocs?: unknown[] };
+    const coll =
+      (typeof payload.collection === "string" && payload.collection.trim()) ||
+      lastIntentCollection ||
+      "";
+    const scores = extractScoresFromDocuments(
+      Array.isArray(payload.sampleDocs) ? payload.sampleDocs : [],
+    );
+    if (scores.length) scoresByCollection.set(coll, scores);
+  }
+
+  return events.map((ev) => {
+    if (ev.type !== "mongo.vector_search") return ev;
+    const payload = (ev.payload ?? {}) as {
+      collection?: string;
+      scores?: number[];
+      scoreSummary?: { avg?: number };
+    };
+    const existing = Array.isArray(payload.scores) ? payload.scores : [];
+    if (existing.length > 0 && payload.scoreSummary?.avg != null) return ev;
+    const coll = typeof payload.collection === "string" ? payload.collection : "";
+    const scores = (coll && scoresByCollection.get(coll)) || [];
+    if (!scores.length) {
+      const anyScores = [...scoresByCollection.values()].find((s) => s.length > 0);
+      if (!anyScores?.length) return ev;
+      return patchVectorSearchPayload(ev, anyScores);
+    }
+    return patchVectorSearchPayload(ev, scores);
+  });
+}
+
+function patchVectorSearchPayload<T extends { type: string; payload?: unknown }>(
+  ev: T,
+  scores: number[],
+): T {
+  const payload = { ...(ev.payload as Record<string, unknown>) };
+  payload.scores = scores.slice(0, MAX_TRACE_SCORES);
+  payload.scoreSummary = summarizeScores(payload.scores as number[]);
+  payload.histogram = scoreHistogram(payload.scores as number[]);
+  return { ...ev, payload };
+}
+
+/** Set by `extractAndReplayMcpTraces` for the in-flight MCP tool call. */
+let pendingMcpVectorScores: number[] | undefined;
+
+export function takePendingMcpVectorScores(): number[] {
+  const scores = pendingMcpVectorScores ?? [];
+  pendingMcpVectorScores = undefined;
   return scores;
 }
 
@@ -833,7 +919,9 @@ export class VectorSearchEmbedTool extends Tool {
       throw err;
     }
 
-    const scores = extractScoresFromResult(result).slice(0, MAX_TRACE_SCORES);
+    let scores = extractScoresFromResult(result);
+    if (!scores.length) scores = takePendingMcpVectorScores();
+    scores = scores.slice(0, MAX_TRACE_SCORES);
     const collection = stringArg(transform.args.collection);
     trace?.event("mongo.vector_search", {
       collection,
@@ -1418,16 +1506,35 @@ async function loadMcpTools(): Promise<Tool[]> {
 }
 
 /**
- * Probe: check if the MCP server is reachable without loading tools.
- * Used by the health endpoint.
+ * Probe: check if the MCP server is reachable (connect + listTools handshake).
+ * Used by the health endpoint. Does not rely on the tool cache — a prior failed
+ * loadMcpTools() can leave `_mcpTools` unset while still returning [] without
+ * throwing, which must not be reported as connected.
  */
 export async function probeMcpServer(): Promise<"connected" | "unreachable"> {
   try {
-    const tools = await getMcpTools();
-    return tools.length >= 0 ? "connected" : "unreachable";
-  } catch {
+    return await Promise.race([
+      probeMcpServerInner(),
+      new Promise<"unreachable">((resolve) => {
+        setTimeout(() => resolve("unreachable"), PING_MS);
+      }),
+    ]);
+  } catch (err) {
+    logger.warn("[health] MCP probe failed", {
+      error: err instanceof Error ? err.message : String(err),
+      url: getMcpServerUrl(),
+    });
     return "unreachable";
   }
+}
+
+const PING_MS = 2500;
+
+async function probeMcpServerInner(): Promise<"connected" | "unreachable"> {
+  const client = await ensureMcpClient();
+  if (!client) return "unreachable";
+  await client.listTools();
+  return "connected";
 }
 
 /** Reset the cached client (for tests). */
@@ -1477,7 +1584,14 @@ export function extractAndReplayMcpTraces(
     const env = parsed as { result?: unknown; meta?: { traces?: unknown; tracesDropped?: number } };
     const meta = env.meta;
     if (!meta || !Array.isArray(meta.traces)) continue;
-    for (const ev of meta.traces) {
+    const traceList = meta.traces as Array<{ type?: string; payload?: Record<string, unknown> }>;
+    const resultDocs = Array.isArray((env.result as { documents?: unknown[] } | undefined)?.documents)
+      ? ((env.result as { documents: unknown[] }).documents)
+      : [];
+    let scoresFromMeta = extractScoresFromDocuments(resultDocs);
+    if (!scoresFromMeta.length) scoresFromMeta = extractScoresFromMcpTraceEvents(traceList);
+    if (scoresFromMeta.length) pendingMcpVectorScores = scoresFromMeta;
+    for (const ev of traceList) {
       if (!ev || typeof ev !== "object") continue;
       const e = ev as { type?: string; payload?: Record<string, unknown> };
       if (typeof e.type !== "string") continue;

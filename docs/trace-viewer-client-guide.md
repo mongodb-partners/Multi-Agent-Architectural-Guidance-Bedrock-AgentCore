@@ -279,6 +279,6 @@ Yes — the URL is by `traceId` (UUID) and is meaningless without API access. Au
 
 - [`trace-ui-system-overview.md`](trace-ui-system-overview.md) — **start here** — all six trace surfaces in one place (inline card, viewer, sessions, fixture harness, print, mobile)
 - [`trace-viewer-developer-guide.md`](trace-viewer-developer-guide.md) — the Developer details panel, sub-section by sub-section
-- [`demo-mode-guide.md`](demo-mode-guide.md) — Trace UI walkthrough + env knobs for client demos
+- [`demo/demo-mode-guide.md`](demo/demo-mode-guide.md) — Trace UI walkthrough + env knobs for client demos
 - [`observability-runbook.md`](observability-runbook.md) §1.b — Day-2 "debug a single turn" pointers (CloudWatch / ServiceLens / X-Ray correlation)
 - [`api-reference.md`](api-reference.md) `GET /traces/:traceId?include=` — the wire shape that backs both client and developer views

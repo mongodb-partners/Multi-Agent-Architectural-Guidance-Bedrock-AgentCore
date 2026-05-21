@@ -114,6 +114,15 @@
       "Resource": "*"
     },
     {
+      "Sid": "BedrockKnowledgeBaseRetrieve",
+      "Effect": "Allow",
+      "Action": [
+        "bedrock:Retrieve",
+        "bedrock-agent-runtime:Retrieve"
+      ],
+      "Resource": "*"
+    },
+    {
       "Sid": "SageMakerAndMarketplace",
       "Effect": "Allow",
       "Action": [

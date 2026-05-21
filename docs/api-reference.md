@@ -39,13 +39,11 @@ Returns liveness + dependency state. Always public (auth bypass).
 ```json
 {
   "status": "ok",
-  "version": "...",
-  "uptime": 12345,
+  "version": "0.1.0",
+  "timestamp": "2026-05-21T12:00:00.000Z",
   "dependencies": {
     "mongodb": "connected",
     "longTermMemory": "connected",
-    "chatSessions": "memory",
-    "toolHosting": "hybrid",
     "agentcore": "connected",
     "mcpServer": "connected",
     "bedrockKnowledgeBase": "connected"
@@ -53,17 +51,17 @@ Returns liveness + dependency state. Always public (auth bypass).
 }
 ```
 
+Each `dependencies.*` value is the result of a **live probe** (or `not_configured` when the env var for that integration is unset). The response does not include config-only fields such as short-term memory backend choice (`SHORT_TERM_MEMORY_BACKEND`) or MCP hosting topology — use env / `deploy-manifest.json` for that.
+
 | Field | Possible values | Meaning |
 |---|---|---|
-| `mongodb` | `connected` / `unavailable` | Real Mongo ping result |
-| `longTermMemory` | `connected` / `unavailable` / `mongodb` / `agentcore` | Long-term memory backend status |
-| `chatSessions` | `memory` / `mongodb` / `agentcore` / `unavailable` | Where short-term sessions live |
-| `toolHosting` | `hybrid` | MongoDB MCP calls go directly to the MongoDB MCP AgentCore Runtime; Gateway remains for non-Mongo MCP tools. |
-| `agentcore` | `connected` / `unreachable` / `not_configured` | AgentCore SDK probe (`ListSessions`) |
-| `mcpServer` | `connected` / `unreachable` | MongoDB MCP runtime / configured MCP endpoint probe |
-| `bedrockKnowledgeBase` | `connected` / `not_configured` | KB ID present + reachable |
+| `mongodb` | `connected` / `unreachable` / `not_configured` | Atlas ping via `MONGODB_URI` |
+| `longTermMemory` | `connected` / `unreachable` / `not_configured` / `no_agents` | Mongo reachable and ≥1 agent has `memory.longTerm: true` |
+| `agentcore` | `connected` / `inactive` / `unreachable` / `not_configured` | AgentCore Memory probe (`ListSessions` on a synthetic actor). `connected` includes the expected `ResourceNotFoundException` for the fake actor (API round-trip succeeded). `inactive` = `AGENTCORE_MEMORY_STORE_ID` is set but the store is not `ACTIVE` (provisioning or deleting). |
+| `mcpServer` | `connected` / `unreachable` | MongoDB MCP endpoint connect + `listTools` handshake (`MONGODB_MCP_RUNTIME_ARN` direct runtime, or `MCP_SERVER_URL` / gateway fallback) |
+| `bedrockKnowledgeBase` | `connected` / `not_configured` / `unreachable` | `BEDROCK_KB_ID` set and a minimal Bedrock Agent Runtime `Retrieve` probe returns `{ status: "ok" }`. `unreachable` usually means IAM (`bedrock-agent-runtime:Retrieve` on the KB ARN) or KB not `ACTIVE` — check API logs for `[health] bedrock KB probe`. |
 
-Returns `503` with `status: degraded` if `mongodb` is `unreachable` or `chatSessions` is `unavailable` while session persistence is enabled (default when `MONGODB_URI` is set; opt out with `PERSIST_CHAT_SESSIONS=0`).
+Returns `503` with `status: degraded` when `mongodb` is `unreachable` only. Other dependencies may be `unreachable` or `inactive` while `status` stays `ok` (informational; does not fail liveness).
 
 ---
 
@@ -223,7 +221,7 @@ with requests.post(
 
 Lists sessions for the calling user.
 
-Filters by JWT `sub` claim — returns only sessions owned by the caller. Sessions persisted before user scoping was wired (no `userId` on the document) are treated as legacy and remain visible to any authenticated caller; new sessions always carry a `userId`. Persistence: when `MONGODB_URI` is set sessions are mirrored to the `chat_sessions` collection (opt out with `PERSIST_CHAT_SESSIONS=0`).
+Filters by JWT `sub` claim — returns only sessions owned by the caller. Sessions persisted before user scoping was wired (no `userId` on the document) are treated as legacy and remain visible to any authenticated caller; new sessions always carry a `userId`. Persistence: in deployed AWS, short-term memory is AgentCore-backed; when `MONGODB_URI` is set, sessions are also mirrored to the `chat_sessions` collection for the Sessions page, audit/debug history, and cold-read fallback (opt out with `PERSIST_CHAT_SESSIONS=0`).
 
 **Response:**
 
@@ -362,6 +360,8 @@ Returns all loaded skills with their tool counts:
 ## 10. `GET /http-tools`
 
 Returns the HTTP tool registry — useful for debugging which tool URLs are wired vs unset.
+
+This endpoint only reports **configured HTTP tools** (root `config/http-tools.json` and per-skill `config/skills/<skill>/http-tools.json`). It does not list MongoDB MCP tools, Bedrock tools, `read_skill_resource`, `run_skill_script`, or internal helpers. For the complete developer catalog, see [`reference/tools.md`](reference/tools.md).
 
 ```json
 {

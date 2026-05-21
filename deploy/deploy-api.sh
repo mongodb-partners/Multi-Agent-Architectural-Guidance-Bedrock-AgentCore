@@ -132,6 +132,12 @@ source "$ENV_FILE"
 source "$SCRIPT_DIR/scripts/_aws-auth.sh"
 validate_aws_auth || err "AWS auth validation failed (see above)"
 ACCOUNT_ID="$AWS_AUTH_ACCOUNT_ID"
+
+# ── Centralized preflight checks (see docs/deployment-preflight-checks.md) ──
+# shellcheck source=deploy/scripts/_preflight-checks.sh
+source "$SCRIPT_DIR/scripts/_preflight-checks.sh"
+preflight_validate api
+
 ok "AWS account: $ACCOUNT_ID"
 
 terraform -chdir="$TF_DIR" init -input=false -reconfigure -backend-config="$TF_DIR/backend.hcl" -no-color >/dev/null
@@ -277,8 +283,8 @@ else:
 PY
   ); then
     MONGODB_URI="$API_PRIVATE_URI"
-    if ! echo "$MONGODB_URI" | grep -q '\-pri\.mongodb\.net'; then
-      err "Computed peering URI does not contain '-pri.mongodb.net' — would route over the public SRV. Aborting to preserve privacy parity."
+    if ! echo "$MONGODB_URI" | grep -qE '\-pri\.'; then
+      err "Computed peering URI does not contain '-pri.' (private peering host) — would route over the public SRV. Aborting to preserve privacy parity."
     fi
     ok "API MongoDB URI normalized to peering connection string"
   else

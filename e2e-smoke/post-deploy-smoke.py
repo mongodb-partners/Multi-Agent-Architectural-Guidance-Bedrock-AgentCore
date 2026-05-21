@@ -95,7 +95,7 @@ def manifest_doc(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text())
 
 
-def check_health(api_url: str) -> None:
+def check_health(api_url: str, resources: dict[str, Any]) -> None:
     log("\n== Health ==")
     health = load_json_url(f"{api_url}/health")
     deps = health.get("dependencies", {})
@@ -103,6 +103,11 @@ def check_health(api_url: str) -> None:
     require(health.get("status") == "ok", f"/health status is not ok: {health.get('status')}")
     for dep in ("mongodb", "agentcore", "mcpServer"):
         require(deps.get(dep) == "connected", f"/health dependency {dep} is {deps.get(dep)!r}")
+    if resources.get("bedrock_kb_id"):
+        require(
+            deps.get("bedrockKnowledgeBase") == "connected",
+            f"/health dependency bedrockKnowledgeBase is {deps.get('bedrockKnowledgeBase')!r}",
+        )
 
 
 def check_agents_endpoint(api_url: str, token: str) -> None:
@@ -774,7 +779,7 @@ def main() -> int:
     log(f"manifest={args.manifest}")
     log(f"network_mode={_network_mode_from_manifest(full_manifest)}  kb_connectivity_mode={_kb_connectivity_mode_from_manifest(full_manifest)}")
 
-    check_health(api_url)
+    check_health(api_url, resources)
     token = cognito_token(client_id)
     log(f"cognito_token_len={len(token)}")
     check_agents_endpoint(api_url, token)

@@ -95,6 +95,11 @@ SHARED_VPC_NAME="${SHARED_VPC_NAME:-shared-network}"
 ATLAS_PEERING_CIDR="${ATLAS_PEERING_CIDR:-192.168.248.0/21}"
 VPC_CIDR="${VPC_CIDR:-10.0.0.0/16}"
 
+# ── Centralized preflight checks (see docs/deployment-preflight-checks.md) ──
+# shellcheck source=deploy/scripts/_preflight-checks.sh
+source "$REPO_ROOT/deploy/scripts/_preflight-checks.sh"
+preflight_validate orchestrator-peering
+
 # ── HARD override — this orchestrator owns NETWORK_MODE=peering ──────────────
 # We export so the sub-scripts see it, regardless of whether the operator
 # left a stale NETWORK_MODE=privatelink in .env. This is intentional — the

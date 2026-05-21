@@ -1,9 +1,6 @@
 import { getMongoDb } from "./mongo-client.ts";
 import { getAgent, listAgents } from "./config-scan.ts";
-import {
-  getChatSessionsCollection,
-  usePersistentChatSessions,
-} from "./chat-sessions-collection.ts";
+import { bedrockKbRetrieve } from "../adapters/bedrock-retrieval.ts";
 import { probeMcpServer } from "../adapters/mongodb-mcp-client.ts";
 import {
   BedrockAgentCoreClient,
@@ -18,12 +15,16 @@ export type MongoDependencyStatus =
   | "connected"
   | "unreachable";
 
-export type StubDependencyStatus = "not_configured";
+export type BedrockKbDependencyStatus =
+  | "not_configured" // BEDROCK_KB_ID unset
+  | "connected" // Retrieve API round-trip succeeded
+  | "unreachable"; // configured but Bedrock KB call failed or timed out
 
 export type AgentcoreStatus =
   | "not_configured"  // AGENTCORE_MEMORY_STORE_ID not set
-  | "connected"       // Memory Store reachable
-  | "unreachable";    // configured but API call failed
+  | "connected"       // Memory Store reachable and ACTIVE
+  | "inactive"        // memory id configured but store is not ACTIVE (provisioning/deleting)
+  | "unreachable";    // configured but API call failed (network/auth/missing store)
 
 export type McpStatus =
   | "connected"       // MongoDB MCP runtime / configured MCP endpoint reachable
@@ -53,9 +54,40 @@ export async function resolveMongoDependencyStatus(): Promise<MongoDependencySta
   }
 }
 
-/** Bedrock KB retrieve tool — not yet wired to health check. */
-export function resolveBedrockKbDependencyStatus(): StubDependencyStatus {
-  return "not_configured";
+/**
+ * Probe Bedrock Knowledge Base reachability via a minimal `Retrieve` call.
+ * Uses the same code path as the `bedrock_kb_retrieve` tool (Agent Runtime API).
+ */
+export async function resolveBedrockKbDependencyStatus(): Promise<BedrockKbDependencyStatus> {
+  const kbId = process.env.BEDROCK_KB_ID?.trim();
+  if (!kbId) return "not_configured";
+  try {
+    const result = await Promise.race([
+      bedrockKbRetrieve("health", kbId, 1),
+      new Promise<never>((_, reject) => {
+        setTimeout(() => reject(new Error("Bedrock KB probe timeout")), PING_MS);
+      }),
+    ]);
+    if (
+      result &&
+      typeof result === "object" &&
+      (result as { status?: string }).status === "ok"
+    ) {
+      return "connected";
+    }
+    logger.warn("[health] bedrock KB probe returned non-ok", {
+      knowledgeBaseId: kbId,
+      resultPreview: JSON.stringify(result).slice(0, 300),
+    });
+    return "unreachable";
+  } catch (err) {
+    logger.warn("[health] bedrock KB probe failed", {
+      knowledgeBaseId: kbId,
+      error: err instanceof Error ? err.name : "Error",
+      message: err instanceof Error ? err.message : String(err),
+    });
+    return "unreachable";
+  }
 }
 
 /**
@@ -105,6 +137,15 @@ export async function resolveAgentcoreDependencyStatus(): Promise<AgentcoreStatu
       return "connected";
     }
 
+    // Memory exists in IAM/env but the control plane has not finished activating it
+    // (or it is being deleted). ListSessions/ListEvents are rejected until ACTIVE.
+    if (
+      name === "ValidationException" &&
+      /memory status is not active/i.test(message)
+    ) {
+      return "inactive";
+    }
+
     // Anything else is a real connectivity / auth / throttle / mis-config
     // problem. Log so the next regression doesn't get silently buried in a
     // `catch {}`.
@@ -134,30 +175,6 @@ export async function resolveMcpDependencyStatus(): Promise<McpStatus> {
   }
 }
 
-/** Short-term chat session storage: in-process Map vs MongoDB `chat_sessions`. */
-export type ChatSessionsPersistenceStatus = "memory" | "mongodb" | "agentcore" | "unavailable";
-
-export async function resolveChatSessionsPersistenceStatus(
-  mongoStatus: MongoDependencyStatus,
-): Promise<ChatSessionsPersistenceStatus> {
-  const shortTermBackend = (process.env.SHORT_TERM_MEMORY_BACKEND ?? "").trim().toLowerCase();
-  if (shortTermBackend === "agentcore" && process.env.AGENTCORE_MEMORY_STORE_ID?.trim()) {
-    return "agentcore";
-  }
-  if (!usePersistentChatSessions()) return "memory";
-  if (mongoStatus === "not_configured" || mongoStatus === "unreachable") return "unavailable";
-  const coll = await getChatSessionsCollection();
-  if (!coll) return "unavailable";
-  return "mongodb";
-}
-
-/** MongoDB MCP is direct AgentCore Runtime; Gateway remains for non-Mongo tools. */
-export type ToolHostingMode = "hybrid";
-
-export function resolveToolHostingMode(): ToolHostingMode {
-  return "hybrid";
-}
-
 /** Count agents that have `memory.longTerm: true` in their frontmatter. */
 function countLtmAgents(): number {
   return listAgents().filter((a) => getAgent(a.id)?.memory?.longTerm === true).length;
@@ -185,21 +202,19 @@ export async function buildHealthPayload(): Promise<{
   dependencies: {
     mongodb: MongoDependencyStatus;
     longTermMemory: LongTermMemoryStatus;
-    chatSessions: ChatSessionsPersistenceStatus;
-    toolHosting: ToolHostingMode;
     agentcore: AgentcoreStatus;
     mcpServer: McpStatus;
-    bedrockKnowledgeBase: StubDependencyStatus;
+    bedrockKnowledgeBase: BedrockKbDependencyStatus;
   };
 }> {
   const mongo = await resolveMongoDependencyStatus();
   const longTermMemory = resolveLongTermMemoryStatus(mongo);
-  const chatSessions = await resolveChatSessionsPersistenceStatus(mongo);
-  const persistWanted = usePersistentChatSessions();
-  const agentcore = await resolveAgentcoreDependencyStatus();
-  const mcpServer = await resolveMcpDependencyStatus();
-  const degraded =
-    mongo === "unreachable" || (persistWanted && chatSessions === "unavailable");
+  const [agentcore, mcpServer, bedrockKnowledgeBase] = await Promise.all([
+    resolveAgentcoreDependencyStatus(),
+    resolveMcpDependencyStatus(),
+    resolveBedrockKbDependencyStatus(),
+  ]);
+  const degraded = mongo === "unreachable";
 
   return {
     status: degraded ? "degraded" : "ok",
@@ -208,11 +223,9 @@ export async function buildHealthPayload(): Promise<{
     dependencies: {
       mongodb: mongo,
       longTermMemory,
-      chatSessions,
-      toolHosting: resolveToolHostingMode(),
       agentcore,
       mcpServer,
-      bedrockKnowledgeBase: resolveBedrockKbDependencyStatus(),
+      bedrockKnowledgeBase,
     },
   };
 }

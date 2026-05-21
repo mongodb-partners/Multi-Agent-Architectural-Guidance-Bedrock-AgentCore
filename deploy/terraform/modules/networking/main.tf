@@ -1,5 +1,19 @@
 data "aws_availability_zones" "available" {
   state = "available"
+
+  filter {
+    name   = "zone-type"
+    values = ["availability-zone"]
+  }
+
+  filter {
+    name   = "opt-in-status"
+    values = ["opt-in-not-required"]
+  }
+}
+
+locals {
+  selected_az_names = sort(data.aws_availability_zones.available.names)
 }
 
 # ── VPC ──────────────────────────────────────────────────────────────────────
@@ -24,7 +38,7 @@ resource "aws_subnet" "public" {
 
   vpc_id                  = aws_vpc.main.id
   cidr_block              = cidrsubnet(var.vpc_cidr, 8, count.index)
-  availability_zone       = data.aws_availability_zones.available.names[count.index]
+  availability_zone       = local.selected_az_names[count.index]
   map_public_ip_on_launch = true
 
   tags = {
@@ -41,7 +55,7 @@ resource "aws_subnet" "private" {
 
   vpc_id            = aws_vpc.main.id
   cidr_block        = cidrsubnet(var.vpc_cidr, 8, count.index + 10)
-  availability_zone = data.aws_availability_zones.available.names[count.index]
+  availability_zone = local.selected_az_names[count.index]
 
   tags = {
     Name        = "${var.project_name}-private-${count.index}-${var.environment}"

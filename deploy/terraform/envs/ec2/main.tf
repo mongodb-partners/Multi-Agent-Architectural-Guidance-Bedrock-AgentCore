@@ -298,11 +298,14 @@ module "bedrock_kb_privatelink" {
 
   project_name       = var.project_name
   environment        = var.environment
+  aws_region         = var.aws_region
   vpc_id             = local.shared_vpc_id
   private_subnet_ids = local.shared_private_subnet_ids
   atlas_vpce_id      = local.shared_atlas_pl_vpce_id
   atlas_ports        = module.mongodb_atlas.privatelink_ports
   tags               = local.common_tags
+
+  depends_on = [module.mongodb_atlas]
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -324,12 +327,25 @@ module "bedrock_kb_peering" {
   vpc_id             = local.shared_vpc_id
   private_subnet_ids = local.shared_private_subnet_ids
 
-  # Use the `-pri.mongodb.net` peering host (populated by Atlas only after
-  # awsCustomDNS=true on the project — modules/atlas-vpc-peering enables that
-  # idempotently). The standard mongo_host resolves to PUBLIC IPs on dig,
-  # which then fails the discover script's ATLAS_PEERING_CIDR sanity check.
-  atlas_srv_host          = module.mongodb_atlas.peering_srv_host
-  atlas_connection_string = module.mongodb_atlas.peering_connection_string
+  # Derive the `-pri.mongodb.net` peering host from the standard host instead
+  # of reading module.mongodb_atlas.peering_srv_host. That output is sourced
+  # from `connection_strings.private_srv` which is `(known after apply)` AND
+  # often empty on a fresh deploy until Atlas internally propagates the
+  # peering + awsCustomDNS state to the cluster doc (race: cluster created
+  # at T=0, DNS enabled at T=20s, Atlas populates private_srv at T=60-120s,
+  # but terraform reads cluster state at T=0 and never re-refreshes during
+  # the same apply). The naming pattern is contractual per Atlas docs:
+  #   standard: <cluster-name>.<project-shard-id>.mongodb.net
+  #   peering : <cluster-name>-pri.<project-shard-id>.mongodb.net
+  # so we can safely inject `-pri` and avoid the apply-time race.
+  atlas_srv_host = replace(module.mongodb_atlas.mongo_host, "/^([^.]+)\\.([^.]+\\.mongodb\\.net)$/", "$1-pri.$2")
+
+  # Used ONLY as a SHA trigger for re-discovery on cluster reissue (see
+  # bedrock-kb-peering/main.tf line 79). Use the standard string — always
+  # populated. peering_connection_string is empty on fresh apply (same race
+  # as peering_srv_host above) and would crash sha1() with an empty input
+  # the first time it's evaluated.
+  atlas_connection_string = module.mongodb_atlas.connection_string
   cluster_name            = module.mongodb_atlas.cluster_name
   ec2_instance_id         = module.ec2.instance_id
   atlas_peering_cidr      = local.shared_atlas_peering_cidr
@@ -394,7 +410,12 @@ module "bedrock_kb" {
 
   # Explicit dep on the full Atlas module (not just cluster) so ensure_collection
   # runs AFTER the DB user is created — mongo_host alone only depends on the cluster.
-  depends_on = [module.mongodb_atlas]
+  # When KB PrivateLink is enabled, also wait for NLB target registration
+  # (see bedrock-kb-privatelink output depends_on) before CreateKnowledgeBase.
+  depends_on = [
+    module.mongodb_atlas,
+    module.bedrock_kb_privatelink,
+  ]
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -588,6 +609,10 @@ resource "aws_security_group" "mongodb_mcp_runtime" {
   tags = {
     Name = "${var.project_name}-sg-mcp-runtime-${var.environment}"
   }
+
+  lifecycle {
+    ignore_changes = [description]
+  }
 }
 
 # AgentCore Runtime VPC-mode container agents periodically pull their image from
@@ -711,45 +736,104 @@ data "aws_vpc_endpoint" "existing_agentcore_runtime_logs" {
   service_name = "com.amazonaws.${var.aws_region}.logs"
 }
 
+# Static for_each keys — endpoint/source SG IDs can be unknown at plan time when
+# module.ec2 is being created or replaced; resolve them in the provisioner instead.
 locals {
-  existing_agentcore_runtime_vpce_security_group_ids = var.create_agentcore_runtime_vpc_endpoints ? [] : distinct(flatten([
-    data.aws_vpc_endpoint.existing_agentcore_runtime_ecr_api[0].security_group_ids,
-    data.aws_vpc_endpoint.existing_agentcore_runtime_ecr_dkr[0].security_group_ids,
-    data.aws_vpc_endpoint.existing_agentcore_runtime_logs[0].security_group_ids,
-  ]))
-  existing_agentcore_runtime_vpce_access_pairs = var.create_agentcore_runtime_vpc_endpoints ? {} : merge([
-    for endpoint_sg_id in local.existing_agentcore_runtime_vpce_security_group_ids : {
-      for source_sg_id in [
-        module.ec2.security_group_id,
-        aws_security_group.mongodb_mcp_runtime.id,
-        ] : "${endpoint_sg_id}-${source_sg_id}" => {
-        endpoint_sg_id = endpoint_sg_id
-        source_sg_id   = source_sg_id
-      }
-    }
-  ]...)
+  existing_agentcore_runtime_vpce_access_rules = var.create_agentcore_runtime_vpc_endpoints ? {} : {
+    "ecr-api-ec2" = { endpoint = "ecr_api", source = "ec2" }
+    "ecr-api-mcp" = { endpoint = "ecr_api", source = "mcp" }
+    "ecr-dkr-ec2" = { endpoint = "ecr_dkr", source = "ec2" }
+    "ecr-dkr-mcp" = { endpoint = "ecr_dkr", source = "mcp" }
+    "logs-ec2"    = { endpoint = "logs", source = "ec2" }
+    "logs-mcp"    = { endpoint = "logs", source = "mcp" }
+  }
 }
 
 resource "null_resource" "existing_agentcore_vpce_access" {
-  for_each = local.existing_agentcore_runtime_vpce_access_pairs
+  for_each = local.existing_agentcore_runtime_vpce_access_rules
+
+  depends_on = [
+    module.ec2,
+    aws_security_group.mongodb_mcp_runtime,
+    data.aws_vpc_endpoint.existing_agentcore_runtime_ecr_api,
+    data.aws_vpc_endpoint.existing_agentcore_runtime_ecr_dkr,
+    data.aws_vpc_endpoint.existing_agentcore_runtime_logs,
+  ]
 
   triggers = {
-    endpoint_sg_id = each.value.endpoint_sg_id
-    source_sg_id   = each.value.source_sg_id
-    region         = var.aws_region
+    rule_key   = each.key
+    endpoint   = each.value.endpoint
+    source     = each.value.source
+    ecr_api_sg = join(",", data.aws_vpc_endpoint.existing_agentcore_runtime_ecr_api[0].security_group_ids)
+    ecr_dkr_sg = join(",", data.aws_vpc_endpoint.existing_agentcore_runtime_ecr_dkr[0].security_group_ids)
+    logs_sg    = join(",", data.aws_vpc_endpoint.existing_agentcore_runtime_logs[0].security_group_ids)
+    ec2_sg     = module.ec2.security_group_id
+    mcp_sg     = aws_security_group.mongodb_mcp_runtime.id
+    region     = var.aws_region
   }
 
   provisioner "local-exec" {
     command = <<-EOT
+      set -e
+      ENDPOINT="${each.value.endpoint}"
+      SOURCE="${each.value.source}"
+      case "$ENDPOINT" in
+        ecr_api) ENDPOINT_SG='${join(",", data.aws_vpc_endpoint.existing_agentcore_runtime_ecr_api[0].security_group_ids)}' ;;
+        ecr_dkr) ENDPOINT_SG='${join(",", data.aws_vpc_endpoint.existing_agentcore_runtime_ecr_dkr[0].security_group_ids)}' ;;
+        logs)    ENDPOINT_SG='${join(",", data.aws_vpc_endpoint.existing_agentcore_runtime_logs[0].security_group_ids)}' ;;
+        *) echo "unknown endpoint $ENDPOINT" >&2; exit 1 ;;
+      esac
+      case "$SOURCE" in
+        ec2) SOURCE_SG='${module.ec2.security_group_id}' ;;
+        mcp) SOURCE_SG='${aws_security_group.mongodb_mcp_runtime.id}' ;;
+        *) echo "unknown source $SOURCE" >&2; exit 1 ;;
+      esac
+      # VPCEs attach one SG; take the first if comma-separated.
+      ENDPOINT_SG="$${ENDPOINT_SG%%,*}"
       set +e
       OUT=$(aws ec2 authorize-security-group-ingress \
         --region '${var.aws_region}' \
-        --group-id '${each.value.endpoint_sg_id}' \
+        --group-id "$ENDPOINT_SG" \
         --protocol tcp \
         --port 443 \
-        --source-group '${each.value.source_sg_id}' 2>&1)
+        --source-group "$SOURCE_SG" 2>&1)
       RC=$?
       if [ "$RC" -eq 0 ] || echo "$OUT" | grep -q 'InvalidPermission.Duplicate'; then
+        exit 0
+      fi
+      echo "$OUT" >&2
+      exit "$RC"
+    EOT
+  }
+
+  provisioner "local-exec" {
+    when    = destroy
+    command = <<-EOT
+      set -e
+      ENDPOINT="${self.triggers.endpoint}"
+      SOURCE="${self.triggers.source}"
+      case "$ENDPOINT" in
+        ecr_api) ENDPOINT_SG='${self.triggers.ecr_api_sg}' ;;
+        ecr_dkr) ENDPOINT_SG='${self.triggers.ecr_dkr_sg}' ;;
+        logs)    ENDPOINT_SG='${self.triggers.logs_sg}' ;;
+        *) echo "unknown endpoint $ENDPOINT" >&2; exit 1 ;;
+      esac
+      case "$SOURCE" in
+        ec2) SOURCE_SG='${self.triggers.ec2_sg}' ;;
+        mcp) SOURCE_SG='${self.triggers.mcp_sg}' ;;
+        *) echo "unknown source $SOURCE" >&2; exit 1 ;;
+      esac
+      # VPCEs attach one SG; take the first if comma-separated.
+      ENDPOINT_SG="$${ENDPOINT_SG%%,*}"
+      set +e
+      OUT=$(aws ec2 revoke-security-group-ingress \
+        --region '${self.triggers.region}' \
+        --group-id "$ENDPOINT_SG" \
+        --protocol tcp \
+        --port 443 \
+        --source-group "$SOURCE_SG" 2>&1)
+      RC=$?
+      if [ "$RC" -eq 0 ] || echo "$OUT" | grep -q 'InvalidPermission.NotFound'; then
         exit 0
       fi
       echo "$OUT" >&2
@@ -797,10 +881,10 @@ check "mcp_uri_is_private_in_peering_mode" {
       !local.is_peering_mode ||
       (
         local.mcp_mongodb_uri != "PEERING_URI_UNAVAILABLE"
-        && can(regex("-pri\\.mongodb\\.net", local.mcp_mongodb_uri))
+        && can(regex("-pri\\.", local.mcp_mongodb_uri))
       )
     )
-    error_message = "Peering-mode MONGODB_URI does not look private (missing '-pri.mongodb.net'). Resolved value: ${local.mcp_mongodb_uri}. Check that module.mongodb_atlas.peering_connection_string or peering_connection_srv_string is populated — the cluster's connection_strings[0].private should be populated whenever a mongodbatlas_network_peering exists for this project+region."
+    error_message = "Peering-mode MONGODB_URI does not look private (missing '-pri.' peering host token). Check that module.mongodb_atlas.peering_connection_string or peering_connection_srv_string is populated — the cluster's connection_strings[0].private should be populated whenever a mongodbatlas_network_peering exists for this project+region."
   }
 }
 

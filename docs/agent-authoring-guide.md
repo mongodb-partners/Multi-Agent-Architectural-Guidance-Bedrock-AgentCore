@@ -210,7 +210,9 @@ See the [Skills Authoring Guide](skills-authoring-guide.md) for how to write ski
 
 ## Available Tools
 
-Tools include **built-in** Strands tools (MongoDB, KB, embeddings, …), **skill-bound** helpers (`read_skill_resource`, `run_skill_script`, per-skill HTTP tools), and optional **global** HTTP tools. Agents use them as directed by their skill instructions — the skill tells the agent *when* and *how* to call each tool.
+Tools include **built-in** Strands tools (MongoDB, KB, embeddings, ...), **skill-bound** helpers (`read_skill_resource`, `run_skill_script`, per-skill HTTP tools), and optional **global** HTTP tools. Agents use them as directed by their skill instructions — the skill tells the agent *when* and *how* to call each tool.
+
+> **Complete catalog:** [`reference/tools.md`](reference/tools.md) is the canonical developer reference for every supported tool, internal-only helper, runtime home, config gate, env var, and debugging surface. Keep this section as a quick orientation only.
 
 | Tool | What it does | Status |
 |------|-------------|--------|
@@ -228,7 +230,7 @@ Tools include **built-in** Strands tools (MongoDB, KB, embeddings, …), **skill
 
 - `activate_skill` is registered for every agent automatically. You do not list it in `tools:`.
 - All Mongo-shaped tools resolve to MCP tool calls against the MongoDB MCP AgentCore Runtime (`MONGODB_MCP_RUNTIME_ARN` / `MONGODB_MCP_RUNTIME_ENDPOINT`). The agent runtime never opens a MongoDB connection itself.
-- **`HTTP_TOOLS_MOCK=1`** skips real outbound HTTP for all HTTP tools (skill + global); useful for demos without Lambda deployed. **`GET /http-tools`** lists configured tools (see [`api-reference.md` § `GET /http-tools`](api-reference.md#10-get-http-tools)).
+- **`HTTP_TOOLS_MOCK=1`** skips real outbound HTTP for all HTTP tools (skill + global); useful for demos without Lambda deployed. **`GET /http-tools`** lists configured HTTP tools only (see [`api-reference.md` § `GET /http-tools`](api-reference.md#10-get-http-tools)); use [`reference/tools.md`](reference/tools.md) for the complete tool catalog.
 
 Only list tools that the agent's skills actually use. Giving an agent tools it has no instructions for does not add capability — it adds surface area for unexpected behavior.
 

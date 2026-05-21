@@ -7,7 +7,7 @@
 
 ## 1. The 30-second version
 
-You type a question into a chat box. A web API on a small AWS server receives it. The API itself classifies the user message (in-process, using a lightweight heuristic + Bedrock Haiku fallback) and invokes the matching **specialist** AgentCore Runtime directly. The specialist looks up data in MongoDB through a small **MCP runtime** (a dedicated AgentCore Runtime that fronts the MongoDB driver) reached over MCP. The AgentCore Gateway remains available for non-Mongo tools. The reply streams back to your screen token-by-token over SSE. Past conversations are remembered between sessions in MongoDB (`agent_memory_facts` + `chat_messages`) with hybrid vector + BM25 retrieval and an AgentCore Memory Store fallback.
+You type a question into a chat box. A web API on a small AWS server receives it. The API itself classifies the user message (in-process, using a lightweight heuristic + Bedrock Haiku fallback) and invokes the matching **specialist** AgentCore Runtime directly. The specialist looks up data in MongoDB through a small **MCP runtime** (a dedicated AgentCore Runtime that fronts the MongoDB driver) reached over MCP. The AgentCore Gateway remains available for non-Mongo tools. The reply streams back to your screen token-by-token over SSE. In deployed AWS, **short-term conversation memory lives in AgentCore Memory**; **long-term cross-session memory lives in MongoDB Atlas** (`agent_memory_facts` + `chat_messages`) with hybrid vector + BM25 retrieval.
 
 The legacy orchestrator-hop path through the `orchestrator` runtime is still available behind `USE_ORCHESTRATOR_RUNTIME=1` as a one-release rollback escape hatch.
 
@@ -35,8 +35,8 @@ flowchart LR
   OM -.->|non-Mongo MCP tools| GW
   PR -.->|non-Mongo MCP tools| GW
   MCPRT -->|PrivateLink or Peering| ATLAS[(MongoDB Atlas)]
-  API -->|hybrid retrieval| LTM[(MongoDB<br/>agent_memory_facts +<br/>chat_messages)]
-  API -.->|short-term fallback| MEM[(AgentCore Memory)]
+  API -->|long-term memory<br/>hybrid retrieval| LTM[(MongoDB Atlas<br/>agent_memory_facts +<br/>chat_messages)]
+  API -->|short-term memory<br/>current session| MEM[(AgentCore Memory)]
   TS -.->|Retrieve| KB[(Bedrock KB<br/>troubleshooting docs)]
   CLS -.->|InvokeModel| BEDROCK[Bedrock<br/>Haiku 4.5 + Sonnet 4.x]
   TS -.->|InvokeModel| BEDROCK
@@ -53,9 +53,9 @@ flowchart LR
 | **Specialist agents** | 3 specialist runtimes | Each is an expert: `order-management`, `troubleshooting`, `product-recommendation` |
 | **Bedrock** | AWS's foundation model service | Models per agent: orchestrator + `order-management` = Claude Haiku 4.5; `troubleshooting` + `product-recommendation` = Claude Sonnet 4.x. Source of truth: [`config/agents/*.agent.md`](../config/agents/) |
 | **MongoDB MCP Runtime** | A dedicated AgentCore Runtime ([`mcp-runtimes/mongodb-mcp/`](../mcp-runtimes/mongodb-mcp/)) | The only thing that talks to MongoDB. Exposes `mongodb_query`, `mongodb_vector_search`, `mongodb_aggregate` and the internal `mongodb_hybrid_search`. Reached via `bedrock-agentcore:InvokeAgentRuntime` over MCP — never `lambda:InvokeFunction`. The legacy Lambda host was deleted in CLIENT_REVIEW Phase 7e. |
-| **MongoDB Atlas** | Managed MongoDB cluster (M10 default) | Stores customers, orders, products, troubleshooting docs, and the runtime collections (`agent_memory_facts`, `chat_messages`, `chat_sessions`, `traces`) |
+| **MongoDB Atlas** | Managed MongoDB cluster (M10 default) | Stores customers, orders, products, troubleshooting docs, long-term memory collections (`agent_memory_facts`, `chat_messages`), session mirrors (`chat_sessions`), and traces |
 | **Long-term memory** | `agent_memory_facts` + `chat_messages` with hybrid retrieval | Vector + BM25 fused with RRF, weighted, recency-decayed, MMR-diversified. See [`docs/long-term-memory-design.md`](long-term-memory-design.md) |
-| **AgentCore Memory** | An AWS-managed memory store | Short-term backend when `SHORT_TERM_MEMORY_BACKEND=agentcore`; LTM fallback if Mongo write fails |
+| **AgentCore Memory** | An AWS-managed memory store | Authoritative short-term conversation memory backend in deployed AWS (`SHORT_TERM_MEMORY_BACKEND=agentcore`); LTM fallback if Mongo write fails |
 | **Bedrock KB** | A vector-search knowledge base | RAG over uploaded manuals. Ingestion path is mode-aware (PL NLB by default in privatelink mode; peering NLB by default in peering mode — both private) |
 
 For the editable historical diagram: [`diagrams/01-aws-infrastructure.drawio`](diagrams/01-aws-infrastructure.drawio) — note this drawio source is **historical** and may show the older orchestrator-hop topology. The Mermaid diagram above is the current truth.
@@ -258,7 +258,8 @@ These are intentional simplifications. Don't add them back without explicit appr
 | `products` | Product catalog with prices, ratings, embeddings | ~9 docs (POC) |
 | `troubleshooting_docs` | Diagnostic guides, error codes (with embeddings for vector search) | ~7 docs (POC) |
 | `agent_memory_facts` | Long-term memory facts (primary, TTL-managed) | grows over time |
-| `chat_sessions` | Persistent short-term chat history (only if `PERSIST_CHAT_SESSIONS=1`) | grows over time |
+| `chat_messages` | Long-term memory retrieval mirror of individual turns | grows over time |
+| `chat_sessions` | Session history mirror for UI/audit/cold-read fallback; AgentCore is the short-term memory authority in deployed AWS | grows over time |
 
 ### Memory: short-term vs long-term
 
@@ -266,15 +267,15 @@ These are intentional simplifications. Don't add them back without explicit appr
 flowchart TB
   REQ[POST /chat] --> ST[Short-Term<br/>session-store.ts]
   REQ --> LT[Long-Term<br/>long-term-memory.ts]
-  ST --> STM[In-memory Map<br/>default]
-  ST --> STAC[AgentCore events<br/>EC2 short-term default]
-  ST --> STMG[(MongoDB chat_sessions<br/>optional write-through)]
+  ST --> STAC[AgentCore events<br/>deployed AWS authority]
+  ST --> STM[In-memory Map<br/>process cache/fallback]
+  ST --> STMG[(MongoDB chat_sessions<br/>UI/audit/cold-read mirror)]
   LT --> LTMG[(MongoDB agent_memory_facts<br/>primary)]
   LT --> LTAC[AgentCore Memory Store<br/>fallback]
 ```
 
-- **Short-term**: every message in the current chat session. In production it is primarily read/written via AgentCore events keyed by `(userId, sessionId)` with `session-store` fallback. The full backend selection matrix (`SHORT_TERM_MEMORY_BACKEND` × `AGENTCORE_MEMORY_STORE_ID` × `MONGODB_URI`) lives in [memory-architecture.md §1](memory-architecture.md).
-- **Long-term**: memorable user facts/preferences. Primary store is MongoDB `agent_memory_facts` (TTL), with AgentCore fallback if Mongo read/write fails. Fact extraction is LLM-only via `api/src/lib/llm-fact-extractor.ts` — there is no regex fallback, by design (a regex fallback would silently store false-positive "facts" on every Bedrock blip).
+- **Short-term**: every message in the current chat session. In deployed AWS this is read/written via AgentCore events keyed by `(userId, sessionId)`. MongoDB `chat_sessions` is a mirror used for the Sessions page, audit/debug history, and cold-read fallback. The full backend selection matrix (`SHORT_TERM_MEMORY_BACKEND` × `AGENTCORE_MEMORY_STORE_ID` × `MONGODB_URI`) lives in [memory-architecture.md §1](memory-architecture.md).
+- **Long-term**: memorable user facts/preferences. Primary store is MongoDB Atlas (`agent_memory_facts` plus the `chat_messages` retrieval mirror), with AgentCore fallback if Mongo read/write fails. Fact extraction is LLM-only via `api/src/lib/llm-fact-extractor.ts` — there is no regex fallback, by design (a regex fallback would silently store false-positive "facts" on every Bedrock blip).
 - **Auth context**: per-turn prompt context includes authenticated identity (`sub`, resolved email, customer tier, recent SKUs) so "my orders/my open tickets/recommend for me" resolve without asking for email.
 
 JWKS auth is mandatory end-to-end (see `assertJwksAuthConfigured()` in [`api/src/lib/jwt-verify.ts`](../api/src/lib/jwt-verify.ts)), so `userId = jwtPayload.sub` is always present and long-term memory always has an identity to scope by. See [memory-architecture.md](memory-architecture.md) for the full picture.
@@ -290,7 +291,7 @@ This answers the question _"the system currently lacks embeddings across all col
 | `orders`, `customers` | **No** (structured-only today) | Deterministic primary-key queries from `mongodb_query` (e.g. `{customerId, orderId}`); embeddings would not improve "show me ORD-1234." |
 | `agent_memory_facts` | **Yes** (Voyage AI 1024-d / Bedrock fallback) | LLM-extracted facts are embedded at write time and retrieved through hybrid `$vectorSearch` + Atlas Search BM25, fused with RRF, weights, recency decay, and MMR. |
 | `chat_messages` | **Yes** (Voyage AI 1024-d / Bedrock fallback) | Individual chat turns are mirrored as vector-searchable documents and included in the same hybrid long-term memory retriever. |
-| `chat_sessions` | **No** | Session metadata / short-term replay store; semantic retrieval uses the `chat_messages` mirror instead. |
+| `chat_sessions` | **No** | Session metadata mirror for UI/history/cold-read fallback; semantic retrieval uses the `chat_messages` mirror instead. |
 | `traces` | **No** | Operational data, not in-context. |
 
 Coherence comes from the orchestrator routing decision plus skill activation plus identity-aware context. Embeddings are used where the corpus is natural language (`products`, `troubleshooting_docs`, `agent_memory_facts`, `chat_messages`); structured operational collections stay deterministic.
@@ -480,7 +481,7 @@ See [`deployment-guide.md`](deployment-guide.md) for current deployment status.
   full-page Trace Viewer at `ui/pages/2_Trace_Viewer.py` with timeline,
   routing attribution, MongoDB dashboard, AgentCore hops, memory dashboard,
   and a raw-event developer expander. See
-  [demo-mode-guide.md](demo-mode-guide.md) for the env knobs and the UI
+  [demo/demo-mode-guide.md](demo/demo-mode-guide.md) for the env knobs and the UI
   walkthrough.
 
 ---
@@ -491,6 +492,6 @@ See [`deployment-guide.md`](deployment-guide.md) for current deployment status.
 - **For configuration**: [configuration-guide.md](configuration-guide.md) and the comprehensive [reference/env-vars.md](reference/env-vars.md)
 - **For the API contract**: [api-reference.md](api-reference.md)
 - **To understand memory in depth**: [memory-architecture.md](memory-architecture.md), [long-term-memory-design.md](long-term-memory-design.md), [hybrid-search.md](hybrid-search.md)
-- **For the trace UI walkthrough**: [demo-mode-guide.md](demo-mode-guide.md), [trace-ui-system-overview.md](trace-ui-system-overview.md)
+- **For the trace UI walkthrough**: [demo/demo-mode-guide.md](demo/demo-mode-guide.md), [trace-ui-system-overview.md](trace-ui-system-overview.md)
 - **For Terraform modules and SSM parameters**: [reference/terraform-modules.md](reference/terraform-modules.md), [reference/ssm-parameters.md](reference/ssm-parameters.md)
 - **For debugging the live stack**: [debugging.md](debugging.md)

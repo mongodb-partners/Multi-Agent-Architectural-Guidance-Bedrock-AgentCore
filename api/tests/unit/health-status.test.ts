@@ -57,11 +57,21 @@ const makeAwsError = (name: string, message: string): Error & { name: string } =
   return e;
 };
 
+const kbProbeState: { result?: { status: string }; throwError?: Error } = {};
+mock.module("../../src/adapters/bedrock-retrieval.ts", () => ({
+  bedrockKbRetrieve: async () => {
+    if (kbProbeState.throwError) throw kbProbeState.throwError;
+    return kbProbeState.result ?? { status: "ok", source: "bedrock_kb", results: [] };
+  },
+  bedrockGenerateEmbedding: async () => ({ status: "ok" }),
+}));
+
 const {
   buildHealthPayload,
   resolveMongoDependencyStatus,
   resolveLongTermMemoryStatus,
   resolveAgentcoreDependencyStatus,
+  resolveBedrockKbDependencyStatus,
 } = await import("../../src/lib/health-status.ts");
 
 describe("health-status", () => {
@@ -71,6 +81,8 @@ describe("health-status", () => {
     mockState.failConnect = false;
     mockState.failPing = false;
     agentcoreState.error = undefined;
+    kbProbeState.result = { status: "ok", source: "bedrock_kb", results: [] };
+    kbProbeState.throwError = undefined;
   });
 
   afterEach(() => {
@@ -101,7 +113,6 @@ describe("health-status", () => {
     expect(body.status).toBe("degraded");
     expect(body.dependencies.mongodb).toBe("unreachable");
     expect(body.dependencies.longTermMemory).toBe("unreachable");
-    expect(body.dependencies.chatSessions).toBe("unavailable");
   });
 
   test("buildHealthPayload includes longTermMemory field when no URI", async () => {
@@ -111,8 +122,8 @@ describe("health-status", () => {
     expect(body.status).toBe("ok");
     expect(typeof body.dependencies.longTermMemory).toBe("string");
     expect(["not_configured", "no_agents"]).toContain(body.dependencies.longTermMemory);
-    expect(body.dependencies.chatSessions).toBe("memory");
-    expect(body.dependencies.toolHosting).toBe("hybrid");
+    expect(body.dependencies).not.toHaveProperty("chatSessions");
+    expect(body.dependencies).not.toHaveProperty("toolHosting");
   });
 
   test("resolveLongTermMemoryStatus not_configured when mongo not_configured", () => {
@@ -189,5 +200,44 @@ describe("health-status", () => {
     process.env.AGENTCORE_MEMORY_STORE_ID = "mem-fake";
     agentcoreState.error = makeAwsError("TimeoutError", "Request timed out");
     expect(await resolveAgentcoreDependencyStatus()).toBe("unreachable");
+  });
+
+  test("agentcore inactive when memory store is not ACTIVE yet", async () => {
+    process.env.AGENTCORE_MEMORY_STORE_ID = "mem-fake";
+    agentcoreState.error = makeAwsError(
+      "ValidationException",
+      "Memory status is not active, unable to process ListSessions request",
+    );
+    expect(await resolveAgentcoreDependencyStatus()).toBe("inactive");
+  });
+
+  test("bedrock KB not_configured when BEDROCK_KB_ID is absent", async () => {
+    delete process.env.BEDROCK_KB_ID;
+    expect(await resolveBedrockKbDependencyStatus()).toBe("not_configured");
+  });
+
+  test("bedrock KB connected when retrieve probe returns ok", async () => {
+    process.env.BEDROCK_KB_ID = "WROQHGJVTR";
+    kbProbeState.result = { status: "ok", source: "bedrock_kb", results: [] };
+    expect(await resolveBedrockKbDependencyStatus()).toBe("connected");
+  });
+
+  test("bedrock KB unreachable when retrieve returns error status", async () => {
+    process.env.BEDROCK_KB_ID = "WROQHGJVTR";
+    kbProbeState.result = { status: "error", source: "bedrock_kb", error: "AccessDenied" };
+    expect(await resolveBedrockKbDependencyStatus()).toBe("unreachable");
+  });
+
+  test("bedrock KB unreachable when retrieve throws", async () => {
+    process.env.BEDROCK_KB_ID = "WROQHGJVTR";
+    kbProbeState.throwError = makeAwsError("ResourceNotFoundException", "KB not found");
+    expect(await resolveBedrockKbDependencyStatus()).toBe("unreachable");
+  });
+
+  test("buildHealthPayload reports bedrockKnowledgeBase connected when KB configured", async () => {
+    process.env.BEDROCK_KB_ID = "WROQHGJVTR";
+    process.env.AGENTCORE_MEMORY_STORE_ID = "mem-fake";
+    const body = await buildHealthPayload();
+    expect(body.dependencies.bedrockKnowledgeBase).toBe("connected");
   });
 });

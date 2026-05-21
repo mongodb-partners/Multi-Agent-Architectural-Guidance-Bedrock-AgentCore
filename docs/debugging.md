@@ -110,6 +110,8 @@ When the per-turn cap is exceeded, low-priority events are dropped first; protec
 
 ## 5. Common failures and fixes
 
+> **Pre-deploy guards.** Most of the failure modes in this section also have a corresponding pre/post-apply guard in [`deploy/scripts/_preflight-checks.sh`](../deploy/scripts/_preflight-checks.sh). When you hit one of them inside a deploy, the failure envelope already names the matching `pf_check_*` and an anchor in [`docs/deployment-preflight-checks.md`](deployment-preflight-checks.md). Override knobs (`PREFLIGHT_SKIP=<id>`, `PREFLIGHT_JSON=1`, `PREFLIGHT_DRY_RUN=1`) are documented there.
+
 ### "API refuses to boot"
 - `AGENTCORE_ORCHESTRATOR_ARN must be set` → run `deploy-agents.sh` (or `deploy-project.sh`) so the ARN is injected into `.env.live`.
 - `AUTH_JWKS_URI / AUTH_ISSUER must be set` → run `deploy-project.sh`; both come from `module.cognito` outputs. No bypass.
@@ -215,20 +217,38 @@ The seven hypotheses (see source for the full mapping):
 | H4 | Weight dominance | `MEMORY_WEIGHT_CHAT_MESSAGES` vs `MEMORY_WEIGHT_FACTS` — defaults 1.2/1.5 |
 | H5 | Noisy long content | Chat message > 4 KB — see `MEMORY_TRACE_VALUES` redaction interplay |
 | H6 | Role filter mismatch | `MEMORY_INCLUDE_ASSISTANT_MESSAGES=false` excludes assistant turns |
-| H7 | Recency decay | `MEMORY_RECENCY_HALFLIFE_DAYS=30` — backdated rows decay below 0 |
+| H7 | Recency decay | `MEMORY_RECENCY_HALFLIFE_DAYS=90` (default) — very old backdated rows may still decay below recall threshold; set `0` to disable |
 
 ## 7. Auth debugging
 
 ```bash
-# Issue a fresh access token from a Cognito test user
-TOKEN=$(python3 e2e-smoke/get_token.py)
-curl -sS -H "Authorization: Bearer $TOKEN" "$API_URL/health" | jq .
+# /health is public (no Bearer required)
+curl -sS "$API_URL/health" | jq .
 
+# Issue a fresh access token from a Cognito test user (for protected routes)
+TOKEN=$(python3 e2e-smoke/get_token.py)
+```
+
+### `/health` dependency fields
+
+`GET /health` returns only **probed** integrations. It does not report short-term memory backend (`SHORT_TERM_MEMORY_BACKEND`) or MCP hosting mode.
+
+| Field | Green (`connected`) | Common false alarms |
+|---|---|---|
+| `mongodb` | Atlas ping via `MONGODB_URI` | `unreachable` → PrivateLink/URI wrong on EC2; `not_configured` → no URI |
+| `longTermMemory` | Mongo up + ≥1 agent with `memory.longTerm: true` | `no_agents` → enable LTM on an `.agent.md`; `not_configured` → no Mongo URI |
+| `agentcore` | Memory store reachable (`ListSessions` probe) | `inactive` → memory id in env but store not `ACTIVE`/`DELETING`; `unreachable` → IAM or wrong `AGENTCORE_MEMORY_STORE_ID` |
+| `mcpServer` | MCP connect + `listTools` | `unreachable` → VPC endpoints, runtime ARN, or cold-start > 2.5s |
+| `bedrockKnowledgeBase` | `BEDROCK_KB_ID` set + `Retrieve` ok | `not_configured` → env unset; `unreachable` → IAM or KB not ready (grep `[health] bedrock KB probe` in API logs) |
+
+Top-level `status: degraded` (HTTP 503) is set only when `mongodb` is `unreachable`. Other fields can be yellow on a still-live API.
+
+```bash
 # Validate the JWT locally
 python3 -c "import json, base64, sys; t=sys.argv[1]; p=t.split('.')[1]+'==='; print(json.dumps(json.loads(base64.urlsafe_b64decode(p)), indent=2))" "$TOKEN"
 ```
 
-When `/health` returns 401:
+`GET /health` does not require auth. When **protected** routes return `401`:
 
 - Confirm `AUTH_JWKS_URI` is reachable from EC2.
 - Confirm `AUTH_ISSUER` matches `iss` claim exactly (trailing slash matters).
@@ -295,6 +315,12 @@ Stay inside `sdk-trace-*` `^1.30.1` + exporters `^0.57.x`. When bumping any `@op
 3. `bun run validate:strands-otel`.
 
 The validator catches the full-Noop case; the dual-provider case (top-level real, Strands shadow-Noop) is not caught — the directory check above is the reliable signal.
+
+### Networking — subnets must use standard AZs only (not Local/Wavelength)
+Unfiltered `aws_availability_zones` can return Local Zones (`*-bos-1a`) or Wavelength Zones (`*-wl1-*`) first in accounts that enable them. Subnets land in unsupported zones → Atlas PrivateLink VPCE create fails; `map_public_ip_on_launch` on public subnets may fail. Fix: [`deploy/terraform/modules/networking/main.tf`](../deploy/terraform/modules/networking/main.tf) filters `zone-type = availability-zone` and `opt-in-status = opt-in-not-required`, then `sort()`s names before subnet assignment. **Recovery:** re-apply network stack; if Terraform cannot move immutable subnets, destroy/recreate networking-layer resources (or clean network apply), then recreate PrivateLink endpoints. Validate: `terraform plan` shows AZs like `us-east-1a`, not `us-east-1-bos-1a` or `us-east-1-wl1-*`.
+
+### Preflight module must stay bash-3.2 compatible
+[`deploy/scripts/_preflight-checks.sh`](../deploy/scripts/_preflight-checks.sh) targets the stock macOS `/bin/bash` (3.2). It must **not** introduce `declare -A`, `local -n` / `unset -n`, `mapfile`, `readarray`, or `${var,,}` lowercase expansion — instead use the `_pf_set` / `_pf_get` / `_pf_kv_reset` map helpers, the `eval "_PF_CHECKS=(\"\${${arr_name}[@]}\")"` indirect-array idiom, and `while IFS= read -r line; do …; done < <(…)` loops. Verify with `bash deploy/scripts/_preflight-checks.sh --self-test` on a stock macOS shell before merging — the self-test asserts every profile entry resolves to a defined function and every literal `--hint` value uses the closed `edit:|run:|console:|doc:|iam:|tfvar:` vocabulary, but it can only catch the bash-version regression by actually running. Catalog of every check in [`docs/deployment-preflight-checks.md`](deployment-preflight-checks.md).
 
 ## 11. Break-glass
 

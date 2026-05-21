@@ -18,6 +18,7 @@
  */
 
 import { type Span, SpanStatusCode, trace as otelTrace } from "@opentelemetry/api";
+import { enrichVectorSearchTraceEvents } from "../adapters/mongodb-mcp-client.ts";
 import { costOfUsage } from "./model-pricing.ts";
 import { recordMongoQuery } from "./cw-metrics.ts";
 import type {
@@ -957,6 +958,9 @@ export class TraceCollector {
     opts: { nestedEventsDropped?: number; logger?: { warn: (msg: string, ctx?: unknown) => void } } = {},
   ): void {
     if (!nestedEvents.length) return;
+    // Backfill mongo.vector_search scoreSummary from sibling mongo.result.sampleDocs
+    // when nested AgentCore traces omit scores on the wrapper event.
+    nestedEvents = enrichVectorSearchTraceEvents(nestedEvents) as TraceEvent[];
     const wrapper = this.events.find((e) => e.id === wrapperId);
     if (!wrapper) return;
     const wrapperStartTs = wrapper.ts;

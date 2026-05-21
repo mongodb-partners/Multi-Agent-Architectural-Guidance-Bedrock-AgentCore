@@ -51,9 +51,15 @@ echo "═══ 1. Health check ($API_URL) ═══"
 HEALTH="$(curl -s --max-time 15 "$API_URL/health" 2>/dev/null)"
 echo "  raw: $HEALTH" | head -c 400; echo
 for dep in mongodb longTermMemory agentcore mcpServer; do
-  ok=$(echo "$HEALTH" | python3 -c "import json,sys; d=json.load(sys.stdin); v=d.get('dependencies',{}).get('$dep',''); print(1 if v in ('connected','agentcore','gateway') else 0)" 2>/dev/null || echo 0)
+  ok=$(echo "$HEALTH" | python3 -c "import json,sys; d=json.load(sys.stdin); v=d.get('dependencies',{}).get('$dep',''); print(1 if v=='connected' else 0)" 2>/dev/null || echo 0)
   assert "health.$dep connected" "$ok" "$(echo "$HEALTH" | python3 -c "import json,sys; print(json.load(sys.stdin).get('dependencies',{}).get('$dep','?'))" 2>/dev/null)"
 done
+# Optional KB probe when manifest carries bedrock_kb_id
+KB_ID="${BEDROCK_KB_ID:-}"
+if [[ -n "$KB_ID" ]]; then
+  ok=$(echo "$HEALTH" | python3 -c "import json,sys; d=json.load(sys.stdin); v=d.get('dependencies',{}).get('bedrockKnowledgeBase',''); print(1 if v=='connected' else 0)" 2>/dev/null || echo 0)
+  assert "health.bedrockKnowledgeBase connected" "$ok" "$(echo "$HEALTH" | python3 -c "import json,sys; print(json.load(sys.stdin).get('dependencies',{}).get('bedrockKnowledgeBase','?'))" 2>/dev/null)"
+fi
 
 # ─── 2. Auth ─────────────────────────────────────────────────────────────────
 echo ""

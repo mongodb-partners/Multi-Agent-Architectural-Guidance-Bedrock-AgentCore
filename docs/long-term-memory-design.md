@@ -16,7 +16,7 @@ How long-term memory (LTM) is implemented today, why every major design choice w
 
 LTM is **cross-session personalization**: things the agent should remember about a specific user between sessions. It is not:
 
-- **Short-term conversation history.** That's short-term memory (AgentCore events or in-memory + `chat_sessions`), keyed by `sessionId`. See [`memory-architecture.md §1`](memory-architecture.md).
+- **Short-term conversation history.** That's short-term memory, keyed by `sessionId` and backed by AgentCore Memory in deployed AWS. The in-memory map and MongoDB `chat_sessions` collection are cache/mirror/fallback layers, not the SoW short-term memory authority. See [`memory-architecture.md §1`](memory-architecture.md).
 - **The knowledge base.** Product catalog, troubleshooting docs, etc. live in `products` / `troubleshooting_docs` and are retrieved by `mongodb_vector_search` / `bedrock_kb_retrieve`. The agent does the same hybrid lookup against those collections, but those rows are not "memory" — they are reference data.
 - **A summary / consolidation layer.** There is no nightly job that rewrites or condenses facts. Recall leans on retrieval ranking, not on consolidation.
 

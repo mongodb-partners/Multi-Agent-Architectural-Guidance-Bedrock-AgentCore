@@ -805,8 +805,8 @@ function memoryNumCandidates(): number {
 }
 
 function memoryRecencyHalfLifeDays(): number {
-  const raw = Number(process.env.MEMORY_RECENCY_HALFLIFE_DAYS ?? 30);
-  return Number.isFinite(raw) ? raw : 30;
+  const raw = Number(process.env.MEMORY_RECENCY_HALFLIFE_DAYS ?? 90);
+  return Number.isFinite(raw) ? raw : 90;
 }
 
 function memoryMmrLambda(): number {

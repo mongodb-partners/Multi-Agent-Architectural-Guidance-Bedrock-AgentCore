@@ -88,7 +88,7 @@ test.describe('Troubleshooting Agent — Individual Commands', () => {
     const body = await res.json();
     expect(['ok', 'degraded']).toContain(body.status);
     expect(body.dependencies).toBeTruthy();
-    expect(['direct', 'lambda', 'gateway']).toContain(body.dependencies.toolHosting);
+    expect(['connected', 'not_configured']).toContain(body.dependencies.mongodb);
   });
 
 });

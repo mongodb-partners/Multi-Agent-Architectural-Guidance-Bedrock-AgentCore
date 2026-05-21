@@ -233,6 +233,7 @@ deploy/
 
 Companions:
 - [`docs/reference/deploy-scripts.md`](docs/reference/deploy-scripts.md) — every script + flag + phase index
+- [`docs/reference/tools.md`](docs/reference/tools.md) — every supported agent tool + runtime home
 - [`docs/reference/terraform-modules.md`](docs/reference/terraform-modules.md) — every module + inputs/outputs
 - [`docs/reference/ssm-parameters.md`](docs/reference/ssm-parameters.md) — cross-stack SSM contract
 - [`deploy/terraform/.design.md`](deploy/terraform/.design.md) — the **why** behind non-obvious Terraform choices
@@ -272,8 +273,9 @@ docs/
 ├── agentcore-runtime-design.md
 ├── debugging.md                       ← developer playbook + persistent pitfalls + validation scripts
 ├── estimate.md
-├── demo-script.md
-├── demo-mode-guide.md
+├── demo/
+│   ├── demo-script.md
+│   └── demo-mode-guide.md
 ├── dashboards/
 │   ├── README.md                      Widget catalog + console URLs + alarm thresholds
 │   └── *.png                          (Illustrative — names will differ in your env)

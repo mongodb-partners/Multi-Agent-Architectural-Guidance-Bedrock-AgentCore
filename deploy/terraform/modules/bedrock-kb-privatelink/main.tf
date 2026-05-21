@@ -4,6 +4,10 @@ terraform {
       source  = "hashicorp/aws"
       version = ">= 6.27, < 7.0"
     }
+    null = {
+      source  = "hashicorp/null"
+      version = "~> 3.0"
+    }
   }
 }
 
@@ -28,9 +32,9 @@ terraform {
 #         │
 #         ▼
 #     OUR Network Load Balancer  ◄── this module
-#         │  (TCP 27017 → IP target group)
+#         │  (TCP per mongod listener port → IP target group)
 #         ▼
-#     Atlas Interface VPCE ENIs  ◄── data lookup (NOT created here)
+#     Atlas Interface VPCE ENIs  ◄── discovered at apply time via AWS CLI
 #         │
 #         ▼
 #     Atlas (cross-account, PrivateLink-enabled cluster)
@@ -40,42 +44,22 @@ terraform {
 #
 # OPERATIONAL CAVEAT: NLB IP targets reference the Atlas VPCE ENI private IPs.
 # Those IPs are stable for the lifetime of the VPCE; if the operator destroys
-# and recreates the VPCE in modules/atlas-privatelink/, this module's NLB
-# target group must be re-applied so the new ENIs become targets. terraform
-# apply does this automatically because aws_network_interfaces re-runs on each
-# plan.
+# and recreates the VPCE in modules/atlas-privatelink/, re-running terraform
+# apply re-registers the new ENIs via null_resource.register_targets.
 # =============================================================================
 
-# ── Lookup the Atlas Interface VPCE ENIs in our subnets ───────────────────────
-data "aws_vpc_endpoint" "atlas" {
-  id = var.atlas_vpce_id
-}
-
-# Read each ENI individually to get its private IP. for_each over the IDs
-# returned by the endpoint data source keeps the target group stable across
-# re-plans (vs. count-indexed which re-shuffles on order changes).
-data "aws_network_interface" "atlas_vpce_eni" {
-  for_each = toset(data.aws_vpc_endpoint.atlas.network_interface_ids)
-  id       = each.value
-}
-
 locals {
-  atlas_port_keys = toset([for port in var.atlas_ports : tostring(port)])
+  # var.atlas_ports is often `(known after apply)` when parsed from
+  # mongodbatlas_cluster connection_strings. for_each KEYS must be plan-time
+  # static — use fixed slot indices and resolve the real port number per slot
+  # at apply time via var.atlas_ports[tonumber(slot)].
+  atlas_port_slot_keys = toset([
+    for i in range(var.atlas_port_slot_count) : tostring(i)
+  ])
+
   # NLB names are capped at 32 chars. Keep a readable project prefix and hash
   # the full project/env identity so parallel demo environments don't collide.
   nlb_name = "kb-${substr(replace(var.project_name, "-", ""), 0, 17)}-${substr(md5("${var.project_name}-${var.environment}"), 0, 8)}"
-
-  atlas_vpce_eni_ips = [
-    for eni in data.aws_network_interface.atlas_vpce_eni : eni.private_ip
-  ]
-
-  target_attachments = {
-    for pair in setproduct(local.atlas_vpce_eni_ips, local.atlas_port_keys) :
-    "${pair[0]}:${pair[1]}" => {
-      ip   = pair[0]
-      port = pair[1]
-    }
-  }
 }
 
 # ── Network Load Balancer fronting the Atlas VPCE ENIs ────────────────────────
@@ -93,10 +77,10 @@ resource "aws_lb" "atlas_kb" {
 }
 
 resource "aws_lb_target_group" "atlas_kb" {
-  for_each = local.atlas_port_keys
+  for_each = local.atlas_port_slot_keys
 
-  name        = "${substr(replace(var.project_name, "-", ""), 0, 12)}-${var.environment}-${each.value}"
-  port        = tonumber(each.value)
+  name        = "${substr(replace(var.project_name, "-", ""), 0, 12)}-${var.environment}-pl${each.key}"
+  port        = var.atlas_ports[tonumber(each.key)]
   protocol    = "TCP"
   target_type = "ip"
   vpc_id      = var.vpc_id
@@ -114,30 +98,100 @@ resource "aws_lb_target_group" "atlas_kb" {
 
   lifecycle {
     precondition {
-      condition     = length(local.atlas_vpce_eni_ips) > 0 && length(var.atlas_ports) > 0
-      error_message = "bedrock-kb-privatelink: Atlas VPCE ${var.atlas_vpce_id} must have ENIs and private listener ports. Ensure atlas-privatelink has been applied and the Atlas private endpoint connection string is available."
+      condition = (
+        var.atlas_vpce_id != "" &&
+        length(var.atlas_ports) >= var.atlas_port_slot_count &&
+        alltrue([for i in range(var.atlas_port_slot_count) : var.atlas_ports[i] > 0])
+      )
+      error_message = "bedrock-kb-privatelink: var.atlas_ports must expose at least ${var.atlas_port_slot_count} PrivateLink listener ports once the cluster is provisioned and atlas_vpce_id must be set. Ensure atlas-privatelink has been applied and mongodb_atlas has populated the private endpoint connection string."
     }
   }
 }
 
-resource "aws_lb_target_group_attachment" "atlas_eni" {
-  for_each = local.target_attachments
+# Register Atlas VPCE ENI private IPs against each per-port target group via AWS
+# CLI instead of data-source for_each + aws_lb_target_group_attachment.
+# Reason: data.aws_vpc_endpoint.atlas.network_interface_ids is `(known after
+# apply)` on fresh ec2 deploys, which breaks for_each KEYS at plan time.
+# Static slot keys + apply-time discovery mirrors modules/bedrock-kb-peering/.
+resource "null_resource" "register_targets" {
+  for_each = local.atlas_port_slot_keys
 
-  target_group_arn = aws_lb_target_group.atlas_kb[each.value.port].arn
-  target_id        = each.value.ip
-  port             = tonumber(each.value.port)
+  triggers = {
+    target_group_arn = aws_lb_target_group.atlas_kb[each.key].arn
+    slot             = each.key
+    port             = var.atlas_ports[tonumber(each.key)]
+    atlas_vpce_id    = var.atlas_vpce_id
+    aws_region       = var.aws_region
+    atlas_ports_sha  = sha1(join(",", [for p in var.atlas_ports : tostring(p)]))
+  }
+
+  provisioner "local-exec" {
+    interpreter = ["bash", "-c"]
+    command     = <<-EOT
+      set -euo pipefail
+      tg_arn="${self.triggers.target_group_arn}"
+      port="${self.triggers.port}"
+      region="${self.triggers.aws_region}"
+      vpce_id="${self.triggers.atlas_vpce_id}"
+
+      if [[ -z "$vpce_id" || "$port" == "0" ]]; then
+        echo "[bedrock-kb-privatelink] register_targets: VPCE or port not ready — skipping slot ${self.triggers.slot} (will run once mongodb_atlas populates privatelink_ports)"
+        exit 0
+      fi
+
+      eni_ids=$(aws ec2 describe-vpc-endpoints --region "$region" \
+        --vpc-endpoint-ids "$vpce_id" \
+        --query 'VpcEndpoints[0].NetworkInterfaceIds' --output text)
+      if [[ -z "$eni_ids" || "$eni_ids" == "None" ]]; then
+        echo "[bedrock-kb-privatelink] register_targets: no ENIs on VPCE $vpce_id"
+        exit 1
+      fi
+
+      ips_csv=""
+      for eni in $eni_ids; do
+        ip=$(aws ec2 describe-network-interfaces --region "$region" \
+          --network-interface-ids "$eni" \
+          --query 'NetworkInterfaces[0].PrivateIpAddress' --output text)
+        ips_csv="$${ips_csv:+$ips_csv,}$ip"
+      done
+
+      existing=$(aws elbv2 describe-target-health --region "$region" \
+        --target-group-arn "$tg_arn" \
+        --query 'TargetHealthDescriptions[].Target.Id' \
+        --output text 2>/dev/null || echo "")
+      if [[ -n "$existing" && "$existing" != "None" ]]; then
+        targets=""
+        for ip in $existing; do
+          targets="$targets Id=$ip,Port=$port"
+        done
+        echo "[bedrock-kb-privatelink] deregistering existing targets for port $port: $existing"
+        aws elbv2 deregister-targets --region "$region" \
+          --target-group-arn "$tg_arn" --targets $targets >/dev/null
+      fi
+
+      targets=""
+      IFS=,
+      for ip in $ips_csv; do
+        targets="$targets Id=$ip,Port=$port"
+      done
+      unset IFS
+      echo "[bedrock-kb-privatelink] registering VPCE ENI targets for port $port: $ips_csv"
+      aws elbv2 register-targets --region "$region" \
+        --target-group-arn "$tg_arn" --targets $targets
+    EOT
+  }
 }
 
 resource "aws_lb_listener" "atlas_kb" {
-  for_each = local.atlas_port_keys
+  for_each = local.atlas_port_slot_keys
 
   load_balancer_arn = aws_lb.atlas_kb.arn
-  port              = tonumber(each.value)
+  port              = var.atlas_ports[tonumber(each.key)]
   protocol          = "TCP"
 
   default_action {
     type             = "forward"
-    target_group_arn = aws_lb_target_group.atlas_kb[each.value].arn
+    target_group_arn = aws_lb_target_group.atlas_kb[each.key].arn
   }
 
   tags = var.tags

@@ -24,6 +24,7 @@ import {
   invokeAgentRuntime,
   agentcoreSpecialistArn,
 } from "../adapters/agentcore-runtime.ts";
+import { enrichVectorSearchTraceEvents } from "../adapters/mongodb-mcp-client.ts";
 import { buildAuthenticatedUserContext } from "../lib/auth-user-context.ts";
 import { TraceCollector, tracingEnabled } from "../lib/trace-collector.ts";
 import { recordChatTurn } from "../lib/cw-metrics.ts";
@@ -413,9 +414,13 @@ chatRoutes.post("/chat", async (c) => {
             }
           } else if (ev.kind === "trace") {
             nestedTraceEvents.push(ev.event);
+            const enrichedNested = enrichVectorSearchTraceEvents(nestedTraceEvents);
+            nestedTraceEvents.length = 0;
+            nestedTraceEvents.push(...(enrichedNested as TraceEvent[]));
+            const traceToForward = enrichedNested[enrichedNested.length - 1] ?? ev.event;
             // Forward live to UI on the same `trace` SSE channel the
             // collector listener uses. Throttle delta batches identically.
-            if (ev.event.type === "model.text_delta_batch") {
+            if (traceToForward.type === "model.text_delta_batch") {
               const now = Date.now();
               if (now - lastDeltaForwardTs < TRACE_THROTTLE_MS) {
                 continue;
@@ -424,7 +429,7 @@ chatRoutes.post("/chat", async (c) => {
             }
             if (!stream.aborted) {
               try {
-                await stream.writeSSE({ event: "trace", data: JSON.stringify(ev.event) });
+                await stream.writeSSE({ event: "trace", data: JSON.stringify(traceToForward) });
               } catch {
                 // Client closed; persistence below still runs.
               }

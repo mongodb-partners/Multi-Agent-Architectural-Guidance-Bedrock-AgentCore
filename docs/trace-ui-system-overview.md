@@ -222,7 +222,7 @@ All trace fetches are logged to the audit channel with `include` so you can late
 - [`trace-viewer-developer-guide.md`](trace-viewer-developer-guide.md) — section-by-section field guide to the dev panel (sub-sections 1–14)
 - [`observability-runbook.md`](observability-runbook.md) §1.b — Day-2 workflow ("I have a trace id, now what?")
 - [`api-reference.md`](api-reference.md) — `GET /traces` + `?include=` contract
-- [`demo-mode-guide.md`](demo-mode-guide.md) — env knobs + how the demo's sidebar / mock-mode banner is wired
+- [`demo/demo-mode-guide.md`](demo/demo-mode-guide.md) — env knobs + how the demo's sidebar / mock-mode banner is wired
 - `ui/lib/inline_summary.py` — the chat-panel inline card source
 - `ui/pages/2_Trace_Viewer.py` — the main page
 - `ui/pages/1_Sessions.py` — Sessions integration

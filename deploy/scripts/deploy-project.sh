@@ -82,6 +82,9 @@ err()  { echo "  [ec2] ✗ $*" >&2; exit 1; }
 warn() { echo "  [ec2] ⚠ $*"; }
 sep()  { echo "────────────────────────────────────────────────"; }
 
+# shellcheck source=deploy/scripts/_sg-cleanup.sh
+source "$SCRIPT_DIR/_sg-cleanup.sh"
+
 # Wrap `terraform apply` with retry-on-transient-errors.
 # The MongoDB Atlas API at cloud.mongodb.com occasionally returns i/o timeouts
 # or connection-resets that vanish on the next call. Terraform can also reject
@@ -121,6 +124,26 @@ apply_with_retry() {
       attempt=$((attempt + 1))
       continue
     fi
+    if grep -qE 'DeleteSecurityGroup.*DependencyViolation|DependencyViolation: resource sg-[a-z0-9]+ has a dependent object' "$log_file"; then
+      local blocked_sgs
+      blocked_sgs=$(python3 - "$log_file" <<'PYEOF'
+import re
+import sys
+
+with open(sys.argv[1], encoding="utf-8", errors="replace") as fh:
+    text = fh.read()
+
+matches = set(re.findall(r"(sg-[0-9a-f]+)", text))
+print(" ".join(sorted(matches)))
+PYEOF
+)
+      if [[ -n "$blocked_sgs" ]]; then
+        warn "Security-group dependency detected; revoking stale external references before retry: ${blocked_sgs}"
+        cleanup_security_group_references $blocked_sgs || true
+        attempt=$((attempt + 1))
+        continue
+      fi
+    fi
     rm -f "$log_file"
     err "terraform apply failed with a non-transient error (see output above)"
   done
@@ -143,16 +166,31 @@ wait_for_ssm_online() {
   local max_attempts=36
   log "Waiting for SSM registration (up to 6 min)..."
   for i in $(seq 1 "$max_attempts"); do
-    local status
-    status=$(aws ssm describe-instance-information \
+    local status=""
+    # Prefer get-connection-status — describe-instance-information can lag
+    # several minutes behind PingStatus=Online on fresh EC2 hosts.
+    status=$(aws ssm get-connection-status \
       --region "$AWS_REGION" \
-      --query "InstanceInformationList[?InstanceId=='${instance_id}'].PingStatus | [0]" \
-      --output text 2>/dev/null || echo "None")
-    if [[ "$status" == "Online" ]]; then
+      --target "$instance_id" \
+      --query "Status" \
+      --output text 2>/dev/null || true)
+    status="${status//$'\r'/}"
+    if [[ "$status" == "connected" ]]; then
       ok "SSM agent is online"
       return 0
     fi
-    log "  Waiting for SSM ($i/$max_attempts)..."
+    # Fallback: legacy PingStatus probe (trim whitespace/null sentinels).
+    status=$(aws ssm describe-instance-information \
+      --region "$AWS_REGION" \
+      --filters "Key=InstanceIds,Values=${instance_id}" \
+      --query "InstanceInformationList[0].PingStatus" \
+      --output text 2>/dev/null || echo "None")
+    status="${status//$'\r'/}"
+    if [[ "$status" == "Online" ]]; then
+      ok "SSM agent is online (PingStatus)"
+      return 0
+    fi
+    log "  Waiting for SSM ($i/$max_attempts)... (connection=${status:-unknown})"
     sleep 10
   done
   err "SSM agent did not become online for $instance_id"
@@ -266,6 +304,12 @@ export TF_VAR_atlas_private_key="${MONGODB_ATLAS_PRIVATE_KEY:-}"
 source "$SCRIPT_DIR/_aws-auth.sh"
 validate_aws_auth || err "AWS auth validation failed (see above)"
 ACCOUNT_ID="$AWS_AUTH_ACCOUNT_ID"
+
+# ── Centralized preflight checks: pre-apply (see docs/deployment-preflight-checks.md) ──
+# shellcheck source=deploy/scripts/_preflight-checks.sh
+source "$SCRIPT_DIR/_preflight-checks.sh"
+preflight_validate project-pre-apply
+
 ok "AWS account: $ACCOUNT_ID"
 ok "Atlas project: $TF_VAR_atlas_project_id"
 
@@ -513,11 +557,40 @@ agentcore_runtime_deployment_mode = "${AGENTCORE_RUNTIME_DEPLOYMENT_MODE}"
 agentcore_code_artifact_prefix    = "${AGENTCORE_CODE_ARTIFACT_PREFIX}"
 
 # Connectivity mode — must match the mode the shared network was applied in
-# (verified by the SSM canary above and by the `check "network_mode_matches_shared"`
+# (verified by the SSM canary above and by the \`check "network_mode_matches_shared"\`
 # block in envs/ec2/main.tf). Switching modes requires destroy + redeploy.
 network_mode      = "${NETWORK_MODE}"
 EOF
-ok "terraform.tfvars written (network_mode=${NETWORK_MODE})"
+
+# AgentCore runtime VPCEs (ECR API, ECR DKR, Logs) are VPC-scoped singletons with
+# private_dns_enabled=true — only ONE set per VPC. When a second project deploys
+# into the same SHARED_VPC_NAME, creating them again fails with:
+#   "conflicting DNS domain for *.dkr.ecr... in the VPC"
+# Auto-detect existing endpoints and reuse via data.aws_vpc_endpoint + SG rules.
+SHARED_VPC_ID=$(aws ssm get-parameter --region "$AWS_REGION" \
+  --name "/${SHARED_VPC_NAME}/${AWS_REGION}/vpc_id" \
+  --query Parameter.Value --output text 2>/dev/null || echo "")
+CREATE_AGENTCORE_VPCE="true"
+if [[ -n "$SHARED_VPC_ID" && "$SHARED_VPC_ID" != "None" ]]; then
+  MANAGED_AGENTCORE_VPCE_COUNT=$(terraform -chdir="$TF_DIR" state list 2>/dev/null \
+    | python3 -c 'import sys
+managed = [line.strip() for line in sys.stdin if line.strip().startswith("aws_vpc_endpoint.agentcore_runtime_")]
+print(len(managed))' 2>/dev/null || echo "0")
+  EXISTING_VPCE_COUNT=$(aws ec2 describe-vpc-endpoints --region "$AWS_REGION" \
+    --filters "Name=vpc-id,Values=${SHARED_VPC_ID}" \
+    --query "length(VpcEndpoints[?ServiceName=='com.amazonaws.${AWS_REGION}.ecr.api' || ServiceName=='com.amazonaws.${AWS_REGION}.ecr.dkr' || ServiceName=='com.amazonaws.${AWS_REGION}.logs'])" \
+    --output text 2>/dev/null || echo "0")
+  if [[ "${MANAGED_AGENTCORE_VPCE_COUNT:-0}" -gt 0 ]]; then
+    CREATE_AGENTCORE_VPCE="true"
+    log "Shared VPC ${SHARED_VPC_ID} has AgentCore ECR/Logs VPCEs managed by this Terraform state — keeping ownership (create_agentcore_runtime_vpc_endpoints=true)"
+  elif [[ "${EXISTING_VPCE_COUNT:-0}" -ge 3 ]]; then
+    CREATE_AGENTCORE_VPCE="false"
+    log "Shared VPC ${SHARED_VPC_ID} already has AgentCore ECR/Logs VPCEs — reusing (create_agentcore_runtime_vpc_endpoints=false)"
+  fi
+fi
+echo "create_agentcore_runtime_vpc_endpoints = ${CREATE_AGENTCORE_VPCE}" >> "$TF_DIR/terraform.tfvars"
+
+ok "terraform.tfvars written (network_mode=${NETWORK_MODE}, create_agentcore_runtime_vpc_endpoints=${CREATE_AGENTCORE_VPCE})"
 
 # ── Phase 4a — Discover agents + write agents.auto.tfvars.json ────────────────
 sep
@@ -788,6 +861,11 @@ log "Reconciling MongoDB indexes (safe to re-run)..."
 )
 ok "MongoDB indexes verified (seed-indexes)"
 
+# ── Centralized preflight checks: post-apply (see docs/deployment-preflight-checks.md) ──
+# shellcheck source=deploy/scripts/_preflight-checks.sh
+source "$SCRIPT_DIR/_preflight-checks.sh"
+preflight_validate project-post-apply
+
 # ══════════════════════════════════════════════════════════════════════════════
 # PHASE 5c — API MongoDB URI normalization
 #
@@ -906,9 +984,11 @@ else:
 PY
   ); then
     MONGODB_URI="$API_PRIVATE_URI"
-    # Sanity check — peering URIs MUST contain -pri.mongodb.net
-    if ! echo "$MONGODB_URI" | grep -q '\-pri\.mongodb\.net'; then
-      err "Computed peering URI does not contain '-pri.mongodb.net' — would route over the public SRV. Aborting to preserve privacy parity."
+    # Sanity check — peering URIs MUST use the private DNS token (-pri).
+    # Atlas may emit either legacy (*-pri.mongodb.net) or project-scoped
+    # (*-pri.<shard-id>.mongodb.net) hostnames once Private DNS for Peering is on.
+    if ! echo "$MONGODB_URI" | grep -qE '\-pri\.'; then
+      err "Computed peering URI does not contain '-pri.' (private peering host) — would route over the public SRV. Aborting to preserve privacy parity."
     fi
     ok "API MongoDB URI normalized to peering connection string (private DNS form: $(echo "$MONGODB_URI" | grep -q 'mongodb+srv' && echo SRV || echo multi-host))"
   else
@@ -1188,6 +1268,11 @@ if [[ -n "$CWA_STATUS_CMD_ID" ]]; then
   fi
 fi
 
+# ── Centralized preflight checks: pre-env-sync (see docs/deployment-preflight-checks.md) ──
+# shellcheck source=deploy/scripts/_preflight-checks.sh
+source "$SCRIPT_DIR/_preflight-checks.sh"
+preflight_validate project-pre-env-sync
+
 # Copy via SSM Session Manager — no SSH key required.
 log "Copying .env.live to EC2 ($EC2_INSTANCE_ID) via SSM..."
 _ENV_B64=$(base64 < "$REPO_ROOT/.env.live" | tr -d '\n')
@@ -1259,17 +1344,14 @@ if [[ -n "$AWS_ENDPOINT_SECURITY_GROUP_IDS" && "$AWS_ENDPOINT_SECURITY_GROUP_IDS
 fi
 
 # Single SSM command: ECR login, pull latest images, restart API + UI containers.
-# MongoDB MCP is now a Lambda function (no local sidecar to restart).
+# --skip-docker only skips local build/push; a replaced EC2 host still needs
+# ECR auth and image pulls from the already-published tags.
 ECR_REGISTRY=$(echo "$ECR_API_REPO" | cut -d'/' -f1)
-if [[ "$SKIP_DOCKER" == "true" ]]; then
-  RESTART_CMD="systemctl daemon-reload && systemctl restart multiagent-api multiagent-ui"
-else
-  RESTART_CMD="aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${ECR_REGISTRY} \
-    && docker pull ${ECR_API_IMAGE} \
-    && docker pull ${ECR_UI_IMAGE} \
-    && systemctl daemon-reload \
-    && systemctl restart multiagent-api multiagent-ui"
-fi
+RESTART_CMD="aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${ECR_REGISTRY} \
+  && docker pull ${ECR_API_IMAGE} \
+  && docker pull ${ECR_UI_IMAGE} \
+  && systemctl daemon-reload \
+  && systemctl restart multiagent-api multiagent-ui"
 
 RESTART_CMD_ID=$(send_ssm_command_retry \
   "$EC2_INSTANCE_ID" \

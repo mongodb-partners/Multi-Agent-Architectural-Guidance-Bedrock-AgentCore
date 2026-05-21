@@ -2,15 +2,20 @@
 
 > **Audience:** anyone trying to reason about what the system remembers, when it remembers, and where that data lives.
 
-The system uses **two memory layers** with different jobs and different backends.
+The system uses **two memory layers** with different jobs and different backends. For client handover and SoW discussions, use this shorthand:
+
+- **Short-term memory → AgentCore Memory** in deployed AWS.
+- **Long-term memory → MongoDB Atlas** (`agent_memory_facts` + `chat_messages`) with hybrid vector + BM25 retrieval.
+
+MongoDB `chat_sessions` is still useful, but it is a session mirror for UI/history/cold-read fallback, not the primary short-term memory authority in the SoW deployment.
 
 ```mermaid
 flowchart TB
   REQ[POST /chat] --> ST[Short-Term Memory<br/>short-term-memory.ts + session-store.ts]
   REQ --> LT[Long-Term Memory<br/>long-term-memory.ts<br/>hybrid vector + lexical]
-  ST --> STAC[AgentCore Events<br/>SHORT_TERM_MEMORY_BACKEND=agentcore<br/>requires userId]
-  ST --> STM[In-memory Map cache<br/>session-store]
-  ST --> STMG[("MongoDB chat_sessions<br/>+ chat_messages mirror<br/>default-on when MONGODB_URI set")]
+  ST --> STAC[AgentCore Events<br/>authoritative in deployed AWS<br/>requires userId]
+  ST --> STM[In-memory Map cache<br/>process fallback]
+  ST --> STMG[("MongoDB chat_sessions<br/>UI/history/cold-read mirror<br/>default-on when MONGODB_URI set")]
   LT --> LTMG[("MongoDB agent_memory_facts<br/>embedding + factHash + TTL<br/>PRIMARY")]
   LT --> LTCM[("MongoDB chat_messages<br/>vector-searchable mirror<br/>fused at read time")]
   LT --> LTAC[AgentCore Memory Store<br/>fallback]
@@ -24,7 +29,7 @@ For an editable picture: [`diagrams/03-memory-architecture.drawio`](diagrams/03-
 
 **What it is:** per-turn chat transcript for a `sessionId`.
 
-**Primary path in EC2 auth mode:** AgentCore short-term events keyed by `(memoryId, actorId=userId, sessionId)`.
+**Primary path in EC2 auth mode:** AgentCore short-term events keyed by `(memoryId, actorId=userId, sessionId)`. This is the SoW narrative and the deploy-script default.
 
 ### Read/write flow
 
@@ -37,9 +42,9 @@ For an editable picture: [`diagrams/03-memory-architecture.drawio`](diagrams/03-
 
 | Backend | When | Behavior |
 |---|---|---|
-| **AgentCore events** | `SHORT_TERM_MEMORY_BACKEND=agentcore` + `AGENTCORE_MEMORY_STORE_ID` + `userId` | Primary durable short-term memory in EC2 mode. |
-| **In-memory map** | Always | Fast cache/fallback. Lost on API restart. |
-| **MongoDB `chat_sessions`** | `MONGODB_URI` set (default-on; opt out with `PERSIST_CHAT_SESSIONS=0`) | Write-through persistence for `session-store`. |
+| **AgentCore events** | `SHORT_TERM_MEMORY_BACKEND=agentcore` + `AGENTCORE_MEMORY_STORE_ID` + `userId` | Primary durable short-term memory in deployed AWS. |
+| **In-memory map** | Always | Fast process cache/fallback. Lost on API restart. |
+| **MongoDB `chat_sessions`** | `MONGODB_URI` set (default-on; opt out with `PERSIST_CHAT_SESSIONS=0`) | Write-through mirror for the Sessions page, audit/debug history, and cold-read fallback. Not the primary short-term memory backend in deployed AWS. |
 
 ### Decision tree (which backend serves a given turn)
 

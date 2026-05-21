@@ -8,7 +8,7 @@ There are four Terraform root configs (and matching deploy scripts):
 
 - **Network mode** — `envs/network/` provisions the **shared** VPC + subnets + the Atlas connectivity primitive matching `NETWORK_MODE` (PrivateLink Interface VPCE in privatelink mode; VPC peering accepter + Atlas-side `mongodbatlas_network_peering` in peering mode), and publishes the resulting IDs to SSM Parameter Store under `/${SHARED_VPC_NAME}/${AWS_REGION}/` (including a `network_mode` canary so downstream stacks refuse to plan against a different mode). Run **once per AWS account + region** with `deploy-network.sh`.
 - **Shared mode** — `envs/shared/` provisions the **shared observability + embeddings** stack: the Voyage SageMaker endpoint, all CloudWatch log groups (`/${SHARED_RESOURCE_PREFIX}/<env>/{api,ui,mcp,agentcore,otel,otel-atlas}`), the four operational dashboards (`${SHARED_RESOURCE_PREFIX}-{fleet,mongo,cost,atlas}-<env>`), fleet + atlas alarms, metric filters, the Logs Insights query library, and the account-scoped Bedrock invocation logging configuration. Publishes its outputs to the same SSM prefix under `voyage_sagemaker_endpoint_name`, `cw_*_log_group`, and `bedrock_*_log_group` keys. Run **once per AWS account + region + environment** with `deploy-shared.sh`. Singleton — multiple per-project `envs/ec2` deployments share the resulting resources.
-- **Local mode** — runs the API + UI on your laptop. Used for daily development and demos. Some Terraform-provisioned AWS resources are still required (Bedrock KB, Cognito, Secrets Manager). Does **not** consume the shared network or shared stack — local mode is self-contained and uses its own local log group + Voyage endpoint discovery via `.env`.
+- **Local mode** — `envs/local/` + `deploy-local.sh`. Provisions **partial** AWS support infra on your laptop path: Atlas M10, Bedrock KB, AgentCore Memory store, and local-prefixed CloudWatch log groups. Does **not** consume the shared network or shared stack. Does **not** provision EC2, AgentCore runtimes, Cognito, or a runnable chat stack by itself — you still need `AGENTCORE_ORCHESTRATOR_ARN` + JWKS from a full EC2 deploy (see [§ 4](#4-local-mode-partial-infra-only)).
 - **EC2 mode** — full cloud deployment. The frozen baseline. Reads the shared VPC's IDs and the shared SageMaker endpoint + log groups from SSM, then provisions the per-project EC2 / AgentCore Runtime / MongoDB MCP Runtime stack on top, plus a per-cluster Route 53 zone for the Atlas SRV hostname and the AWS service VPC endpoints required by the VPC-mode MongoDB MCP runtime (ECR API, ECR Docker, S3 gateway, CloudWatch Logs). Set `TF_VAR_create_agentcore_runtime_vpc_endpoints=false` when those singleton endpoints already exist in the shared VPC; EC2 mode will reuse them and ensure this deployment's security groups can reach them. The legacy Lambda MongoDB MCP host (and its Terraform module) was deleted in CLIENT_REVIEW Phase 7e. MongoDB MCP is invoked directly as an AgentCore Runtime; the AgentCore Gateway remains available for non-Mongo tools.
 
 **Apply order (clean account):** `network → shared → ec2`. The single entrypoints `deploy-full-with-privatelink.sh` (default mode) and `deploy-full-with-vpc-peering.sh` (alternative) both probe SSM canaries for each upstream stack and run the missing ones automatically; pass `--skip-network` / `--skip-shared` to bypass the canary probes when you already know they are applied. Tear down in reverse: `destroy.sh --mode ec2 → shared → network`. **PrivateLink and VPC peering are mutually exclusive per account+region** — switching modes requires destroying everything and re-running the matching orchestrator.
@@ -41,6 +41,8 @@ You need an AWS account with:
 - Bedrock model access enabled for **all** models referenced by `config/agents/*.agent.md` and the embedding/extraction defaults. Today that is `us.anthropic.claude-sonnet-4-6` (troubleshooting + product-recommendation), `us.anthropic.claude-haiku-4-5-20251001-v1:0` (orchestrator + order-management + LTM fact-extractor + classifier fallback), and `amazon.titan-embed-text-v2:0` (Voyage fallback). Request via the Bedrock console; takes ~15 min for Anthropic models which need a use-case form. When you change an agent model, enable access for the new one **first**.
 - AWS credentials with the permissions in [`deploy/iam/policy.json`](../deploy/iam/policy.json). This can be an **IAM user** (static long-lived keys) or — for environments that prohibit IAM users — an **IAM Role assumed via STS** (see [§ 2b](#2b-sts--sso-credentials-no-iam-user) below). The same policy document covers both cases.
 
+> **Preflight is your friend.** Every deploy script automatically runs the [`_preflight-checks.sh`](../deploy/scripts/_preflight-checks.sh) module before mutating AWS state — it validates your `.env` quality, AWS auth, IAM permissions (incl. SCPs), Bedrock model access, Atlas API key scope, project name length, network egress, local tool versions, Docker resources, and ~25 other things. If something is wrong it prints a structured failure envelope with plain-English fix steps, machine-readable `ai-fix-hint`s, and an anchor in [`docs/deployment-preflight-checks.md`](deployment-preflight-checks.md). Override with `PREFLIGHT_SKIP=<id>,<id>` (or `PREFLIGHT_SKIP=*`); preview the run with `PREFLIGHT_DRY_RUN=1`.
+
 You need a MongoDB Atlas Organization with:
 - An organization API key (public + private)
 - An existing Atlas project (the deploy creates a cluster inside it; it does not create the project itself)
@@ -49,7 +51,7 @@ You need a MongoDB Atlas Organization with:
 
 ## 2. The `.env` file (credentials and project identity)
 
-Everything starts with [`.env`](../.env) at the repo root. This file is committed to the repo and contains live credentials — fill in the required values before the first deploy.
+Everything starts with [`.env`](../.env) at the repo root. Copy [`.env.sample`](../.env.sample) to `.env` and fill in credentials — **`.env` is gitignored; never commit it.**
 
 > **`AUTH_MODE` (iam | sts)** controls which credential block the deploy scripts validate. Default is `iam` for backward compatibility; set `AUTH_MODE=sts` when your account prohibits IAM users. The shared validator at [`deploy/scripts/_aws-auth.sh`](../deploy/scripts/_aws-auth.sh) refuses to proceed if the resolved caller ARN doesn't match the declared mode. See § 2b for the STS path; see [`deploy/iam/README.md`](../deploy/iam/README.md) for trust-policy setup.
 
@@ -205,9 +207,14 @@ This is what `deploy/deploy-full-with-privatelink.sh` does. It handles all three
 cd mongodb-aws-bedrock-multi-agent-framework
 source .env
 
-# Handles everything: network (first time) + project stack
+# Handles everything: network (first time) + shared (first time) + project stack
 ./deploy/deploy-full-with-privatelink.sh --auto-approve
+
+# Post-deploy smoke
+source .env && python3 e2e-smoke/post-deploy-smoke.py
 ```
+
+When the script finishes, open the **UI URL** printed in the deploy summary (`ec2_ui_url`, Streamlit on port 8501) and sign in with the seeded Cognito user.
 
 Alternatively, run the phases manually:
 
@@ -305,6 +312,18 @@ source .env
 
 Use `./deploy/deploy-api.sh --skip-docker` to only re-sync env and restart the API after an already-pushed image.
 
+### 3.0c UI-only redeployment (partial deploy)
+
+When only `ui/` changed:
+
+```bash
+source .env
+./deploy/deploy-ui.sh
+./deploy/deploy-ui.sh --skip-docker --skip-smoke
+```
+
+Rebuilds/pushes the UI image and restarts `multiagent-ui` only. Does **not** regenerate `.env.live` — run `deploy-api.sh` first if Cognito or API URL env vars changed.
+
 ### 3.1 Deployment phases (current script)
 
 ```mermaid
@@ -337,7 +356,12 @@ Editable diagram with descriptions: [`diagrams/04-deployment-pipeline.drawio`](d
 
 ### 3.2 Observability stack (deployed by default)
 
-The same `terraform apply` provisions the **CloudWatch GenAI Observability** + **OTLP via ADOT** + **fleet dashboards** stack. Defaults are tuned for low-volume dev / staging:
+Observability is **split across two stacks:**
+
+- **`envs/shared`** (via `deploy-shared.sh`) — CloudWatch log groups (`api`, `ui`, `mcp`, `agentcore`, `otel`, `otel-atlas`), fleet/mongo/cost dashboards + alarms, Bedrock invocation logging (`/aws/bedrock/invocations`).
+- **`envs/ec2`** (via `deploy-project.sh`) — GenAI observability / X-Ray Transaction Search (`enable_genai_observability`), ADOT collector sidecar (`enable_adot_collector`), per-project Atlas metrics dashboard when opted in.
+
+Key Terraform variables (defaults tuned for low-volume dev / staging):
 
 | Terraform variable | Default | What it does | Cost driver |
 |---|---|---|---|
@@ -347,7 +371,7 @@ The same `terraform apply` provisions the **CloudWatch GenAI Observability** + *
 | `log_prompt_bodies` | `false` | When true, raw prompts + completions land in invocation logs (still PII-masked) | Big bump — bodies dwarf metadata |
 | `log_embedding_bodies` | `false` | When true, raw embedding inputs land in invocation logs | Same |
 | `enable_adot_collector` | `true` | ADOT sidecar on EC2 + `/<SHARED_RESOURCE_PREFIX>/<env>/otel` log group | OTLP egress + storage |
-| `enable_fleet_dashboards` | `true` | 3 dashboards + 7 alarms + SNS topic + query library | Negligible |
+| `enable_fleet_dashboards` | `true` | 3 dashboards + 7 alarms + SNS topic + query library (**`envs/shared`**) | Negligible |
 | `alarm_email` | `""` | Subscribes a single email address to the alarms SNS topic | Free |
 | `enable_atlas_metrics` | `false` | **Phase 4 opt-in.** ADOT scrapes Atlas Prometheus → `MongoDB/Atlas` CloudWatch namespace; adds Atlas dashboard + 2 alarms | Custom metrics + secret |
 
@@ -372,42 +396,50 @@ The same `terraform apply` provisions the **CloudWatch GenAI Observability** + *
 | Terraform apply says "Saved plan is stale" | Remote state changed after the plan was created | Re-run `deploy-full-with-privatelink.sh`; the retry wrapper re-plans and applies against current state. |
 | Deploy rejects Voyage model/request format | `VOYAGE_MODEL_PACKAGE_ARN`, `VOYAGE_MARKETPLACE_MODEL`, and `VOYAGE_REQUEST_FORMAT` disagree | Use `setup-voyage-marketplace.sh --model voyage-multimodal-3` for `multimodal`, or `--model voyage-3-5-lite` for `legacy`, then re-source `.env`. |
 | API health hangs on `mcpServer` / MCP logs are empty | Missing VPC endpoints for the VPC-mode MongoDB MCP runtime | EC2 mode should create ECR API, ECR Docker, S3 gateway, and CloudWatch Logs endpoints. Apply `envs/ec2` and verify those endpoints are `available`. |
-| Phase 11 health check fails on `agentcore: unreachable` | Known issue — `ListSessions` health probe requires extra IAM | Non-blocking. Functional memory still works. |
+| `/health` shows `agentcore: "inactive"` | AgentCore Memory store not `ACTIVE` (provisioning or `DELETING`) | `aws bedrock-agentcore-control list-memories` — confirm `AGENTCORE_MEMORY_STORE_ID` in `.env.live` matches an `ACTIVE` memory. Re-run `deploy-project.sh` if the store is stuck deleting. |
+| `/health` shows `bedrockKnowledgeBase: "unreachable"` but KB exists | EC2 role missing Bedrock KB retrieve permission or wrong KB id | Confirm `BEDROCK_KB_ID` in `.env.live`. EC2 IAM should allow `bedrock-agent-runtime:Retrieve` (see `modules/ec2/main.tf`). API logs: `[health] bedrock KB probe`. Re-run `./deploy/deploy-api.sh` after IAM/terraform fixes. |
+| `/health` shows `bedrockKnowledgeBase: "not_configured"` | `BEDROCK_KB_ID` unset in the API container | Set in Terraform `knowledge_base_id` output and regenerate `.env.live` via `deploy-api.sh` or `deploy-project.sh`. |
 | Deploy exits after Docker push with code 1 | Known `docker-build-push.sh` exit anomaly | Re-run `./deploy/deploy-full-with-privatelink.sh --auto-approve --skip-docker` to apply/restart with pushed images. |
 
 ---
 
-## 4. Local mode
+## 4. Local mode (partial infra only)
 
-Runs the API + UI on your laptop. Useful for daily dev. Still uses real AWS for Bedrock model calls (so credentials must be valid).
+`deploy-local.sh` provisions supporting AWS resources via `envs/local/` — useful for Atlas/KB development, **not** a substitute for the full EC2 chat stack.
 
-### 4.1 Install + seed
+### What `deploy-local.sh` actually provisions
+
+Terraform in `envs/local/` creates:
+
+- MongoDB Atlas M10 cluster (+ index seed hook)
+- Bedrock Knowledge Base (Titan embeddings)
+- AgentCore Memory store
+- CloudWatch log groups under `/multiagent-local/<env>/…`
+
+It does **not** create: EC2, Cognito, AgentCore runtimes, MongoDB MCP runtime, or Voyage SageMaker.
+
+The generated `.env.live` leaves `AUTH_JWKS_URI`, `AUTH_ISSUER`, and `AGENTCORE_ORCHESTRATOR_ARN` empty — **`bun run dev` will fail** until you merge values from a full EC2 deploy's `.env.live`. The script's Phase 8 may attempt to start the API anyway; treat that as legacy behavior.
+
+### 4.1 First-time partial infra
 
 ```bash
 cd mongodb-aws-bedrock-multi-agent-framework
+cp .env.sample .env    # if you have not already
 source .env
 aws sts get-caller-identity
 
-# First time: provision the supporting AWS resources
 ./deploy/scripts/deploy-local.sh --auto-approve
-
-# Daily: just start the services
 ```
 
-`deploy-local.sh` runs Terraform for `envs/local/`, which provisions:
-- Bedrock KB + S3 docs
-- Cognito user pool
-- Secrets Manager Atlas creds
+### 4.2 Daily laptop dev (after a full EC2 deploy)
 
-It does NOT create EC2, AgentCore runtimes, MongoDB MCP runtime, or Atlas. To run the local stack you must point at a deployed AgentCore Orchestrator runtime (`AGENTCORE_ORCHESTRATOR_ARN`) — the API has no in-process fallback.
-
-### 4.2 Daily start
+For a **runnable** local API + UI loop, run the full EC2 orchestrator first, then:
 
 **Terminal 1 — API:**
 
 ```bash
 cd mongodb-aws-bedrock-multi-agent-framework
-source .env && source .env.live   # exports AGENTCORE_ORCHESTRATOR_ARN + AWS creds
+source .env && source .env.live   # JWKS + AGENTCORE_ORCHESTRATOR_ARN from deploy-project.sh
 export PATH="$HOME/.bun/bin:$PATH"
 cd api && bun run dev
 ```
@@ -415,10 +447,11 @@ cd api && bun run dev
 **Terminal 2 — UI:**
 
 ```bash
-~/.venvs/multiagent-ui/bin/streamlit run ui/app.py --server.headless true
+cd ui
+streamlit run app.py   # API URL defaults to http://127.0.0.1:3000 (STREAMLIT_API_URL to override)
 ```
 
-Open `http://localhost:8501`.
+Open `http://localhost:8501`. Configure `STREAMLIT_COGNITO_*` (written to `.env.live` by `deploy-project.sh`) — every protected API route requires a valid Cognito JWT.
 
 ---
 
@@ -503,8 +536,12 @@ After `deploy-full-with-privatelink.sh` completes:
 ```bash
 EC2_IP=$(jq -r '.ec2_instance_public_ip' deploy-manifest.json)
 
-# Health check — should return all "connected"
+# Health check — see docs/api-reference.md § GET /health for per-field meaning
 curl -s "http://$EC2_IP:3000/health" | python3 -m json.tool
+# Expect: status "ok", mongodb/agentcore/mcpServer "connected" when the stack is warm.
+# longTermMemory "connected" requires ≥1 agent with memory.longTerm: true.
+# bedrockKnowledgeBase "connected" only when BEDROCK_KB_ID is set AND Retrieve IAM works.
+# agentcore "inactive" means the memory store exists but is not ACTIVE (re-run deploy-project if stuck DELETING).
 
 # Order tracking smoke test
 curl -s -X POST "http://$EC2_IP:3000/chat" \
@@ -574,10 +611,10 @@ Runs on every push and pull request against `main` / `master`. Four jobs in para
 |---|---|
 | `api` | `bun install --frozen-lockfile`, `bun run typecheck`, `bun run validate:bun`, `bun run validate:agentcore`, `bun run test:all` |
 | `ui` | `pip install -r requirements.txt`, `python -m pytest tests/ -v` |
-| `e2e` | `bunx playwright install --with-deps chromium` then `bun run test` against the stub API server (`CHAT_MODE=stub`) |
+| `e2e` | `bunx playwright install --with-deps chromium` then `API_URL=http://localhost:3000 bun run test` — requires a **live** API (no in-tree stub server; health/agents/skills smoke only unless you add chat specs) |
 | `docker-images` | `docker build` for both `api/Dockerfile` (context = repo root) and `ui/Dockerfile` (context = `ui/`) — verifies images build cleanly |
 
-CI runs with **no AWS credentials**. None of the live integration paths (real Bedrock, real Atlas, real AgentCore) exercise here. The stub API (`tests/stubs/server.ts`) deterministically replays fixture answers so `e2e/` covers the SSE pipeline + the Trace Viewer page without paying Bedrock TPM.
+CI runs with **no AWS credentials**. None of the live integration paths (real Bedrock, real Atlas, real AgentCore) exercise here. The default `e2e/tests/api.spec.ts` hits read-only public endpoints (`/health`, `/agents`, `/skills`) — it does not start a local API process.
 
 Local equivalent before pushing:
 
@@ -622,7 +659,7 @@ There is currently **no automatic destroy workflow**. Teardown is laptop-only (`
 | File | Purpose |
 |---|---|
 | [`.env`](../.env) | Live credentials + project identity (fill in before first deploy) |
-| [`.env.live`](../.env.live) | Generated by Phase 9. Holds runtime config (gitignored). |
+| [`.env.live`](../.env.live) | Generated by `deploy-project.sh` Phase 7. Holds runtime config (gitignored). |
 | [`deploy/deploy-full-with-privatelink.sh`](../deploy/deploy-full-with-privatelink.sh) | **Main entrypoint** — provisions network (if needed) then project stack |
 | [`deploy/scripts/deploy-network.sh`](../deploy/scripts/deploy-network.sh) | Shared VPC + Atlas PrivateLink VPCE (run once per account + region) |
 | [`deploy/scripts/deploy-shared.sh`](../deploy/scripts/deploy-shared.sh) | Shared observability + embeddings — Voyage SageMaker endpoint, CloudWatch log groups, fleet/mongo/cost/atlas dashboards, Bedrock invocation logging (run once per account + region + environment) |
@@ -630,7 +667,7 @@ There is currently **no automatic destroy workflow**. Teardown is laptop-only (`
 | [`deploy/deploy-api.sh`](../deploy/deploy-api.sh) | API-only redeploy — rebuilds/pushes API image, syncs `.env.live`, restarts `multiagent-api`, runs backend smoke. Skips Terraform/UI/AgentCore runtime changes. |
 | [`deploy/deploy-agents.sh`](../deploy/deploy-agents.sh) | Agent-only redeploy — rebuilds artifact, targeted tf apply on runtime modules, env injection, API config/cache refresh. Skips Atlas/EC2/KB/Docker/API restart. |
 | [`deploy/scripts/_agents-common.sh`](../deploy/scripts/_agents-common.sh) | Shared helper sourced by `deploy-project.sh` and `deploy-agents.sh` (not run directly) |
-| [`deploy/scripts/deploy-local.sh`](../deploy/scripts/deploy-local.sh) | Local mode supporting infra |
+| [`deploy/scripts/deploy-local.sh`](../deploy/scripts/deploy-local.sh) | Partial laptop infra (`envs/local`) — Atlas + KB + memory; not a full chat stack |
 | [`deploy/scripts/destroy.sh`](../deploy/scripts/destroy.sh) | Tear down (`--mode local`/`ec2`/`network`) |
 | [`deploy/scripts/docker-build-push.sh`](../deploy/scripts/docker-build-push.sh) | Code-only image rebuild |
 | [`deploy/terraform/envs/network/main.tf`](../deploy/terraform/envs/network/main.tf) | Shared VPC + Atlas PL VPCE root module (account + region singleton) |

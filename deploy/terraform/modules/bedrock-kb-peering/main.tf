@@ -187,11 +187,17 @@ resource "null_resource" "register_targets" {
           --target-group-arn "$tg_arn" --targets $targets >/dev/null
       fi
 
-      # Register the freshly discovered Atlas peering IPs.
+      # Register the freshly discovered Atlas peering IPs. AvailabilityZone=all
+      # is REQUIRED because the Atlas IPs are in the peer's CIDR (e.g.
+      # 192.168.248.0/21), not the consumer VPC's CIDR. Without it, ELBv2
+      # rejects with: "The Availability Zone is required for IP address
+      # 'X.X.X.X' because it is not in the VPC". `all` enables cross-zone
+      # routing — fine for NLB since enable_cross_zone_load_balancing=true
+      # is set on the LB itself.
       targets=""
       IFS=,
       for ip in $ips_csv; do
-        targets="$targets Id=$ip,Port=$port"
+        targets="$targets Id=$ip,Port=$port,AvailabilityZone=all"
       done
       unset IFS
       echo "[bedrock-kb-peering] registering targets for port $port: $ips_csv"

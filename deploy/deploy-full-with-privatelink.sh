@@ -102,6 +102,34 @@ source "$ENV_FILE"
 AWS_REGION="${AWS_REGION:-us-east-1}"
 SHARED_VPC_NAME="${SHARED_VPC_NAME:-shared-network}"
 
+# ── Centralized preflight checks (see docs/deployment-preflight-checks.md) ──
+# Bypass with PREFLIGHT_SKIP=<id>,<id> or PREFLIGHT_SKIP=*
+# shellcheck source=deploy/scripts/_preflight-checks.sh
+source "$REPO_ROOT/deploy/scripts/_preflight-checks.sh"
+preflight_validate orchestrator-privatelink
+
+# ── HARD override — this orchestrator owns NETWORK_MODE=privatelink ─────────
+# Export so sub-scripts see it even if the shell still has NETWORK_MODE=peering
+# from a prior peering deploy in the same session.
+if [[ -n "${NETWORK_MODE:-}" && "$NETWORK_MODE" != "privatelink" ]]; then
+  warn "Overriding NETWORK_MODE='${NETWORK_MODE}' → 'privatelink' (this orchestrator is PrivateLink-only)"
+fi
+export NETWORK_MODE=privatelink
+
+# Fail fast if SSM says this shared VPC was applied in peering mode.
+EXISTING_MODE=$(aws ssm get-parameter \
+  --region "$AWS_REGION" \
+  --name "/${SHARED_VPC_NAME}/${AWS_REGION}/network_mode" \
+  --query "Parameter.Value" --output text 2>/dev/null || echo "")
+if [[ -n "$EXISTING_MODE" && "$EXISTING_MODE" != "privatelink" ]]; then
+  err "MODE MISMATCH: SSM /${SHARED_VPC_NAME}/${AWS_REGION}/network_mode says '${EXISTING_MODE}' but this script enforces 'privatelink'.
+     PrivateLink and VPC peering are mutually exclusive per shared VPC. To switch modes run:
+       ./deploy/scripts/destroy.sh --mode ec2
+       ./deploy/scripts/destroy.sh --mode shared    # optional
+       ./deploy/scripts/destroy.sh --mode network
+     Then re-run this script for a clean PrivateLink deploy."
+fi
+
 # ──────────────────────────────────────────────────────────────────────────────
 # PHASE 1 — Network stack (shared VPC + Atlas PrivateLink)
 # ──────────────────────────────────────────────────────────────────────────────

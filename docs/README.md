@@ -8,7 +8,7 @@ This folder is the **canonical handover pack** for the Bedrock Multi-Agent refer
 
 ## 1. What this project is
 
-A **configuration-driven multi-agent reference** on **AWS Bedrock** (via the [Strands Agents TypeScript SDK](https://github.com/strands-agents/sdk-typescript)) and **MongoDB Atlas**. A user types a question into a Streamlit web UI; the Hono API receives it, an **in-API classifier** picks the right specialist (or falls back to an orchestrator AgentCore Runtime), and a **specialist AgentCore Runtime** (order-management, troubleshooting, product-recommendation) streams the answer back over SSE. MongoDB tools run in a **dedicated MongoDB MCP AgentCore Runtime** behind the AgentCore Gateway. Long-term memory is **hybrid vector + BM25** across `agent_memory_facts` + `chat_messages` in Atlas. Observability lands in CloudWatch (logs, EMF metrics, four dashboards, alarms) plus OpenTelemetry / X-Ray.
+A **configuration-driven multi-agent reference** on **AWS Bedrock** (via the [Strands Agents TypeScript SDK](https://github.com/strands-agents/sdk-typescript)) and **MongoDB Atlas**. A user types a question into a Streamlit web UI; the Hono API receives it, an **in-API classifier** picks the right specialist (or falls back to an orchestrator AgentCore Runtime), and a **specialist AgentCore Runtime** (order-management, troubleshooting, product-recommendation) streams the answer back over SSE. MongoDB tools run in a **dedicated MongoDB MCP AgentCore Runtime** behind the AgentCore Gateway. Memory follows the SoW split: **short-term conversation memory lives in AgentCore Memory**, while **long-term cross-session memory lives in MongoDB Atlas** with hybrid vector + BM25 across `agent_memory_facts` + `chat_messages`. Observability lands in CloudWatch (logs, EMF metrics, four dashboards, alarms) plus OpenTelemetry / X-Ray.
 
 The product goal: **add specialists by editing markdown config**, not by forking business logic for every customer. New agent = new `config/agents/<name>.agent.md` + skill folder + redeploy.
 
@@ -51,9 +51,10 @@ Pick the path that matches your role.
 1. [`architecture.md`](architecture.md) — system overview, 5-runtime topology, classifier vs orchestrator
 2. [`agent-authoring-guide.md`](agent-authoring-guide.md) — `.agent.md` schema
 3. [`skills-authoring-guide.md`](skills-authoring-guide.md) — `SKILL.md` schema + progressive disclosure
-4. [`api-reference.md`](api-reference.md) — HTTP/SSE contract
-5. [`memory-architecture.md`](memory-architecture.md) + [`long-term-memory-design.md`](long-term-memory-design.md) — short-term + LTM
-6. [`debugging.md`](debugging.md) — trace-driven debug, validation scripts
+4. [`reference/tools.md`](reference/tools.md) — every supported agent tool, runtime home, config, and debugging path
+5. [`api-reference.md`](api-reference.md) — HTTP/SSE contract
+6. [`memory-architecture.md`](memory-architecture.md) + [`long-term-memory-design.md`](long-term-memory-design.md) — short-term + LTM
+7. [`debugging.md`](debugging.md) — trace-driven debug, validation scripts
 
 ### 3.3 Site Reliability (logs, metrics, traces, alarms)
 1. [`logging-architecture.md`](logging-architecture.md) — JSON logger, OTel + X-Ray, CloudWatch shipping, ADOT sidecar, audit channel
@@ -63,8 +64,8 @@ Pick the path that matches your role.
 5. [`debugging.md`](debugging.md) — when alarms fire
 
 ### 3.4 Demo engineer / SE (client demos)
-1. [`demo-script.md`](demo-script.md) — narrated walkthrough
-2. [`demo-mode-guide.md`](demo-mode-guide.md) — trace UI knobs for live demos
+1. [`demo/demo-script.md`](demo/demo-script.md) — narrated walkthrough
+2. [`demo/demo-mode-guide.md`](demo/demo-mode-guide.md) — trace UI knobs for live demos
 3. [`trace-viewer-client-guide.md`](trace-viewer-client-guide.md) — client-friendly Trace Viewer surface
 
 ---
@@ -79,6 +80,7 @@ Pick the path that matches your role.
 | [`api-reference.md`](api-reference.md) | HTTP + SSE contract, projections, auth error codes | 2026-05-20 |
 | [`agent-authoring-guide.md`](agent-authoring-guide.md) | `.agent.md` frontmatter + body | 2026-05-20 |
 | [`skills-authoring-guide.md`](skills-authoring-guide.md) | `SKILL.md`, progressive disclosure, scripts, http-tools | 2026-05-20 |
+| [`reference/tools.md`](reference/tools.md) | **NEW** — every supported agent tool, internal helper, runtime home, config, and debugging path | 2026-05-20 |
 | [`memory-architecture.md`](memory-architecture.md) | Short-term + long-term memory at a glance | 2026-05-20 |
 | [`long-term-memory-design.md`](long-term-memory-design.md) | Deep dive — schemas, write path, read path, tuning, failure modes | 2026-05-20 |
 | [`hybrid-search.md`](hybrid-search.md) | `mongodb_vector_search` + hybrid BM25, agent-facing surface | 2026-05-20 |
@@ -91,10 +93,11 @@ Pick the path that matches your role.
 | [`debugging.md`](debugging.md) | **NEW** — developer playbook: EC2 access, log tailing, trace-driven debug, common failures, memory diag, validation scripts, persistent pitfalls | 2026-05-20 |
 | [`dashboards/README.md`](dashboards/README.md) | Widget catalog, console URLs, alarm thresholds | 2026-05-20 |
 | [`estimate.md`](estimate.md) | Monthly AWS cost estimate | 2026-05-20 |
-| [`demo-script.md`](demo-script.md) | Narrated client-demo walkthrough | 2026-05-20 |
-| [`demo-mode-guide.md`](demo-mode-guide.md) | Trace UI knobs for live demos | 2026-05-20 |
+| [`demo/demo-script.md`](demo/demo-script.md) | Narrated client-demo walkthrough | 2026-05-20 |
+| [`demo/demo-mode-guide.md`](demo/demo-mode-guide.md) | Trace UI knobs for live demos | 2026-05-20 |
 | **Reference appendix** | | |
 | [`reference/env-vars.md`](reference/env-vars.md) | **NEW** — every env var catalogued | 2026-05-20 |
+| [`reference/tools.md`](reference/tools.md) | **NEW** — every supported agent tool catalogued | 2026-05-20 |
 | [`reference/terraform-modules.md`](reference/terraform-modules.md) | **NEW** — every Terraform module summarized | 2026-05-20 |
 | [`reference/ssm-parameters.md`](reference/ssm-parameters.md) | **NEW** — cross-stack SSM contract | 2026-05-20 |
 | [`reference/data-model.md`](reference/data-model.md) | **NEW** — every Mongo collection, indexes, TTL, access paths | 2026-05-20 |

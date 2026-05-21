@@ -8,6 +8,7 @@ TypeScript + Bun + Hono service. Hosts the chat SSE endpoint, session store, cla
 > - [`docs/architecture.md`](../docs/architecture.md) — system overview
 > - [`docs/agentcore-runtime-design.md`](../docs/agentcore-runtime-design.md) — the 5-runtime topology this file powers
 > - [`docs/configuration-guide.md`](../docs/configuration-guide.md) + [`docs/reference/env-vars.md`](../docs/reference/env-vars.md) — env vars
+> - [`docs/reference/tools.md`](../docs/reference/tools.md) — every supported agent tool, runtime home, config, and debugging path
 > - [`docs/debugging.md`](../docs/debugging.md) — debug a live turn
 
 ## Quick start

@@ -86,6 +86,29 @@ fi
 [[ -n "$ATLAS_SRV_HOST"     ]] || err "atlas_srv_host missing from query"
 [[ -n "$ATLAS_PEERING_CIDR" ]] || err "atlas_peering_cidr missing from query"
 
+log "waiting for ${EC2_INSTANCE_ID} to register with SSM (up to 4 min)"
+
+# Wait for SSM agent to come online. EC2 boots in ~20s but SSM Agent registration
+# usually takes 60-90s after that on AL2023. Without this wait, the very next
+# `aws ssm send-command` fails with `InvalidInstanceId: Instances not in a valid
+# state for account` — terraform then reports the data source as failed and
+# the whole apply aborts. Polls every 10s up to 4 min, then gives up.
+for attempt in $(seq 1 24); do
+  PING_STATUS=$(aws ssm describe-instance-information --region "$AWS_REGION" \
+    --filters "Key=InstanceIds,Values=${EC2_INSTANCE_ID}" \
+    --query 'InstanceInformationList[0].PingStatus' --output text 2>/dev/null || echo "Unknown")
+  if [[ "$PING_STATUS" == "Online" ]]; then
+    log "  SSM online after attempt ${attempt}"
+    break
+  fi
+  log "  ping_status=${PING_STATUS} (attempt ${attempt}/24, sleeping 10s)"
+  sleep 10
+done
+
+if [[ "${PING_STATUS:-Unknown}" != "Online" ]]; then
+  err "EC2 ${EC2_INSTANCE_ID} did not register with SSM within 4 min (last ping=${PING_STATUS:-Unknown}). Check SSM agent in /var/log/amazon/ssm/amazon-ssm-agent.log and the instance profile attached IAM role for AmazonSSMManagedInstanceCore."
+fi
+
 log "running SSM send-command on ${EC2_INSTANCE_ID} to resolve _mongodb._tcp.${ATLAS_SRV_HOST}"
 
 # Pre-installed on AL2023 standard AMI v9.18.28+ via bind-utils. Command does:

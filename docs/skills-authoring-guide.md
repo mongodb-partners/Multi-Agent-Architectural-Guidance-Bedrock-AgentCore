@@ -30,7 +30,7 @@ config/skills/<skill-name>/
 
 The `SKILL.md` file is always loaded when the skill is activated. Files in `references/` are loaded on demand — only when the agent explicitly requests them during a conversation. Keep `SKILL.md` focused and delegate detail to `references/`.
 
-**`http-tools.json`** (optional) declares Strands tools that invoke **HTTPS endpoints** — typically **AWS Lambda Function URLs** or **API Gateway** HTTP APIs. Same trust model as `scripts/*.mjs`: colocated with the skill, reviewed like code. Agents enable each tool by listing **`skill-folder/localToolName`** in `.agent.md` `tools:` (e.g. `order-management/notify_fulfillment_lambda`). The skill must be **allowed and activated** before a call succeeds (like `read_skill_resource`). SSRF **host allowlists** belong in repo-root `config/http-tools.json` → `security`. Details: [Configuration Guide § 6 — Skill configuration](configuration-guide.md#6-skill-configuration-configskillsskillskillmd).
+**`http-tools.json`** (optional) declares Strands tools that invoke **HTTPS endpoints** — typically **AWS Lambda Function URLs** or **API Gateway** HTTP APIs. Same trust model as `scripts/*.mjs`: colocated with the skill, reviewed like code. Agents enable each tool by listing **`skill-folder/localToolName`** in `.agent.md` `tools:` (e.g. `order-management/notify_fulfillment_lambda`). The skill must be **allowed and activated** before a call succeeds (like `read_skill_resource`). SSRF **host allowlists** belong in repo-root `config/http-tools.json` → `security`. Details: [Configuration Guide § 6 — Skill configuration](configuration-guide.md#6-skill-configuration-configskillsskillskillmd) and the canonical [tool catalog](reference/tools.md).
 
 **Minimal `http-tools.json` example** (inside a skill folder):
 
@@ -451,7 +451,7 @@ Viewer shows, per turn:
 If your skill seems "ignored", open the Trace Viewer first — usually the
 `prompt.assembled` and `skill.activated` events tell you why.
 
-See [demo-mode-guide.md](demo-mode-guide.md) for the full UI walkthrough
+See [demo/demo-mode-guide.md](demo/demo-mode-guide.md) for the full UI walkthrough
 and env knobs (`MONGO_TRACE_DIAGNOSTIC`, `MONGO_TRACE_EXPLAIN`, etc.).
 
 ---
@@ -461,5 +461,5 @@ and env knobs (`MONGO_TRACE_DIAGNOSTIC`, `MONGO_TRACE_EXPLAIN`, etc.).
 - [Configuration Guide](configuration-guide.md) — how to wire skills to agents
 - [Architecture](architecture.md) — how the skill loader works at runtime
 - [API reference](api-reference.md#14-tracing-endpoints) — trace event types
-- [Demo / trace UI guide](demo-mode-guide.md) — UI walkthrough
+- [Demo / trace UI guide](demo/demo-mode-guide.md) — UI walkthrough
 - [agentskills.io specification](https://agentskills.io/specification) — upstream specification

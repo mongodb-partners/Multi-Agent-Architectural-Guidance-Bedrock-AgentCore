@@ -23,7 +23,7 @@ python3 e2e-smoke/post-deploy-smoke.py
 
 Checks:
 
-- `/health` for MongoDB, AgentCore Memory, MCP runtime, JWKS.
+- `/health` for MongoDB, long-term memory, AgentCore Memory, MCP runtime, and (when `bedrock_kb_id` is in the manifest) Bedrock KB retrieve.
 - `/agents` metadata against the four configured agents.
 - `deploy-manifest.json` aligns with the env (`embeddings_provider`, Voyage Marketplace ARN, SoW model).
 - SageMaker endpoint `InService` when `EMBEDDINGS_PROVIDER=voyage`.
@@ -55,7 +55,7 @@ bash e2e-smoke/e2e-smoke.sh
 
 Covers:
 
-1. `/health` per-dependency.
+1. `/health` per-dependency (`mongodb`, `longTermMemory`, `agentcore`, `mcpServer`, optional `bedrockKnowledgeBase`).
 2. Cognito JWT obtain for `alex@example.com`.
 3. **Product recommendation** chat — asserts `mongodb_vector_search` fires via Voyage.
 4. **Troubleshooting** chat — asserts `mongodb_vector_search` + optional `bedrock_kb_retrieve`.

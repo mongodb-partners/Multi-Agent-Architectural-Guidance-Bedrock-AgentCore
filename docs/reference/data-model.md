@@ -99,7 +99,7 @@ Hosts both seed playbooks (with `docId`) and Bedrock KB chunked documents (witho
 These are auto-ensured by the API on first write (`createIndex` in `lib/*-collection.ts`) and also seeded by `seed-indexes.ts` so fresh clusters are ready before traffic.
 
 ### `chat_sessions` (override via `CHAT_SESSIONS_COLLECTION`)
-Persistent mirror of every chat session. Replayed into the Strands `Agent` as `messages: seed` on each turn.
+Persistent mirror of every chat session for the Sessions page, audit/debug history, and cold-read fallback. In deployed AWS, **AgentCore Memory is the authoritative short-term memory backend**; this collection is not the SoW short-term memory owner.
 
 | Field | Type | Notes |
 |---|---|---|
@@ -111,6 +111,7 @@ Persistent mirror of every chat session. Replayed into the Strands `Agent` as `m
 
 **Indexes:** `{ sessionId: 1 }` (unique, lazy via API), `{ userId: 1, updatedAt: -1 }` (seeded only — speeds `GET /sessions`).
 **Persistence gate:** `MONGODB_URI` set AND `PERSIST_CHAT_SESSIONS != 0`.
+**Memory role:** mirror/fallback only when `SHORT_TERM_MEMORY_BACKEND=agentcore`; primary short-term memory remains AgentCore.
 **Access:** [`api/src/lib/session-store.ts`](../../api/src/lib/session-store.ts) + `routes/sessions.ts`.
 
 ### `chat_messages` (override via `CHAT_MESSAGES_COLLECTION`)

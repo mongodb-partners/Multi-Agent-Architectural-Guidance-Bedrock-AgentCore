@@ -119,9 +119,9 @@ I need to cancel order ORD-1002 for blake@example.com. I no longer need it.
 
 Switch to the **repo** (IDE or GitHub):
 
-1. Open [`config/agents/orchestrator.agent.md`](../config/agents/orchestrator.agent.md) — **handoffs** table in frontmatter.
-2. Open [`config/skills/order-management/SKILL.md`](../config/skills/order-management/SKILL.md) — tool usage + `read_skill_resource` paths.
-3. Open the [`db-seeding/`](../db-seeding/) `seed-{products,orders,customers}.ts` scripts — the same fixtures that live in Atlas, served through the MongoDB MCP AgentCore Runtime.
+1. Open [`config/agents/orchestrator.agent.md`](../../config/agents/orchestrator.agent.md) — **handoffs** table in frontmatter.
+2. Open [`config/skills/order-management/SKILL.md`](../../config/skills/order-management/SKILL.md) — tool usage + `read_skill_resource` paths.
+3. Open the [`db-seeding/`](../../db-seeding/) `seed-{products,orders,customers}.ts` scripts — the same fixtures that live in Atlas, served through the MongoDB MCP AgentCore Runtime.
 
 **Presenter line:** *“A new vertical is mostly new markdown under `config/` plus data shape—not a new microservice per customer.”*
 
@@ -149,8 +149,8 @@ Switch to the **repo** (IDE or GitHub):
 
 ## After the demo
 
-- Point to [`reference/env-vars.md`](reference/env-vars.md) for the full env matrix. Optional setup (persistence, auth, real backends) is summarized in **[Before the demo](#before-the-demo)** above.
-- Point to [`README.md`](README.md) "Authoritative source files" for what’s still open in the production story (multi-tenancy, AgentCore Code Interpreter, etc.).
+- Point to [`reference/env-vars.md`](../reference/env-vars.md) for the full env matrix. Optional setup (persistence, auth, real backends) is summarized in **[Before the demo](#before-the-demo)** above.
+- Point to [`README.md`](../README.md) "Authoritative source files" for what’s still open in the production story (multi-tenancy, AgentCore Code Interpreter, etc.).
 - **Docker option:** run `docker compose up --build` (or `make docker-up`) from the repo root to show the full stack in containers — no Bun or Python install required. The API still requires `AGENTCORE_ORCHESTRATOR_ARN` and AWS credentials in the environment.
 
 ---
@@ -165,9 +165,9 @@ Use this after a demo session so someone else can **run it again** and **explain
 | 2 | **Swarm vs single** | Toggle `ORCHESTRATOR_MODE=swarm` on the orchestrator runtime, pick **orchestrator** vs a specialist in the UI, and state what changes (handoffs vs direct agent). |
 | 3 | **Where config lives** | Open `config/agents/*.agent.md` (persona + `handoffs` + `tools`) and `config/skills/*/SKILL.md` (domain instructions + progressive disclosure). |
 | 4 | **Tool path** | All Mongo tools resolve to MCP calls against the MongoDB MCP AgentCore Runtime (`MONGODB_MCP_RUNTIME_ARN` / `MONGODB_MCP_RUNTIME_ENDPOINT`); Gateway remains for non-Mongo tools. |
-| 5 | **API contract** | Name `POST /chat` (SSE), `GET /agents`, `GET /skills`, `GET /sessions`, `DELETE /sessions/:id`, `GET /http-tools`, and where events are documented ([`docs/api-reference.md`](api-reference.md)). |
-| 6 | **What’s actually missing** | List at least three **not implemented** items (configurable behavior belongs in [Before the demo](#before-the-demo)): e.g. **multi-instance** coherence for Mongo-backed **`chat_sessions`**; **AgentCore Code Interpreter** wired into product flows; **CI/CD** as the primary deploy path; **ECS/ALB** rollout beyond EC2 + container images. Source of truth: [`README.md`](README.md). |
-| 7 | **Extend a vertical** | Describe the steps to add a new skill folder + reference an agent’s `skills:` list (or walk through [`docs/skills-authoring-guide.md`](skills-authoring-guide.md) / [`docs/agent-authoring-guide.md`](agent-authoring-guide.md)). |
+| 5 | **API contract** | Name `POST /chat` (SSE), `GET /agents`, `GET /skills`, `GET /sessions`, `DELETE /sessions/:id`, `GET /http-tools`, and where events are documented ([`docs/api-reference.md`](../api-reference.md)). |
+| 6 | **What’s actually missing** | List at least three **not implemented** items (configurable behavior belongs in [Before the demo](#before-the-demo)): e.g. **AgentCore Code Interpreter** wired into product flows; **CI/CD** as the primary deploy path; **ECS/ALB** rollout beyond EC2 + container images; customer-scoped multi-tenancy on operational collections. Source of truth: [`README.md`](../README.md). |
+| 7 | **Extend a vertical** | Describe the steps to add a new skill folder + reference an agent’s `skills:` list (or walk through [`docs/skills-authoring-guide.md`](../skills-authoring-guide.md) / [`docs/agent-authoring-guide.md`](../agent-authoring-guide.md)). |
 | 8 | **Regression** | Run `cd api && bun run typecheck && bun test` before a big demo or config change. |
 
-**Optional deep dives (assign reading):** [`AGENTS.md`](../AGENTS.md) (contributor rules), [`docs/architecture.md`](architecture.md), [`docs/configuration-guide.md`](configuration-guide.md).
+**Optional deep dives (assign reading):** [`AGENTS.md`](../../AGENTS.md) (contributor rules), [`docs/architecture.md`](../architecture.md), [`docs/configuration-guide.md`](../configuration-guide.md).

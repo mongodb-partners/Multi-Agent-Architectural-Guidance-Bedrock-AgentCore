@@ -68,9 +68,12 @@ resource "aws_iam_role_policy" "ec2_app" {
         Resource = "*"
       },
       {
-        Sid      = "BedrockKBRetrieve"
-        Effect   = "Allow"
-        Action   = ["bedrock-agent-runtime:Retrieve"]
+        Sid    = "BedrockKBRetrieve"
+        Effect = "Allow"
+        Action = [
+          "bedrock:Retrieve",
+          "bedrock-agent-runtime:Retrieve",
+        ]
         Resource = "*"
       },
       {

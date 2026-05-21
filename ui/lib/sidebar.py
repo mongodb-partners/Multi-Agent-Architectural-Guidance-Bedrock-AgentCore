@@ -14,6 +14,7 @@ _STATUS_CLASS = {
     "dev_mock": "warn",
     "degraded": "err",
     "unreachable": "err",
+    "inactive": "warn",
     "not_configured": "muted",
     "no_agents": "muted",
 }

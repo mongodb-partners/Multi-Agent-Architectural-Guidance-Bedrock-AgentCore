@@ -1,7 +1,8 @@
 # Root build context for `api/Dockerfile` (docker build -f api/Dockerfile .)
 .git
 .github
-.cursor
+.idea
+.vscode
 api/node_modules
 api/tests
 ui

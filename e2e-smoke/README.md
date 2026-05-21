@@ -11,7 +11,7 @@ python3 e2e-smoke/post-deploy-smoke.py
 
 This checks:
 
-- `/health` dependencies for MongoDB, AgentCore, and MCP.
+- `/health` dependencies: `mongodb`, `longTermMemory`, `agentcore`, `mcpServer`, and `bedrockKnowledgeBase` when a KB is configured.
 - `/agents` metadata for all four configured agents.
 - Manifest alignment for `embeddings_provider`, exact Voyage model package, and SoW alignment.
 - SageMaker endpoint existence and `InService` status when `EMBEDDINGS_PROVIDER=voyage`.

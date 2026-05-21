@@ -267,7 +267,7 @@ test.describe('Infrastructure', () => {
     const body = await res.json();
     expect(['ok', 'degraded']).toContain(body.status);
     expect(body.dependencies).toBeTruthy();
-    expect(['direct', 'lambda', 'gateway']).toContain(body.dependencies.toolHosting);
+    expect(['connected', 'not_configured']).toContain(body.dependencies.mongodb);
   });
 
   test('INF-02: /agents — all four agents registered', async ({ request }) => {

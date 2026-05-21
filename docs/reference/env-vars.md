@@ -159,7 +159,7 @@ Hybrid (vector + BM25) retrieval over `agent_memory_facts` (LLM-curated) and `ch
 | `MEMORY_VECTOR_TOPK` | `14` | Top-K hits after RRF + MMR (raised from `6` → `10` → `14` after harness regression) | [`api/src/lib/long-term-memory.ts`](../../api/src/lib/long-term-memory.ts) |
 | `MEMORY_VECTOR_FETCHK` | `24` | Per-leg over-fetch before fusion | `long-term-memory.ts` |
 | `MEMORY_VECTOR_NUM_CANDIDATES` | `200` | Atlas `$vectorSearch.numCandidates` width | `long-term-memory.ts` |
-| `MEMORY_RECENCY_HALFLIFE_DAYS` | `30` | Exponential recency decay half-life; `0` disables | `long-term-memory.ts` |
+| `MEMORY_RECENCY_HALFLIFE_DAYS` | `90` | Exponential recency decay half-life; `0` disables | `long-term-memory.ts` |
 | `MEMORY_MMR_LAMBDA` | `0.7` | 1 = pure relevance, 0 = pure diversity | `long-term-memory.ts` |
 | `MEMORY_MIN_SCORE` | `0` | Drop hits with fused score below this | `long-term-memory.ts` |
 | `MEMORY_WEIGHT_FACTS` | `1.5` | Multiplier on `agent_memory_facts` RRF score | `long-term-memory.ts` |
@@ -230,7 +230,7 @@ Per-turn trace events live in MongoDB `traces` (TTL-controlled) and in a ring bu
 
 | Variable | Default | Effect | Reader |
 |---|---|---|---|
-| `BEDROCK_KB_ID` | — | Default KB id used by the `bedrock_kb_retrieve` tool when callers omit it | [`api/src/lib/base-tools.ts`](../../api/src/lib/base-tools.ts) |
+| `BEDROCK_KB_ID` | — | Default KB id for `bedrock_kb_retrieve` and the `/health` `bedrockKnowledgeBase` probe (`Retrieve` with query `"health"`) | [`api/src/lib/base-tools.ts`](../../api/src/lib/base-tools.ts), [`api/src/lib/health-status.ts`](../../api/src/lib/health-status.ts) |
 | `SKILL_RESOURCE_MAX_BYTES` | `500000` (500 KB) | Cap on bytes returned by `read_skill_resource` | [`api/src/lib/skill-loader.ts`](../../api/src/lib/skill-loader.ts) |
 
 ---

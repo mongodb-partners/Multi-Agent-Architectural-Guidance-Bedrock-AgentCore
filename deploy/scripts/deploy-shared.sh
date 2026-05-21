@@ -108,6 +108,12 @@ ATLAS_REPLICATION_LAG_THRESHOLD_MS="${ATLAS_REPLICATION_LAG_THRESHOLD_MS:-5000}"
 source "$SCRIPT_DIR/_aws-auth.sh"
 validate_aws_auth || err "AWS auth validation failed (see above)"
 ACCOUNT_ID="$AWS_AUTH_ACCOUNT_ID"
+
+# ── Centralized preflight checks (see docs/deployment-preflight-checks.md) ──
+# shellcheck source=deploy/scripts/_preflight-checks.sh
+source "$SCRIPT_DIR/_preflight-checks.sh"
+preflight_validate shared
+
 ok "AWS account: $ACCOUNT_ID"
 ok "Shared VPC name: $SHARED_VPC_NAME"
 ok "Shared resource prefix: $SHARED_RESOURCE_PREFIX"

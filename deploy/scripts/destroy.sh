@@ -85,6 +85,9 @@ err()  { echo "  [destroy:$MODE] ✗ $*" >&2; exit 1; }
 warn() { echo "  [destroy:$MODE] ⚠ $*"; }
 sep()  { echo "────────────────────────────────────────────────"; }
 
+# shellcheck source=deploy/scripts/_sg-cleanup.sh
+source "$SCRIPT_DIR/_sg-cleanup.sh"
+
 # ══════════════════════════════════════════════════════════════════════════════
 # Prerequisites
 # ══════════════════════════════════════════════════════════════════════════════
@@ -286,6 +289,10 @@ log "Found $_RESOURCE_COUNT resource(s) in state"
 
 _DESTROY_START="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 log "Running terraform destroy..."
+if [[ "$MODE" == "ec2" ]]; then
+  log "Pre-cleaning external security-group references for project SGs..."
+  cleanup_project_security_group_references || true
+fi
 if [[ "$AUTO_APPROVE" == "true" ]]; then
   terraform destroy -input=false -auto-approve
 else
