@@ -302,7 +302,6 @@ PREFLIGHT_PROFILE_orchestrator_privatelink=(
   pf_check_atlas_project_quota
   pf_check_voyage_marketplace_subscribed
   pf_check_bedrock_model_access
-  pf_check_bedrock_service_quotas
   pf_check_iam_deploy_actions
   pf_check_aws_service_limits
   pf_advise_cost_and_duration
@@ -1047,7 +1046,7 @@ pf_check_session_manager_plugin() {
 }
 
 # pf:check: pf_check_docker_buildx
-# pf:catches: "docker buildx missing — ARM64 multi-platform build fails opaquely"
+# pf:catches: "docker buildx missing or not visible to Docker CLI — ARM64 multi-platform build fails opaquely"
 # pf:source:  new-user friction (operator machine)
 pf_check_docker_buildx() {
   # Only required when docker is on PATH and reachable
@@ -1059,22 +1058,60 @@ pf_check_docker_buildx() {
     _pf_skip pf_check_docker_buildx "docker daemon not reachable"
     return 0
   fi
-  if ! docker buildx version >/dev/null 2>&1; then
+  local docker_path docker_version docker_context docker_config buildx_out buildx_error
+  docker_path="$(command -v docker 2>/dev/null || echo "not found")"
+  docker_version="$(docker --version 2>&1 || true)"
+  docker_context="$(docker context show 2>&1 || true)"
+  docker_config="${DOCKER_CONFIG:-${HOME:-}/.docker}"
+
+  if ! buildx_out="$(docker buildx version 2>&1)"; then
+    buildx_error="${buildx_out//$'\n'/ }"
+    local standalone_buildx="not found"
+    if command -v docker-buildx >/dev/null 2>&1; then
+      standalone_buildx="$(command -v docker-buildx)"
+    fi
+
+    local -a plugin_hits=()
+    local p plugin_locations
+    for p in \
+      "${docker_config}/cli-plugins/docker-buildx" \
+      "${HOME:-}/.docker/cli-plugins/docker-buildx" \
+      "/opt/homebrew/lib/docker/cli-plugins/docker-buildx" \
+      "/opt/homebrew/libexec/docker/cli-plugins/docker-buildx" \
+      "/usr/local/lib/docker/cli-plugins/docker-buildx" \
+      "/usr/local/libexec/docker/cli-plugins/docker-buildx" \
+      "/usr/lib/docker/cli-plugins/docker-buildx" \
+      "/usr/libexec/docker/cli-plugins/docker-buildx"; do
+      [[ -n "$p" && -e "$p" ]] && plugin_hits+=("$p")
+    done
+    plugin_locations="${plugin_hits[*]:-none}"
+
+    local summary
+    if [[ "$standalone_buildx" != "not found" || "$plugin_locations" != "none" ]]; then
+      summary="docker buildx is installed but Docker CLI cannot load it"
+    else
+      summary="docker buildx is not available (linux/arm64 builds will fail)"
+    fi
     _pf_fail pf_check_docker_buildx \
-      --summary "docker buildx is not available (linux/arm64 builds will fail)" \
+      --summary "$summary" \
       --shortcoming "new-user friction (operator machine)" \
-      --observed "'docker buildx version' returned non-zero" \
-      --fix "Install Docker Desktop (which bundles buildx) or 'docker buildx install'" \
-      --fix "On Linux without Docker Desktop: docker buildx create --use --name multiagent-builder" \
+      --observed "docker=${docker_path}; ${docker_version}; context=${docker_context}; DOCKER_CONFIG=${docker_config}; docker-buildx=${standalone_buildx}; plugin_paths=${plugin_locations}; error=${buildx_error:-unknown}" \
+      --fix "Run the deploy from the same shell where 'docker buildx version' works; if needed export PATH=\"/opt/homebrew/bin:/usr/local/bin:\$PATH\" before running deploy" \
+      --fix "macOS Docker Desktop: restart Docker Desktop, then run 'docker context use desktop-linux' (or the context that 'docker info' uses successfully)" \
+      --fix "Homebrew/standalone Buildx: mkdir -p ~/.docker/cli-plugins && ln -sf \"\$(command -v docker-buildx)\" ~/.docker/cli-plugins/docker-buildx && chmod +x ~/.docker/cli-plugins/docker-buildx" \
+      --fix "Linux Docker Engine: install the Docker CLI plugin package (Debian/Ubuntu: sudo apt-get install docker-buildx-plugin; RHEL/Amazon Linux: sudo yum install docker-buildx-plugin)" \
+      --fix "After Buildx loads, create/select a builder if needed: docker buildx create --use --name multiagent-builder" \
       --hint "doc:docs/deployment-preflight-checks.md#docker-buildx" \
       --doc "docs/deployment-preflight-checks.md#docker-buildx" \
       --exit-class tool
     return 0
   fi
-  if ! docker buildx ls 2>/dev/null | grep -qE 'linux/(arm64|amd64)'; then
-    _pf_warn "docker buildx is installed but no multi-platform builder is active. Run: docker buildx create --use"
+  local buildx_ls_out
+  buildx_ls_out="$(docker buildx ls 2>&1 || true)"
+  if ! printf '%s\n' "$buildx_ls_out" | grep -qE 'linux/(arm64|amd64)'; then
+    _pf_warn "docker buildx is installed but no multi-platform builder is active. Run: docker buildx create --use --name multiagent-builder"
   fi
-  _pf_pass pf_check_docker_buildx "buildx available"
+  _pf_pass pf_check_docker_buildx "buildx available (${buildx_out})"
 }
 
 # pf:check: pf_check_disk_and_docker_resources
@@ -1409,55 +1446,6 @@ pf_check_bedrock_model_access() {
     _pf_warn "bedrock get-foundation-model failed for non-access reason: $(echo "$out" | head -1)"
   fi
   _pf_pass pf_check_bedrock_model_access "model ${strip_inference} accessible in ${region}"
-}
-
-# pf:check: pf_check_bedrock_service_quotas
-# pf:catches: "Bedrock TPM/RPM quotas at floor — first turn 429s"
-pf_check_bedrock_service_quotas() {
-  _pf_ensure_aws_auth || { _pf_skip pf_check_bedrock_service_quotas "AWS auth not validated"; return 0; }
-  local region="${AWS_REGION:-us-east-1}"
-  # We cannot reliably enumerate Bedrock per-model quotas via the Quotas API in
-  # all regions (codes vary). Probe two well-known ones; if both come back as
-  # default (low) values, surface a warning rather than a fail. This check is
-  # advisory: it never sets exit-class config.
-  local out_rpm out_tpm rpm_value tpm_value
-  # Bedrock quota names vary across regions/launches:
-  #   "On-demand model inference requests per minute for Anthropic Claude 3 Sonnet"
-  #   "Cross-region model inference requests per minute for Anthropic Claude Sonnet 4"
-  #   etc. We match on Anthropic|Claude family + RPM|TPM dimension.
-  local _quota_json
-  _quota_json="$(aws service-quotas list-service-quotas --region "$region" --service-code bedrock --output json 2>/dev/null || echo '{}')"
-  out_rpm="$(echo "$_quota_json" | python3 -c '
-import json, sys
-try:
-    q = json.load(sys.stdin).get("Quotas", []) or []
-except Exception:
-    q = []
-hits = [x for x in q if (("Anthropic" in x.get("QuotaName","") or "Claude" in x.get("QuotaName","")) and "requests per minute" in x.get("QuotaName","").lower())]
-print(int(min(h["Value"] for h in hits))) if hits else print("")
-' 2>/dev/null || echo '')"
-  out_tpm="$(echo "$_quota_json" | python3 -c '
-import json, sys
-try:
-    q = json.load(sys.stdin).get("Quotas", []) or []
-except Exception:
-    q = []
-hits = [x for x in q if (("Anthropic" in x.get("QuotaName","") or "Claude" in x.get("QuotaName","")) and "tokens per minute" in x.get("QuotaName","").lower())]
-print(int(min(h["Value"] for h in hits))) if hits else print("")
-' 2>/dev/null || echo '')"
-  rpm_value="${out_rpm:-?}"
-  tpm_value="${out_tpm:-?}"
-  if [[ "$rpm_value" == "?" && "$tpm_value" == "?" ]]; then
-    _pf_pass pf_check_bedrock_service_quotas "service-quotas API didn't enumerate Bedrock entries (advisory check skipped)"
-    return 0
-  fi
-  if [[ "$rpm_value" =~ ^[0-9]+$ ]] && (( rpm_value < 50 )); then
-    _pf_warn "Bedrock RPM quota for Claude in ${region} is ${rpm_value}/min (recommend ≥ 50). Open https://${region}.console.aws.amazon.com/servicequotas/home/services/bedrock/quotas to request an increase."
-  fi
-  if [[ "$tpm_value" =~ ^[0-9]+$ ]] && (( tpm_value < 50000 )); then
-    _pf_warn "Bedrock TPM quota for Claude in ${region} is ${tpm_value}/min (recommend ≥ 50,000). Same console link as above."
-  fi
-  _pf_pass pf_check_bedrock_service_quotas "RPM=${rpm_value} TPM=${tpm_value}"
 }
 
 # pf:check: pf_check_iam_deploy_actions
