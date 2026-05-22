@@ -429,16 +429,22 @@ def list_recent_traces(
     return r.json().get("traces", [])
 
 
-def get_demo_prompts(api_base: str, *, request_id: str | None = None, timeout: float = 5.0) -> list[dict]:
+def get_demo_prompts(
+    api_base: str,
+    *,
+    access_token: str | None = None,
+    request_id: str | None = None,
+    timeout: float = 5.0,
+) -> list[dict]:
     """GET /demo-prompts — the sidebar's "Try a prompt" entries.
 
-    Public endpoint (no auth required) so the sidebar can render before login.
+    Requires the same Bearer token as the rest of the API.
     Returns a list of `{ title, prompts: [{ label, text }] }` groups. Any
     network/parse failure → ``[]`` (the section just hides itself).
     """
     url = f"{api_base.rstrip('/')}/demo-prompts"
     try:
-        r = requests.get(url, headers=_http_headers(None, request_id), timeout=timeout)
+        r = requests.get(url, headers=_http_headers(access_token, request_id), timeout=timeout)
         r.raise_for_status()
     except (requests.RequestException, ValueError):
         return []

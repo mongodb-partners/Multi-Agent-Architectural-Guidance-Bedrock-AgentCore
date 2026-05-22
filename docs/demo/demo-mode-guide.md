@@ -76,9 +76,9 @@ Trace Viewer at the latest assistant message's trace.
 ## Adding a new demo prompt
 
 Edit `config/demo-prompts.yaml`. The file is served to the UI by the API at
-`GET /demo-prompts` (public, no auth) — this is why the file lives in
-`config/` (mounted into the API container) and not in `ui/` (the Streamlit
-container doesn't see the repo's `config/` tree).
+`GET /demo-prompts` with the signed-in user's API token — this is why the file
+lives in `config/` (mounted into the API container) and not in `ui/` (the
+Streamlit container doesn't see the repo's `config/` tree).
 
 Each prompt is `{ label, text }` and groups are free-form:
 

@@ -107,7 +107,7 @@ These are typically set in `.env.live` by `deploy-project.sh`. For local dev wit
 | `BEDROCK_KB_ID` | `YDF16V4CRX` | Default knowledge base for `bedrock_kb_retrieve` |
 | `EMBEDDINGS_PROVIDER` | `titan` or `voyage` | Explicit embedding provider. `titan` needs no Voyage ARN; `voyage` provisions/uses SageMaker from `VOYAGE_MODEL_PACKAGE_ARN`. |
 | `EMBEDDING_MODEL_ID` | `amazon.titan-embed-text-v2:0` | Bedrock embedding model for `EMBEDDINGS_PROVIDER=titan` and fallback paths. Must match Atlas vector index dimensionality (Titan v2 = 1024-d). |
-| `VOYAGE_MODEL_PACKAGE_ARN` | `arn:aws:sagemaker:...:model-package/...` | Required only for `EMBEDDINGS_PROVIDER=voyage`. Supports `voyage-multimodal-3` and `voyage-3-5-lite` ARNs. |
+| `VOYAGE_MODEL_PACKAGE_ARN` | `arn:aws:sagemaker:...:model-package/voyage-...` | Required only for `EMBEDDINGS_PROVIDER=voyage`. Must point at a Voyage package. The SoW default is `voyage-multimodal-3`; AWS may expose that family as `voyage-multimodel-3-updated-*`. |
 | `VOYAGE_MARKETPLACE_MODEL` | `voyage-multimodal-3` or `voyage-3-5-lite` | Selected Voyage Marketplace model. Used for endpoint naming and env consistency. |
 | `VOYAGE_SAGEMAKER_ENDPOINT` | `mongodb-multiagent3-voyage-multimodal-3-dev` | Runtime endpoint name written by deploy when Voyage is enabled. If empty, API + AgentCore runtimes use Titan. |
 | `VOYAGE_REQUEST_FORMAT` | `multimodal` or `legacy` | SageMaker request envelope. Use `multimodal` for `voyage-multimodal-3`; use `legacy` for `voyage-3-5-lite`. |
@@ -160,8 +160,9 @@ The deployment supports three explicit modes:
 | Mode | Required env | Runtime behavior |
 |---|---|---|
 | Titan/no ARN | `EMBEDDINGS_PROVIDER=titan` | No SageMaker endpoint is created. API + AgentCore runtimes use Bedrock Titan v2 (`amazon.titan-embed-text-v2:0`). |
-| Voyage multimodal | `EMBEDDINGS_PROVIDER=voyage`, `VOYAGE_MARKETPLACE_MODEL=voyage-multimodal-3`, `VOYAGE_REQUEST_FORMAT=multimodal`, `VOYAGE_MODEL_PACKAGE_ARN=...voyage-multimodal-3...` | Provisions SageMaker and uses Voyage multimodal embeddings. This is the SoW-aligned path. |
+| Voyage multimodal | `EMBEDDINGS_PROVIDER=voyage`, `VOYAGE_MARKETPLACE_MODEL=voyage-multimodal-3`, `VOYAGE_REQUEST_FORMAT=multimodal`, `VOYAGE_MODEL_PACKAGE_ARN=...voyage-multimodal-3...` or `...voyage-multimodel-3-updated...` | Provisions SageMaker and uses Voyage multimodal embeddings. This is the SoW-aligned path. |
 | Voyage legacy/text | `EMBEDDINGS_PROVIDER=voyage`, `VOYAGE_MARKETPLACE_MODEL=voyage-3-5-lite`, `VOYAGE_REQUEST_FORMAT=legacy`, `VOYAGE_OUTPUT_DIM=1024`, `VOYAGE_MODEL_PACKAGE_ARN=...voyage-3-5-lite...` | Provisions SageMaker and uses the older text-only Voyage listing. |
+| Voyage custom | `EMBEDDINGS_PROVIDER=voyage`, `VOYAGE_MARKETPLACE_MODEL=voyage-...`, `VOYAGE_REQUEST_FORMAT=multimodal` or `legacy`, `VOYAGE_MODEL_PACKAGE_ARN=...model-package/voyage-...` | Provisions SageMaker for another Voyage Marketplace package. The package tail and model label must start with `voyage-`. |
 
 `products`, `troubleshooting_docs`, `agent_memory_facts`, and `chat_messages` are the collections with semantic retrieval. The first two are embedded by `db-seeding/seed-embeddings.ts`; long-term memory facts and chat-message mirrors are embedded online by the API as they are written. `orders`, `customers`, `chat_sessions`, and `traces` remain structured-only.
 

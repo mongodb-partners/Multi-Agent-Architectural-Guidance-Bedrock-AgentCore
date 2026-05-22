@@ -139,7 +139,7 @@ There is no `REQUIRE_AUTH=false` / `ALLOW_UNAUTHENTICATED` bypass.
 | Variable | Default | Effect | Required when | Reader |
 |---|---|---|---|---|
 | `EMBEDDINGS_PROVIDER` | — | `voyage` (SoW) or `titan` (explicit deviation). `assertEmbeddingsProvider()` rejects unset / unrecognized values | API boot | [`api/src/lib/assert-embeddings-provider.ts`](../../api/src/lib/assert-embeddings-provider.ts), [`api/src/lib/embed-query.ts`](../../api/src/lib/embed-query.ts) |
-| `VOYAGE_MODEL_PACKAGE_ARN` | — | Marketplace ARN for the Voyage model. Pinned to `voyage-multimodal-3` by the deploy validator | `EMBEDDINGS_PROVIDER=voyage` | `deploy-project.sh`, [`modules/voyage-sagemaker/`](../../deploy/terraform/modules/voyage-sagemaker/) |
+| `VOYAGE_MODEL_PACKAGE_ARN` | — | Marketplace ARN for a Voyage model package. The validator requires a `model-package/voyage-...` ARN; SoW uses the `voyage-multimodal-3` family, which AWS may expose as `voyage-multimodel-3-updated-*` | `EMBEDDINGS_PROVIDER=voyage` | `deploy-project.sh`, [`modules/voyage-sagemaker/`](../../deploy/terraform/modules/voyage-sagemaker/) |
 | `VOYAGE_MARKETPLACE_MODEL` | `voyage-multimodal-3` | SoW model pin; override only with written deviation | Default-on | `setup-voyage-marketplace.sh` |
 | `VOYAGE_INSTANCE_TYPE` | `ml.g6.xlarge` | SageMaker real-time endpoint instance | Default-on for SoW | `modules/voyage-sagemaker` |
 | `VOYAGE_REQUEST_FORMAT` | `multimodal` | `multimodal` (voyage-multimodal-3) or `legacy` (voyage-3.5-lite / voyage-3) | Per-model contract | [`api/src/adapters/voyage-embedding.ts`](../../api/src/adapters/voyage-embedding.ts) |

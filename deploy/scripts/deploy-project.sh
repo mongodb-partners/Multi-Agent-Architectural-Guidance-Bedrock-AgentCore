@@ -295,6 +295,26 @@ esac
 export TF_VAR_network_mode="$NETWORK_MODE"
 ok "Network mode: ${NETWORK_MODE}"
 
+# ── Bedrock KB ingestion path auto-derived from NETWORK_MODE ────────────────
+# envs/ec2 only consults the flag matching the active mode (the other is
+# silently ignored — see locals.use_kb_* in envs/ec2/main.tf). So the
+# operator never has to set both. We default the active flag to "true" (SoW-
+# aligned private path) and force the inactive one to "false" for clarity.
+# Override either in .env to drop KB onto Atlas public SRV — this is a
+# privacy regression and the only documented escape hatch for the
+# experimental peering-NLB TLS path (see modules/bedrock-kb-peering/README.md).
+case "$NETWORK_MODE" in
+  privatelink)
+    export TF_VAR_enable_kb_privatelink="${TF_VAR_enable_kb_privatelink:-true}"
+    export TF_VAR_enable_kb_peering="${TF_VAR_enable_kb_peering:-false}"
+    ;;
+  peering)
+    export TF_VAR_enable_kb_privatelink="${TF_VAR_enable_kb_privatelink:-false}"
+    export TF_VAR_enable_kb_peering="${TF_VAR_enable_kb_peering:-true}"
+    ;;
+esac
+ok "KB ingestion: privatelink=${TF_VAR_enable_kb_privatelink} peering=${TF_VAR_enable_kb_peering}"
+
 export TF_VAR_atlas_db_password="${TF_VAR_atlas_db_password:-${TF_VAR_mongodb_password:-}}"
 [[ -n "${TF_VAR_atlas_db_password:-}" ]] || err "Atlas DB password not set. Set TF_VAR_mongodb_password in .env"
 
@@ -376,12 +396,12 @@ case "$EMBEDDINGS_PROVIDER" in
     fi
     # Marketplace ARN tail format:
     #   arn:aws:sagemaker:<region>:<vendor>:model-package/<package-name>
-    # AWS Marketplace package names may include vendor version suffixes such as
-    # `voyage-multimodal-3-5-v1-<hash>`. Keep provider routing based on the
-    # canonical model family, but preserve the exact tail in deploy-manifest.json
-    # so version suffixes never disappear silently.
+    # AWS Marketplace package names may include vendor version suffixes or the
+    # published `voyage-multimodel-3-updated-*` package tail. Keep provider
+    # routing based on the canonical model family, but preserve the exact tail
+    # in deploy-manifest.json so version suffixes never disappear silently.
     VOYAGE_ARN_TAIL="${VOYAGE_ARN##*/}"
-    if [[ "$VOYAGE_ARN_TAIL" =~ ^voyage-multimodal-3($|-) ]]; then
+    if [[ "$VOYAGE_ARN_TAIL" =~ ^voyage-multimo(dal|del)-3($|-) ]]; then
       VOYAGE_MODEL_LABEL="voyage-multimodal-3"
       VOYAGE_REQUEST_FORMAT="${VOYAGE_REQUEST_FORMAT:-multimodal}"
       [[ "$VOYAGE_REQUEST_FORMAT" == "multimodal" ]] || err "voyage-multimodal-3 requires VOYAGE_REQUEST_FORMAT=multimodal"
@@ -394,6 +414,10 @@ case "$EMBEDDINGS_PROVIDER" in
       VOYAGE_MODEL_LABEL="$VOYAGE_MARKETPLACE_MODEL"
       [[ -n "$VOYAGE_MODEL_LABEL" && "$VOYAGE_MODEL_LABEL" != "voyage-multimodal-3" ]] || err "Could not infer Voyage model from VOYAGE_MODEL_PACKAGE_ARN tail '$VOYAGE_ARN_TAIL'.
        Set VOYAGE_MARKETPLACE_MODEL to the selected custom model and VOYAGE_REQUEST_FORMAT to multimodal or legacy."
+      [[ "$VOYAGE_ARN_TAIL" =~ ^voyage- ]] || err "VOYAGE_MODEL_PACKAGE_ARN tail '$VOYAGE_ARN_TAIL' is not a Voyage model package.
+       Use an ARN whose model-package name starts with 'voyage-'."
+      [[ "$VOYAGE_MODEL_LABEL" =~ ^voyage- ]] || err "VOYAGE_MARKETPLACE_MODEL='$VOYAGE_MODEL_LABEL' is not a Voyage model label.
+       Use a label starting with 'voyage-'."
       [[ "$VOYAGE_REQUEST_FORMAT" == "multimodal" || "$VOYAGE_REQUEST_FORMAT" == "legacy" ]] || err "Custom Voyage model '$VOYAGE_MODEL_LABEL' requires VOYAGE_REQUEST_FORMAT=multimodal or legacy"
     fi
     EMBEDDINGS_MODEL_ID="$VOYAGE_ARN_TAIL"

@@ -1,7 +1,7 @@
 """Sidebar block: Try-a-prompt buttons backed by the API.
 
 The prompts themselves live in ``config/demo-prompts.yaml`` on the API side
-and are exposed via ``GET /demo-prompts`` (public endpoint). Clicking a
+and are exposed via authenticated ``GET /demo-prompts``. Clicking a
 button writes the prompt into ``st.session_state.pending_chat_input`` so the
 next rerun's ``handle_chat_input`` picks it up and submits it without the
 user having to retype.
@@ -15,13 +15,15 @@ from lib.api_client import get_demo_prompts
 
 
 @st.cache_data(ttl=60, show_spinner=False)
-def _load_prompts(api_base: str) -> list[dict]:
+def _load_prompts(api_base: str, auth_present: bool, _access_token: str | None) -> list[dict]:
     """Cache the API response briefly so each rerun isn't a fresh GET."""
-    return get_demo_prompts(api_base)
+    if not auth_present:
+        return []
+    return get_demo_prompts(api_base, access_token=_access_token)
 
 
-def render_suggested_prompts(api_base: str) -> None:
-    groups = _load_prompts(api_base)
+def render_suggested_prompts(api_base: str, access_token: str | None) -> None:
+    groups = _load_prompts(api_base, bool(access_token), access_token)
     if not groups:
         return
     st.markdown("---")

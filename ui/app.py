@@ -45,7 +45,7 @@ ensure_defaults()
 
 with st.sidebar:
     agent_id = render_session_and_agent_sidebar(settings.api_base, api_token)
-    render_suggested_prompts(settings.api_base)
+    render_suggested_prompts(settings.api_base, api_token)
     st.markdown("---")
     render_metrics_block(settings.api_base, api_token)
     render_cognito_logout(settings)

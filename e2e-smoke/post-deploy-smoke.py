@@ -152,11 +152,15 @@ def check_embedding_manifest_and_sagemaker(resources: dict[str, Any]) -> None:
 
     require(provider in ("voyage", "titan"), f"unknown embeddings_provider={provider!r}")
     if provider == "voyage":
-        require(aligned is True, "voyage provider must be marked embeddings_sow_aligned=true")
         require(
-            isinstance(model, str) and re.match(r"^voyage-multimodal-3($|-)", model),
-            f"voyage embeddings_model is not voyage-multimodal-3: {model!r}",
+            isinstance(model, str) and re.match(r"^voyage-", model),
+            f"voyage embeddings_model is not a Voyage package tail: {model!r}",
         )
+        if aligned is True:
+            require(
+                re.match(r"^voyage-multimo(?:dal|del)-3($|-)", model),
+                f"embeddings_sow_aligned=true but model is not voyage-multimodal-3 family: {model!r}",
+            )
         require(endpoint, "voyage provider requires voyage_sagemaker_endpoint")
         status = run(
             [

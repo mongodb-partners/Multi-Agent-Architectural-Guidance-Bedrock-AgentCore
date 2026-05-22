@@ -4,7 +4,7 @@
 
 The API is a Hono server (TypeScript on Bun) listening on port `3000`. It exposes JSON endpoints for session management and a Server-Sent Events stream for chat.
 
-**Authentication is mandatory.** The API refuses to boot without `AUTH_JWKS_URI` + `AUTH_ISSUER` (`assertJwksAuthConfigured()` in `api/src/lib/jwt-verify.ts`). Every endpoint except `/health` and `/demo-prompts` requires a valid Bearer JWT signed by the configured JWKS pool. There is no `ALLOW_UNAUTHENTICATED` / `REQUIRE_AUTH=false` bypass.
+**Authentication is mandatory.** The API refuses to boot without `AUTH_JWKS_URI` + `AUTH_ISSUER` (`assertJwksAuthConfigured()` in `api/src/lib/jwt-verify.ts`). Every endpoint except `/health` requires a valid Bearer JWT signed by the configured JWKS pool. There is no `ALLOW_UNAUTHENTICATED` / `REQUIRE_AUTH=false` bypass.
 
 ---
 
@@ -22,7 +22,7 @@ The API is a Hono server (TypeScript on Bun) listening on port `3000`. It expose
 | POST | `/internal/agents/refresh` | Deploy-only agent config/cache refresh |
 | GET | `/skills` | List all loaded skills |
 | GET | `/http-tools` | List configured HTTP tools and their environment-bound URLs |
-| GET | `/demo-prompts` | Suggested chat prompts from `config/demo-prompts.yaml` (public) |
+| GET | `/demo-prompts` | Suggested chat prompts from `config/demo-prompts.yaml` |
 | GET | `/traces` | List recent traces (sidebar metrics) |
 | GET | `/traces/:id` | Fetch one trace document by id |
 | GET | `/trace` | Fetch a trace by `sessionId`+`messageId` |
@@ -391,7 +391,7 @@ JWKS auth is **always required** — the API refuses to start without `AUTH_JWKS
 - JWT signature, `iss`, and `exp` are verified using `jose`. Optional `AUTH_APP_CLIENT_ID` validates `aud`/`client_id`. `AUTH_TOKEN_USE` controls whether `token_use` must equal `access` or `id`.
 - The decoded JWT `sub` claim becomes the `userId` used for session ownership and long-term memory keying.
 
-Public routes that bypass the gate: `GET /health`, `GET /demo-prompts`.
+Public routes that bypass the gate: `GET /health`.
 
 Errors: `401 UNAUTHORIZED` for missing or malformed Authorization header; `401 INVALID_TOKEN` for tokens that fail verification.
 

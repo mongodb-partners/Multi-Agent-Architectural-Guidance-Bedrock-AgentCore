@@ -162,15 +162,6 @@
       "Resource": "*"
     },
     {
-      "Sid": "OrganizationsReadOnly",
-      "Effect": "Allow",
-      "Action": [
-        "organizations:Describe*",
-        "organizations:List*"
-      ],
-      "Resource": "*"
-    },
-    {
       "Sid": "ApiGatewayAndAppRunner",
       "Effect": "Allow",
       "Action": [

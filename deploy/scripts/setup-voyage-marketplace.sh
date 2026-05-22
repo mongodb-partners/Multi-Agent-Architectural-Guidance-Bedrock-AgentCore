@@ -32,6 +32,7 @@ ENV_FILE="$REPO_ROOT/.env"
 # Default to the SoW model, but keep voyage-3-5-lite as a supported legacy
 # option for lower-cost/text-only deployments.
 MODEL="${VOYAGE_MARKETPLACE_MODEL:-voyage-multimodal-3}"
+MODEL_FROM_ARGS=false
 REQUIRE_VOYAGE_MULTIMODAL_3="${REQUIRE_VOYAGE_MULTIMODAL_3:-false}"
 AWS_REGION="${AWS_REGION:-us-east-1}"
 UPDATE_ENV=true
@@ -51,7 +52,7 @@ declare -A MARKETPLACE_URLS=(
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --model)     MODEL="$2"; shift ;;
+    --model)     MODEL="$2"; MODEL_FROM_ARGS=true; shift ;;
     --region)    AWS_REGION="$2"; shift ;;
     --env-file)  ENV_FILE="$2"; shift ;;
     --gh-repo)   GH_REPO="$2"; shift ;;
@@ -63,8 +64,6 @@ while [[ $# -gt 0 ]]; do
   esac
   shift
 done
-
-MARKETPLACE_URL="${MARKETPLACE_URLS[$MODEL]:-https://aws.amazon.com/marketplace/seller-profile?id=c9032c7b-70dd-459f-834f-c1e23cf3d092}"
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 log()  { echo "  [voyage] $*"; }
@@ -98,6 +97,11 @@ else
   warn ".env not found at $ENV_FILE — relying on current shell's AWS creds"
 fi
 
+if [[ "$MODEL_FROM_ARGS" != "true" ]]; then
+  MODEL="${VOYAGE_MARKETPLACE_MODEL:-$MODEL}"
+fi
+MARKETPLACE_URL="${MARKETPLACE_URLS[$MODEL]:-https://aws.amazon.com/marketplace/seller-profile?id=c9032c7b-70dd-459f-834f-c1e23cf3d092}"
+
 ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text 2>/dev/null)" \
   || err "AWS credentials invalid or expired. Run: source .env"
 ok "AWS account: $ACCOUNT_ID (region: $AWS_REGION)"
@@ -107,8 +111,11 @@ if [[ "$REQUIRE_VOYAGE_MULTIMODAL_3" == "true" && "$MODEL" != "voyage-multimodal
   err "Refusing to subscribe to '$MODEL' — SoW pins this stack to 'voyage-multimodal-3'.
      To override, re-run with REQUIRE_VOYAGE_MULTIMODAL_3=false (requires written sign-off)."
 fi
+if [[ ! "$MODEL" =~ ^voyage- ]]; then
+  err "Unsupported model '$MODEL'. Voyage model labels must start with 'voyage-'."
+fi
 if [[ -z "${MARKETPLACE_URLS[$MODEL]:-}" ]]; then
-  err "Unsupported Voyage model '$MODEL'. Supported: ${!MARKETPLACE_URLS[*]}"
+  warn "No dedicated Marketplace URL configured for '$MODEL' — opening the Voyage seller page."
 fi
 ok "Target Voyage model: $MODEL"
 
@@ -116,15 +123,37 @@ ok "Target Voyage model: $MODEL"
 sep
 log "Phase 2 — Checking Marketplace subscription for '$MODEL'..."
 
+model_package_groups() {
+  # Voyage's public model name is voyage-multimodal-3, but some Marketplace
+  # package groups use a voyage-multimodel-3-updated-* tail.
+  case "$MODEL" in
+    voyage-multimodal-3)
+      printf '%s\n' "voyage-multimodal-3" "voyage-multimodel-3-updated"
+      ;;
+    *)
+      printf '%s\n' "$MODEL"
+      ;;
+  esac
+}
+
 discover_arn() {
   # Returns the latest approved model-package ARN for $MODEL, or empty string.
-  aws sagemaker list-model-packages \
-    --region "$AWS_REGION" \
-    --model-package-group-name "$MODEL" \
-    --model-approval-status Approved \
-    --sort-by CreationTime --sort-order Descending \
-    --query 'ModelPackageSummaryList[0].ModelPackageArn' \
-    --output text 2>/dev/null || echo ""
+  local group arn
+  while IFS= read -r group; do
+    arn="$(aws sagemaker list-model-packages \
+      --region "$AWS_REGION" \
+      --model-package-group-name "$group" \
+      --model-approval-status Approved \
+      --sort-by CreationTime --sort-order Descending \
+      --query 'ModelPackageSummaryList[0].ModelPackageArn' \
+      --output text 2>/dev/null || echo "")"
+    [[ "$arn" == "None" ]] && arn=""
+    if [[ -n "$arn" ]]; then
+      echo "$arn"
+      return 0
+    fi
+  done < <(model_package_groups)
+  echo ""
 }
 
 ARN="$(discover_arn)"
@@ -196,7 +225,7 @@ fi
 if [[ "$UPDATE_ENV" == "true" ]]; then
   sep
   log "Phase 4 — Updating $ENV_FILE..."
-  REQUEST_FORMAT="multimodal"
+  REQUEST_FORMAT="${VOYAGE_REQUEST_FORMAT:-multimodal}"
   ENDPOINT_SUFFIX="$MODEL"
   if [[ "$MODEL" == "voyage-3-5-lite" ]]; then
     REQUEST_FORMAT="legacy"

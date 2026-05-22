@@ -144,8 +144,8 @@ Each check below corresponds to a `pf_check_*` (or `pf_advise_*`) function. The 
 
 #### docker-buildx
 **Function:** `pf_check_docker_buildx`
-**Catches:** `docker buildx` unavailable on operator machine — multi-arch (`linux/arm64` for AgentCore Runtime) builds will fail opaquely mid-deploy.
-**Fix:** Install Docker Desktop, or `docker buildx create --use --name multiagent-builder` on plain Docker Engine.
+**Catches:** `docker buildx` unavailable to the Docker CLI on the operator machine — multi-arch (`linux/arm64` for AgentCore Runtime) builds will fail opaquely mid-deploy. The failure envelope prints the Docker binary path, Docker context, `DOCKER_CONFIG`, detected Buildx plugin paths, standalone `docker-buildx` location, and the raw `docker buildx version` error.
+**Fix:** Install Docker Desktop or the Docker Buildx CLI plugin. If Buildx works in one shell but deploy fails in another, run deploy from the working shell or export the same `PATH` / `DOCKER_CONFIG`. For Homebrew standalone Buildx, link it into Docker CLI plugins: `mkdir -p ~/.docker/cli-plugins && ln -sf "$(command -v docker-buildx)" ~/.docker/cli-plugins/docker-buildx`. Then create/select a builder if needed: `docker buildx create --use --name multiagent-builder`.
 
 #### local-prerequisites
 **Function:** `pf_check_disk_and_docker_resources`
@@ -188,11 +188,6 @@ Advisory only — never fails. Prints expected resources, ~$240–320/month esti
 **Function:** `pf_check_bedrock_model_access`
 **Catches:** Bedrock model access not granted in the chosen region for the model id we will invoke (default `us.anthropic.claude-sonnet-4-...`). Probes via `bedrock get-foundation-model`; classifies `AccessDenied / not subscribed / ValidationException` as a real failure.
 **Fix:** Open the Bedrock console → Model access → enable Anthropic Claude Sonnet 4 (and Voyage embeddings if `EMBEDDINGS_PROVIDER=voyage`). Approval is usually instant.
-
-#### bedrock-service-quotas
-**Function:** `pf_check_bedrock_service_quotas`
-**Catches:** Claude RPM < 50/min or TPM < 50,000/min on this account. Advisory (warns, does not fail) because Bedrock quota names are volatile by region — and an account at the default cap will 429 on the very first chat turn even though the deploy itself succeeded.
-**Fix:** Service Quotas console → Bedrock → request raise.
 
 #### iam-deploy-actions
 **Function:** `pf_check_iam_deploy_actions`

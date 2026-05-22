@@ -53,9 +53,6 @@ export function createApp(): Hono {
   );
 
   app.route("/", healthRoutes);
-  // Demo prompts are public — they're literally the suggested-prompt strings
-  // the sidebar renders pre-login. No PII; no secrets.
-  app.route("/", demoPromptsRoutes);
 
   const protectedApp = new Hono();
   protectedApp.use("*", rateLimitMiddleware);
@@ -65,6 +62,7 @@ export function createApp(): Hono {
   protectedApp.route("/", skillsRoutes);
   protectedApp.route("/", sessionsRoutes);
   protectedApp.route("/", httpToolsMetaRoutes);
+  protectedApp.route("/", demoPromptsRoutes);
   protectedApp.route("/", traceRoutes);
   protectedApp.route("/", agentConfigRefreshRoutes);
 

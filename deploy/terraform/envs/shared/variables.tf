@@ -32,15 +32,15 @@ variable "shared_resource_prefix" {
 # ── Voyage AI SageMaker (optional) ────────────────────────────────────────────
 variable "voyage_model_package_arn" {
   type        = string
-  description = "AWS Marketplace SageMaker model package ARN for Voyage embeddings. Empty disables SageMaker; non-empty must point at a voyage-multimodal-3 package."
+  description = "AWS Marketplace SageMaker model package ARN for Voyage embeddings. Empty disables SageMaker; non-empty must point at a Voyage model package."
   default     = ""
 
   validation {
     condition = (
       var.voyage_model_package_arn == ""
-      || can(regex("^arn:aws:sagemaker:[a-z0-9-]+:[0-9]{12}:model-package/voyage-multimodal-3($|-)", var.voyage_model_package_arn))
+      || can(regex("^arn:aws:sagemaker:[a-z0-9-]+:[0-9]{12}:model-package/voyage-[A-Za-z0-9_.-]+$", var.voyage_model_package_arn))
     )
-    error_message = "voyage_model_package_arn must be empty or point at a voyage-multimodal-3 SageMaker Marketplace model package. Non-multimodal Voyage packages are not allowed."
+    error_message = "voyage_model_package_arn must be empty or point at a Voyage SageMaker Marketplace model package whose package name starts with voyage-. Non-Voyage packages are not allowed."
   }
 }
 
