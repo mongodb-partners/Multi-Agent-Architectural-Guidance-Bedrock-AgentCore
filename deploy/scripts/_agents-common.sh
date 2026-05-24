@@ -17,7 +17,7 @@
 #
 # Optional (needed only by update_runtime_env_dynamic):
 #   MONGODB_URI, ATLAS_DB_NAME, BEDROCK_KB_ID, AGENTCORE_MEMORY_STORE_ID,
-#   AGENTCORE_GATEWAY_URL, MONGODB_MCP_RUNTIME_ARN, MONGODB_MCP_RUNTIME_ENDPOINT,
+#   AGENTCORE_GATEWAY_URL,
 #   VOYAGE_ENDPOINT, EMBEDDINGS_PROVIDER, VOYAGE_REQUEST_FORMAT
 #
 # Functions exported by this file:
@@ -365,8 +365,6 @@ build_dynamic_env_base() {
     BEDROCK_KB_ID="${BEDROCK_KB_ID:-}" \
     AGENTCORE_MEMORY_STORE_ID="${AGENTCORE_MEMORY_STORE_ID:-}" \
     AGENTCORE_GATEWAY_URL="${AGENTCORE_GATEWAY_URL:-}" \
-    MONGODB_MCP_RUNTIME_ARN="${MONGODB_MCP_RUNTIME_ARN:-}" \
-    MONGODB_MCP_RUNTIME_ENDPOINT="${MONGODB_MCP_RUNTIME_ENDPOINT:-}" \
     VOYAGE_ENDPOINT="${VOYAGE_ENDPOINT:-}" \
     MEMORY_TRACE_VALUES="${MEMORY_TRACE_VALUES:-0}" \
     TRACE_PROMPT_BODY="${TRACE_PROMPT_BODY:-0}" \
@@ -383,10 +381,7 @@ env = {
   'MONGODB_DB':                os.environ.get('ATLAS_DB_NAME', ''),
   'BEDROCK_KB_ID':             os.environ.get('BEDROCK_KB_ID', ''),
   'AGENTCORE_MEMORY_STORE_ID': os.environ.get('AGENTCORE_MEMORY_STORE_ID', ''),
-  'MCP_SERVER_URL':            os.environ.get('AGENTCORE_GATEWAY_URL', ''),
   'AGENTCORE_GATEWAY_URL':     os.environ.get('AGENTCORE_GATEWAY_URL', ''),
-  'MONGODB_MCP_RUNTIME_ARN':   os.environ.get('MONGODB_MCP_RUNTIME_ARN', ''),
-  'MONGODB_MCP_RUNTIME_ENDPOINT': os.environ.get('MONGODB_MCP_RUNTIME_ENDPOINT', ''),
   'EMBEDDING_MODEL_ID':        'amazon.titan-embed-text-v2:0',
   'EMBEDDINGS_PROVIDER':       os.environ.get('EMBEDDINGS_PROVIDER', ''),
   'VOYAGE_SAGEMAKER_ENDPOINT': os.environ.get('VOYAGE_ENDPOINT', ''),
@@ -506,6 +501,194 @@ print(json.dumps(env))")
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
+# force_mcp_runtime_image_sync
+#
+# Container-mode AgentCore runtimes are wired to `<repo>:latest` in Terraform.
+# After a fresh `docker push <repo>:latest`, the `:latest` tag points at a new
+# digest but the Terraform-managed `container_uri` string is unchanged — so
+# `terraform plan` shows no diff, the runtime resource is not replaced, and
+# AgentCore never re-pulls the image. This is a silent freeze that has bitten
+# us more than once (docs/status/debugging.md "AgentCore Runtime image push does not
+# auto-trigger a runtime version bump").
+#
+# This helper:
+#   1. Resolves the runtime's currently-deployed image digest (best effort) and
+#      compares with the digest just pushed to ECR for the matching tag.
+#   2. If they differ, calls update-agent-runtime preserving role/network/
+#      protocol/env/lifecycle config — AgentCore treats every update as a new
+#      version, which forces a fresh pull of :latest on the next cold start.
+#   3. Waits for the runtime to reach READY.
+#   4. Deletes any gateway target whose `triggers.endpoint` references this
+#      runtime, so the next `terraform apply` recreates it (which re-runs
+#      tools/list against the new container and refreshes the gateway's cached
+#      tool schemas — see docs/status/debugging.md "AgentCore Gateway target caches
+#      tool schemas — refresh after MCP runtime change").
+#
+# Skip with: MCP_RUNTIME_FORCE_SYNC=0 (incident-response only).
+#
+# Args:
+#   $1 runtime_id          AgentCore runtime id (last component of the ARN)
+#   $2 ecr_repo_name       e.g. "myproj-mongodb-mcp-dev"
+#   $3 image_tag           e.g. "latest"
+#   $4 gateway_id          gateway id whose target points at this runtime
+#                          (pass "" to skip the gateway-target refresh step)
+#   $5 gateway_target_name e.g. "mongodb-mcp" (only used when $4 is set)
+# ══════════════════════════════════════════════════════════════════════════════
+force_mcp_runtime_image_sync() {
+  local runtime_id="$1"
+  local repo_name="$2"
+  local image_tag="${3:-latest}"
+  local gateway_id="${4:-}"
+  local target_name="${5:-mongodb-mcp}"
+
+  if [[ "${MCP_RUNTIME_FORCE_SYNC:-1}" != "1" ]]; then
+    _ac_warn "MCP_RUNTIME_FORCE_SYNC=0 — skipping MCP runtime force-sync (image push will only land on next replace)"
+    return 0
+  fi
+
+  if [[ -z "$runtime_id" || "$runtime_id" == "None" ]]; then
+    _ac_warn "force_mcp_runtime_image_sync: empty runtime_id — first deploy, skipping (TF apply will create the runtime with the new image)"
+    return 0
+  fi
+
+  # Pushed digest (just-now `docker push`).
+  local pushed_digest
+  pushed_digest=$(aws ecr describe-images \
+    --region "$AWS_REGION" \
+    --repository-name "$repo_name" \
+    --image-ids "imageTag=${image_tag}" \
+    --query 'imageDetails[0].imageDigest' \
+    --output text 2>/dev/null || echo "")
+  if [[ -z "$pushed_digest" || "$pushed_digest" == "None" ]]; then
+    _ac_warn "force_mcp_runtime_image_sync: cannot resolve digest for ${repo_name}:${image_tag} — skipping force-sync (deploy will continue)"
+    return 0
+  fi
+
+  # Current runtime config — we re-apply the same fields with `update-agent-runtime`
+  # so AgentCore promotes a new version that will pull :latest on next cold start.
+  local cfg_json
+  cfg_json=$(aws bedrock-agentcore-control get-agent-runtime \
+    --region "$AWS_REGION" \
+    --agent-runtime-id "$runtime_id" \
+    --output json 2>/dev/null || echo "")
+  if [[ -z "$cfg_json" ]]; then
+    _ac_warn "force_mcp_runtime_image_sync: get-agent-runtime returned empty for ${runtime_id} — skipping"
+    return 0
+  fi
+
+  # The currentlyDeployedImage is not always exposed by the control plane;
+  # when we can't compare, force-update unconditionally (cheap and safe — it
+  # just bumps the version pointer; the actual pull is deferred to cold start).
+  local current_uri changed
+  current_uri=$(echo "$cfg_json" | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+artifact = d.get('agentRuntimeArtifact') or {}
+print((artifact.get('containerConfiguration') or {}).get('containerUri') or '')
+")
+  # `:latest` URI gives no digest signal — always force when running through this helper.
+  changed="yes"
+  _ac_log "force_mcp_runtime_image_sync: pushed digest ${pushed_digest:0:19}… on tag '${image_tag}' (current URI: ${current_uri:-unknown}) — forcing runtime version bump"
+
+  if [[ "$changed" != "yes" ]]; then
+    _ac_ok "MCP runtime already on the pushed digest — no version bump needed"
+    return 0
+  fi
+
+  # Replay the runtime config on update-agent-runtime to mint a new version.
+  # We preserve role/network/protocol/env/lifecycle so behaviour is unchanged
+  # apart from the new container version.
+  local update_args_file update_err
+  update_args_file=$(mktemp -t mcp-update.XXXXXX.json)
+  CFG_JSON="$cfg_json" \
+  RUNTIME_ID="$runtime_id" \
+  python3 - <<'PY' > "$update_args_file"
+import json, os, sys
+
+cfg = json.loads(os.environ['CFG_JSON'])
+out = {
+    'agentRuntimeId':     os.environ['RUNTIME_ID'],
+    'roleArn':            cfg['roleArn'],
+    'agentRuntimeArtifact': cfg['agentRuntimeArtifact'],
+    'networkConfiguration':  cfg.get('networkConfiguration')  or {'networkMode': 'PUBLIC'},
+    'protocolConfiguration': cfg.get('protocolConfiguration') or {'serverProtocol': 'MCP'},
+    'environmentVariables':  cfg.get('environmentVariables', {}),
+}
+# Optional fields — only include when present so we don't reset to defaults.
+for key in ('lifecycleConfiguration', 'description', 'authorizerConfiguration'):
+    if cfg.get(key) is not None:
+        out[key] = cfg[key]
+print(json.dumps(out))
+PY
+
+  # Use a real file path — piping JSON to `file:///dev/stdin` fails on macOS
+  # (aws-cli ParamValidation: Invalid JSON received) even though Linux accepts it.
+  if ! update_err=$(aws bedrock-agentcore-control update-agent-runtime \
+    --region "$AWS_REGION" \
+    --cli-input-json "file://${update_args_file}" \
+    --output json 2>&1); then
+    rm -f "$update_args_file"
+    echo "$update_err" >&2
+    _ac_err "MCP runtime ${runtime_id}: update-agent-runtime failed"
+  fi
+  rm -f "$update_args_file"
+  _ac_ok "MCP runtime ${runtime_id}: version bumped (will pull :latest on next cold start)"
+
+  # Poll until READY (max ~3 min). Use runtime_status — zsh reserves `status`.
+  local runtime_status attempt
+  for attempt in $(seq 1 36); do
+    runtime_status=$(aws bedrock-agentcore-control get-agent-runtime \
+      --region "$AWS_REGION" \
+      --agent-runtime-id "$runtime_id" \
+      --query "status" --output text 2>/dev/null || echo "UNKNOWN")
+    if [[ "$runtime_status" == "READY" ]]; then
+      _ac_ok "MCP runtime ${runtime_id}: status=READY (attempt ${attempt})"
+      break
+    fi
+    [[ $attempt -eq 36 ]] && _ac_warn "MCP runtime ${runtime_id}: still ${runtime_status} after ~3min — continuing anyway"
+    sleep 5
+  done
+
+  if [[ -z "$gateway_id" ]]; then
+    _ac_log "force_mcp_runtime_image_sync: no gateway_id passed — skipping target refresh"
+    return 0
+  fi
+
+  # The gateway caches tool schemas at create-gateway-target time. Delete the
+  # existing target so the null_resource in modules/agentcore-gateway re-runs
+  # on the next apply (which re-fetches tools/list against the new runtime
+  # version).
+  local target_id
+  target_id=$(aws bedrock-agentcore-control list-gateway-targets \
+    --region "$AWS_REGION" \
+    --gateway-identifier "$gateway_id" \
+    --query "items[?name=='${target_name}'].targetId | [0]" \
+    --output text 2>/dev/null || echo "")
+  if [[ -z "$target_id" || "$target_id" == "None" ]]; then
+    _ac_log "force_mcp_runtime_image_sync: no existing '${target_name}' target on gateway ${gateway_id} — nothing to delete"
+    return 0
+  fi
+
+  _ac_log "force_mcp_runtime_image_sync: deleting gateway target ${target_name} (${target_id}) so TF recreates it with refreshed tool schemas"
+  aws bedrock-agentcore-control delete-gateway-target \
+    --region "$AWS_REGION" \
+    --gateway-identifier "$gateway_id" \
+    --target-id "$target_id" \
+    --output text >/dev/null 2>&1 \
+    && _ac_ok "Gateway target deleted — next terraform apply will recreate with new tool schemas" \
+    || _ac_warn "Gateway target delete failed — apply may not pick up new tool schemas"
+
+  # Best-effort: also drop the null_resource from TF state so the apply re-runs
+  # the local-exec instead of considering it up-to-date. Tolerates missing state
+  # entries (no-op on a clean refresh).
+  if [[ -n "${TF_DIR:-}" ]]; then
+    (cd "$TF_DIR" && terraform state rm 'module.agentcore_gateway.null_resource.mcp_server_gateway_target[0]' >/dev/null 2>&1) \
+      && _ac_log "Cleared null_resource.mcp_server_gateway_target from TF state" \
+      || true
+  fi
+}
+
+# ══════════════════════════════════════════════════════════════════════════════
 # verify_runtime_env_dynamic
 #
 # Polls each runtime (up to 12 × 5s) until environment variables are stable,
@@ -529,31 +712,28 @@ verify_runtime_env_dynamic() {
         --output json 2>/dev/null || echo "{}")
 
       if python3 - <<'PYEOF' "$env_json" "$runtime_label" "$expected_agent_id" "$is_orchestrator" \
-          "${AGENTCORE_GATEWAY_URL:-}" "${MONGODB_MCP_RUNTIME_ARN:-}" "${MONGODB_MCP_RUNTIME_ENDPOINT:-}" \
-          "${SPECIALIST_IDS_JSON:-[]}"
+          "${AGENTCORE_GATEWAY_URL:-}" "${SPECIALIST_IDS_JSON:-[]}"
 import json, sys
 env            = json.loads(sys.argv[1] or "{}")
 label          = sys.argv[2]
 expected_agent = sys.argv[3]
 is_orch        = sys.argv[4] == "yes"
 expected_gw    = sys.argv[5]
-expected_mcp_arn  = sys.argv[6]
-expected_mcp_ep   = sys.argv[7]
-specialist_ids = json.loads(sys.argv[8])
+specialist_ids = json.loads(sys.argv[6])
 
 def fail(msg):
     raise SystemExit(f"{label}: {msg}")
 
 if env.get("AGENT_ID") != expected_agent:
     fail(f"AGENT_ID expected '{expected_agent}', got '{env.get('AGENT_ID')}'")
-if not env.get("MCP_SERVER_URL"):
-    fail("MCP_SERVER_URL missing")
-if expected_gw and env.get("MCP_SERVER_URL") != expected_gw:
-    fail(f"MCP_SERVER_URL mismatch (got '{env.get('MCP_SERVER_URL')}', want '{expected_gw}')")
-if expected_mcp_arn and env.get("MONGODB_MCP_RUNTIME_ARN") != expected_mcp_arn:
-    fail("MONGODB_MCP_RUNTIME_ARN missing or mismatched")
-if expected_mcp_ep and env.get("MONGODB_MCP_RUNTIME_ENDPOINT") != expected_mcp_ep:
-    fail("MONGODB_MCP_RUNTIME_ENDPOINT missing or mismatched")
+# MCP Gateway env var: required on every runtime regardless of caller shell
+# state. Mongo tool traffic must go through AgentCore Gateway; the dedicated
+# MongoDB MCP runtime ARN/endpoint is infrastructure wiring for the Gateway
+# target and is intentionally not injected into application runtimes.
+if not env.get("AGENTCORE_GATEWAY_URL"):
+    fail("AGENTCORE_GATEWAY_URL missing on runtime (post-Phase 6b)")
+if expected_gw and env.get("AGENTCORE_GATEWAY_URL") != expected_gw:
+    fail(f"AGENTCORE_GATEWAY_URL mismatch (got '{env.get('AGENTCORE_GATEWAY_URL')}', want '{expected_gw}')")
 if env.get("SHORT_TERM_MEMORY_BACKEND") != "agentcore":
     fail(f"SHORT_TERM_MEMORY_BACKEND expected 'agentcore', got '{env.get('SHORT_TERM_MEMORY_BACKEND')}'")
 if is_orch:

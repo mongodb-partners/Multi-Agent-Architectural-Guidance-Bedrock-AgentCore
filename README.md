@@ -207,7 +207,8 @@ Full runbook: [`docs/deployment-guide.md`](docs/deployment-guide.md). Script ref
 | [`docs/README.md`](docs/README.md) | **Handover entry** — checklist, reading orders |
 | [`docs/agent-authoring-guide.md`](docs/agent-authoring-guide.md) | `.agent.md` schema |
 | [`docs/skills-authoring-guide.md`](docs/skills-authoring-guide.md) | `SKILL.md`, scripts, http-tools |
-| [`docs/configuration-guide.md`](docs/configuration-guide.md) | Env vars, agent + skill schema |
+| [`docs/configuration-guide.md`](docs/configuration-guide.md) | `config/` folder — agent + skill schema |
+| [`docs/advanced/deploy-tweak-guide.md`](docs/advanced/deploy-tweak-guide.md) | **Advanced** — deploy/runtime env tuning |
 | [`docs/deployment-guide.md`](docs/deployment-guide.md) | Deploy, CI/CD, teardown |
 | [`docs/reference/env-vars.md`](docs/reference/env-vars.md) | Every env var |
 | [`docs/reference/tools.md`](docs/reference/tools.md) | Every agent-facing tool |
@@ -306,7 +307,7 @@ Design: [`deploy/terraform/.design.md`](deploy/terraform/.design.md). Modules: [
 | [`docs/logging-architecture.md`](docs/logging-architecture.md) | Logs, OTel |
 | [`docs/trace-ui-system-overview.md`](docs/trace-ui-system-overview.md) | Trace UI |
 | [`docs/agentcore-runtime-design.md`](docs/agentcore-runtime-design.md) | Runtime topology, artifacts |
-| [`docs/debugging.md`](docs/debugging.md) | EC2 access, pitfalls, validation |
+| [`docs/status/debugging.md`](docs/status/debugging.md) | EC2 access, pitfalls, validation |
 | [`docs/estimate.md`](docs/estimate.md) | Monthly AWS cost estimate |
 | [`docs/demo/demo-script.md`](docs/demo/demo-script.md) | Demo walkthrough |
 | [`docs/reference/terraform-modules.md`](docs/reference/terraform-modules.md) | Terraform modules |

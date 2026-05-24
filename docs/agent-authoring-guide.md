@@ -221,15 +221,15 @@ Tools include **built-in** Strands tools (MongoDB, KB, embeddings, ...), **skill
 | `run_skill_script` | Dynamically imports `scripts/*.mjs` for a **skillName** + args; same allowlist/activation as `read_skill_resource` | Live |
 | **`{skill}/{localName}`** | **Per-skill HTTP tool** — `POST`/`GET`/… to a URL (e.g. Lambda Function URL). Defined in `config/skills/<skill>/http-tools.json`. Listed in `tools:` as **`order-management/notify_fulfillment_lambda`**. Same **allowlist + activation** as `read_skill_resource`. SSRF allowlists live in root `config/http-tools.json` → `security`. | Live — see [Skills authoring guide](skills-authoring-guide.md#file-structure) |
 | **Short name** (no `/`) | **Global HTTP tool** from root `config/http-tools.json` → `tools` (optional). No skill activation gate. | Live |
-| `mongodb_query` | Runs find / findOne / aggregate / updateOne against MongoDB | Live — proxied through the dedicated MongoDB MCP AgentCore Runtime |
-| `mongodb_vector_search` | Performs semantic/vector search against a MongoDB Atlas collection | Live — Atlas `$vectorSearch` via the same MongoDB MCP runtime |
+| `mongodb_query` | Runs find / findOne / aggregate / updateOne against MongoDB | Live — proxied through AgentCore Gateway to the dedicated MongoDB MCP AgentCore Runtime |
+| `mongodb_vector_search` | Performs semantic/vector search against a MongoDB Atlas collection | Live — Atlas `$vectorSearch` via the same Gateway-backed MongoDB MCP runtime |
 | `bedrock_kb_retrieve` | Retrieves passages from a Bedrock Knowledge Base | Live — real Bedrock KB when `BEDROCK_KB_ID` + AWS credentials set |
 | `generate_embedding` | Generates a text embedding via Amazon Bedrock (Titan / Cohere) | Live — real Bedrock embedding when `EMBEDDING_MODEL_ID` + AWS credentials set |
 
 **Notes:**
 
 - `activate_skill` is registered for every agent automatically. You do not list it in `tools:`.
-- All Mongo-shaped tools resolve to MCP tool calls against the MongoDB MCP AgentCore Runtime (`MONGODB_MCP_RUNTIME_ARN` / `MONGODB_MCP_RUNTIME_ENDPOINT`). The agent runtime never opens a MongoDB connection itself.
+- All Mongo-shaped tools resolve to MCP tool calls through AgentCore Gateway (`AGENTCORE_GATEWAY_URL`). The Gateway target invokes the MongoDB MCP AgentCore Runtime; the agent runtime never opens a MongoDB connection itself. `MCP_SERVER_URL` is local-development only.
 - **`HTTP_TOOLS_MOCK=1`** skips real outbound HTTP for all HTTP tools (skill + global); useful for demos without Lambda deployed. **`GET /http-tools`** lists configured HTTP tools only (see [`api-reference.md` § `GET /http-tools`](api-reference.md#10-get-http-tools)); use [`reference/tools.md`](reference/tools.md) for the complete tool catalog.
 
 Only list tools that the agent's skills actually use. Giving an agent tools it has no instructions for does not add capability — it adds surface area for unexpected behavior.
@@ -400,7 +400,7 @@ cd ui && streamlit run app.py       # starts the Streamlit UI (separate terminal
 
 Or via Docker: `docker compose up --build` from the repo root.
 
-See the [Configuration Guide](configuration-guide.md) and [`reference/env-vars.md`](reference/env-vars.md) for env vars and local setup.
+See the [Configuration Guide](configuration-guide.md) for `config/` wiring, [`advanced/deploy-tweak-guide.md`](advanced/deploy-tweak-guide.md) for deploy/runtime env tuning, and [`reference/env-vars.md`](reference/env-vars.md) for the full env var catalog.
 
 ---
 
@@ -448,5 +448,6 @@ There is no built-in versioning for agent files. Use git tags or PR descriptions
 ## Related
 
 - [Skills Authoring Guide](skills-authoring-guide.md) — how to write the domain knowledge that powers agents
-- [Configuration Guide](configuration-guide.md) — environment variables, model defaults, memory settings
+- [Configuration Guide](configuration-guide.md) — `config/agents/` schema, model defaults, memory flags
+- [Deploy Tweak Guide](advanced/deploy-tweak-guide.md) — **advanced** deploy/runtime environment variables
 - [Architecture](architecture.md) — how agent loading and the orchestration loop work at runtime

@@ -293,9 +293,10 @@ PREFLIGHT_PROFILE_orchestrator_privatelink=(
   pf_check_atlas_api_key_scope
   pf_check_atlas_cluster_tier
   pf_check_tool_versions
+  pf_check_aws_cli_agentcore_gateway_model
   pf_check_clock_skew
   pf_check_session_manager_plugin
-  pf_check_docker_buildx
+  pf_check_docker_cross_platforms
   pf_check_disk_and_docker_resources
   pf_check_network_egress
   pf_check_atlas_privatelink_no_orphans
@@ -343,9 +344,10 @@ PREFLIGHT_PROFILE_project_pre_apply=(
   pf_check_atlas_api_key_scope
   pf_check_atlas_cluster_tier
   pf_check_tool_versions
+  pf_check_aws_cli_agentcore_gateway_model
   pf_check_clock_skew
   pf_check_disk_and_docker_resources
-  pf_check_docker_buildx
+  pf_check_docker_cross_platforms
   pf_check_voyage_marketplace_subscribed
   pf_check_bedrock_model_access
   pf_check_iam_deploy_actions
@@ -384,7 +386,7 @@ PREFLIGHT_PROFILE_api=(
   pf_check_tool_versions
   pf_check_concurrent_deploy_lock
   pf_check_deploy_manifest_present
-  pf_check_docker_buildx
+  pf_check_docker_cross_platforms
   pf_check_session_manager_plugin
 )
 
@@ -393,7 +395,7 @@ PREFLIGHT_PROFILE_ui=(
   pf_check_tool_versions
   pf_check_concurrent_deploy_lock
   pf_check_deploy_manifest_present
-  pf_check_docker_buildx
+  pf_check_docker_cross_platforms
   pf_check_session_manager_plugin
 )
 
@@ -1048,73 +1050,48 @@ pf_check_session_manager_plugin() {
     --exit-class tool
 }
 
-# pf:check: pf_check_docker_buildx
-# pf:catches: "docker buildx missing or not visible to Docker CLI — ARM64 multi-platform build fails opaquely"
+# pf:check: pf_check_docker_cross_platforms
+# pf:catches: "Docker cannot run required cross-platform images (QEMU/binfmt not registered) — linux/arm64 + linux/amd64 builds fail opaquely"
 # pf:source:  new-user friction (operator machine)
-pf_check_docker_buildx() {
+pf_check_docker_cross_platforms() {
   # Only required when docker is on PATH and reachable
   if ! command -v docker >/dev/null 2>&1; then
-    _pf_skip pf_check_docker_buildx "docker not on PATH (skip-docker scenario)"
+    _pf_skip pf_check_docker_cross_platforms "docker not on PATH (skip-docker scenario)"
     return 0
   fi
   if ! docker info >/dev/null 2>&1; then
-    _pf_skip pf_check_docker_buildx "docker daemon not reachable"
+    _pf_skip pf_check_docker_cross_platforms "docker daemon not reachable"
     return 0
   fi
-  local docker_path docker_version docker_context docker_config buildx_out buildx_error
+
+  local docker_path docker_version docker_context
   docker_path="$(command -v docker 2>/dev/null || echo "not found")"
   docker_version="$(docker --version 2>&1 || true)"
   docker_context="$(docker context show 2>&1 || true)"
-  docker_config="${DOCKER_CONFIG:-${HOME:-}/.docker}"
 
-  if ! buildx_out="$(docker buildx version 2>&1)"; then
-    buildx_error="${buildx_out//$'\n'/ }"
-    local standalone_buildx="not found"
-    if command -v docker-buildx >/dev/null 2>&1; then
-      standalone_buildx="$(command -v docker-buildx)"
+  local plat out
+  local -a failed=()
+  for plat in linux/amd64 linux/arm64; do
+    if ! out="$(docker run --rm --platform "$plat" alpine:3 true 2>&1)"; then
+      failed+=("${plat}: ${out//$'\n'/ }")
     fi
+  done
 
-    local -a plugin_hits=()
-    local p plugin_locations
-    for p in \
-      "${docker_config}/cli-plugins/docker-buildx" \
-      "${HOME:-}/.docker/cli-plugins/docker-buildx" \
-      "/opt/homebrew/lib/docker/cli-plugins/docker-buildx" \
-      "/opt/homebrew/libexec/docker/cli-plugins/docker-buildx" \
-      "/usr/local/lib/docker/cli-plugins/docker-buildx" \
-      "/usr/local/libexec/docker/cli-plugins/docker-buildx" \
-      "/usr/lib/docker/cli-plugins/docker-buildx" \
-      "/usr/libexec/docker/cli-plugins/docker-buildx"; do
-      [[ -n "$p" && -e "$p" ]] && plugin_hits+=("$p")
-    done
-    plugin_locations="${plugin_hits[*]:-none}"
-
-    local summary
-    if [[ "$standalone_buildx" != "not found" || "$plugin_locations" != "none" ]]; then
-      summary="docker buildx is installed but Docker CLI cannot load it"
-    else
-      summary="docker buildx is not available (linux/arm64 builds will fail)"
-    fi
-    _pf_fail pf_check_docker_buildx \
-      --summary "$summary" \
+  if (( ${#failed[@]} > 0 )); then
+    _pf_fail pf_check_docker_cross_platforms \
+      --summary "Docker cannot run required cross-platform images (${#failed[@]}/2 platforms failed)" \
       --shortcoming "new-user friction (operator machine)" \
-      --observed "docker=${docker_path}; ${docker_version}; context=${docker_context}; DOCKER_CONFIG=${docker_config}; docker-buildx=${standalone_buildx}; plugin_paths=${plugin_locations}; error=${buildx_error:-unknown}" \
-      --fix "Run the deploy from the same shell where 'docker buildx version' works; if needed export PATH=\"/opt/homebrew/bin:/usr/local/bin:\$PATH\" before running deploy" \
-      --fix "macOS Docker Desktop: restart Docker Desktop, then run 'docker context use desktop-linux' (or the context that 'docker info' uses successfully)" \
-      --fix "Homebrew/standalone Buildx: mkdir -p ~/.docker/cli-plugins && ln -sf \"\$(command -v docker-buildx)\" ~/.docker/cli-plugins/docker-buildx && chmod +x ~/.docker/cli-plugins/docker-buildx" \
-      --fix "Linux Docker Engine: install the Docker CLI plugin package (Debian/Ubuntu: sudo apt-get install docker-buildx-plugin; RHEL/Amazon Linux: sudo yum install docker-buildx-plugin)" \
-      --fix "After Buildx loads, create/select a builder if needed: docker buildx create --use --name multiagent-builder" \
-      --hint "doc:docs/deployment-preflight-checks.md#docker-buildx" \
-      --doc "docs/deployment-preflight-checks.md#docker-buildx" \
+      --observed "docker=${docker_path}; ${docker_version}; context=${docker_context}; failures=${failed[*]}" \
+      --fix "Docker Desktop: enable 'Use Rosetta for x86_64/amd64 emulation' (Settings -> General) and restart Docker Desktop" \
+      --fix "Linux / colima: install QEMU binfmt via 'docker run --privileged --rm tonistiigi/binfmt --install all'" \
+      --fix "GitHub Actions runners: add 'uses: docker/setup-qemu-action@v3' before the deploy step" \
+      --hint "doc:docs/deployment-preflight-checks.md#docker-cross-platforms" \
+      --doc "docs/deployment-preflight-checks.md#docker-cross-platforms" \
       --exit-class tool
     return 0
   fi
-  local buildx_ls_out
-  buildx_ls_out="$(docker buildx ls 2>&1 || true)"
-  if ! printf '%s\n' "$buildx_ls_out" | grep -qE 'linux/(arm64|amd64)'; then
-    _pf_warn "docker buildx is installed but no multi-platform builder is active. Run: docker buildx create --use --name multiagent-builder"
-  fi
-  _pf_pass pf_check_docker_buildx "buildx available (${buildx_out})"
+
+  _pf_pass pf_check_docker_cross_platforms "linux/amd64 + linux/arm64 emulation OK"
 }
 
 # pf:check: pf_check_disk_and_docker_resources
@@ -1148,7 +1125,7 @@ pf_check_disk_and_docker_resources() {
           return 0
         fi
         _pf_fail pf_check_disk_and_docker_resources \
-          --summary "Docker has ${mem_gb} GB total memory (multi-platform buildx needs ≥ 4 GB)" \
+          --summary "Docker has ${mem_gb} GB total memory (multi-platform builds need ≥ 4 GB)" \
           --shortcoming "new-user friction (operator machine)" \
           --observed "docker info MemTotal=${mem_gb}GB" \
           --fix "Open Docker Desktop → Settings → Resources → Memory and raise to 4 GB+" \
@@ -1319,6 +1296,133 @@ PY
   args+=(--doc "docs/deployment-guide.md#prerequisites")
   args+=(--exit-class tool)
   _pf_fail pf_check_tool_versions "${args[@]}"
+}
+
+# Pure-shape parser used by pf_check_aws_cli_agentcore_gateway_model and the
+# self-test. Reads `aws ... --generate-cli-skeleton input` JSON from stdin and
+# prints space-separated missing dotted-field paths on stdout. Empty stdout =
+# shape OK. Exits 1 on invalid JSON, 0 otherwise.
+#
+# Implementation note: we cannot use `python3 - <<'PY'` here because the
+# heredoc itself is python's stdin — it would shadow the JSON the caller piped
+# in. Instead, copy stdin to a temp file and pass the path as argv to python.
+_pf_agentcore_gateway_skeleton_missing() {
+  local tmp rc
+  tmp="$(mktemp -t pf-acgw.XXXXXX)"
+  cat - >"$tmp"
+  python3 - "$tmp" <<'PY'
+import json, sys
+try:
+    with open(sys.argv[1], "r", encoding="utf-8") as fh:
+        data = json.load(fh)
+except Exception as exc:
+    sys.stderr.write("INVALID_JSON: %s\n" % exc)
+    sys.exit(1)
+
+missing = []
+mcp = (data.get("targetConfiguration") or {}).get("mcp")
+if not isinstance(mcp, dict) or not isinstance(mcp.get("mcpServer"), dict):
+    missing.append("targetConfiguration.mcp.mcpServer")
+elif "endpoint" not in mcp["mcpServer"]:
+    missing.append("targetConfiguration.mcp.mcpServer.endpoint")
+
+cpc_list = data.get("credentialProviderConfigurations")
+if not isinstance(cpc_list, list) or not cpc_list:
+    missing.append("credentialProviderConfigurations[].credentialProvider.iamCredentialProvider")
+else:
+    iam_ok = False
+    for entry in cpc_list:
+        cp = (entry or {}).get("credentialProvider") or {}
+        iam = cp.get("iamCredentialProvider")
+        if isinstance(iam, dict) and "service" in iam and "region" in iam:
+            iam_ok = True
+            break
+    if not iam_ok:
+        missing.append("credentialProviderConfigurations[].credentialProvider.iamCredentialProvider")
+
+print(" ".join(missing))
+PY
+  rc=$?
+  rm -f "$tmp"
+  return $rc
+}
+
+# pf:check: pf_check_aws_cli_agentcore_gateway_model
+# pf:catches: "Local AWS CLI service model missing AgentCore Gateway mcpServer / iamCredentialProvider fields"
+# pf:source:  recurring deploy failure: aws bedrock-agentcore-control create-gateway-target rejects the
+#             targetConfiguration.mcp.mcpServer + credentialProvider.iamCredentialProvider shape required
+#             by deploy/terraform/modules/agentcore-gateway/main.tf when the operator's CLI ships a stale
+#             botocore service model.
+pf_check_aws_cli_agentcore_gateway_model() {
+  _pf_prereq pf_check_tool_versions || \
+    { _pf_skip pf_check_aws_cli_agentcore_gateway_model "prereq pf_check_tool_versions failed"; return 0; }
+
+  if ! command -v aws >/dev/null 2>&1; then
+    _pf_skip pf_check_aws_cli_agentcore_gateway_model "aws CLI not on PATH"
+    return 0
+  fi
+  if ! command -v python3 >/dev/null 2>&1; then
+    _pf_skip pf_check_aws_cli_agentcore_gateway_model "python3 not on PATH"
+    return 0
+  fi
+
+  local cli_version
+  cli_version="$(aws --version 2>&1 | head -1 | awk '{print $1}' | awk -F/ '{print $2}')"
+  cli_version="${cli_version:-unknown}"
+
+  local skeleton rc
+  skeleton="$(aws bedrock-agentcore-control create-gateway-target \
+    --generate-cli-skeleton input 2>/dev/null)"
+  rc=$?
+  if (( rc != 0 )) || [[ -z "$skeleton" ]]; then
+    local -a args=(--summary "AWS CLI does not know the bedrock-agentcore-control create-gateway-target shape"
+                   --shortcoming "new-user friction (operator machine)"
+                   --observed "aws-cli ${cli_version}: --generate-cli-skeleton input exited ${rc} (service or operation not in this CLI's botocore service model)"
+                   --fix "macOS/Homebrew: brew update && brew upgrade awscli && aws --version"
+                   --fix "macOS pkg / Linux: reinstall AWS CLI v2 from the official bundle for your arch (https://awscli.amazonaws.com/AWSCLIV2.pkg on macOS, awscli-exe-linux-x86_64.zip or awscli-exe-linux-aarch64.zip on Linux), then re-run aws --version to confirm"
+                   --fix "CI runners: update the base image, or add an 'install AWS CLI v2' step before any deploy step (the official awscli-exe-linux-<arch>.zip flow works inside ubuntu-latest runners)"
+                   --hint "run:brew upgrade awscli"
+                   --hint "doc:docs/deployment-preflight-checks.md#aws-cli-agentcore-gateway-model"
+                   --doc "docs/deployment-preflight-checks.md#aws-cli-agentcore-gateway-model"
+                   --exit-class tool)
+    _pf_fail pf_check_aws_cli_agentcore_gateway_model "${args[@]}"
+    return 0
+  fi
+
+  local missing parse_rc
+  missing="$(printf '%s' "$skeleton" | _pf_agentcore_gateway_skeleton_missing 2>/dev/null)"
+  parse_rc=$?
+  if (( parse_rc != 0 )); then
+    local -a args=(--summary "AWS CLI returned a skeleton that could not be parsed as JSON"
+                   --shortcoming "new-user friction (operator machine)"
+                   --observed "aws-cli ${cli_version}: --generate-cli-skeleton input emitted non-JSON output"
+                   --fix "macOS/Homebrew: brew update && brew upgrade awscli && aws --version"
+                   --fix "macOS pkg / Linux: reinstall AWS CLI v2 from the official bundle for your arch, then re-run aws --version to confirm"
+                   --fix "CI runners: update the base image or install AWS CLI v2 before the deploy step"
+                   --hint "run:brew upgrade awscli"
+                   --hint "doc:docs/deployment-preflight-checks.md#aws-cli-agentcore-gateway-model"
+                   --doc "docs/deployment-preflight-checks.md#aws-cli-agentcore-gateway-model"
+                   --exit-class tool)
+    _pf_fail pf_check_aws_cli_agentcore_gateway_model "${args[@]}"
+    return 0
+  fi
+
+  if [[ -z "$missing" ]]; then
+    _pf_pass pf_check_aws_cli_agentcore_gateway_model "aws-cli ${cli_version} service model has mcpServer + iamCredentialProvider"
+    return 0
+  fi
+
+  local -a args=(--summary "AWS CLI bedrock-agentcore-control service model missing required AgentCore Gateway MCP target fields"
+                 --shortcoming "new-user friction (operator machine)"
+                 --observed "aws-cli ${cli_version} missing: ${missing// /, }"
+                 --fix "macOS/Homebrew: brew update && brew upgrade awscli && aws --version"
+                 --fix "macOS pkg / Linux: reinstall AWS CLI v2 from the official bundle for your arch (https://awscli.amazonaws.com/AWSCLIV2.pkg on macOS, awscli-exe-linux-x86_64.zip or awscli-exe-linux-aarch64.zip on Linux), then re-run aws --version to confirm"
+                 --fix "CI runners: update the base image, or add an 'install AWS CLI v2' step before any deploy step (the official awscli-exe-linux-<arch>.zip flow works inside ubuntu-latest runners)"
+                 --hint "run:brew upgrade awscli"
+                 --hint "doc:docs/deployment-preflight-checks.md#aws-cli-agentcore-gateway-model"
+                 --doc "docs/deployment-preflight-checks.md#aws-cli-agentcore-gateway-model"
+                 --exit-class tool)
+  _pf_fail pf_check_aws_cli_agentcore_gateway_model "${args[@]}"
 }
 
 # pf:check: pf_check_network_egress
@@ -2501,6 +2605,44 @@ PY
     fail=1
   else
     echo "  ✓ every _pf_fail call site has --summary"
+  fi
+
+  # Test 12: agentcore gateway shape parser.
+  # Pin the parser used by pf_check_aws_cli_agentcore_gateway_model so the
+  # negative path (stale CLI service model) is regression-covered without
+  # depending on a stale CLI host. Three fixtures: both fields present
+  # (must report empty), mcpServer missing, iamCredentialProvider missing.
+  if ! command -v python3 >/dev/null 2>&1; then
+    echo "  ⊘ Test 12 skipped (python3 not on PATH)"
+  else
+    local _ok_json _no_mcp_json _no_iam_json _result _t12_fail=0
+    _ok_json='{"targetConfiguration":{"mcp":{"mcpServer":{"endpoint":""}}},"credentialProviderConfigurations":[{"credentialProvider":{"iamCredentialProvider":{"service":"","region":""}}}]}'
+    _no_mcp_json='{"targetConfiguration":{"mcp":{"openApiSchema":{}}},"credentialProviderConfigurations":[{"credentialProvider":{"iamCredentialProvider":{"service":"","region":""}}}]}'
+    _no_iam_json='{"targetConfiguration":{"mcp":{"mcpServer":{"endpoint":""}}},"credentialProviderConfigurations":[{"credentialProvider":{"oauthCredentialProvider":{}}}]}'
+
+    _result="$(printf '%s' "$_ok_json" | _pf_agentcore_gateway_skeleton_missing 2>/dev/null)"
+    if [[ -n "$_result" ]]; then
+      echo "  ✗ parser flagged a healthy skeleton (got: '$_result')"
+      _t12_fail=1
+    fi
+
+    _result="$(printf '%s' "$_no_mcp_json" | _pf_agentcore_gateway_skeleton_missing 2>/dev/null)"
+    if [[ "$_result" != *"targetConfiguration.mcp.mcpServer"* ]]; then
+      echo "  ✗ parser did not flag missing mcpServer (got: '$_result')"
+      _t12_fail=1
+    fi
+
+    _result="$(printf '%s' "$_no_iam_json" | _pf_agentcore_gateway_skeleton_missing 2>/dev/null)"
+    if [[ "$_result" != *"iamCredentialProvider"* ]]; then
+      echo "  ✗ parser did not flag missing iamCredentialProvider (got: '$_result')"
+      _t12_fail=1
+    fi
+
+    if (( _t12_fail == 0 )); then
+      echo "  ✓ agentcore gateway shape parser handles healthy + both missing-field cases"
+    else
+      fail=1
+    fi
   fi
 
   if (( fail == 0 )); then

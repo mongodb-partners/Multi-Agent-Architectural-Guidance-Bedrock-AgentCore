@@ -7,6 +7,7 @@ import uuid
 import streamlit as st
 
 from lib.api_client import get_health, list_agents
+from lib.session_hydration import HYDRATED_SESSION_KEY, clear_session_id_query_param
 
 _STATUS_CLASS = {
     "ok": "ok",
@@ -43,6 +44,9 @@ def render_session_and_agent_sidebar(api_base: str, token: str | None) -> str:
         st.session_state.session_id = f"sess_{uuid.uuid4().hex[:16]}"
         st.session_state.prev_session_pick = st.session_state.session_id
         st.session_state.messages = []
+        if hasattr(st.session_state, HYDRATED_SESSION_KEY):
+            delattr(st.session_state, HYDRATED_SESSION_KEY)
+        clear_session_id_query_param()
         st.rerun()
 
     return pick_agent

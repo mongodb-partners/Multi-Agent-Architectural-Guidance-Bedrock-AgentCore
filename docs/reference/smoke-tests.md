@@ -23,13 +23,17 @@ python3 e2e-smoke/post-deploy-smoke.py
 
 Checks:
 
-- `/health` for MongoDB, long-term memory, AgentCore Memory, MCP runtime, and (when `bedrock_kb_id` is in the manifest) Bedrock KB retrieve.
+- `/health` for MongoDB, long-term memory, AgentCore Memory, MCP runtime (via Gateway), and (when `bedrock_kb_id` is in the manifest) Bedrock KB retrieve. `mcpServer=unreachable` is downgraded to a warning because the API only opens the Gateway connection lazily on the first JWT-scoped chat turn (see `docs/status/debugging.md` "MongoDB MCP prewarm singleton race").
 - `/agents` metadata against the four configured agents.
 - `deploy-manifest.json` aligns with the env (`embeddings_provider`, Voyage Marketplace ARN, SoW model).
 - SageMaker endpoint `InService` when `EMBEDDINGS_PROVIDER=voyage`.
 - Terraform outputs for Voyage endpoint + Bedrock KB connectivity.
 - Bedrock KB in `ACTIVE` state with the correct Atlas endpoint service.
-- Authenticated `/chat` flows for `orchestrator`, `order-management`, `product-recommendation`, `troubleshooting`.
+- **AgentCore Runtime env wiring** — every runtime (orchestrator + 3 specialists) has its full env set (≥ 18 vars on specialists, ≥ 22 on orchestrator). Catches the post-apply env-drift class permanently. See `docs/status/debugging.md` "AgentCore Runtime env vars get reset…".
+- **Authenticated `/chat` flows** for `orchestrator`, `order-management`, `product-recommendation`, `troubleshooting`. Each turn must yield `token`, `done`, **no `stream_error`**, a `trace_id`, and either a `trace` event or a `handoff`. `product-recommendation` must also emit a real `mongo.vector_search` trace event; `troubleshooting` and `orchestrator` must emit `tool.mcp` (proves the AgentCore Gateway → MongoDB MCP path is live, with `_meta` passthrough working).
+- **LTM cross-session recall** — plant turn writes a uniquely-tokened fact (e.g. `HELIOTROPE-LANTERN`), a second session in a fresh chat must surface that token. Verifies `agent_memory_facts` write + hybrid retrieval end-to-end.
+- **CloudWatch trace_id join** — picks the live `x-trace-id` from the smoke chat and confirms `/multiagent/<env>/api` log streams contain ≥ 1 matching event in the smoke window. Validates `_trace` propagation from API → CloudWatch (the parallel scan against `/aws/bedrock-agentcore/runtimes/*` log groups is best-effort and warns rather than fails when AgentCore-side propagation is still in progress).
+- The Phase 9b deterministic backend smoke (`deploy/scripts/backend-smoke.py`, invoked by `deploy-project.sh`) wraps two chat turns in a **3-attempt retry with 15s × attempt back-off** so a freshly-restarted API container doesn't fail the gate on cold-start latency.
 
 Useful overrides:
 
@@ -41,7 +45,9 @@ Useful overrides:
 | `SKIP_LTM_CHECK=1` | Skip the long-term memory recall sub-test |
 | `E2E_USER`, `E2E_PASS` | Cognito creds |
 
-Exit code 0 = pass; non-zero = blocking failure.
+The runtime env wiring assertion and CloudWatch trace_id join intentionally have **no skip flags** — they're the cheapest checks to run and they catch the env-drift + trace-propagation classes that have repeatedly slipped past the chat-only smoke.
+
+Exit code 0 = pass; non-zero = blocking failure. The terminal sentinel for a clean pass is `ALL_POST_DEPLOY_SMOKE_CHECKS_PASSED`.
 
 ---
 
@@ -196,4 +202,4 @@ Run the disruptive failure drills (`mongo_outage`, `agentcore_failure`, `api_rol
 
 ---
 
-*Last verified: 2026-05-20 against the script set in `e2e-smoke/` and `e2e-smoke/failure-drills/`.*
+*Last verified: 2026-05-23 against the script set in `e2e-smoke/` and `e2e-smoke/failure-drills/` (full deploy + post-deploy smoke green end-to-end on PrivateLink stack).*

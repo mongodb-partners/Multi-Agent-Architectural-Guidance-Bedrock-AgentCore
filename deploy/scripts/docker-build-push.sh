@@ -86,42 +86,38 @@ aws ecr get-login-password --region "$AWS_REGION" \
   | docker login --username AWS --password-stdin "$ECR_REGISTRY"
 ok "ECR login successful"
 
+# Source the shared build/push helper (plain `docker build --platform` + `docker push`).
+# Cross-platform builds (linux/arm64 from amd64 hosts, linux/amd64 from Apple
+# Silicon) rely on QEMU binfmt being registered on the operator's machine —
+# the `pf_check_docker_cross_platforms` preflight verifies this before deploy.
+source "$SCRIPT_DIR/_docker-build.sh"
+
 # ── Build + push API image ────────────────────────────────────────────────────
-# buildx with --push is the only path that reliably cross-builds linux/amd64
-# from an Apple Silicon host (the legacy `docker build --platform` produces an
-# image colima/dockerd refuses to load with "does not provide the specified
-# platform"). On amd64 hosts it still works the same.
 log "Building + pushing API image (linux/amd64, context: repo root, Dockerfile: api/Dockerfile)..."
-docker buildx build \
-  --platform linux/amd64 \
-  -f "$REPO_ROOT/api/Dockerfile" \
-  -t "$API_REPO:$API_TAG" \
-  -t "$API_REPO:latest" \
-  --push \
-  "$REPO_ROOT"
+docker_build_push_image linux/amd64 \
+  "$REPO_ROOT/api/Dockerfile" \
+  "$REPO_ROOT" \
+  "$API_REPO:$API_TAG" \
+  "$API_REPO:latest"
 ok "API pushed: $API_REPO:$API_TAG"
 
 # ── Build + push UI image ─────────────────────────────────────────────────────
 log "Building + pushing UI image (linux/amd64, context: ui/, Dockerfile: ui/Dockerfile)..."
-docker buildx build \
-  --platform linux/amd64 \
-  -f "$REPO_ROOT/ui/Dockerfile" \
-  -t "$UI_REPO:$UI_TAG" \
-  -t "$UI_REPO:latest" \
-  --push \
-  "$REPO_ROOT/ui"
+docker_build_push_image linux/amd64 \
+  "$REPO_ROOT/ui/Dockerfile" \
+  "$REPO_ROOT/ui" \
+  "$UI_REPO:$UI_TAG" \
+  "$UI_REPO:latest"
 ok "UI pushed: $UI_REPO:$UI_TAG"
 
 # ── Build + push agent-runtime image (ARM64 — required by AgentCore Runtime) ──
 if [[ -n "$AGENT_RUNTIME_REPO" ]]; then
   log "Building agent-runtime image (linux/arm64, Dockerfile: api/Dockerfile.agentcore)..."
-  docker buildx build \
-    --platform linux/arm64 \
-    -f "$REPO_ROOT/api/Dockerfile.agentcore" \
-    -t "$AGENT_RUNTIME_REPO:$RUNTIME_TAG" \
-    -t "$AGENT_RUNTIME_REPO:latest" \
-    --push \
-    "$REPO_ROOT"
+  docker_build_push_image linux/arm64 \
+    "$REPO_ROOT/api/Dockerfile.agentcore" \
+    "$REPO_ROOT" \
+    "$AGENT_RUNTIME_REPO:$RUNTIME_TAG" \
+    "$AGENT_RUNTIME_REPO:latest"
   ok "agent-runtime pushed: $AGENT_RUNTIME_REPO:$RUNTIME_TAG"
 fi
 
@@ -133,13 +129,11 @@ fi
 # Phase 7e — the legacy `lambda/mongodb-mcp/` host has been deleted).
 if [[ -n "$MONGODB_MCP_RUNTIME_REPO" ]]; then
   log "Building mongodb-mcp-runtime image (linux/arm64, Dockerfile: mcp-runtimes/mongodb-mcp/Dockerfile)..."
-  docker buildx build \
-    --platform linux/arm64 \
-    -f "$REPO_ROOT/mcp-runtimes/mongodb-mcp/Dockerfile" \
-    -t "$MONGODB_MCP_RUNTIME_REPO:$RUNTIME_TAG" \
-    -t "$MONGODB_MCP_RUNTIME_REPO:latest" \
-    --push \
-    "$REPO_ROOT/mcp-runtimes/mongodb-mcp"
+  docker_build_push_image linux/arm64 \
+    "$REPO_ROOT/mcp-runtimes/mongodb-mcp/Dockerfile" \
+    "$REPO_ROOT/mcp-runtimes/mongodb-mcp" \
+    "$MONGODB_MCP_RUNTIME_REPO:$RUNTIME_TAG" \
+    "$MONGODB_MCP_RUNTIME_REPO:latest"
   ok "mongodb-mcp-runtime pushed: $MONGODB_MCP_RUNTIME_REPO:$RUNTIME_TAG"
 fi
 

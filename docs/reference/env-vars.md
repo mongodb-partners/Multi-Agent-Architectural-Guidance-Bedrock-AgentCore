@@ -76,9 +76,8 @@ The stack supports two **mutually exclusive per account** connectivity modes for
 | `MONGODB_URI` | — | Atlas connection URI used by the API + MCP runtime. **Set in `.env.live`** by `deploy-project.sh` / `deploy-api.sh`; never hand-edited. Mode-aware: PL multi-host with `tlsAllowInvalidHostnames=true` in privatelink mode; `connectionStrings.privateSrv` (or multi-host non-SRV fallback) in peering mode | API short-term + LTM + chat-message mirror; MCP runtime | [`api/src/lib/mongo-client.ts`](../../api/src/lib/mongo-client.ts), [`mcp-runtimes/mongodb-mcp/src/`](../../mcp-runtimes/mongodb-mcp/src/) |
 | `MONGODB_URI_PUBLIC` | — | Public SRV form of `MONGODB_URI`, written to `.env.live` for off-VPC tooling. Used by `e2e-smoke/memory-recall-diagnostic.py` so harnesses can write to `chat_messages` from a laptop | Memory diagnostic harness | `e2e-smoke/memory-recall-diagnostic.py` |
 | `MONGODB_DB` | `bedrock_agents` | Database name override | Always (set in `.env.live`) | `api/src/lib/mongo-client.ts` |
-| `MONGODB_MCP_RUNTIME_ARN` | — | ARN of the dedicated MongoDB MCP AgentCore Runtime | API runtime; required for chat to work | [`api/src/adapters/mongodb-mcp-client.ts`](../../api/src/adapters/mongodb-mcp-client.ts) |
-| `MONGODB_MCP_RUNTIME_ENDPOINT` | — | Optional HTTP endpoint override for the MCP runtime | Bypass IAM-authorized AgentCore invoke | `mongodb-mcp-client.ts` |
-| `MONGODB_MCP_RUNTIME_SESSION_ID` | derived | Stable per-process MCP session ID | API runtime | `mongodb-mcp-client.ts` |
+| `MONGODB_MCP_RUNTIME_ARN` | — | ARN of the dedicated MongoDB MCP AgentCore Runtime | Terraform/deploy wiring for the AgentCore Gateway target | `deploy/terraform/envs/ec2`, `deploy/scripts/deploy-project.sh` |
+| `MONGODB_MCP_RUNTIME_ENDPOINT` | — | Streamable-HTTP endpoint for the MongoDB MCP runtime | Terraform/deploy wiring for the AgentCore Gateway target | `deploy/terraform/envs/ec2`, `deploy/scripts/deploy-project.sh` |
 | `MONGODB_ALLOW_WRITE` | `false` | MCP write gate. When false, the MCP runtime rejects `updateOne`/`insertOne`/`replaceOne`/`deleteOne` | Set to `true` for explicit write workloads | MCP runtime |
 | `MONGODB_MAX_LIMIT` | `200` | Cap on `mongodb_query` result size | Always | MCP runtime |
 | `MONGODB_PUBLIC_COLLECTIONS` | — (all collections allowed) | Comma-separated allow-list of collection names the MCP runtime is permitted to read | Tenant isolation | `api/src/adapters/mongodb-mcp-client.ts` |
@@ -94,8 +93,8 @@ The stack supports two **mutually exclusive per account** connectivity modes for
 | `AGENTCORE_RUNTIME_ARN` | — | Legacy alias for `AGENTCORE_ORCHESTRATOR_ARN` | Back-compat | `agentcore-runtime.ts` |
 | `AGENTCORE_RUNTIME_ARN_<AGENT_ID>` | — | ARN per specialist (uppercase + underscores). Read by the orchestrator runtime when it streams to a specialist | Set in `.env.live` per discovered specialist | [`api/src/agent-runtime-code.ts`](../../api/src/agent-runtime-code.ts) |
 | `AGENTCORE_<AGENT_ID>_ARN` | — | Alternative naming for the same; also injected by `deploy-api.sh` | Same | `agent-runtime-code.ts` |
-| `AGENTCORE_GATEWAY_URL` | — | AgentCore Gateway MCP endpoint (used for non-Mongo Gateway tools) | When non-Mongo gateway tools are wired | `mongodb-mcp-client.ts`, gateway helpers |
-| `MCP_SERVER_URL` | — | Override the Gateway URL for local MCP testing | Local dev | `mongodb-mcp-client.ts` |
+| `AGENTCORE_GATEWAY_URL` | — | AgentCore Gateway MCP endpoint used by deployed Mongo tool calls | Deployed API + AgentCore runtimes | `mongodb-mcp-client.ts`, gateway helpers |
+| `MCP_SERVER_URL` | — | Local-development override for a manually run MCP endpoint. Ignored in deployed/dev AWS runtimes unless `ENVIRONMENT=local`, `NODE_ENV=development`, or `DEV_MOCK_BACKENDS=1` | Local dev only | `mongodb-mcp-client.ts` |
 | `AGENTCORE_MEMORY_STORE_ID` | — | AgentCore Memory Store ID (short-term backend; LTM fallback) | `SHORT_TERM_MEMORY_BACKEND=agentcore` | [`api/src/lib/short-term-memory.ts`](../../api/src/lib/short-term-memory.ts) |
 | `SHORT_TERM_MEMORY_BACKEND` | unset (in-memory `Map`) | `agentcore` → use AgentCore Memory Store. `assertShortTermBackendConfigured()` refuses to boot if set without `AGENTCORE_MEMORY_STORE_ID` | API boot | `short-term-memory.ts`, `index.ts` |
 | `USE_ORCHESTRATOR_RUNTIME` | unset (off) | `1` → route every turn through the orchestrator runtime instead of the in-API classifier (one-release rollback path) | Rollback only | [`api/src/routes/chat.ts`](../../api/src/routes/chat.ts) |

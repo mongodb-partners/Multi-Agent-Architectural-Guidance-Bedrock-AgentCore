@@ -79,7 +79,17 @@ resource "aws_lb" "atlas_kb" {
 resource "aws_lb_target_group" "atlas_kb" {
   for_each = local.atlas_port_slot_keys
 
-  name        = "${substr(replace(var.project_name, "-", ""), 0, 12)}-${var.environment}-pl${each.key}"
+  # `name_prefix` instead of `name` so any future rename-driven replacement does
+  # not collide with the existing TG (whose ARN is still referenced by the
+  # listener until the listener is updated to the replacement TG). With a fixed
+  # `name`, the rename would attempt to destroy the old TG before the listener
+  # update lands, and AWS rejects the delete with `ResourceInUse: Target group
+  # … is currently in use by a listener or a rule` (observed 2026-05-22 when
+  # the naming scheme changed in commit ba49832). `name_prefix` is capped at
+  # 6 chars; ELBv2 appends a 26-char suffix, keeping us under the 32-char NLB
+  # TG cap. Pair with `create_before_destroy` so TF sequences create → update
+  # listener → delete.
+  name_prefix = "pl${each.key}-"
   port        = var.atlas_ports[tonumber(each.key)]
   protocol    = "TCP"
   target_type = "ip"
@@ -97,6 +107,8 @@ resource "aws_lb_target_group" "atlas_kb" {
   tags = var.tags
 
   lifecycle {
+    create_before_destroy = true
+
     precondition {
       condition = (
         var.atlas_vpce_id != "" &&
@@ -195,6 +207,8 @@ resource "aws_lb_listener" "atlas_kb" {
   }
 
   tags = var.tags
+
+  depends_on = [null_resource.register_targets]
 }
 
 # ── VPC Endpoint Service exposing the NLB to Bedrock ──────────────────────────

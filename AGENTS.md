@@ -18,7 +18,7 @@ A **configuration-driven multi-agent reference** on **AWS Bedrock** (via [Strand
 
 **Handover:** [`docs/README.md`](docs/README.md) — doc map, first-day checklist, reading orders.
 
-**Debugging:** [`docs/debugging.md`](docs/debugging.md) — EC2 access, trace-driven debug, common failures, validation scripts, **persistent pitfalls**. When a non-obvious regression recurs more than twice (or is a severe guardrail like hung CI / infinite Strands loop), add an entry to **Known persistent pitfalls** in the same PR as the fix.
+**Debugging:** [`docs/status/debugging.md`](docs/status/debugging.md) — EC2 access, trace-driven debug, common failures, validation scripts, **persistent pitfalls**. When a non-obvious regression recurs more than twice (or is a severe guardrail like hung CI / infinite Strands loop), add an entry to **Known persistent pitfalls** in the same PR as the fix.
 
 **Reference appendix:** [`docs/reference/`](docs/reference/) — env vars, tools, Terraform modules, SSM parameters, data model, smoke tests, deploy scripts.
 
@@ -339,8 +339,8 @@ docker compose up --build    # needs .env with JWKS + AgentCore ARNs
 3. **Domain behavior** belongs in **`config/skills/`** and **`config/agents/`**, not in ad-hoc strings inside route handlers — unless clearly temporary scaffolding.
 4. **API surface** stays aligned with [`docs/api-reference.md`](docs/api-reference.md) (paths, SSE events, error shape, auth codes like **`INVALID_TOKEN`**). New cloud/data integrations go behind **`api/src/adapters/`** so **`DEV_MOCK_BACKENDS=1`** remains a complete local loop where applicable.
 5. **Do not commit** `.env`, keys, or Terraform state. Follow [`.gitignore`](.gitignore).
-6. **When run behavior or implementation status changes**, update [`docs/deployment-guide.md`](docs/deployment-guide.md) (Step 5 + top status box), [`docs/configuration-guide.md`](docs/configuration-guide.md), and [`docs/debugging.md`](docs/debugging.md) in the same change. **Docker / Compose / ECR scripts / CI image jobs:** also align this file's layout/commands if paths or build context change.
-7. **When a pitfall has recurred more than twice** (or is a critical regression worth a permanent rule), add a concise entry to the **Known persistent pitfalls** section of [`docs/debugging.md`](docs/debugging.md). Ordinary bugs belong in PRs and commits.
+6. **When run behavior or implementation status changes**, update [`docs/deployment-guide.md`](docs/deployment-guide.md) (Step 5 + top status box), [`docs/configuration-guide.md`](docs/configuration-guide.md), and [`docs/status/debugging.md`](docs/status/debugging.md) in the same change. **Docker / Compose / ECR scripts / CI image jobs:** also align this file's layout/commands if paths or build context change.
+7. **When a pitfall has recurred more than twice** (or is a critical regression worth a permanent rule), add a concise entry to the **Known persistent pitfalls** section of [`docs/status/debugging.md`](docs/status/debugging.md). Ordinary bugs belong in PRs and commits.
 8. **Use `logger` (not `console.log`) for new diagnostic output** in `api/src/`. Import from `./logger.ts` (or `../lib/logger.ts`). `console.log` / `console.error` in tests and Streamlit (`ui/`) are fine. For **new Streamlit-side diagnostics**, prefer `ui/lib/log.py` (`log.info` / `warn` / `error` / `debug`) so support can grep JSON in process logs the same way as the API.
 9. **Any new deploy script that needs AWS credentials** must `source "$SCRIPT_DIR/_aws-auth.sh"` (or `"$SCRIPT_DIR/scripts/_aws-auth.sh"` if you live in `deploy/`) and call `validate_aws_auth || err "..."`. Don't reimplement the `AWS_ACCESS_KEY_ID`/`AWS_PROFILE` check or call `aws sts get-caller-identity` directly for the `ACCOUNT_ID` capture — read `AWS_AUTH_ACCOUNT_ID` from the validator's exports instead. See [`deploy/iam/README.md`](deploy/iam/README.md) § 4.
 10. **Any new deploy script that mutates AWS / Atlas state** must also `source "$SCRIPT_DIR/_preflight-checks.sh"` and call `preflight_validate <profile>` immediately after AWS auth. Add the new checks to the appropriate `PREFLIGHT_PROFILE_*` array in [`deploy/scripts/_preflight-checks.sh`](deploy/scripts/_preflight-checks.sh) and document them in [`docs/deployment-preflight-checks.md`](docs/deployment-preflight-checks.md). Do **not** delete or refactor the existing inline guards — preflight runs **in addition** to them. Verify with `bash deploy/scripts/_preflight-checks.sh --self-test` before merging.
@@ -444,11 +444,12 @@ Full catalog: [`docs/reference/env-vars.md`](docs/reference/env-vars.md).
 | Doc | Use when |
 |---|---|
 | [`docs/README.md`](docs/README.md) | Client handover — first-day checklist, reading orders |
-| [`docs/debugging.md`](docs/debugging.md) | Developer playbook, persistent pitfalls, validation scripts |
+| [`docs/status/debugging.md`](docs/status/debugging.md) | Developer playbook, persistent pitfalls, validation scripts |
 | [`docs/architecture.md`](docs/architecture.md) | System design, 5-runtime topology, request flow |
 | [`docs/deployment-guide.md`](docs/deployment-guide.md) | Deploy (PrivateLink + VPC peering), CI/CD, teardown |
 | [`docs/deployment-preflight-checks.md`](docs/deployment-preflight-checks.md) | Catalog of every pre/post-apply guard run by [`deploy/scripts/_preflight-checks.sh`](deploy/scripts/_preflight-checks.sh); failure envelope + override knobs (`PREFLIGHT_SKIP`, `PREFLIGHT_JSON`, `PREFLIGHT_DRY_RUN`, …) |
-| [`docs/configuration-guide.md`](docs/configuration-guide.md) | Env vars, mode flags, agent + skill schema |
+| [`docs/configuration-guide.md`](docs/configuration-guide.md) | `config/` folder — agent + skill schema |
+| [`docs/advanced/deploy-tweak-guide.md`](docs/advanced/deploy-tweak-guide.md) | **Advanced** — deploy/runtime env tuning (mode flags, ARNs, embeddings) |
 | [`docs/api-reference.md`](docs/api-reference.md) | HTTP + SSE, projections, auth |
 | [`docs/agent-authoring-guide.md`](docs/agent-authoring-guide.md) | `.agent.md` format |
 | [`docs/skills-authoring-guide.md`](docs/skills-authoring-guide.md) | `SKILL.md`, progressive disclosure |

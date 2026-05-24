@@ -16,6 +16,7 @@ from lib.chat_panel import handle_chat_input, render_message_history
 from lib.cognito_gate import ensure_api_bearer_token, render_cognito_logout
 from lib.config import load_settings
 from lib.metrics_sidebar import render_metrics_block
+from lib.session_hydration import ensure_chat_session_hydrated
 from lib.session_state import ensure_defaults
 from lib.sidebar import render_session_and_agent_sidebar
 from lib.suggested_prompts import render_suggested_prompts
@@ -42,6 +43,7 @@ st.caption(
 )
 
 ensure_defaults()
+ensure_chat_session_hydrated(settings.api_base, api_token)
 
 with st.sidebar:
     agent_id = render_session_and_agent_sidebar(settings.api_base, api_token)

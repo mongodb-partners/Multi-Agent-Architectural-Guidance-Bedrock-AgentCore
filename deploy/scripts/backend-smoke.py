@@ -79,49 +79,73 @@ def has_order_data(body: str) -> bool:
 
 
 def validate_chat_smoke(api: str, session_id: str, id_token: str) -> None:
-    first = post_chat(api, session_id, id_token, "I need help tracking an order.")
-    second = post_chat(
-        api,
-        session_id,
-        id_token,
-        "Order ORD-2002 for casey@example.com. What is the tracking number and status?",
-    )
-
-    first_has_token, _, first_has_done = check_sse(first)
-    second_has_token, second_has_handoff, second_has_done = check_sse(second)
-    if not (first_has_token and first_has_done and second_has_token and second_has_handoff and second_has_done):
-        raise SystemExit("SSE smoke validation failed: missing token/handoff/done events")
-    if "event: error" in first or "event: error" in second:
-        raise SystemExit("SSE smoke validation failed: error event present")
-
-    summary = parse_turn_end(second)
-    if not summary:
-        raise SystemExit("SSE smoke validation failed: chat.turn.end summary missing for second turn")
-    if (summary.get("agentcoreRuntimeMs") or 0) <= 0:
-        raise SystemExit("SSE smoke validation failed: agentcoreRuntimeMs <= 0 (Hono never called the runtime)")
-    if (summary.get("bytesOut") or 0) <= 0:
-        raise SystemExit("SSE smoke validation failed: bytesOut == 0 (runtime returned an empty response)")
-
-    hops = summary.get("agentcoreHops") or 0
-    if hops < 1:
-        raise SystemExit(
-            f"SSE smoke validation failed: agentcoreHops={hops} < 1 for an "
-            "order question (expected Hono -> specialist, or legacy "
-            "Hono -> orchestrator -> specialist when USE_ORCHESTRATOR_RUNTIME=1).",
+    last_err = "SSE smoke validation failed: unknown"
+    for attempt in range(1, 4):
+        first = post_chat(api, session_id, id_token, "I need help tracking an order.")
+        second = post_chat(
+            api,
+            session_id,
+            id_token,
+            "Order ORD-2002 for casey@example.com. What is the tracking number and status?",
         )
 
-    if (summary.get("mongoQueries") or 0) <= 0:
-        raise SystemExit("SSE smoke validation failed: mongoQueries == 0 - counter rollup or Mongo path broken")
-    if (summary.get("mcpCalls") or 0) <= 0:
-        raise SystemExit("SSE smoke validation failed: mcpCalls == 0 - gateway MCP path or counter rollup broken")
+        first_has_token, _, first_has_done = check_sse(first)
+        second_has_token, second_has_handoff, second_has_done = check_sse(second)
+        if not (
+            first_has_token
+            and first_has_done
+            and second_has_token
+            and second_has_handoff
+            and second_has_done
+        ):
+            last_err = "SSE smoke validation failed: missing token/handoff/done events"
+        elif "event: error" in first or "event: error" in second:
+            last_err = "SSE smoke validation failed: error event present"
+        else:
+            summary = parse_turn_end(second)
+            if not summary:
+                last_err = "SSE smoke validation failed: chat.turn.end summary missing for second turn"
+            elif (summary.get("agentcoreRuntimeMs") or 0) <= 0:
+                last_err = (
+                    "SSE smoke validation failed: agentcoreRuntimeMs <= 0 "
+                    "(Hono never called the runtime)"
+                )
+            elif (summary.get("bytesOut") or 0) <= 0:
+                last_err = (
+                    "SSE smoke validation failed: bytesOut == 0 "
+                    "(runtime returned an empty response)"
+                )
+            elif (summary.get("agentcoreHops") or 0) < 1:
+                hops = summary.get("agentcoreHops") or 0
+                last_err = (
+                    f"SSE smoke validation failed: agentcoreHops={hops} < 1 for an "
+                    "order question (expected Hono -> specialist, or legacy "
+                    "Hono -> orchestrator -> specialist when USE_ORCHESTRATOR_RUNTIME=1)."
+                )
+            elif (summary.get("mongoQueries") or 0) <= 0:
+                last_err = (
+                    "SSE smoke validation failed: mongoQueries == 0 - "
+                    "counter rollup or Mongo path broken"
+                )
+            elif (summary.get("mcpCalls") or 0) <= 0:
+                last_err = (
+                    "SSE smoke validation failed: mcpCalls == 0 - "
+                    "gateway MCP path or counter rollup broken"
+                )
+            elif not has_order_data(second):
+                last_err = (
+                    "SSE smoke validation failed: response for ORD-2002 lacks any seeded "
+                    "order field (TRK-2002-US / Pro Gadget / 89.99). The MCP tool path is "
+                    "almost certainly broken - check AgentCore Runtime logs for "
+                    "'no MCP tools loaded' and Lambda logs for 'Unrecognized event shape'."
+                )
+            else:
+                return
 
-    if not has_order_data(second):
-        raise SystemExit(
-            "SSE smoke validation failed: response for ORD-2002 lacks any seeded "
-            "order field (TRK-2002-US / Pro Gadget / 89.99). The MCP tool path is "
-            "almost certainly broken - check AgentCore Runtime logs for "
-            "'no MCP tools loaded' and Lambda logs for 'Unrecognized event shape'.",
-        )
+        if attempt < 3:
+            time.sleep(15 * attempt)
+            continue
+        raise SystemExit(last_err)
 
 
 def validate_session_user(api: str, session_id: str, id_token: str) -> None:

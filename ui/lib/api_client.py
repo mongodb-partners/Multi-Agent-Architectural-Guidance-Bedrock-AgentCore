@@ -370,6 +370,34 @@ def get_trace(
     return r.json()
 
 
+def trace_events_from_doc(trace_doc: dict | None) -> list[TraceEvent]:
+    """Parse persisted ``GET /traces/:id`` events into ``TraceEvent`` objects."""
+    if not trace_doc:
+        return []
+    raw_events = trace_doc.get("events")
+    if not isinstance(raw_events, list):
+        return []
+    out: list[TraceEvent] = []
+    for raw in raw_events:
+        if not isinstance(raw, dict):
+            continue
+        ev_type = raw.get("type")
+        if not ev_type:
+            continue
+        out.append(
+            TraceEvent(
+                type=str(ev_type),
+                id=str(raw.get("id") or ""),
+                ts=int(raw.get("ts") or 0),
+                payload=raw.get("payload") if isinstance(raw.get("payload"), dict) else {},
+                parent_id=str(raw["parentId"]) if raw.get("parentId") else None,
+                agent_id=str(raw["agentId"]) if raw.get("agentId") else None,
+                duration_ms=raw.get("durationMs"),
+            )
+        )
+    return out
+
+
 def get_trace_mongo(
     api_base: str,
     *,

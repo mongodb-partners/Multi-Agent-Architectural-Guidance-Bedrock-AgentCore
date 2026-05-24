@@ -192,6 +192,16 @@ resource "aws_bedrockagentcore_agent_runtime" "this" {
   tags = var.tags
 
   lifecycle {
+    # Deploy scripts (deploy-project.sh Phase 6b, deploy-agents.sh, deploy-api.sh)
+    # layer ~15 dynamic env vars on top of the 4 TF-declared ones via
+    # bedrock-agentcore-control update-agent-runtime (see
+    # _agents-common.sh::update_runtime_env_dynamic). Without this ignore_changes
+    # rule, the next `terraform apply` resets the runtime back to the 4 vars
+    # below, silently wiping MONGODB_MCP_RUNTIME_ARN / MCP_SERVER_URL / Mongo
+    # URI / KB id, which breaks every Mongo MCP call until the next
+    # deploy-agents.sh run. See docs/status/debugging.md Known persistent pitfalls.
+    ignore_changes = [environment_variables]
+
     precondition {
       condition     = var.network_mode != "VPC" || (length(var.vpc_subnet_ids) > 0 && length(var.vpc_security_group_ids) > 0)
       error_message = "agentcore-agent-runtime: network_mode=VPC requires non-empty vpc_subnet_ids and vpc_security_group_ids."

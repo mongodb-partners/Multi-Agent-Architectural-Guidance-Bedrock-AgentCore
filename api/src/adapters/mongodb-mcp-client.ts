@@ -5,14 +5,16 @@
  * tools as McpTool instances ready to attach to any specialist agent.
  *
  * Endpoint resolution (cascade):
- *   `MONGODB_MCP_RUNTIME_ARN` → `MCP_SERVER_URL` → `AGENTCORE_GATEWAY_URL` →
- *   `http://localhost:8080/mcp`.
+ *   deployed runtimes: `AGENTCORE_GATEWAY_URL` only.
+ *   local development: `MCP_SERVER_URL` is allowed only when ENVIRONMENT=local,
+ *   NODE_ENV=development, or DEV_MOCK_BACKENDS=1.
+ *
+ * Missing Gateway configuration is fatal. Do not fall back to localhost; that
+ * masks deploy/runtime env drift and makes tool failures look like MCP bugs.
  *
  * Outbound auth:
- *   - Direct AgentCore Runtime mode signs each MCP JSON-RPC call with the
- *     runtime role by using `InvokeAgentRuntime`.
- *   - Gateway mode reads the caller's JWT from `currentGatewayJwt()` and sets
- *     it as `Authorization: Bearer <jwt>`.
+ *   Gateway mode reads the caller's JWT from `currentGatewayJwt()` and sets it
+ *   as `Authorization: Bearer <jwt>`.
  *
  * The client is initialised lazily on first call and cached for the process
  * lifetime to avoid reconnect overhead on every agent invocation. On a 401
@@ -30,11 +32,7 @@ import {
   type ToolSpec,
   type ToolStreamGenerator,
 } from "@strands-agents/sdk";
-import { BedrockAgentCoreClient } from "@aws-sdk/client-bedrock-agentcore";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { Hash } from "@smithy/hash-node";
-import { HttpRequest } from "@smithy/protocol-http";
-import { SignatureV4 } from "@smithy/signature-v4";
 import { logger } from "../lib/logger.ts";
 import { appendTraceContextHeaders } from "../lib/otel.ts";
 import { currentTrace } from "../lib/trace-context.ts";
@@ -547,10 +545,14 @@ export function extractScoresFromResult(result: ToolResultBlock): number[] {
 
 /** Scores from MCP runtime trace events (`mongo.result.sampleDocs`). */
 export function extractScoresFromMcpTraceEvents(
-  traces: Array<{ type?: string; payload?: Record<string, unknown> }>,
+  traces: Array<{ type?: string; payload?: Record<string, unknown> } | null | undefined>,
 ): number[] {
   const scores: number[] = [];
   for (const ev of traces) {
+    // Defensively skip null/undefined/non-object entries. AgentCore-forwarded
+    // traces occasionally contain malformed envelope blocks (covered by the
+    // "skips malformed trace event entries" integration test).
+    if (!ev || typeof ev !== "object") continue;
     if (ev.type !== "mongo.result") continue;
     const sampleDocs = ev.payload?.sampleDocs;
     if (!Array.isArray(sampleDocs)) continue;
@@ -971,10 +973,10 @@ export function vectorIndexFromTransformArgs(args: Record<string, JSONValue | un
 /**
  * Decide which Tool wrapper to use for a raw MCP tool.
  *
- *   - Gateway mode: `mongodb-mcp___mongodb_query` → `mongodb_query`.
- *   - Direct runtime mode: `mongodb_query` stays `mongodb_query`.
+ *   - Gateway target prefix: `mongodb-mcp___mongodb_query` → `mongodb_query`.
+ *   - Unprefixed local/dev MCP tools stay as-is.
  *   - `mongodb_vector_search` always gets the queryText embedding bridge,
- *     whether it arrived through Gateway or direct runtime. When the runtime
+ *     whether it arrived with or without a Gateway prefix. When the runtime
  *     also exposes `mongodb_hybrid_search`, the wrapper carries a second
  *     handle to that helper so `hybrid: true` calls route through MCP too.
  *
@@ -997,44 +999,50 @@ let _mcpClient: McpClient | null = null;
 // satisfy `Tool` and that is the only thing Strands' `Agent` requires.
 let _mcpTools: Tool[] | null = null;
 let _mcpToolsPromise: Promise<Tool[]> | null = null;
-let _agentCoreClient: BedrockAgentCoreClient | null = null;
 
-type McpEndpoint =
-  | { mode: "agentcore-runtime"; url: string; runtimeArn: string }
-  | { mode: "http"; url: string };
+type McpEndpoint = { mode: "gateway"; url: string };
 
-type AwsCredentials = {
-  accessKeyId: string;
-  secretAccessKey: string;
-  sessionToken?: string;
-};
+function localMcpOverrideAllowed(): boolean {
+  const environment = process.env.ENVIRONMENT?.trim().toLowerCase();
+  const nodeEnv = process.env.NODE_ENV?.trim().toLowerCase();
+  return (
+    environment === "local" ||
+    nodeEnv === "development" ||
+    process.env.DEV_MOCK_BACKENDS === "1"
+  );
+}
+
+function configuredMcpServerUrl(): string | undefined {
+  const gatewayUrl = process.env.AGENTCORE_GATEWAY_URL?.trim();
+  if (gatewayUrl) return gatewayUrl;
+
+  const localOverride = process.env.MCP_SERVER_URL?.trim();
+  if (localOverride && localMcpOverrideAllowed()) return localOverride;
+
+  return undefined;
+}
 
 /**
- * Resolve the MCP endpoint. Production prefers the dedicated MongoDB MCP
- * AgentCore Runtime; `MCP_SERVER_URL` / `AGENTCORE_GATEWAY_URL` remain the
- * fallback for local servers and future non-Mongo Gateway targets.
+ * Resolve the MCP endpoint. Production tool traffic always goes through the
+ * AgentCore Gateway. The Gateway target then invokes the dedicated MongoDB MCP
+ * AgentCore Runtime. We intentionally ignore MONGODB_MCP_RUNTIME_ARN here so a
+ * runtime env var cannot silently bypass Gateway.
  */
 function resolveMcpEndpoint(): McpEndpoint {
-  const runtimeArn = process.env.MONGODB_MCP_RUNTIME_ARN?.trim();
-  if (runtimeArn) {
-    return {
-      mode: "agentcore-runtime",
-      runtimeArn,
-      url: process.env.MONGODB_MCP_RUNTIME_ENDPOINT?.trim() ||
-        buildAgentCoreRuntimeEndpoint(runtimeArn),
-    };
+  const url = configuredMcpServerUrl();
+  if (!url) {
+    throw new Error(
+      "AGENTCORE_GATEWAY_URL is required for MongoDB MCP tools; MCP_SERVER_URL is local-development only and localhost fallback is disabled.",
+    );
   }
-
   return {
-    mode: "http",
-    url: process.env.MCP_SERVER_URL?.trim() ||
-      process.env.AGENTCORE_GATEWAY_URL?.trim() ||
-      "http://localhost:8080/mcp",
+    mode: "gateway",
+    url,
   };
 }
 
 function getMcpServerUrl(): string {
-  return resolveMcpEndpoint().url;
+  return configuredMcpServerUrl() ?? "(missing AGENTCORE_GATEWAY_URL)";
 }
 
 /**
@@ -1062,119 +1070,9 @@ export const jwtInjectingFetch = (
   return globalThis.fetch(input, { ...init, headers });
 };
 
-function getAgentCoreClient(): BedrockAgentCoreClient {
-  if (!_agentCoreClient) {
-    _agentCoreClient = new BedrockAgentCoreClient({
-      region: process.env.AWS_REGION ?? "us-east-1",
-    });
-  }
-  return _agentCoreClient;
-}
-
-function buildAgentCoreRuntimeEndpoint(runtimeArn: string): string {
-  const region = process.env.AWS_REGION ?? "us-east-1";
-  return `https://bedrock-agentcore.${region}.amazonaws.com/runtimes/${encodeURIComponent(runtimeArn)}/invocations?qualifier=DEFAULT`;
-}
-
-function directRuntimeSessionId(): string {
-  const configured = process.env.MONGODB_MCP_RUNTIME_SESSION_ID?.trim();
-  const sessionId = configured ||
-    `mongodb-mcp-runtime-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
-  return sessionId.length >= 33 ? sessionId : sessionId.padEnd(33, "0");
-}
-
-async function bodyToString(body: RequestInit["body"]): Promise<string> {
-  if (body === undefined || body === null) return "";
-  if (typeof body === "string") return body;
-  if (body instanceof Uint8Array) return new TextDecoder().decode(body);
-  if (body instanceof ArrayBuffer) return new TextDecoder().decode(body);
-  if (body instanceof URLSearchParams) return body.toString();
-  if (typeof Blob !== "undefined" && body instanceof Blob) return await body.text();
-  return String(body);
-}
-
-async function resolveAwsCredentials(): Promise<AwsCredentials> {
-  const provider = getAgentCoreClient().config.credentials;
-  const credentials = typeof provider === "function" ? await provider() : provider;
-  if (!credentials?.accessKeyId || !credentials.secretAccessKey) {
-    throw new Error("AWS credentials are required for direct AgentCore Runtime MCP calls");
-  }
-  return credentials;
-}
-
-async function signAgentCoreRequest(
-  input: string | URL,
-  runtimeSessionId: string,
-  init?: RequestInit,
-): Promise<{ url: URL; init: RequestInit }> {
-  const url = new URL(input.toString());
-  const region = process.env.AWS_REGION ?? "us-east-1";
-  const method = (init?.method ?? "POST").toUpperCase();
-  const body = await bodyToString(init?.body);
-  const headers = new Headers(init?.headers);
-
-  headers.set("host", url.host);
-  if (!headers.has("x-amzn-bedrock-agentcore-runtime-session-id")) {
-    headers.set("x-amzn-bedrock-agentcore-runtime-session-id", runtimeSessionId);
-  }
-  if (!headers.has("mcp-protocol-version")) {
-    headers.set("mcp-protocol-version", "2025-06-18");
-  }
-
-  const request = new HttpRequest({
-    protocol: url.protocol,
-    hostname: url.hostname,
-    port: url.port ? Number.parseInt(url.port, 10) : undefined,
-    method,
-    path: url.pathname,
-    query: Object.fromEntries(url.searchParams.entries()),
-    headers: Object.fromEntries(headers.entries()),
-    body: method === "GET" || method === "HEAD" ? undefined : body,
-  });
-  const signer = new SignatureV4({
-    credentials: resolveAwsCredentials,
-    region,
-    service: "bedrock-agentcore",
-    sha256: Hash.bind(null, "sha256"),
-  });
-  const signed = await signer.sign(request);
-
-  return {
-    url,
-    init: {
-      ...init,
-      method,
-      ...(method === "GET" || method === "HEAD" ? {} : { body }),
-      headers: (() => {
-        const h = new Headers(
-          Object.fromEntries(
-            Object.entries(signed.headers).filter(([k]) => k.toLowerCase() !== "host"),
-          ),
-        );
-        appendTraceContextHeaders(h);
-        return Object.fromEntries(h.entries());
-      })(),
-    },
-  };
-}
-
-/**
- * StreamableHTTP transport hook for direct MongoDB MCP Runtime calls. The MCP
- * SDK owns the streaming request lifecycle; this adapter only adds SigV4 so
- * AgentCore Runtime accepts the HTTPS MCP request under the EC2/runtime role.
- */
-function buildAgentCoreRuntimeFetch(_runtimeArn: string): typeof jwtInjectingFetch {
-  const runtimeSessionId = directRuntimeSessionId();
-  return async (input: string | URL, init?: RequestInit): Promise<Response> => {
-    const signed = await signAgentCoreRequest(input, runtimeSessionId, init);
-    return globalThis.fetch(signed.url, signed.init);
-  };
-}
-
 /**
  * Build the StreamableHTTP transport for the selected MongoDB MCP endpoint.
- * Direct runtime mode uses IAM via `InvokeAgentRuntime`; HTTP/Gateway mode uses
- * the caller JWT when one is in scope.
+ * Gateway mode uses the caller JWT when one is in scope.
  */
 function buildTransport() {
   const endpoint = resolveMcpEndpoint();
@@ -1183,9 +1081,7 @@ function buildTransport() {
     mode: endpoint.mode,
   });
   return new StreamableHTTPClientTransport(new URL(endpoint.url), {
-    fetch: endpoint.mode === "agentcore-runtime"
-      ? buildAgentCoreRuntimeFetch(endpoint.runtimeArn)
-      : jwtInjectingFetch,
+    fetch: jwtInjectingFetch,
   });
 }
 
@@ -1254,8 +1150,7 @@ const INSERT_TOOLS = new Set([
  * the current user's data.
  *
  * Strips the gateway-target prefix (`mongodb-mcp___`) from the tool name
- * before checking the known-tool sets so the logic applies in both gateway
- * and direct-runtime modes.
+ * before checking the known-tool sets.
  */
 export function injectUserIdIntoArgs(
   toolName: string,
@@ -1435,9 +1330,43 @@ async function ensureMcpClient(): Promise<McpClient | null> {
  * this handles the case where the cached singleton's `connect` handshake
  * happened with no JWT (cold start) or with an expired token.
  */
+/**
+ * Decision helper: should `getMcpTools()` discard an in-flight singleton
+ * result and start a fresh load? Pure function, exported for regression
+ * tests around the prewarm-singleton-race pitfall
+ * (docs/status/debugging.md "MongoDB MCP prewarm singleton race").
+ *
+ * Returns `true` only when both conditions hold:
+ *   1. The in-flight load resolved to an empty tool list (typically the
+ *      boot-time prewarm that connected before any JWT was in scope and
+ *      was rejected by the gateway with `Missing Bearer token`).
+ *   2. The current caller has a JWT in scope (so a fresh load has a
+ *      reasonable chance of succeeding against the gateway authorizer).
+ *
+ * When either condition is false we return the in-flight result as-is:
+ *   * non-empty result → real tools, ship them
+ *   * empty result + no JWT → re-load would fail the same way, don't
+ *     thrash the singleton
+ */
+export function shouldRetryDegradedMcpSingleton(
+  inflightResult: Tool[],
+  hasJwtInScope: boolean,
+): boolean {
+  return inflightResult.length === 0 && hasJwtInScope;
+}
+
 export async function getMcpTools(): Promise<Tool[]> {
   if (_mcpTools) return _mcpTools;
-  if (_mcpToolsPromise) return _mcpToolsPromise;
+  if (_mcpToolsPromise) {
+    const inflight = await _mcpToolsPromise;
+    if (!shouldRetryDegradedMcpSingleton(inflight, Boolean(currentGatewayJwt()))) {
+      return inflight;
+    }
+    // The in-flight load was a JWT-less degraded singleton (boot prewarm or
+    // similar). The current caller has a JWT — start a fresh load so a
+    // single bad boot connect doesn't lock the runtime into a degraded
+    // template for the lifetime of the process.
+  }
 
   _mcpToolsPromise = loadMcpTools();
   try {

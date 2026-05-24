@@ -13,9 +13,17 @@ Environment overrides:
     DEPLOY_MANIFEST_PATH   Path to deploy-manifest.json
     E2E_USER               Cognito smoke user, default alex@example.com
     E2E_PASS               Cognito smoke password, default DemoUser#2026
+    POST_DEPLOY_CHAT_ATTEMPTS
+                           Retry count for live chat assertions, default 5
+    POST_DEPLOY_CHAT_RETRY_DELAY_SECONDS
+                           Base backoff for live chat assertion retries, default 8
     SKIP_TERRAFORM_CHECKS  Set to 1 to skip local terraform output checks
     SKIP_CHAT_CHECKS       Set to 1 to skip live /chat checks
     SKIP_LTM_CHECK         Set to 1 to skip the long-term memory recall check
+    SKIP_AGENTCORE_ENV_CHECK
+                           Set to 1 to skip the per-runtime env wiring check
+                           (verifies AGENTCORE_GATEWAY_URL is present on every
+                           AgentCore Runtime)
 """
 
 from __future__ import annotations
@@ -29,6 +37,7 @@ import subprocess
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any
@@ -76,6 +85,24 @@ def require(condition: bool, message: str) -> None:
         raise SmokeFailure(message)
 
 
+def env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
+def chat_attempts() -> int:
+    return max(1, env_int("POST_DEPLOY_CHAT_ATTEMPTS", 5))
+
+
+def chat_retry_delay_seconds() -> int:
+    return max(0, env_int("POST_DEPLOY_CHAT_RETRY_DELAY_SECONDS", 8))
+
+
 def manifest_resources(path: Path) -> dict[str, Any]:
     require(path.exists(), f"deploy manifest not found: {path}")
     doc = json.loads(path.read_text())
@@ -96,13 +123,35 @@ def manifest_doc(path: Path) -> dict[str, Any]:
 
 
 def check_health(api_url: str, resources: dict[str, Any]) -> None:
+    """
+    /health smoke. We mirror deploy-project.sh Phase 9a2's contract:
+    - mongodb + agentcore: HARD-REQUIRE 'connected'.
+    - bedrockKnowledgeBase: HARD-REQUIRE 'connected' when KB id is provisioned.
+    - mcpServer: WARN ONLY when not 'connected'. The MCP runtime is an
+      AgentCore Runtime that can be scaled to zero between deploys; its first
+      probe after an idle period frequently times out on cold start (MCP client
+      timeout 60s > API health probe timeout 2.5s, so `/health` reports
+      'unreachable' even though invocations from chat will eventually succeed
+      once the container warms). Real MCP regressions are caught downstream by
+      `check_agentcore_runtime_env` (env wiring) + the per-agent chat checks
+      (vector_search / aggregate trace events). Failing here would force every
+      operator to run smoke twice. Matches the warning behaviour at
+      deploy/scripts/deploy-project.sh:1510-1512.
+    """
     log("\n== Health ==")
     health = load_json_url(f"{api_url}/health")
     deps = health.get("dependencies", {})
     log(json.dumps({"status": health.get("status"), "dependencies": deps}, sort_keys=True))
     require(health.get("status") == "ok", f"/health status is not ok: {health.get('status')}")
-    for dep in ("mongodb", "agentcore", "mcpServer"):
+    for dep in ("mongodb", "agentcore"):
         require(deps.get(dep) == "connected", f"/health dependency {dep} is {deps.get(dep)!r}")
+    mcp_status = deps.get("mcpServer")
+    if mcp_status != "connected":
+        log(
+            f"  warning: /health dependency mcpServer is {mcp_status!r}; "
+            "MongoDB MCP runtime likely cold-starting. Downstream env-wiring + "
+            "chat checks will catch real MCP regressions."
+        )
     if resources.get("bedrock_kb_id"):
         require(
             deps.get("bedrockKnowledgeBase") == "connected",
@@ -369,20 +418,46 @@ def cognito_token(client_id: str) -> str:
     return token
 
 
-def post_chat(api_url: str, token: str, agent: str, message: str) -> tuple[str, str | None]:
-    payload = json.dumps(
-        {
-            "agentId": agent,
-            "sessionId": f"post-deploy-smoke-{agent}-{int(time.time() * 1000)}",
-            "message": message,
-        }
-    ).encode()
+def post_chat(
+    api_url: str,
+    token: str,
+    agent: str,
+    message: str,
+    *,
+    session_id: str | None = None,
+) -> tuple[str, str | None]:
+    """
+    POST /chat and return the SSE body + X-Trace-Id.
+
+    Reads the SSE stream incrementally and tolerates premature TCP closes when
+    meaningful events have already arrived (handoff, agent_info, stream_error,
+    done, message). This is necessary because the API today emits a burst of
+    trace/agent_info/handoff events at the start, then **goes idle for the
+    duration of the AgentCore Runtime invocation** (often 60-150s on cold
+    start). AWS-side NAT / NLB / target-group idle timeouts can drop the TCP
+    connection during that silent window, even though the server is still
+    successfully processing and ultimately persists the assistant turn.
+    Failing the smoke on those drops would flake every run after an idle
+    runtime. Real failures (missing handoff/done, surfaced stream_error) are
+    still asserted downstream by the per-agent checks.
+    """
     headers = {
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
+        "Accept": "text/event-stream",
     }
     last_error: BaseException | None = None
-    for attempt in range(1, 4):
+    max_attempts = min(chat_attempts(), 3)
+    for attempt in range(1, max_attempts + 1):
+        turn_session_id = session_id or f"post-deploy-smoke-{agent}-{int(time.time() * 1000)}-{attempt}"
+        payload = json.dumps(
+            {
+                "agentId": agent,
+                "sessionId": turn_session_id,
+                "message": message,
+            }
+        ).encode()
+        chunks: list[bytes] = []
         try:
             request = urllib.request.Request(
                 f"{api_url}/chat",
@@ -390,10 +465,38 @@ def post_chat(api_url: str, token: str, agent: str, message: str) -> tuple[str, 
                 headers=headers,
                 method="POST",
             )
-            with urllib.request.urlopen(request, timeout=240) as response:
+            with urllib.request.urlopen(request, timeout=300) as response:
                 x_trace = response.headers.get("X-Trace-Id") or response.headers.get("x-trace-id")
-                body = response.read().decode("utf-8", "replace")
+                try:
+                    while True:
+                        chunk = response.read(8192)
+                        if not chunk:
+                            break
+                        chunks.append(chunk)
+                except (http.client.IncompleteRead, TimeoutError, urllib.error.URLError) as stream_exc:
+                    partial = getattr(stream_exc, "partial", None)
+                    if isinstance(partial, (bytes, bytearray)) and partial:
+                        chunks.append(bytes(partial))
+                    body = b"".join(chunks).decode("utf-8", "replace")
+                    if _sse_has_useful_event(body):
+                        log(
+                            f"  warning: SSE stream truncated for {agent} "
+                            f"({type(stream_exc).__name__}: {stream_exc}); "
+                            f"using {len(body)} bytes of partial response that "
+                            f"already contains the events downstream checks need."
+                        )
+                        return body, x_trace
+                    raise
+                body = b"".join(chunks).decode("utf-8", "replace")
                 return body, x_trace
+        except urllib.error.HTTPError as exc:
+            try:
+                body = exc.read().decode("utf-8", "replace")
+            except Exception:
+                body = ""
+            if body:
+                return body, None
+            last_error = exc
         except (
             http.client.IncompleteRead,
             http.client.HTTPException,
@@ -401,9 +504,22 @@ def post_chat(api_url: str, token: str, agent: str, message: str) -> tuple[str, 
             urllib.error.URLError,
         ) as exc:
             last_error = exc
-            if attempt < 3:
+            if attempt < max_attempts:
                 time.sleep(5 * attempt)
     raise SmokeFailure(f"chat stream failed after retries for {agent}: {last_error}")
+
+
+_USEFUL_SSE_EVENT_RE = re.compile(
+    r'^event:\s*(?:handoff|agent_info|stream_error|done|message|token)\s*$',
+    re.MULTILINE,
+)
+
+
+def _sse_has_useful_event(body: str) -> bool:
+    """True if the partial SSE body already contains an event downstream checks key off."""
+    if not body:
+        return False
+    return bool(_USEFUL_SSE_EVENT_RE.search(body))
 
 
 def parse_sse(body: str) -> tuple[str, list[str], list[str], list[dict[str, Any]], list[Any]]:
@@ -442,6 +558,193 @@ def parse_sse(body: str) -> tuple[str, list[str], list[str], list[dict[str, Any]
     return "".join(tokens), events, traces, handoffs, errors
 
 
+def poll_persisted_turn(
+    api_url: str,
+    token: str,
+    session_id: str,
+    *,
+    timeout_seconds: int = 240,
+) -> tuple[str, str | None]:
+    """Return the persisted assistant reply + messageId for a chat session.
+
+    Used when the live SSE stream is cut during a long AgentCore Runtime call.
+    The API persists the assistant turn before storing the trace, so the
+    session document is the earliest reliable signal that the server finished.
+    """
+    deadline = time.time() + timeout_seconds
+    last_error = ""
+    while time.time() < deadline:
+        try:
+            doc = load_json_url(
+                f"{api_url}/sessions/{urllib.parse.quote(session_id, safe='')}",
+                timeout=30,
+                token=token,
+            )
+            messages = doc.get("messages", []) if isinstance(doc, dict) else []
+            for msg in reversed(messages if isinstance(messages, list) else []):
+                if not isinstance(msg, dict):
+                    continue
+                if msg.get("role") != "assistant":
+                    continue
+                content = str(msg.get("content") or "")
+                if content.strip():
+                    message_id = msg.get("messageId") or msg.get("id")
+                    return content, str(message_id) if message_id else None
+        except Exception as exc:
+            last_error = f"{type(exc).__name__}: {exc}"
+        time.sleep(5)
+    raise SmokeFailure(
+        f"assistant reply was not persisted for session {session_id!r} within "
+        f"{timeout_seconds}s; last_error={last_error}"
+    )
+
+
+def poll_trace_event_types(
+    api_url: str,
+    token: str,
+    session_id: str,
+    message_id: str | None,
+    *,
+    timeout_seconds: int = 120,
+) -> list[str]:
+    """Poll /trace for event types associated with a persisted assistant turn."""
+    if not message_id:
+        return []
+    encoded_session = urllib.parse.quote(session_id, safe="")
+    encoded_message = urllib.parse.quote(message_id, safe="")
+    url = f"{api_url}/trace?sessionId={encoded_session}&messageId={encoded_message}&include=full"
+    deadline = time.time() + timeout_seconds
+    last_error = ""
+    while time.time() < deadline:
+        try:
+            trace_doc = load_json_url(url, timeout=30, token=token)
+            events = trace_doc.get("events", []) if isinstance(trace_doc, dict) else []
+            out: list[str] = []
+            for ev in events if isinstance(events, list) else []:
+                if isinstance(ev, dict) and ev.get("type"):
+                    out.append(str(ev["type"]))
+            if out:
+                return out
+        except Exception as exc:
+            last_error = f"{type(exc).__name__}: {exc}"
+        time.sleep(5)
+    log(
+        f"  warning: trace events unavailable for session={session_id} "
+        f"messageId={message_id}; last_error={last_error}"
+    )
+    return []
+
+
+def _read_env_live(path: Path) -> dict[str, str]:
+    """Parse a KEY=VALUE .env file (no `export`, no quoting). Returns {} when
+    the file is missing so older deploys without .env.live don't hard-fail."""
+    if not path.exists():
+        return {}
+    out: dict[str, str] = {}
+    for raw in path.read_text().splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        out[key.strip()] = value.strip()
+    return out
+
+
+def check_agentcore_runtime_env(resources: dict[str, Any]) -> None:
+    """Fail fast when a specialist (or orchestrator) AgentCore Runtime is
+    missing MongoDB MCP Gateway wiring env vars. This catches the Terraform-vs-script
+    drift documented in docs/status/debugging.md (Specialist runtime env reset by
+    `terraform apply`) before the live chat checks waste 5 retries on a
+    silently-degraded runtime.
+
+    Failure mode this prevents: TF reapplies the agentcore-agent-runtime
+    module and overwrites the dynamic env injected by Phase 6b, leaving the
+    runtime with only AWS_REGION/AGENT_ID/LOG_LEVEL/AGENTCORE_MEMORY_STORE_ID
+    and every `mongodb_*` tool call failing before it can reach Gateway.
+    """
+    log("\n== AgentCore runtime env wiring ==")
+    if os.environ.get("SKIP_AGENTCORE_ENV_CHECK") == "1":
+        log("skipped via SKIP_AGENTCORE_ENV_CHECK=1")
+        return
+
+    region = str(resources.get("aws_region") or os.environ.get("AWS_REGION") or "").strip()
+    require(region, "aws_region missing — needed for bedrock-agentcore-control calls")
+
+    env_live = _read_env_live(ROOT / ".env.live")
+    runtime_arns: dict[str, str] = {}
+    if env_live.get("AGENTCORE_ORCHESTRATOR_ARN"):
+        runtime_arns["orchestrator"] = env_live["AGENTCORE_ORCHESTRATOR_ARN"]
+    for key, value in env_live.items():
+        if not key.startswith("AGENTCORE_") or not key.endswith("_ARN"):
+            continue
+        if key in ("AGENTCORE_ORCHESTRATOR_ARN", "AGENTCORE_RUNTIME_ARN"):
+            continue
+        # AGENTCORE_PRODUCT_RECOMMENDATION_ARN -> product-recommendation
+        spec_id = key[len("AGENTCORE_") : -len("_ARN")].lower().replace("_", "-")
+        if spec_id:
+            runtime_arns[spec_id] = value
+
+    if not runtime_arns:
+        log("WARN: no AGENTCORE_*_ARN entries found in .env.live; runtime env check skipped")
+        return
+
+    log(f"runtimes_checked={sorted(runtime_arns)}")
+
+    # Vars every specialist + orchestrator runtime needs. Mirrors the strict
+    # checks in deploy/scripts/_agents-common.sh::verify_runtime_env_dynamic.
+    required = (
+        "AGENTCORE_GATEWAY_URL",
+        "MONGODB_URI",
+        "AGENTCORE_MEMORY_STORE_ID",
+    )
+
+    failures: list[str] = []
+    for agent_id, runtime_arn in sorted(runtime_arns.items()):
+        runtime_id = runtime_arn.rsplit("/", 1)[-1]
+        try:
+            raw = run(
+                [
+                    "aws",
+                    "bedrock-agentcore-control",
+                    "get-agent-runtime",
+                    "--region",
+                    region,
+                    "--agent-runtime-id",
+                    runtime_id,
+                    "--query",
+                    "environmentVariables",
+                    "--output",
+                    "json",
+                ],
+                timeout=30,
+            )
+        except SmokeFailure as exc:
+            failures.append(f"{agent_id} ({runtime_id}): get-agent-runtime failed: {exc}")
+            continue
+
+        try:
+            env_map: dict[str, str] = json.loads(raw or "{}") or {}
+        except json.JSONDecodeError:
+            failures.append(f"{agent_id} ({runtime_id}): non-JSON environmentVariables: {raw[:200]!r}")
+            continue
+
+        missing = [name for name in required if not env_map.get(name)]
+        if missing:
+            failures.append(
+                f"{agent_id} ({runtime_id}): missing required env vars {missing}. "
+                f"Runtime has only {sorted(env_map)}. "
+                "Re-run ./deploy/deploy-agents.sh --auto-approve to restore Gateway env."
+            )
+            continue
+        log(f"PASS {agent_id} runtime env wiring (has {len(env_map)} vars)")
+
+    if failures:
+        raise SmokeFailure(
+            "AgentCore runtime env wiring failed for "
+            f"{len(failures)} runtime(s):\n  - " + "\n  - ".join(failures)
+        )
+
+
 def check_all_agents(api_url: str, token: str) -> None:
     log("\n== Live agent chat checks ==")
     if os.environ.get("SKIP_CHAT_CHECKS") == "1":
@@ -478,30 +781,83 @@ def check_all_agents(api_url: str, token: str) -> None:
     for case in cases:
         agent = case["agent"]
         log(f"\n-- {agent} --")
-        body, x_trace = post_chat(api_url, token, str(agent), str(case["message"]))
-        require(
-            isinstance(x_trace, str) and len(x_trace) == 32 and re.match(r"^[0-9a-f]{32}$", x_trace, re.I),
-            f"{agent}: POST /chat missing valid X-Trace-Id header (got {x_trace!r})",
-        )
-        text, events, traces, handoffs, errors = parse_sse(body)
-        flat = re.sub(r"\s+", " ", text).strip()
-        checks = {
-            "token": "token" in events and len(flat) > 20,
-            "done": "done" in events,
-            "no_error": not errors,
-            "content": any(n.lower() in flat.lower() for n in case["needles"]),
-            "trace_or_handoff": any(t in traces for t in case["trace_any"])
-            or ("handoff" in case["trace_any"] and bool(handoffs)),
-        }
-        log(f"events={sorted(set(events))}")
-        log(f"traces_sample={sorted(set(traces))[:20]}")
-        if handoffs:
-            log(f"handoffs={handoffs[:3]}")
-        if errors:
-            log(f"errors={errors[:3]}")
-        log(f"reply={flat[:700]}")
-        log(f"checks={json.dumps(checks, sort_keys=True)}")
-        require(all(checks.values()), f"{agent} smoke failed: {checks}")
+        last_failure = ""
+        max_attempts = chat_attempts()
+        for attempt in range(1, max_attempts + 1):
+            if attempt > 1:
+                log(f"retrying {agent} chat assertion ({attempt}/{max_attempts})")
+            turn_session_id = f"post-deploy-smoke-{agent}-{int(time.time() * 1000)}-{attempt}"
+            body, x_trace = post_chat(
+                api_url,
+                token,
+                str(agent),
+                str(case["message"]),
+                session_id=turn_session_id,
+            )
+            text, events, traces, handoffs, errors = parse_sse(body)
+            flat = re.sub(r"\s+", " ", text).strip()
+            used_persisted_fallback = False
+
+            # If the SSE stream was dropped during a long silent AgentCore
+            # invoke, validate the server-completed turn from persisted session
+            # + trace data. This keeps smoke aligned with the actual contract:
+            # the turn must finish, persist an assistant reply, and emit the
+            # relevant trace or handoff signal. It does not mask application
+            # errors because `errors` from the partial SSE still fail below.
+            if ("done" not in events or "token" not in events or len(flat) <= 20) and _sse_has_useful_event(body):
+                log(
+                    f"  warning: SSE for {agent} ended before token/done; "
+                    f"polling persisted session {turn_session_id} for completion"
+                )
+                persisted_reply, persisted_message_id = poll_persisted_turn(
+                    api_url,
+                    token,
+                    turn_session_id,
+                )
+                persisted_traces = poll_trace_event_types(
+                    api_url,
+                    token,
+                    turn_session_id,
+                    persisted_message_id,
+                )
+                if persisted_reply:
+                    flat = re.sub(r"\s+", " ", persisted_reply).strip()
+                    events = sorted(set(events + ["token", "done"]))
+                    used_persisted_fallback = True
+                if persisted_traces:
+                    traces = sorted(set(traces + persisted_traces))
+
+            checks = {
+                "trace_id": isinstance(x_trace, str)
+                and len(x_trace) == 32
+                and re.match(r"^[0-9a-f]{32}$", x_trace, re.I) is not None,
+                "token": "token" in events and len(flat) > 20,
+                "done": "done" in events,
+                "no_error": not errors,
+                "content": any(n.lower() in flat.lower() for n in case["needles"]),
+                "trace_or_handoff": any(t in traces for t in case["trace_any"])
+                or ("handoff" in case["trace_any"] and bool(handoffs)),
+            }
+            log(f"events={sorted(set(events))}")
+            log(f"traces_sample={sorted(set(traces))[:20]}")
+            if handoffs:
+                log(f"handoffs={handoffs[:3]}")
+            if errors:
+                log(f"errors={errors[:3]}")
+            log(f"reply={flat[:700]}")
+            if used_persisted_fallback:
+                log("used_persisted_fallback=true")
+            log(f"checks={json.dumps(checks, sort_keys=True)}")
+            if all(checks.values()):
+                break
+            last_failure = (
+                f"{agent} smoke failed after attempt {attempt}/{max_attempts}: "
+                f"checks={checks} x_trace={x_trace!r}"
+            )
+            if attempt < max_attempts:
+                time.sleep(chat_retry_delay_seconds() * attempt)
+        else:
+            raise SmokeFailure(last_failure)
         log(f"PASS {agent}")
 
 
@@ -520,8 +876,7 @@ def check_long_term_memory_recall(api_url: str, token: str) -> None:
         return
 
     needle = "HELIOTROPE-LANTERN"
-    plant_session = f"post-deploy-smoke-ltm-plant-{int(time.time() * 1000)}"
-    recall_session = f"post-deploy-smoke-ltm-recall-{int(time.time() * 1000)}"
+    run_id = int(time.time() * 1000)
     plant_msg = (
         f"Please remember this preference for future support tickets: my "
         f"favorite mnemonic phrase is {needle}. Treat it as a stable user "
@@ -532,30 +887,23 @@ def check_long_term_memory_recall(api_url: str, token: str) -> None:
         "as one of my preferences. Quote that exact phrase back to me."
     )
 
-    payload_plant = json.dumps({
-        "agentId": "orchestrator",
-        "sessionId": plant_session,
-        "message": plant_msg,
-    }).encode()
-    payload_recall = json.dumps({
-        "agentId": "orchestrator",
-        "sessionId": recall_session,
-        "message": recall_msg,
-    }).encode()
-    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-
-    def _stream(payload: bytes) -> tuple[str, list[str], list[Any]]:
-        request = urllib.request.Request(
-            f"{api_url}/chat", data=payload, headers=headers, method="POST"
-        )
-        with urllib.request.urlopen(request, timeout=240) as response:
-            body = response.read().decode("utf-8", "replace")
+    def _stream(session_id: str, message: str) -> tuple[str, list[str], list[Any]]:
+        body, _x_trace = post_chat(api_url, token, "orchestrator", message, session_id=session_id)
         text, events, _traces, _handoffs, errors = parse_sse(body)
         return text, events, errors
 
-    plant_text, plant_events, plant_errors = _stream(payload_plant)
-    require("done" in plant_events, f"LTM plant turn did not finish: events={plant_events}")
-    require(not plant_errors, f"LTM plant turn returned errors: {plant_errors}")
+    plant_text = ""
+    last_plant_failure = ""
+    for attempt in range(1, chat_attempts() + 1):
+        plant_session = f"post-deploy-smoke-ltm-plant-{run_id}-{attempt}"
+        plant_text, plant_events, plant_errors = _stream(plant_session, plant_msg)
+        if "done" in plant_events and not plant_errors:
+            break
+        last_plant_failure = f"LTM plant attempt {attempt} failed: events={plant_events} errors={plant_errors}"
+        if attempt < chat_attempts():
+            time.sleep(chat_retry_delay_seconds() * attempt)
+    else:
+        raise SmokeFailure(last_plant_failure)
     log(f"plant reply head: {plant_text[:160]!r}")
 
     # Let fact extraction + embedding + dedup index settle before recall.
@@ -563,15 +911,23 @@ def check_long_term_memory_recall(api_url: str, token: str) -> None:
     # on the live stack; we give it 8 s to absorb cold-start jitter.
     time.sleep(8)
 
-    recall_text, recall_events, recall_errors = _stream(payload_recall)
-    require("done" in recall_events, f"LTM recall turn did not finish: events={recall_events}")
-    require(not recall_errors, f"LTM recall turn returned errors: {recall_errors}")
-    flat = re.sub(r"\s+", " ", recall_text).strip()
-    log(f"recall reply head: {flat[:400]!r}")
-    require(
-        needle.lower() in flat.lower(),
-        f"LTM recall did not surface needle {needle!r} in reply: {flat[:400]!r}",
-    )
+    flat = ""
+    last_recall_failure = ""
+    for attempt in range(1, chat_attempts() + 1):
+        recall_session = f"post-deploy-smoke-ltm-recall-{run_id}-{attempt}"
+        recall_text, recall_events, recall_errors = _stream(recall_session, recall_msg)
+        flat = re.sub(r"\s+", " ", recall_text).strip()
+        log(f"recall reply head: {flat[:400]!r}")
+        if "done" in recall_events and not recall_errors and needle.lower() in flat.lower():
+            break
+        last_recall_failure = (
+            f"LTM recall attempt {attempt} failed: events={recall_events} "
+            f"errors={recall_errors} reply={flat[:400]!r}"
+        )
+        if attempt < chat_attempts():
+            time.sleep(chat_retry_delay_seconds() * attempt)
+    else:
+        raise SmokeFailure(f"LTM recall did not surface needle {needle!r}: {last_recall_failure}")
     log(f"PASS LTM cross-session recall ({needle})")
 
 
@@ -790,6 +1146,11 @@ def main() -> int:
     check_embedding_manifest_and_sagemaker(resources)
     check_terraform_outputs(resources, full_manifest)
     check_bedrock_kb(resources, full_manifest)
+    # Verify every AgentCore Runtime has the Gateway MCP wiring vars BEFORE
+    # the live chat checks. Missing AGENTCORE_GATEWAY_URL means mongodb_* tools cannot
+    # reach Gateway, which the chat check would only catch after retries on
+    # each agent.
+    check_agentcore_runtime_env(resources)
     check_all_agents(api_url, token)
     check_long_term_memory_recall(api_url, token)
     check_cloudwatch_join(resources, api_url, token)

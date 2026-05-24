@@ -51,10 +51,30 @@ export type AgentTemplate = {
   systemPromptBase: string;
   tools: Tool[];
   model: Model;
+  /**
+   * True when the agent declared MCP-served tools (mongodb_*) in its
+   * `tools:` list but the MCP loader returned []. The template is built
+   * (so the agent still answers) but it MUST NOT be cached and the chat
+   * stream MUST surface a `tools.degraded` trace + `TOOLS_UNAVAILABLE`
+   * SSE error so callers (smoke, UI, operator) see why every Mongo
+   * tool call fails. See `docs/status/debugging.md` Known persistent pitfalls.
+   */
+  mcpDegraded?: boolean;
+  /** Tool names that were declared by the agent but missing at build time. */
+  missingTools?: string[];
 };
 
 type TemplateCacheEntry = { template: AgentTemplate; agentRef: AgentDetail };
 const templateCache = new Map<string, TemplateCacheEntry>();
+
+/** Tool names that always come from the MongoDB MCP runtime. Mirrors
+ *  `GATEWAY_MONGO_TOOL_NAMES` in `base-tools.ts`; duplicated here so this
+ *  module doesn't need to import the private constant. */
+const MCP_SERVED_TOOL_NAMES: ReadonlySet<string> = new Set([
+  "mongodb_query",
+  "mongodb_vector_search",
+  "mongodb_aggregate",
+]);
 
 function templateIsCacheable(agentConfig: AgentDetail, preActivateSkills: boolean): boolean {
   if (agentConfig.skills.length === 0) return true;
@@ -79,17 +99,40 @@ async function buildTemplate(
 
   const inProcessTools = toolsForAgent(agentConfig.tools, registry);
   const mcpTools = await getMcpTools();
+  const declaredMcpTools = agentConfig.tools.filter((t) => MCP_SERVED_TOOL_NAMES.has(t.trim()));
+  const loadedMcpNames = new Set(mcpTools.map((t) => t.name));
+  const missingMcpTools = declaredMcpTools.filter((t) => !loadedMcpNames.has(t));
+  const mcpDegraded = declaredMcpTools.length > 0 && missingMcpTools.length > 0;
+
   if (mcpTools.length === 0) {
     logger.warn(
       "[agent] no MCP tools loaded from gateway — Mongo tool calls will fail",
       { agentId: agentConfig.id },
     );
   }
+  if (mcpDegraded) {
+    logger.warn(
+      "[agent] template built in degraded mode — agent declared MCP tools that the loader did not return",
+      {
+        agentId: agentConfig.id,
+        declaredMcpTools,
+        missingMcpTools,
+        loadedMcpToolCount: mcpTools.length,
+      },
+    );
+  }
   const tools = [...inProcessTools, ...mcpTools];
 
   const model = resolveModel(agentConfig);
 
-  return { agentConfig, registry, systemPromptBase, tools, model };
+  return {
+    agentConfig,
+    registry,
+    systemPromptBase,
+    tools,
+    model,
+    ...(mcpDegraded ? { mcpDegraded: true, missingTools: missingMcpTools } : {}),
+  };
 }
 
 /**
@@ -113,6 +156,18 @@ export async function getAgentTemplate(
   if (cached && cached.agentRef === agentConfig) return cached.template;
 
   const template = await buildTemplate(agentConfig, opts);
+  if (template.mcpDegraded) {
+    // Refuse to cache a degraded template. A transient MCP outage at boot
+    // would otherwise lock every subsequent turn to a tool-less Strands
+    // Agent until the container restarts. By skipping cache.set() the next
+    // turn re-runs buildTemplate() which re-attempts getMcpTools() and
+    // can recover automatically once MCP is reachable again.
+    logger.warn("[agent-cache] not caching degraded template — will rebuild on next turn", {
+      agentId,
+      missingTools: template.missingTools,
+    });
+    return template;
+  }
   templateCache.set(agentId, { template, agentRef: agentConfig });
   return template;
 }

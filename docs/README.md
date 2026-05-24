@@ -30,9 +30,9 @@ The product goal: **add specialists by editing markdown config**, not by forking
 5. **Run post-deploy smoke:** `source .env && python3 e2e-smoke/post-deploy-smoke.py`.
 6. **Open the Streamlit UI** (URL printed by the deploy script), log in via the seeded Cognito user, send a chat.
 7. **Open the Trace Viewer** for that turn (link in the chat inline card), toggle **Show developer details**.
-8. **Tail logs without SSH:** `aws ssm send-command --document-name AWS-RunShellScript --instance-ids <id> --parameters 'commands=["journalctl -u multiagent-api -n 100"]'` — see [`debugging.md`](debugging.md) §3.
+8. **Tail logs without SSH:** `aws ssm send-command --document-name AWS-RunShellScript --instance-ids <id> --parameters 'commands=["journalctl -u multiagent-api -n 100"]'` — see [`status/debugging.md`](status/debugging.md) §3.
 
-If anything fails, [`debugging.md`](debugging.md) is the playbook — start with its "Common failures" table.
+If anything fails, [`status/debugging.md`](status/debugging.md) is the playbook — start with its "Common failures" table.
 
 ---
 
@@ -42,10 +42,10 @@ Pick the path that matches your role.
 
 ### 3.1 Operator / SRE (deploy + run + debug)
 1. [`deployment-guide.md`](deployment-guide.md) — prerequisites, the two orchestrators, destroy, CI/CD
-2. [`configuration-guide.md`](configuration-guide.md) — env vars, mode flags, agent / skill schema
+2. [`configuration-guide.md`](configuration-guide.md) — `config/` folder: agent personas, skills, `environment.yaml`
 3. [`observability-runbook.md`](observability-runbook.md) — finding traces, log groups, dashboards, alarms, emergency knobs
 4. [`reference/smoke-tests.md`](reference/smoke-tests.md) — every `e2e-smoke/*` script
-5. [`debugging.md`](debugging.md) — fix things when they break
+5. [`status/debugging.md`](status/debugging.md) — fix things when they break
 
 ### 3.2 Backend developer (add agents, skills, tools, behaviors)
 1. [`architecture.md`](architecture.md) — system overview, 5-runtime topology, classifier vs orchestrator
@@ -54,19 +54,23 @@ Pick the path that matches your role.
 4. [`reference/tools.md`](reference/tools.md) — every supported agent tool, runtime home, config, and debugging path
 5. [`api-reference.md`](api-reference.md) — HTTP/SSE contract
 6. [`memory-architecture.md`](memory-architecture.md) + [`long-term-memory-design.md`](long-term-memory-design.md) — short-term + LTM
-7. [`debugging.md`](debugging.md) — trace-driven debug, validation scripts
+7. [`status/debugging.md`](status/debugging.md) — trace-driven debug, validation scripts
 
 ### 3.3 Site Reliability (logs, metrics, traces, alarms)
 1. [`logging-architecture.md`](logging-architecture.md) — JSON logger, OTel + X-Ray, CloudWatch shipping, ADOT sidecar, audit channel
 2. [`observability-runbook.md`](observability-runbook.md) — day-2 ops
 3. [`trace-ui-system-overview.md`](trace-ui-system-overview.md) → [`trace-viewer-developer-guide.md`](trace-viewer-developer-guide.md) — debug-grade Trace Viewer
 4. [`dashboards/README.md`](dashboards/README.md) — fleet / mongo / cost / atlas widget catalog
-5. [`debugging.md`](debugging.md) — when alarms fire
+5. [`status/debugging.md`](status/debugging.md) — when alarms fire
 
 ### 3.4 Demo engineer / SE (client demos)
 1. [`demo/demo-script.md`](demo/demo-script.md) — narrated walkthrough
 2. [`demo/demo-mode-guide.md`](demo/demo-mode-guide.md) — trace UI knobs for live demos
 3. [`trace-viewer-client-guide.md`](trace-viewer-client-guide.md) — client-friendly Trace Viewer surface
+
+### 3.5 Advanced (optional — not required for most contributors)
+1. [`advanced/deploy-tweak-guide.md`](advanced/deploy-tweak-guide.md) — mode flags, AWS ARNs, embedding provider switches, operational env knobs, local-dev wiring
+2. [`reference/env-vars.md`](reference/env-vars.md) — exhaustive env var catalog
 
 ---
 
@@ -76,7 +80,8 @@ Pick the path that matches your role.
 |---|---|---|
 | [`architecture.md`](architecture.md) | System overview, 5-runtime topology, AWS infra, request flow, classifier path | 2026-05-20 |
 | [`deployment-guide.md`](deployment-guide.md) | How to deploy (PrivateLink + VPC peering), CI/CD, teardown, prerequisites | 2026-05-20 |
-| [`configuration-guide.md`](configuration-guide.md) | Env vars, mode flags, agent + skill schema, secrets | 2026-05-20 |
+| [`configuration-guide.md`](configuration-guide.md) | `config/` folder — agent personas, skills, `environment.yaml`, `http-tools.json` | 2026-05-24 |
+| [`advanced/deploy-tweak-guide.md`](advanced/deploy-tweak-guide.md) | **Advanced** — deploy/runtime tuning: mode flags, ARNs, embeddings, operational env knobs | 2026-05-24 |
 | [`api-reference.md`](api-reference.md) | HTTP + SSE contract, projections, auth error codes | 2026-05-20 |
 | [`agent-authoring-guide.md`](agent-authoring-guide.md) | `.agent.md` frontmatter + body | 2026-05-20 |
 | [`skills-authoring-guide.md`](skills-authoring-guide.md) | `SKILL.md`, progressive disclosure, scripts, http-tools | 2026-05-20 |
@@ -90,7 +95,8 @@ Pick the path that matches your role.
 | [`trace-viewer-client-guide.md`](trace-viewer-client-guide.md) | Client-friendly Trace Viewer tour | 2026-05-20 |
 | [`trace-viewer-developer-guide.md`](trace-viewer-developer-guide.md) | Debug-grade Trace Viewer tour, `?include=core\|dev\|full` projection | 2026-05-20 |
 | [`agentcore-runtime-design.md`](agentcore-runtime-design.md) | 5-runtime topology, code vs container artifact strategy | 2026-05-20 |
-| [`debugging.md`](debugging.md) | **NEW** — developer playbook: EC2 access, log tailing, trace-driven debug, common failures, memory diag, validation scripts, persistent pitfalls | 2026-05-20 |
+| [`status/README.md`](status/README.md) | Status / ops doc index | 2026-05-24 |
+| [`status/debugging.md`](status/debugging.md) | Developer playbook: EC2 access, log tailing, trace-driven debug, common failures, memory diag, validation scripts, persistent pitfalls | 2026-05-20 |
 | [`dashboards/README.md`](dashboards/README.md) | Widget catalog, console URLs, alarm thresholds | 2026-05-20 |
 | [`estimate.md`](estimate.md) | Monthly AWS cost estimate | 2026-05-20 |
 | [`demo/demo-script.md`](demo/demo-script.md) | Narrated client-demo walkthrough | 2026-05-20 |

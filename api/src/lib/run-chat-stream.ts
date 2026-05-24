@@ -103,6 +103,51 @@ export async function* runChatStream(params: {
     yield { type: "token", text: `Error: unable to build agent template for '${params.agentId}'.` };
     return;
   }
+
+  // When the agent declared MCP-served tools (mongodb_*) but the loader
+  // returned [], surface this loudly so the smoke test, UI, and operator
+  // logs see why the model can never answer questions that need a Mongo
+  // round-trip. Without this, the model silently retries with no tools
+  // and emits hallucinated "I cannot access the database" text that
+  // looks like a normal answer to the smoke test's content checks.
+  // Probable root causes:
+  //   - AGENTCORE_GATEWAY_URL missing from runtime env vars
+  //     (drifted by `terraform apply`; see docs/status/debugging.md pitfalls).
+  //   - AgentCore Gateway / MongoDB MCP runtime down or unreachable.
+  // The template is intentionally NOT cached when degraded (see
+  // create-strands-agent.ts) so the next chat turn re-attempts MCP.
+  if (template.mcpDegraded) {
+    const collector = currentTrace();
+    const missing = template.missingTools ?? [];
+    const mcpEndpoint = process.env.AGENTCORE_GATEWAY_URL?.trim()
+      || "(missing AGENTCORE_GATEWAY_URL — no localhost fallback)";
+    collector?.event("tools.degraded", {
+      agentId: params.agentId,
+      missingTools: missing,
+      reason: "mcp_tools_unavailable",
+      mcpEndpoint,
+      hint:
+        "MongoDB MCP tools were declared by the agent but getMcpTools() returned an empty list. "
+        + "Verify AGENTCORE_GATEWAY_URL on the runtime and "
+        + "that the AgentCore Gateway target for MongoDB MCP is reachable.",
+    });
+    logger.warn("[chat] refusing to run turn against degraded template", {
+      agentId: params.agentId,
+      missingTools: missing,
+      mcpEndpoint,
+    });
+    yield {
+      type: "stream_error",
+      code: "TOOLS_UNAVAILABLE",
+      message:
+        `Required MongoDB MCP tools are unavailable for agent '${params.agentId}': `
+        + `${missing.join(", ") || "(none reported)"}. `
+        + `MCP endpoint resolved to: ${mcpEndpoint}. `
+        + `Check AGENTCORE_GATEWAY_URL on the AgentCore Runtime env.`,
+    };
+    return;
+  }
+
   const registry = template.registry;
 
   if (preActivateSkills) {

@@ -159,6 +159,31 @@ class TestGetTrace:
         assert "messageId=m1" in url_called
 
 
+class TestTraceEventsFromDoc:
+    def test_parses_persisted_events(self) -> None:
+        from lib.api_client import trace_events_from_doc
+
+        doc = {
+            "traceId": "t1",
+            "events": [
+                {
+                    "id": "e1",
+                    "ts": 1,
+                    "type": "model.usage",
+                    "parentId": "p1",
+                    "agentId": "orch",
+                    "durationMs": 12,
+                    "payload": {"totalTokens": 3},
+                },
+            ],
+        }
+        events = trace_events_from_doc(doc)
+        assert len(events) == 1
+        assert events[0].type == "model.usage"
+        assert events[0].parent_id == "p1"
+        assert events[0].payload["totalTokens"] == 3
+
+
 class TestGetTraceMongo:
     def test_returns_payload_on_200(self) -> None:
         mock_resp = MagicMock()

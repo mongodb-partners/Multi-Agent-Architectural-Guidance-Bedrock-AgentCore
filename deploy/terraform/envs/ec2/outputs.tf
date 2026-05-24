@@ -129,6 +129,11 @@ output "mongodb_mcp_runtime_arn" {
   description = "AgentCore Runtime ARN of the mongodb-mcp MCP server."
 }
 
+output "mongodb_mcp_runtime_id" {
+  value       = module.mongodb_mcp_runtime.runtime_id
+  description = "AgentCore Runtime ID of the mongodb-mcp MCP server (consumed by deploy-project.sh force_mcp_runtime_image_sync)."
+}
+
 output "mongodb_mcp_runtime_endpoint" {
   value       = local.mongodb_mcp_runtime_endpoint
   description = "Direct Streamable-HTTP MCP endpoint for the mongodb-mcp AgentCore Runtime."

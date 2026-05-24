@@ -110,7 +110,7 @@ ui/
 
 ## `mcp-runtimes/mongodb-mcp/` — MongoDB MCP runtime
 
-Container-mode AgentCore Runtime (ARM64) running a streamable-HTTP MCP server on `0.0.0.0:8000/mcp`. Exposes `mongodb_query`, `mongodb_vector_search`, `mongodb_aggregate`. Reached by the API + every other AgentCore Runtime through `bedrock-agentcore:InvokeAgentRuntime`.
+Container-mode AgentCore Runtime (ARM64) running a streamable-HTTP MCP server on `0.0.0.0:8000/mcp`. Exposes `mongodb_query`, `mongodb_vector_search`, `mongodb_aggregate`. Reached by the API + every other AgentCore Runtime through the AgentCore Gateway target.
 
 ```
 mcp-runtimes/mongodb-mcp/
@@ -258,7 +258,9 @@ docs/
 ├── README.md                          ← CLIENT HANDOVER ENTRY POINT
 ├── architecture.md
 ├── deployment-guide.md                ← deploy + CI/CD + teardown
-├── configuration-guide.md
+├── configuration-guide.md             ← config/ folder (agents, skills, yaml)
+├── advanced/
+│   └── deploy-tweak-guide.md          ← optional: deploy/runtime env tuning
 ├── api-reference.md
 ├── agent-authoring-guide.md
 ├── skills-authoring-guide.md
@@ -271,7 +273,9 @@ docs/
 ├── trace-viewer-client-guide.md
 ├── trace-viewer-developer-guide.md
 ├── agentcore-runtime-design.md
-├── debugging.md                       ← developer playbook + persistent pitfalls + validation scripts
+├── status/
+│   ├── README.md                      ← status / ops doc index
+│   └── debugging.md                   ← developer playbook + persistent pitfalls + validation scripts
 ├── estimate.md
 ├── demo/
 │   ├── demo-script.md

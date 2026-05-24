@@ -21,10 +21,11 @@ COPY package.json package-lock.json* ./
 RUN npm install --no-audit --no-fund
 
 COPY tsconfig.json ./
-COPY src/server.ts src/server.ts
-COPY src/index.ts  src/index.ts
-COPY src/vendor    src/vendor
-COPY src/lib       src/lib
+COPY src/server.ts  src/server.ts
+COPY src/schemas.ts src/schemas.ts
+COPY src/index.ts   src/index.ts
+COPY src/vendor     src/vendor
+COPY src/lib        src/lib
 
 RUN npx tsc
 

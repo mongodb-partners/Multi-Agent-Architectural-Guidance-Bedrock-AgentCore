@@ -13,7 +13,17 @@
 //   - On error:   isError=true, content[0].text is `JSON.stringify({ error, code?, meta: { traces } })`
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { z } from "zod";
+
+// Per-tool Zod input schemas. Extracted to `./schemas.ts` so unit tests can
+// import them without dragging in the McpServer + vendor handlers + Mongo
+// driver from this file.
+import {
+  META_PASSTHROUGH,
+  mongodbQueryInputSchema,
+  mongodbVectorSearchInputSchema,
+  mongodbAggregateInputSchema,
+  mongodbHybridSearchInputSchema,
+} from "./schemas.js";
 
 // Vendored handlers — bundled into the container under `dist/vendor/` at
 // Docker build time (see Dockerfile). During local typecheck the .mjs files
@@ -22,6 +32,10 @@ import { tools, redactArgsForLog, redactErrorForLog } from "./vendor/handlers.mj
 import { createLambdaTrace } from "./vendor/tracing.mjs";
 import { MongoGuardError } from "./vendor/guards.mjs";
 import { logger } from "./lib/logger.js";
+
+// `META_PASSTHROUGH` is re-exported below for callers that still import it
+// from `./server`. New imports should use `./schemas` directly.
+export { META_PASSTHROUGH };
 
 type ToolFn = (args: Record<string, unknown>, trace: unknown) => Promise<unknown>;
 type TraceCollector = {
@@ -35,59 +49,7 @@ const toolMap = tools as Record<string, ToolFn>;
 // Kept lenient on optional fields because the LLM occasionally leaves them
 // out — the per-tool guards in `./vendor/guards.mjs` are the authoritative
 // validation layer.
-const mongodbQueryInputSchema = {
-  collection: z.string(),
-  operation: z
-    .enum(["find", "findOne", "aggregate", "insertOne", "updateOne"])
-    .optional(),
-  filter: z.record(z.string(), z.unknown()).optional(),
-  projection: z.record(z.string(), z.unknown()).optional(),
-  sort: z.record(z.string(), z.unknown()).optional(),
-  limit: z.number().int().optional(),
-  pipeline: z.array(z.record(z.string(), z.unknown())).optional(),
-  update: z.record(z.string(), z.unknown()).optional(),
-  document: z.record(z.string(), z.unknown()).optional(),
-};
-
-const mongodbVectorSearchInputSchema = {
-  collection: z.string(),
-  index: z.string(),
-  queryVector: z.array(z.number()),
-  path: z.string().optional(),
-  numCandidates: z.number().int().optional(),
-  limit: z.number().int().optional(),
-  filter: z.record(z.string(), z.unknown()).optional(),
-  minScore: z.number().optional(),
-};
-
-const mongodbAggregateInputSchema = {
-  collection: z.string(),
-  pipeline: z.array(z.record(z.string(), z.unknown())),
-  limit: z.number().int().optional(),
-};
-
-/**
- * Schema for the runtime-internal `mongodb_hybrid_search` helper. This tool is
- * NOT advertised to agents (the API-side `wrapGatewayTool` filters it out of
- * `tools/list`); it is invoked exclusively by `VectorSearchEmbedTool` when the
- * wrapper opts into hybrid mode. The fusion logic lives in
- * `vendor/handlers.mjs` so any future host (Lambda rollback, etc.) inherits
- * the same semantics for free.
- */
-const mongodbHybridSearchInputSchema = {
-  collection: z.string(),
-  vectorIndex: z.string(),
-  lexicalIndex: z.string(),
-  lexicalPath: z.string(),
-  queryText: z.string(),
-  queryVector: z.array(z.number()),
-  path: z.string().optional(),
-  filter: z.record(z.string(), z.unknown()).optional(),
-  limit: z.number().int().optional(),
-  fetchK: z.number().int().optional(),
-  numCandidates: z.number().int().optional(),
-  minScore: z.number().optional(),
-};
+// (Per-tool input schemas are imported from `./schemas` above.)
 
 function buildSuccess(result: unknown, trace: TraceCollector) {
   const meta: Record<string, unknown> = { traces: trace.events() };
@@ -119,9 +81,13 @@ function buildError(err: unknown, trace: TraceCollector) {
 }
 
 async function dispatch(toolName: string, args: Record<string, unknown>) {
+  // Strip MCP-spec `_meta` (passed through schema for gateway compatibility)
+  // before handing args to the underlying handler so its own validation /
+  // logging / persistence layers don't see the protocol envelope key.
+  const { _meta: _ignored, ...handlerArgs } = args ?? {};
   logger.info("mongodb tool invocation", {
     toolName,
-    argsPreview: JSON.stringify(redactArgsForLog(args)).slice(0, 500),
+    argsPreview: JSON.stringify(redactArgsForLog(handlerArgs)).slice(0, 500),
   });
 
   const fn = toolMap[toolName];
@@ -133,7 +99,7 @@ async function dispatch(toolName: string, args: Record<string, unknown>) {
     );
   }
   try {
-    const result = await fn(args ?? {}, trace);
+    const result = await fn(handlerArgs, trace);
     return buildSuccess(result, trace);
   } catch (err) {
     const redactedErr = redactErrorForLog(err);

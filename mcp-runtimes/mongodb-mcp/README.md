@@ -56,8 +56,9 @@ endpoint.
 
 AgentCore Runtime requires `linux/arm64` for MCP server images. The
 `Dockerfile` enforces this with `--platform=linux/arm64` so a build on
-amd64 macOS / amd64 EC2 still produces an ARM64 image (via QEMU under
-buildx).
+amd64 macOS / amd64 EC2 still produces an ARM64 image (via QEMU
+binfmt; verified at deploy time by the `docker-cross-platforms`
+preflight check).
 
 ## Safety model
 

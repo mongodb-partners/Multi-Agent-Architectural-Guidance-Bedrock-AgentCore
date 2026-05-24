@@ -84,13 +84,14 @@ Bedrock Knowledge Base with MongoDB Atlas vector store, IAM role, KB S3 bucket, 
 One AgentCore Runtime per agent (orchestrator + 3 specialists) plus the dedicated `mongodb-mcp-runtime`. Reusable; called 5× from `envs/ec2`. Supports `container` and `code` deployment modes.
 - **Inputs (selected)**: `runtime_name`, `deployment_mode` (`container` / `code`), `container_uri` (container mode), `code_artifact_bucket` + `code_artifact_prefix` + `code_artifact_version_id` + `code_runtime` + `code_entry_point` (code mode), `environment_variables`, `voyage_sagemaker_endpoint_arn`, `kb_secret_name_prefix`, `network_mode`, `vpc_subnet_ids`, `vpc_security_group_ids`, `idle_timeout_seconds`, `max_lifetime_seconds`, `server_protocol` (default `HTTP`, `MCP` for the MongoDB MCP runtime).
 - **Outputs**: `runtime_arn`, `runtime_id`, `runtime_role_arn`, `runtime_version`, `workload_identity_arn`.
-- **Used by**: `envs/ec2` — once per AgentCore Runtime (`mongodb_mcp_runtime`, `acr_specialists`, `acr_orchestrator`).
+- **Used by**: `envs/ec2` — once per AgentCore Runtime (`mongodb_mcp_runtime`, `acr_specialists`, `acr_orchestrator`). The `mongodb_mcp_runtime.runtime_id` output is re-exported from `envs/ec2` as `mongodb_mcp_runtime_id` and consumed by `deploy-project.sh::force_mcp_runtime_image_sync` to bump the runtime version after every `docker push` (so `:latest` digest changes are actually pulled).
+- **Lifecycle**: `environment_variables` is in `lifecycle.ignore_changes` because deploy scripts layer ~15 dynamic env vars onto the 4 TF-declared ones via `bedrock-agentcore-control update-agent-runtime` after apply (`_agents-common.sh::update_runtime_env_dynamic`). Removing this would let the next `terraform apply` reset the runtime back to the 4 declared vars, silently wiping `AGENTCORE_GATEWAY_URL` / `MONGODB_URI` / `BEDROCK_KB_ID` / `EMBEDDINGS_PROVIDER` until the next `deploy-agents.sh` run. See `docs/status/debugging.md` Known persistent pitfalls.
 
 ### `agentcore-gateway`
-AgentCore Gateway with Cognito-authorized MCP target(s) — used for **non-Mongo** Gateway tools. The MongoDB MCP server runs as a dedicated AgentCore Runtime, not behind the Gateway.
-- **Inputs**: `cognito_user_pool_id`, `cognito_app_client_id`, `lambda_function_arn` (back-compat — no longer wired in current code), `create_lambda_target`, `create_mcp_server_target`, `mcp_server_endpoint`, `mcp_server_runtime_arn`.
+AgentCore Gateway with Cognito-authorized MCP target(s). **All MCP tool calls in deployed runtimes — including every Mongo tool — go through this Gateway**; the dedicated `mongodb-mcp-runtime` AgentCore Runtime is wired as a Gateway target, not invoked directly by application runtimes. `MCP_SERVER_URL` is a local-development override only.
+- **Inputs**: `cognito_user_pool_id`, `cognito_app_client_id`, `lambda_function_arn` (back-compat — no longer wired in current code), `create_lambda_target`, `create_mcp_server_target`, `mcp_server_endpoint`, `mcp_server_runtime_arn`, `mcp_server_image_digest` (opaque change-tracker; when the upstream MCP image digest changes, this re-triggers the gateway-target `null_resource` so cached tool schemas are refreshed on the next apply — see `docs/status/debugging.md` "AgentCore Gateway target caches tool schemas").
 - **Outputs**: `gateway_id`, `gateway_mcp_url`, `gateway_arn`.
-- **Used by**: `envs/ec2`.
+- **Used by**: `envs/ec2` (the `mongodb_mcp_image_digest` envs/ec2 variable is forwarded here from `deploy-project.sh` Phase 4d after the MCP image is pushed).
 
 ### `agentcore-memory`
 AgentCore Memory Store (short-term backend; LTM fallback).

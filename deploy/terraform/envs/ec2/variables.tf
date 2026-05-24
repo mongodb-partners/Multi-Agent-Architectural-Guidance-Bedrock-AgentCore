@@ -177,6 +177,19 @@ variable "create_agentcore_runtime_vpc_endpoints" {
   default     = true
 }
 
+variable "mongodb_mcp_image_digest" {
+  type        = string
+  description = <<-EOT
+    SHA256 digest of the mongodb-mcp ECR image (e.g. "sha256:abc123…"). Fed
+    into module.agentcore_gateway as the gateway-target trigger for cached
+    tool schemas. `deploy-project.sh` Phase 4d captures the digest after
+    `docker push` and forwards it via `-var` so a `terraform apply` re-runs
+    the gateway-target null_resource whenever the MCP image changes. Empty
+    on first deploys / when the helper is skipped (no-op trigger).
+  EOT
+  default     = ""
+}
+
 # Note: log_retention_days lives in envs/shared/variables.tf — the API/UI/
 # MCP/AgentCore/OTel log groups are shared singletons.
 

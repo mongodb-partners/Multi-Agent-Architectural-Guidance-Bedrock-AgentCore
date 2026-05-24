@@ -58,7 +58,7 @@ Each `dependencies.*` value is the result of a **live probe** (or `not_configure
 | `mongodb` | `connected` / `unreachable` / `not_configured` | Atlas ping via `MONGODB_URI` |
 | `longTermMemory` | `connected` / `unreachable` / `not_configured` / `no_agents` | Mongo reachable and ≥1 agent has `memory.longTerm: true` |
 | `agentcore` | `connected` / `inactive` / `unreachable` / `not_configured` | AgentCore Memory probe (`ListSessions` on a synthetic actor). `connected` includes the expected `ResourceNotFoundException` for the fake actor (API round-trip succeeded). `inactive` = `AGENTCORE_MEMORY_STORE_ID` is set but the store is not `ACTIVE` (provisioning or deleting). |
-| `mcpServer` | `connected` / `unreachable` | MongoDB MCP endpoint connect + `listTools` handshake (`MONGODB_MCP_RUNTIME_ARN` direct runtime, or `MCP_SERVER_URL` / gateway fallback) |
+| `mcpServer` | `connected` / `unreachable` | AgentCore Gateway MCP endpoint connect + `listTools` handshake (`AGENTCORE_GATEWAY_URL`; `MCP_SERVER_URL` local-dev only) |
 | `bedrockKnowledgeBase` | `connected` / `not_configured` / `unreachable` | `BEDROCK_KB_ID` set and a minimal Bedrock Agent Runtime `Retrieve` probe returns `{ status: "ok" }`. `unreachable` usually means IAM (`bedrock-agent-runtime:Retrieve` on the KB ARN) or KB not `ACTIVE` — check API logs for `[health] bedrock KB probe`. |
 
 Returns `503` with `status: degraded` when `mongodb` is `unreachable` only. Other dependencies may be `unreachable` or `inactive` while `status` stays `ok` (informational; does not fail liveness).

@@ -246,8 +246,6 @@ AGENTCORE_ORCHESTRATOR_ID=$(terraform output -raw acr_orchestrator_id 2>/dev/nul
 AGENTCORE_ORCHESTRATOR_ARN=$(terraform output -raw acr_orchestrator_arn 2>/dev/null || echo "")
 AGENTCORE_MEMORY_STORE_ID=$(terraform output -raw agentcore_memory_id 2>/dev/null || echo "")
 AGENTCORE_GATEWAY_URL=$(terraform output -raw agentcore_gateway_url 2>/dev/null || echo "")
-MONGODB_MCP_RUNTIME_ARN=$(terraform output -raw mongodb_mcp_runtime_arn 2>/dev/null || echo "")
-MONGODB_MCP_RUNTIME_ENDPOINT=$(terraform output -raw mongodb_mcp_runtime_endpoint 2>/dev/null || echo "")
 ECR_RUNTIME_REPO=$(terraform output -raw ecr_agent_runtime_repository_url 2>/dev/null || echo "")
 BEDROCK_KB_ID=$(terraform output -raw knowledge_base_id 2>/dev/null || echo "")
 
@@ -280,7 +278,6 @@ fi
 
 [[ -n "$AGENTCORE_ORCHESTRATOR_ID" ]] || err "acr_orchestrator_id output is empty — run deploy.sh first."
 [[ -n "$AGENTCORE_GATEWAY_URL" ]] || err "agentcore_gateway_url output is empty."
-[[ -n "$MONGODB_MCP_RUNTIME_ARN" ]] || err "mongodb_mcp_runtime_arn output is empty."
 
 ok "Orchestrator: ${AGENTCORE_ORCHESTRATOR_ID}"
 for spec_id in "${SPECIALIST_IDS[@]:-}"; do
@@ -300,7 +297,6 @@ fi
 # Export everything build_dynamic_env_base / update_runtime_env_dynamic need.
 export AWS_REGION MONGODB_URI ATLAS_DB_NAME BEDROCK_KB_ID \
        AGENTCORE_MEMORY_STORE_ID AGENTCORE_GATEWAY_URL \
-       MONGODB_MCP_RUNTIME_ARN MONGODB_MCP_RUNTIME_ENDPOINT \
        VOYAGE_ENDPOINT EMBEDDINGS_PROVIDER VOYAGE_REQUEST_FORMAT \
        AGENTCORE_RUNTIME_DEPLOYMENT_MODE SHARED_BUCKET AGENTCORE_CODE_ARTIFACT_PREFIX \
        ECR_RUNTIME_REPO
@@ -341,7 +337,7 @@ SMOKE_ID_TOKEN=$(aws cognito-idp initiate-auth \
 ensure_agent_config_refresh_token
 REFRESH_PAYLOAD_FILE=$(mktemp -t agent-config-refresh.XXXXXX.json)
 REFRESH_RESPONSE_FILE=$(mktemp -t agent-config-refresh-response.XXXXXX.json)
-trap 'rm -f "$REFRESH_PAYLOAD_FILE" "$REFRESH_RESPONSE_FILE"' EXIT
+trap 'rm -f "$REFRESH_PAYLOAD_FILE" "$REFRESH_RESPONSE_FILE"; _pf_release_lock_on_exit' EXIT
 
 REPO_ROOT="$REPO_ROOT" SPECIALIST_RUNTIME_ARNS_JSON="${SPECIALIST_RUNTIME_ARNS_JSON:-}" \
   python3 - <<'PYEOF' > "$REFRESH_PAYLOAD_FILE"

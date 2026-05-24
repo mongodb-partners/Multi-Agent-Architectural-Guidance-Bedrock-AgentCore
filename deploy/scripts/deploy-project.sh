@@ -731,13 +731,54 @@ if [[ "$SKIP_DOCKER" != "true" ]]; then
   aws ecr get-login-password --region "$AWS_REGION" \
     | docker login --username AWS --password-stdin "$ECR_REGISTRY" >/dev/null
   log "  building mongodb-mcp-runtime image (linux/arm64)..."
-  docker buildx build \
-    --platform linux/arm64 \
-    -f "$REPO_ROOT/mcp-runtimes/mongodb-mcp/Dockerfile" \
-    -t "${MCP_RUNTIME_REPO}:latest" \
-    --push \
-    "$REPO_ROOT/mcp-runtimes/mongodb-mcp" >/dev/null
+  source "$SCRIPT_DIR/_docker-build.sh"
+  docker_build_push_image linux/arm64 \
+    "$REPO_ROOT/mcp-runtimes/mongodb-mcp/Dockerfile" \
+    "$REPO_ROOT/mcp-runtimes/mongodb-mcp" \
+    "${MCP_RUNTIME_REPO}:latest" >/dev/null
   ok "mongodb-mcp-runtime pushed: ${MCP_RUNTIME_REPO}:latest"
+
+  # Phase 4d.5 — force-sync the AgentCore runtime + gateway target. Required
+  # because the TF-managed `container_uri` of `<repo>:latest` is a constant
+  # string — `terraform plan` would otherwise see no diff and AgentCore would
+  # keep serving the previous image version. See docs/status/debugging.md
+  # "AgentCore Runtime image push does not auto-trigger a runtime version bump"
+  # and "AgentCore Gateway target caches tool schemas …".
+  #
+  # First-deploy safety: when the runtime/gateway don't exist yet,
+  # force_mcp_runtime_image_sync no-ops and the apply below creates them with
+  # the freshly-pushed image.
+  if ! declare -F force_mcp_runtime_image_sync >/dev/null 2>&1; then
+    # Source the helpers if the caller didn't (deploy-project.sh sources later
+    # in normal flow, but Phase 4d runs before the source on first-deploy).
+    source "$SCRIPT_DIR/_agents-common.sh"
+  fi
+  _MCP_RUNTIME_ID_PRE=$(terraform output -raw mongodb_mcp_runtime_id 2>/dev/null || echo "")
+  _GATEWAY_ID_PRE=$(terraform output -raw agentcore_gateway_id 2>/dev/null || echo "")
+  force_mcp_runtime_image_sync \
+    "$_MCP_RUNTIME_ID_PRE" \
+    "$MCP_RUNTIME_REPO_NAME" \
+    "latest" \
+    "$_GATEWAY_ID_PRE" \
+    "mongodb-mcp"
+  unset _MCP_RUNTIME_ID_PRE _GATEWAY_ID_PRE
+
+  # Capture the pushed image digest so the next `terraform plan` propagates it
+  # as a trigger on module.agentcore_gateway.null_resource.mcp_server_gateway_target.
+  # Belt-and-suspenders for any future apply that does not go through
+  # `deploy-project.sh` (e.g. operator-driven targeted plans).
+  TF_VAR_mongodb_mcp_image_digest=$(aws ecr describe-images \
+    --region "$AWS_REGION" \
+    --repository-name "$MCP_RUNTIME_REPO_NAME" \
+    --image-ids imageTag=latest \
+    --query 'imageDetails[0].imageDigest' \
+    --output text 2>/dev/null || echo "")
+  if [[ -n "$TF_VAR_mongodb_mcp_image_digest" && "$TF_VAR_mongodb_mcp_image_digest" != "None" ]]; then
+    export TF_VAR_mongodb_mcp_image_digest
+    log "  exporting TF_VAR_mongodb_mcp_image_digest=${TF_VAR_mongodb_mcp_image_digest:0:19}…"
+  else
+    unset TF_VAR_mongodb_mcp_image_digest
+  fi
 fi
 
 sep
@@ -1126,10 +1167,12 @@ if [[ -n "$AGENTCORE_ORCHESTRATOR_ID" ]]; then
   if [[ -z "${AGENTCORE_GATEWAY_URL:-}" ]]; then
     err "AGENTCORE_GATEWAY_URL is empty. Provision the AgentCore Gateway first (terraform apply)."
   fi
+  # Agent runtimes must use Gateway for MCP traffic. The MongoDB MCP runtime
+  # ARN/endpoint are infrastructure wiring for the Gateway target only and are
+  # intentionally not injected into application runtimes.
 
   export AWS_REGION MONGODB_URI ATLAS_DB_NAME BEDROCK_KB_ID \
          AGENTCORE_MEMORY_STORE_ID AGENTCORE_GATEWAY_URL \
-         MONGODB_MCP_RUNTIME_ARN MONGODB_MCP_RUNTIME_ENDPOINT \
          VOYAGE_ENDPOINT EMBEDDINGS_PROVIDER VOYAGE_REQUEST_FORMAT \
          AGENTCORE_RUNTIME_DEPLOYMENT_MODE SHARED_BUCKET AGENTCORE_CODE_ARTIFACT_PREFIX \
          ECR_RUNTIME_REPO
@@ -1206,11 +1249,8 @@ done
 unset _spec_id _upper_id _spec_arn
 cat >> "$REPO_ROOT/.env.live" <<EOF
 
-# Tool hosting — Gateway remains for non-Mongo tools; MongoDB MCP calls go
-# directly to the dedicated AgentCore Runtime.
-MCP_SERVER_URL=${AGENTCORE_GATEWAY_URL}
-MONGODB_MCP_RUNTIME_ARN=${MONGODB_MCP_RUNTIME_ARN}
-MONGODB_MCP_RUNTIME_ENDPOINT=${MONGODB_MCP_RUNTIME_ENDPOINT}
+# Tool hosting — all agent MCP traffic goes through AgentCore Gateway. The
+# Gateway target invokes the dedicated MongoDB MCP AgentCore Runtime.
 SHORT_TERM_MEMORY_BACKEND=agentcore
 PERSIST_CHAT_SESSIONS=1
 MEMORY_TTL_DAYS=30
@@ -1542,8 +1582,8 @@ echo "  Bedrock KB : ${BEDROCK_KB_ID:-'(not yet provisioned)'}"
 echo "  Embedding  : ${VOYAGE_ENDPOINT:-'Titan (amazon.titan-embed-text-v2:0)'}"
 echo "  AgentCore  : memory=${AGENTCORE_MEMORY_STORE_ID:-?}"
 echo "               gateway=${AGENTCORE_GATEWAY_URL:-?}"
-echo "  Tools/MCP  : MongoDB direct runtime ${MONGODB_MCP_RUNTIME_ARN:-?}"
-echo "               Gateway available for non-Mongo tools ${AGENTCORE_GATEWAY_URL:-?}"
+echo "  Tools/MCP  : MongoDB tools via AgentCore Gateway ${AGENTCORE_GATEWAY_URL:-?}"
+echo "               Gateway target runtime ${MONGODB_MCP_RUNTIME_ARN:-?}"
 echo "  Auth       : Cognito JWKS required (no bypass)"
 echo "               Cognito users=${COGNITO_TEST_USERS_CSV}"
 echo "               Password=${COGNITO_TEST_PASSWORD}"

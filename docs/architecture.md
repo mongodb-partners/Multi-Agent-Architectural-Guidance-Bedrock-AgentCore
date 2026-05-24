@@ -7,7 +7,7 @@
 
 ## 1. The 30-second version
 
-You type a question into a chat box. A web API on a small AWS server receives it. The API itself classifies the user message (in-process, using a lightweight heuristic + Bedrock Haiku fallback) and invokes the matching **specialist** AgentCore Runtime directly. The specialist looks up data in MongoDB through a small **MCP runtime** (a dedicated AgentCore Runtime that fronts the MongoDB driver) reached over MCP. The AgentCore Gateway remains available for non-Mongo tools. The reply streams back to your screen token-by-token over SSE. In deployed AWS, **short-term conversation memory lives in AgentCore Memory**; **long-term cross-session memory lives in MongoDB Atlas** (`agent_memory_facts` + `chat_messages`) with hybrid vector + BM25 retrieval.
+You type a question into a chat box. A web API on a small AWS server receives it. The API itself classifies the user message (in-process, using a lightweight heuristic + Bedrock Haiku fallback) and invokes the matching **specialist** AgentCore Runtime directly. The specialist looks up data in MongoDB through AgentCore Gateway, whose target invokes a small **MCP runtime** (a dedicated AgentCore Runtime that fronts the MongoDB driver). The reply streams back to your screen token-by-token over SSE. In deployed AWS, **short-term conversation memory lives in AgentCore Memory**; **long-term cross-session memory lives in MongoDB Atlas** (`agent_memory_facts` + `chat_messages`) with hybrid vector + BM25 retrieval.
 
 The legacy orchestrator-hop path through the `orchestrator` runtime is still available behind `USE_ORCHESTRATOR_RUNTIME=1` as a one-release rollback escape hatch.
 
@@ -28,12 +28,10 @@ flowchart LR
   SPEC --> TS[troubleshooting]
   SPEC --> OM[order-management]
   SPEC --> PR[product-recommendation]
-  TS -->|MCP via InvokeAgentRuntime| MCPRT[mongodb-mcp-runtime<br/>AgentCore Runtime]
-  OM -->|MCP via InvokeAgentRuntime| MCPRT
-  PR -->|MCP via InvokeAgentRuntime| MCPRT
-  TS -.->|non-Mongo MCP tools| GW[AgentCore Gateway]
-  OM -.->|non-Mongo MCP tools| GW
-  PR -.->|non-Mongo MCP tools| GW
+  TS -->|MCP via AGENTCORE_GATEWAY_URL| GW[AgentCore Gateway<br/>Cognito JWT auth]
+  OM -->|MCP via AGENTCORE_GATEWAY_URL| GW
+  PR -->|MCP via AGENTCORE_GATEWAY_URL| GW
+  GW -->|mongodb-mcp target| MCPRT[mongodb-mcp-runtime<br/>AgentCore Runtime]
   MCPRT -->|PrivateLink or Peering| ATLAS[(MongoDB Atlas)]
   API -->|long-term memory<br/>hybrid retrieval| LTM[(MongoDB Atlas<br/>agent_memory_facts +<br/>chat_messages)]
   API -->|short-term memory<br/>current session| MEM[(AgentCore Memory)]
@@ -52,7 +50,7 @@ flowchart LR
 | **AgentCore Runtimes** | AWS-managed agent containers (5 total) | One per specialist (3) + a legacy orchestrator hop + a dedicated MongoDB MCP runtime |
 | **Specialist agents** | 3 specialist runtimes | Each is an expert: `order-management`, `troubleshooting`, `product-recommendation` |
 | **Bedrock** | AWS's foundation model service | Models per agent: orchestrator + `order-management` = Claude Haiku 4.5; `troubleshooting` + `product-recommendation` = Claude Sonnet 4.x. Source of truth: [`config/agents/*.agent.md`](../config/agents/) |
-| **MongoDB MCP Runtime** | A dedicated AgentCore Runtime ([`mcp-runtimes/mongodb-mcp/`](../mcp-runtimes/mongodb-mcp/)) | The only thing that talks to MongoDB. Exposes `mongodb_query`, `mongodb_vector_search`, `mongodb_aggregate` and the internal `mongodb_hybrid_search`. Reached via `bedrock-agentcore:InvokeAgentRuntime` over MCP — never `lambda:InvokeFunction`. The legacy Lambda host was deleted in CLIENT_REVIEW Phase 7e. |
+| **MongoDB MCP Runtime** | A dedicated AgentCore Runtime ([`mcp-runtimes/mongodb-mcp/`](../mcp-runtimes/mongodb-mcp/)) | The only thing that talks to MongoDB. Exposes `mongodb_query`, `mongodb_vector_search`, `mongodb_aggregate` and the internal `mongodb_hybrid_search`. Reached through the AgentCore Gateway target — never `lambda:InvokeFunction`. The legacy Lambda host was deleted in CLIENT_REVIEW Phase 7e. |
 | **MongoDB Atlas** | Managed MongoDB cluster (M10 default) | Stores customers, orders, products, troubleshooting docs, long-term memory collections (`agent_memory_facts`, `chat_messages`), session mirrors (`chat_sessions`), and traces |
 | **Long-term memory** | `agent_memory_facts` + `chat_messages` with hybrid retrieval | Vector + BM25 fused with RRF, weighted, recency-decayed, MMR-diversified. See [`docs/long-term-memory-design.md`](long-term-memory-design.md) |
 | **AgentCore Memory** | An AWS-managed memory store | Authoritative short-term conversation memory backend in deployed AWS (`SHORT_TERM_MEMORY_BACKEND=agentcore`); LTM fallback if Mongo write fails |
@@ -178,7 +176,7 @@ flowchart TB
         ACO[Orchestrator Runtime<br/>USE_ORCHESTRATOR_RUNTIME=1 only]
         ACMCP[mongodb-mcp Runtime<br/>MCP server]
         ACMEM[AgentCore Memory]
-        ACGW[AgentCore Gateway<br/>non-Mongo tools]
+        ACGW[AgentCore Gateway<br/>mongodb-mcp target + future tools]
       end
 
       ATLAS[(MongoDB Atlas)]
@@ -192,7 +190,8 @@ flowchart TB
     EC2 -->|classify + invoke| ACS
     EC2 -.->|USE_ORCHESTRATOR_RUNTIME=1| ACO
     ACO -.-> ACS
-    ACS -->|MCP InvokeAgentRuntime| ACMCP
+    ACS -->|MCP via AGENTCORE_GATEWAY_URL| ACGW
+    ACGW -->|mongodb-mcp target| ACMCP
     ACMCP -->|PL mode| VPCE
     ACMCP -.->|peering mode| PEER
     VPCE --> R53 --> ATLAS
@@ -200,7 +199,6 @@ flowchart TB
     KBNLB --> ATLAS
     KB --> KBNLB
     EC2 -->|short-term backend / LTM fallback| ACMEM
-    EC2 -.->|non-Mongo tools| ACGW
   end
 ```
 
@@ -216,7 +214,7 @@ Per-environment resource names are emitted into `deploy-manifest.json` after eac
 | ECR | API / UI / MCP repos | `<project>-{api,ui,mongodb-mcp}-<env>` |
 | AgentCore | 5 runtimes | `<project>-{orchestrator,troubleshooting,order-management,product-recommendation,mongodb-mcp-runtime}-<env>` |
 | AgentCore | Memory store | `<project>_memory_<env>-<auto-suffix>` |
-| AgentCore | Gateway | `<project>-gw-<env>-<auto-suffix>` (non-Mongo target slots only) |
+| AgentCore | Gateway | `<project>-gw-<env>-<auto-suffix>` (target: `mongodb-mcp` → `mongodb-mcp-runtime`; additional non-Mongo target slots when wired) |
 | Bedrock | KB | KB id from `module.bedrock_kb.knowledge_base_id` |
 | Atlas | Cluster | `<project>-<env>` (M10 default) |
 | Atlas | Connectivity | PrivateLink endpoint (PL mode) **or** network peering (peering mode) |
@@ -300,19 +298,24 @@ Coherence comes from the orchestrator routing decision plus skill activation plu
 
 ## 7. Key design decisions (and why)
 
-### 7.1 MongoDB MCP runs in AgentCore Runtime; Gateway is for non-Mongo tools
+### 7.1 MongoDB MCP runs behind AgentCore Gateway
 
-Every Mongo tool call from every runtime is served by the dedicated `mongodb-mcp-runtime` AgentCore Runtime ([`mcp-runtimes/mongodb-mcp/`](../mcp-runtimes/mongodb-mcp/)), which owns the MongoDB driver, query guards, and vector search. The MCP client uses `MONGODB_MCP_RUNTIME_ARN` / `MONGODB_MCP_RUNTIME_ENDPOINT` and invokes the runtime with `bedrock-agentcore:InvokeAgentRuntime`. The AgentCore Gateway remains provisioned for non-Mongo Gateway-hosted tools, but Mongo does **not** register as a Gateway `mcp_server` target because that target type cannot use an AgentCore Runtime endpoint. The legacy Lambda host (`lambda/mongodb-mcp/`) and its `deploy/terraform/modules/lambda-mcp/` module were physically deleted in CLIENT_REVIEW Phase 7e — the canonical home for Mongo tool implementations is now [`mcp-runtimes/mongodb-mcp/src/vendor/`](../mcp-runtimes/mongodb-mcp/src/vendor/). There is no `TOOL_HOSTING_MODE` switch and no `lambda:InvokeFunction` path.
+Every Mongo tool call from every runtime goes to the AgentCore Gateway (`AGENTCORE_GATEWAY_URL`). The Gateway target invokes the dedicated `mongodb-mcp-runtime` AgentCore Runtime ([`mcp-runtimes/mongodb-mcp/`](../mcp-runtimes/mongodb-mcp/)), which owns the MongoDB driver, query guards, and vector search. Application runtimes do not call `MONGODB_MCP_RUNTIME_ARN` / `MONGODB_MCP_RUNTIME_ENDPOINT` directly; those values are deploy/Terraform wiring for the Gateway target. `MCP_SERVER_URL` is reserved for local-development overrides only. The legacy Lambda host (`lambda/mongodb-mcp/`) and its `deploy/terraform/modules/lambda-mcp/` module were physically deleted in CLIENT_REVIEW Phase 7e — the canonical home for Mongo tool implementations is now [`mcp-runtimes/mongodb-mcp/src/vendor/`](../mcp-runtimes/mongodb-mcp/src/vendor/). There is no `TOOL_HOSTING_MODE` switch and no `lambda:InvokeFunction` path.
 
-**Auth:** direct Mongo MCP calls are IAM-authorized by the caller runtime role (`bedrock-agentcore:InvokeAgentRuntime`). The caller's Cognito access token is still forwarded from the Hono API through the AgentCore Runtime invocation payload (`userJwt`) so Gateway-backed non-Mongo tools can inject it via an `AsyncLocalStorage`-scoped `Authorization: Bearer <jwt>` header.
+**Auth:** the caller's Cognito access token is forwarded from the Hono API through the AgentCore Runtime invocation payload (`userJwt`). The MCP client injects it into Gateway calls via an `AsyncLocalStorage`-scoped `Authorization: Bearer <jwt>` header.
 
 | Knob | Where | Meaning |
 |---|---|---|
-| `MONGODB_MCP_RUNTIME_ARN` / `MONGODB_MCP_RUNTIME_ENDPOINT` | Per-runtime env | Direct MongoDB MCP runtime target. Preferred by `mongodb-mcp-client.ts`. |
-| `AGENTCORE_GATEWAY_URL` | `.env.live` (generated by `deploy-project.sh`) | Gateway MCP endpoint for non-Mongo tools. |
-| `MCP_SERVER_URL` | Per-runtime env | Set by `deploy-project.sh` from `AGENTCORE_GATEWAY_URL` as the Gateway fallback. |
+| `AGENTCORE_GATEWAY_URL` | Per-runtime env / `.env.live` (generated by `deploy-project.sh`) | Gateway MCP endpoint used by all deployed Mongo tool calls. |
+| `MCP_SERVER_URL` | Local shell env only | Local-development override for a manually run MCP server. Not emitted by deploy scripts. |
+| `MONGODB_MCP_RUNTIME_ARN` / `MONGODB_MCP_RUNTIME_ENDPOINT` | Terraform/deploy outputs | Gateway target backend wiring only; not consumed by app runtimes. |
 
-**Trade-off:** Mongo loses the single Gateway audit surface, but avoids the unsupported Gateway `mcp_server` → AgentCore Runtime shape. The Gateway still supports bring-your-own non-Mongo tools; Mongo keeps AgentCore isolation, VPC PrivateLink access to Atlas, and IAM-scoped invocation without reintroducing Lambda.
+**Trade-off:** routing Mongo through the Gateway adds one IAM-authorized hop (~10–30 ms) over a direct `bedrock-agentcore:InvokeAgentRuntime` call, but in exchange:
+- Every Mongo tool call shares the same Cognito-authenticated audit surface as future tools — one place to enforce policy and inspect traffic.
+- The application runtime never needs `bedrock-agentcore:InvokeAgentRuntime` IAM on the MongoDB MCP runtime ARN, just `GET` on the Gateway URL.
+- The legacy direct-invoke path remains in deploy/Terraform outputs (`MONGODB_MCP_RUNTIME_ARN`, `MONGODB_MCP_RUNTIME_ENDPOINT`) for Gateway-target wiring only. The application client (`api/src/adapters/mongodb-mcp-client.ts::resolveMcpEndpoint`) fails fast when `AGENTCORE_GATEWAY_URL` is missing — there is **no localhost fallback** in deployed runtimes; `MCP_SERVER_URL` is honored only when `ENVIRONMENT=local`, `NODE_ENV=development`, or `DEV_MOCK_BACKENDS=1` is set.
+
+Gateway-target schema cache (the Gateway snapshots `tools/list` from the upstream MCP server at target-create time and serves it from cache thereafter) is invalidated on every redeploy by `deploy-project.sh` Phase 4d: the MCP image digest is exported as `TF_VAR_mongodb_mcp_image_digest`, fed to the gateway module's `null_resource` triggers, and any digest change re-creates the target so fresh tool schemas are picked up. See `docs/status/debugging.md` "AgentCore Gateway target caches tool schemas".
 
 ### 7.2 S3 code artifacts, not ECR containers, for AgentCore runtimes
 
@@ -374,7 +377,7 @@ Why a separate module: Atlas SRV connection strings (`mongodb+srv://...`) resolv
 > - In **VPC peering mode**, KB ingestion runs through [`bedrock-kb-peering/`](../deploy/terraform/modules/bedrock-kb-peering/) (internal NLB pointed at the peered Atlas mongod IPs). Gated by `TF_VAR_enable_kb_peering`. **EXPERIMENTAL — NLB-over-peering is not partner-validated**; mongod IP drift on Atlas-side scaling/upgrade requires re-running `envs/ec2` to re-pin NLB targets.
 > - Setting `TF_VAR_enable_kb_privatelink=false` (in PL mode) or `TF_VAR_enable_kb_peering=false` (in peering mode) falls back to the **public Atlas SRV endpoint**. This is **not the default and not recommended** — KB traffic leaves the private fabric and constitutes a privacy regression. TLS + Atlas auth still apply, but documented deviation is required.
 >
-> See [`debugging.md` § 5 — common failures: Bedrock KB ingestion](debugging.md) for the full trade-off and the design rationale.
+> See [`status/debugging.md` § 5 — common failures: Bedrock KB ingestion](status/debugging.md) for the full trade-off and the design rationale.
 
 Bedrock, AgentCore, Cognito, ECR, S3 — all are reached over the public internet from EC2. They use AWS SDK signing (SigV4) which is sufficient for a POC. Adding VPC interface endpoints for these would cost ~$102/month with no meaningful security gain at this scale.
 
@@ -414,7 +417,7 @@ The Voyage **model name** vs SoW (`voyage-3.5-lite` vs `voyage-multimodal-3`) is
 | | **Local dev** (Docker Compose / `bun run dev`) | **EC2 production** |
 |---|---|---|
 | Where agents run | In-process inside the Hono API (Strands SDK) when `AGENTCORE_ORCHESTRATOR_ARN` is unset, or via `DEV_MOCK_BACKENDS=1` for a fixture loop | 5 separate AgentCore Runtimes (managed by AWS) — default path classifies in-API and invokes a specialist directly |
-| Tool execution | Fixtures (`DEV_MOCK_BACKENDS=1`) or real MongoDB/AgentCore depending on env | AgentCore Runtime MCP (Mongo) + AgentCore Gateway (non-Mongo) |
+| Tool execution | Fixtures (`DEV_MOCK_BACKENDS=1`) or real MongoDB/AgentCore depending on env. `MCP_SERVER_URL` honored only when `ENVIRONMENT=local`, `NODE_ENV=development`, or `DEV_MOCK_BACKENDS=1` | All MCP tool calls (including every Mongo tool) go through AgentCore Gateway → `mongodb-mcp-runtime`. No localhost fallback. |
 | Long-term memory | In-process `Map` when `MONGODB_URI` unset, else live hybrid retriever | MongoDB `agent_memory_facts` + `chat_messages` (primary) + AgentCore fallback |
 | MongoDB connection | Direct SRV (public) | PrivateLink **or** peering (private) |
 | Bedrock access | Local AWS creds via `aws sso login` / IAM user | EC2 instance profile |
@@ -489,9 +492,10 @@ See [`deployment-guide.md`](deployment-guide.md) for current deployment status.
 ## 11. Where to go next
 
 - **For deployment**: [deployment-guide.md](deployment-guide.md)
-- **For configuration**: [configuration-guide.md](configuration-guide.md) and the comprehensive [reference/env-vars.md](reference/env-vars.md)
+- **For `config/` folder**: [configuration-guide.md](configuration-guide.md)
+- **For deploy/runtime env tuning (advanced)**: [advanced/deploy-tweak-guide.md](advanced/deploy-tweak-guide.md) and the comprehensive [reference/env-vars.md](reference/env-vars.md)
 - **For the API contract**: [api-reference.md](api-reference.md)
 - **To understand memory in depth**: [memory-architecture.md](memory-architecture.md), [long-term-memory-design.md](long-term-memory-design.md), [hybrid-search.md](hybrid-search.md)
 - **For the trace UI walkthrough**: [demo/demo-mode-guide.md](demo/demo-mode-guide.md), [trace-ui-system-overview.md](trace-ui-system-overview.md)
 - **For Terraform modules and SSM parameters**: [reference/terraform-modules.md](reference/terraform-modules.md), [reference/ssm-parameters.md](reference/ssm-parameters.md)
-- **For debugging the live stack**: [debugging.md](debugging.md)
+- **For debugging the live stack**: [status/debugging.md](status/debugging.md)

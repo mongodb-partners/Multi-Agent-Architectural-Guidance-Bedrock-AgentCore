@@ -1,5 +1,7 @@
 # AgentCore Runtime container — build from repository root:
-#   docker buildx build --platform linux/arm64 -f api/Dockerfile.agentcore -t <ecr-uri>:latest .
+#   docker build --platform linux/arm64 -f api/Dockerfile.agentcore -t <ecr-uri>:latest . && docker push <ecr-uri>:latest
+# (Requires QEMU binfmt when building from an amd64 host; verified by the
+# `pf_check_docker_cross_platforms` deploy preflight.)
 #
 # IMPORTANT: AgentCore Runtime requires linux/arm64. Do NOT build for amd64.
 # Port: 8080 (required by AgentCore Runtime; not configurable)

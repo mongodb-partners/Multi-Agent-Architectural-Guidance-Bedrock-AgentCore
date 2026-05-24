@@ -24,7 +24,7 @@ Runtime artifact modes:
 3. API runs the in-process classifier ([`api/src/lib/agent-classifier.ts`](../api/src/lib/agent-classifier.ts)): heuristic token/bigram overlap against the orchestrator's `handoffs:` roster, with a Bedrock Haiku 4.5 fallback when the heuristic margin is below `CLASSIFIER_HEURISTIC_MARGIN`.
 4. API reads long-term memory context (hybrid `agent_memory_facts` + `chat_messages`).
 5. API invokes the selected specialist's ARN (`AGENTCORE_RUNTIME_ARN_<SPECIALIST>`) via `InvokeAgentRuntime` with `Accept: text/event-stream`.
-6. Specialist runtime runs `runChatStream(<specialistId>)`. Mongo tools route via `mongodb-mcp-runtime` (also `InvokeAgentRuntime`). Non-Mongo tools route via the AgentCore Gateway.
+6. Specialist runtime runs `runChatStream(<specialistId>)`. **All MCP tool calls — Mongo and non-Mongo — go through the AgentCore Gateway** (`AGENTCORE_GATEWAY_URL`); the Gateway's `mongodb-mcp` target then invokes `mongodb-mcp-runtime`. Application runtimes never invoke `MONGODB_MCP_RUNTIME_ARN` / `MONGODB_MCP_RUNTIME_ENDPOINT` directly — those values are Terraform/deploy wiring for the Gateway target only. `MCP_SERVER_URL` is a local-development override.
 7. The runtime streams `event: stream` (token), `event: trace` (per trace event), and `event: done` SSE frames back to the API.
 8. The API forwards verbatim to the UI (no buffering).
 

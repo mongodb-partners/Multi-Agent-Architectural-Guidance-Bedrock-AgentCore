@@ -45,6 +45,7 @@ export type TraceEventType =
   | "tool.http"
   | "tool.mcp"
   | "tools.batch"
+  | "tools.degraded"
   | "conversation.message_added"
   | "handoff.decision"
   | "agent.activate"

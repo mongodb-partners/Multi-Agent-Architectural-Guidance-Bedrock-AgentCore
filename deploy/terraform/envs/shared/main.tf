@@ -130,11 +130,11 @@ module "cloudwatch_fleet_dashboards" {
   shared_resource_prefix        = var.shared_resource_prefix
   environment                   = var.environment
   aws_region                    = var.aws_region
-  api_log_group_name            = module.cloudwatch.api_log_group_name
-  ui_log_group_name             = module.cloudwatch.ui_log_group_name
-  invocation_log_group_name     = var.enable_bedrock_invocation_logging ? module.bedrock_invocation_logging.log_group_name : ""
-  audit_findings_log_group_name = var.enable_bedrock_invocation_logging ? module.bedrock_invocation_logging.audit_log_group_name : ""
-  otel_log_group_name           = aws_cloudwatch_log_group.otel.name
+  api_log_group_name            = "${local.log_group_prefix}/api"
+  ui_log_group_name             = "${local.log_group_prefix}/ui"
+  invocation_log_group_name     = var.enable_bedrock_invocation_logging ? "/aws/bedrock/invocations" : ""
+  audit_findings_log_group_name = var.enable_bedrock_invocation_logging ? "/aws/bedrock/invocations-audit" : ""
+  otel_log_group_name           = local.otel_log_group_name
   p99_latency_threshold_ms      = var.p99_latency_threshold_ms
   error_rate_threshold_pct      = var.error_rate_threshold_pct
   throttle_burst_threshold      = var.throttle_burst_threshold

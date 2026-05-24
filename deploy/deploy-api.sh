@@ -176,8 +176,6 @@ VOYAGE_ENDPOINT="$(tf_raw voyage_endpoint_name)"
 AGENTCORE_MEMORY_STORE_ID="$(tf_raw agentcore_memory_id)"
 AGENTCORE_GATEWAY_URL="$(tf_raw agentcore_gateway_url)"
 AGENTCORE_ORCHESTRATOR_ARN="$(tf_raw acr_orchestrator_arn)"
-MONGODB_MCP_RUNTIME_ARN="$(tf_raw mongodb_mcp_runtime_arn)"
-MONGODB_MCP_RUNTIME_ENDPOINT="$(tf_raw mongodb_mcp_runtime_endpoint)"
 CW_API_LOG_GROUP="$(tf_raw cloudwatch_api_log_group)"
 CW_UI_LOG_GROUP="$(tf_raw cloudwatch_ui_log_group)"
 export TF_VAR_atlas_project_id="${TF_VAR_atlas_project_id:-${TF_VAR_mongodb_atlas_project_id:-}}"
@@ -193,6 +191,7 @@ VOYAGE_REQUEST_FORMAT="${VOYAGE_REQUEST_FORMAT:-multimodal}"
 
 [[ -n "$EC2_IP" && -n "$EC2_INSTANCE_ID" ]] || err "EC2 outputs missing; run deploy.sh first"
 [[ -n "$ECR_API_REPO" ]] || err "ECR API repo output missing"
+[[ -n "$AGENTCORE_GATEWAY_URL" ]] || err "AgentCore Gateway URL output missing; AGENTCORE_GATEWAY_URL is required and localhost fallback is disabled"
 [[ -n "$MONGODB_URI" ]] || err "MONGODB_URI unavailable (.env or terraform output atlas_connection_string)"
 [[ -n "$TF_VAR_atlas_project_id" ]] || err "Atlas project id missing (TF_VAR_mongodb_atlas_project_id / TF_VAR_atlas_project_id)"
 [[ -n "${MONGODB_ATLAS_PUBLIC_KEY:-}" && -n "${MONGODB_ATLAS_PRIVATE_KEY:-}" ]] \
@@ -341,7 +340,7 @@ if [[ "$SKIP_DOCKER" == "true" ]]; then
 else
   log "Phase 4 — Building + pushing API image only..."
   DOCKER_CONFIG_DIR=$(mktemp -d -t deploy-api-docker-XXXXXX)
-  trap 'rm -rf "$DOCKER_CONFIG_DIR"' EXIT
+  trap 'rm -rf "$DOCKER_CONFIG_DIR"; _pf_release_lock_on_exit' EXIT
   if [[ -d "$HOME/.docker" ]]; then
     cp -R "$HOME/.docker/." "$DOCKER_CONFIG_DIR/"
     if [[ -f "$DOCKER_CONFIG_DIR/config.json" ]]; then
@@ -363,13 +362,12 @@ PY
 
   aws ecr get-login-password --region "$AWS_REGION" \
     | docker login --username AWS --password-stdin "$ECR_REGISTRY" >/dev/null
-  docker buildx build \
-    --platform linux/amd64 \
-    -f "$REPO_ROOT/api/Dockerfile" \
-    -t "$ECR_API_REPO:$API_TAG" \
-    -t "$ECR_API_REPO:latest" \
-    --push \
-    "$REPO_ROOT"
+  source "$SCRIPT_DIR/scripts/_docker-build.sh"
+  docker_build_push_image linux/amd64 \
+    "$REPO_ROOT/api/Dockerfile" \
+    "$REPO_ROOT" \
+    "$ECR_API_REPO:$API_TAG" \
+    "$ECR_API_REPO:latest"
   ok "API image pushed: $ECR_API_REPO:$API_TAG"
 fi
 
@@ -412,9 +410,6 @@ unset _spec_id _upper_id _spec_arn
 
 cat >> "$REPO_ROOT/.env.live" <<EOF
 
-MCP_SERVER_URL=${AGENTCORE_GATEWAY_URL}
-MONGODB_MCP_RUNTIME_ARN=${MONGODB_MCP_RUNTIME_ARN}
-MONGODB_MCP_RUNTIME_ENDPOINT=${MONGODB_MCP_RUNTIME_ENDPOINT}
 SHORT_TERM_MEMORY_BACKEND=agentcore
 PERSIST_CHAT_SESSIONS=1
 MEMORY_TTL_DAYS=30

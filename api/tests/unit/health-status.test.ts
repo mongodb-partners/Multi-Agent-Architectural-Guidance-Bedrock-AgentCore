@@ -57,7 +57,10 @@ const makeAwsError = (name: string, message: string): Error & { name: string } =
   return e;
 };
 
-const kbProbeState: { result?: { status: string }; throwError?: Error } = {};
+const kbProbeState: {
+  result?: { status: string; source?: string; results?: unknown[]; error?: string };
+  throwError?: Error;
+} = {};
 mock.module("../../src/adapters/bedrock-retrieval.ts", () => ({
   bedrockKbRetrieve: async () => {
     if (kbProbeState.throwError) throw kbProbeState.throwError;

@@ -186,7 +186,7 @@ The system prompt's "Memory recall rules" block is the **single source** of memo
 
 ### Chat-invoked Mongo tools (boundary preserved)
 
-Long-term memory uses direct Mongo for efficiency, but **chat-invoked Mongo tools always route through the Mongo MCP runtime** ([`mcp-runtimes/mongodb-mcp/src/vendor/handlers.mjs`](../mcp-runtimes/mongodb-mcp/src/vendor/handlers.mjs)). That includes the new hybrid path: when the model sets `hybrid: true` on a `mongodb_vector_search` call, the API-side wrapper in [`api/src/adapters/mongodb-mcp-client.ts → VectorSearchEmbedTool`](../api/src/adapters/mongodb-mcp-client.ts) rewrites the args and invokes the runtime's `mongodb_hybrid_search` helper — the API never bypasses MCP for chat tools.
+Long-term memory uses direct Mongo for efficiency, but **chat-invoked Mongo tools always route through AgentCore Gateway to the Mongo MCP runtime** ([`mcp-runtimes/mongodb-mcp/src/vendor/handlers.mjs`](../mcp-runtimes/mongodb-mcp/src/vendor/handlers.mjs)). That includes the new hybrid path: when the model sets `hybrid: true` on a `mongodb_vector_search` call, the API-side wrapper in [`api/src/adapters/mongodb-mcp-client.ts → VectorSearchEmbedTool`](../api/src/adapters/mongodb-mcp-client.ts) rewrites the args and invokes the runtime's `mongodb_hybrid_search` helper — the API never bypasses MCP for chat tools.
 
 ---
 

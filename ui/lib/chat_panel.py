@@ -19,6 +19,7 @@ from lib.api_client import (
 )
 from lib import log as ui_log
 from lib.inline_summary import (
+    TurnSummary,
     aggregate_summary,
     merge_post_done_memory_events,
     render_inline_summary,
@@ -100,21 +101,32 @@ def render_message_history() -> None:
             for badge in m.get("badges", []):
                 st.caption(badge)
             inline = m.get("inline_summary")
+            trace_id = (
+                (inline or {}).get("trace_id")
+                or m.get("trace_id")
+            )
             if inline:
                 # Render the same inline summary as during streaming.
                 render_inline_summary(
                     inline["summary"],
                     trace_url=inline.get("trace_url"),
-                    trace_id=inline.get("trace_id") or m.get("trace_id"),
+                    trace_id=trace_id,
+                )
+            elif trace_id:
+                # Session replay: API stores traceId but not the live inline card.
+                render_inline_summary(
+                    TurnSummary(trace_id=trace_id),
+                    trace_id=trace_id,
                 )
 
 
 def _resolve_prompt() -> str | None:
     """Read the chat input, falling back to a queued prompt from the sidebar."""
+    typed = st.chat_input("Message")
     queued = st.session_state.pop("pending_chat_input", None)
     if queued:
         return str(queued)
-    return st.chat_input("Message") or None
+    return typed or None
 
 
 def handle_chat_input(api_base: str, token: str | None, agent_id: str) -> None:
@@ -280,4 +292,6 @@ def handle_chat_input(api_base: str, token: str | None, agent_id: str) -> None:
         msg["trace_id"] = done_trace_id
     if done_message_id:
         msg["message_id"] = done_message_id
+    if inline_block:
+        msg["trace_enriched"] = True
     st.session_state.messages.append(msg)

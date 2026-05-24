@@ -348,6 +348,30 @@ chatRoutes.post("/chat", async (c) => {
       let nestedEventsDropped = 0;
       let firstClientTokenSent = false;
 
+      // SSE keepalive heartbeat — writes a `: keepalive` comment frame every
+      // SSE_KEEPALIVE_MS while waiting on the AgentCore Runtime invocation.
+      // SSE comments (lines starting with `:`) are silently ignored by every
+      // conformant client (browser EventSource, Streamlit, curl -N, our smoke
+      // parse_sse), but they keep the TCP connection warm. Without this,
+      // cold-start runtime invokes (60-150s of silence between the initial
+      // `handoff`/`agent_info` burst and the final nested-trace flush) get
+      // their connection dropped by AWS NLB / NAT / ISP idle timeouts (some as
+      // low as 60s), and downstream clients see `IncompleteRead` even though
+      // the server completed successfully. The interval is cleared in
+      // `finally` so it can't outlive the request.
+      const SSE_KEEPALIVE_MS = Number(process.env.SSE_KEEPALIVE_MS ?? 15000);
+      let keepaliveTimer: ReturnType<typeof setInterval> | undefined;
+      if (SSE_KEEPALIVE_MS > 0) {
+        keepaliveTimer = setInterval(() => {
+          if (stream.aborted || stream.closed) return;
+          // stream.write writes raw bytes; SSE comment line + double-newline
+          // is a complete frame that browsers / curl treat as a no-op.
+          stream.write(`: keepalive ${Date.now()}\n\n`).catch(() => {
+            // Client closed mid-heartbeat; let the main loop detect it.
+          });
+        }, SSE_KEEPALIVE_MS);
+      }
+
       try {
         reqLog.info("[chat] routing to AgentCore Runtime", {
           agentId: routeAgentId,
@@ -355,6 +379,7 @@ chatRoutes.post("/chat", async (c) => {
           mode: invokeMode,
           hasRuntimeOverride: Boolean(runtimeArn),
           traceCollectorId: collector?.traceId,
+          sseKeepaliveMs: SSE_KEEPALIVE_MS,
         });
 
         for await (const ev of invokeAgentRuntime({
@@ -466,6 +491,8 @@ chatRoutes.post("/chat", async (c) => {
           event: "error",
           data: JSON.stringify({ code: "AGENTCORE_RUNTIME_ERROR", message, requestId }),
         });
+      } finally {
+        if (keepaliveTimer) clearInterval(keepaliveTimer);
       }
 
       // Persistence and trace splice run AFTER the stream is fully relayed
@@ -630,13 +657,34 @@ function previewRequestHeaders(headers: Headers): Record<string, string> {
   return out;
 }
 
-/** Locate the most recent `agentcore.invoke` span id on the collector so we
+/** Locate the most recent `agentcore.invoke` SPAN id on the collector so we
  *  can splice nested runtime trace events under it. The adapter creates
- *  exactly one wrapper per `invokeAgentRuntime` call within a turn. */
-function findOutermostAgentcoreInvokeId(collector: TraceCollector): string | undefined {
+ *  exactly one wrapper per `invokeAgentRuntime` call within a turn.
+ *
+ *  Implementation notes:
+ *
+ *  - `start("agentcore.invoke", …)` emits an event whose `id` IS the span id
+ *    (with `durationMs === undefined`). That event stays in the collector's
+ *    list permanently — `end()` does NOT remove it; it appends a SECOND
+ *    event with a fresh uuid + `parentId: spanId` + `durationMs` set. So
+ *    the open-vs-closed distinction is NOT what determines whether the
+ *    span id is recoverable; the start event is always there.
+ *
+ *  - We must return the start event's id (the span id), not the end event's
+ *    fresh uuid. `attachEventsNested` calls `events.find(e => e.id === wrapperId)`
+ *    and uses the start event's ts as the wrapper-start clock for the
+ *    nested-trace tsOffset calculation. Returning the end event's uuid
+ *    would point at the wrong event and shift the entire nested trace by
+ *    `(endTs - startTs)` ms.
+ *
+ *  Pinned by api/tests/unit/chat-find-outermost-agentcore-invoke.test.ts. */
+export function findOutermostAgentcoreInvokeId(collector: TraceCollector): string | undefined {
   const events = collector.getEvents();
   for (let i = events.length - 1; i >= 0; i--) {
     const ev = events[i];
+    // `durationMs === undefined` distinguishes the START event (which carries
+    // the span id) from the synthetic END event (fresh uuid). Both share
+    // `type: "agentcore.invoke"`.
     if (ev.type === "agentcore.invoke" && ev.durationMs === undefined) {
       return ev.id;
     }

@@ -123,6 +123,9 @@ resource "aws_lb_target_group" "atlas_kb" {
   tags = var.tags
 
   lifecycle {
+    create_before_destroy = true
+    ignore_changes        = [name]
+
     precondition {
       condition     = length(local.atlas_ips) > 0
       error_message = "bedrock-kb-peering: discover_ips produced an empty IP list. Verify the EC2 instance ${var.ec2_instance_id} is SSM-reachable and can resolve _mongodb._tcp.${var.atlas_srv_host}. Check the discover-atlas-private-ips.sh output."
@@ -220,6 +223,8 @@ resource "aws_lb_listener" "atlas_kb" {
   }
 
   tags = var.tags
+
+  depends_on = [null_resource.register_targets]
 }
 
 # ── Step 3 — VPC Endpoint Service exposing the NLB to Bedrock ────────────────

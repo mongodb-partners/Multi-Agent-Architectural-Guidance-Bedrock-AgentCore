@@ -16,6 +16,8 @@ from lib.api_client import delete_session, get_session, list_sessions
 from lib.brand_css import inject_brand_css, inject_hide_builtin_sidebar_nav
 from lib.cognito_gate import ensure_api_bearer_token
 from lib.config import load_settings
+from lib.session_hydration import mark_session_hydrated, sync_session_id_query_param
+from lib.session_messages import load_session_messages
 from lib.session_state import ensure_defaults
 from lib.trace_navigation import open_trace_viewer
 
@@ -98,11 +100,14 @@ else:
                 st.session_state.prev_session_pick = sid
                 try:
                     data = get_session(settings.api_base, sid, api_token)
-                    st.session_state.messages = [
-                        {"role": m["role"], "content": m["content"]}
-                        for m in data.get("messages", [])
-                        if m.get("role") in ("user", "assistant")
-                    ]
+                    st.session_state.messages = load_session_messages(
+                        settings.api_base,
+                        sid,
+                        data.get("messages", []),
+                        api_token,
+                    )
+                    mark_session_hydrated(sid)
+                    sync_session_id_query_param(sid)
                 except Exception:
                     st.session_state.messages = []
                 st.switch_page("app.py")

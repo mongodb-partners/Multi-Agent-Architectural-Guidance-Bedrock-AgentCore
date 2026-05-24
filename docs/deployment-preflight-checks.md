@@ -142,10 +142,12 @@ Each check below corresponds to a `pf_check_*` (or `pf_advise_*`) function. The 
 **Fix (macOS):** `brew install --cask session-manager-plugin`.
 **Fix (Linux):** Download the matching `.deb` / `.rpm` from `s3.amazonaws.com/session-manager-downloads/...`.
 
-#### docker-buildx
-**Function:** `pf_check_docker_buildx`
-**Catches:** `docker buildx` unavailable to the Docker CLI on the operator machine — multi-arch (`linux/arm64` for AgentCore Runtime) builds will fail opaquely mid-deploy. The failure envelope prints the Docker binary path, Docker context, `DOCKER_CONFIG`, detected Buildx plugin paths, standalone `docker-buildx` location, and the raw `docker buildx version` error.
-**Fix:** Install Docker Desktop or the Docker Buildx CLI plugin. If Buildx works in one shell but deploy fails in another, run deploy from the working shell or export the same `PATH` / `DOCKER_CONFIG`. For Homebrew standalone Buildx, link it into Docker CLI plugins: `mkdir -p ~/.docker/cli-plugins && ln -sf "$(command -v docker-buildx)" ~/.docker/cli-plugins/docker-buildx`. Then create/select a builder if needed: `docker buildx create --use --name multiagent-builder`.
+#### docker-cross-platforms
+**Function:** `pf_check_docker_cross_platforms`
+**Catches:** Docker cannot run cross-platform images (QEMU/binfmt not registered) — `linux/arm64` (AgentCore Runtime) and `linux/amd64` builds invoked from the deploy scripts will fail opaquely mid-deploy with an "exec format error". The check runs `docker run --rm --platform linux/{amd64,arm64} alpine:3 true` and reports which platforms failed alongside the Docker binary path, version, and context.
+**Fix (Docker Desktop):** Settings → General → enable **Use Rosetta for x86_64/amd64 emulation**, then restart Docker Desktop. On Apple Silicon this also covers `linux/amd64`; ARM64 is native.
+**Fix (Linux / colima):** Register QEMU binfmt handlers once per boot via `docker run --privileged --rm tonistiigi/binfmt --install all`.
+**Fix (GitHub Actions / CI):** Add `uses: docker/setup-qemu-action@v3` before the deploy step (already wired into `.github/workflows/deploy.yml`).
 
 #### local-prerequisites
 **Function:** `pf_check_disk_and_docker_resources`
@@ -166,6 +168,14 @@ Advisory only — never fails. Prints expected resources, ~$240–320/month esti
 **Function:** `pf_check_tool_versions`
 **Catches:** `terraform < 1.6`, `bun < 1.1`, `aws-cli < 2.15`, `python3 < 3.10`, `docker < 24`, `jq < 1.6` (advisory), or any of them missing entirely.
 **Fix:** Upgrade per the version printed; see [`docs/deployment-guide.md`](deployment-guide.md#prerequisites).
+
+#### aws-cli-agentcore-gateway-model
+**Function:** `pf_check_aws_cli_agentcore_gateway_model`
+**Catches:** AWS CLI installed and on PATH, but its bundled `botocore` service model for `bedrock-agentcore-control` is too old to know the AgentCore Gateway MCP target shape used by [`deploy/terraform/modules/agentcore-gateway/main.tf`](../deploy/terraform/modules/agentcore-gateway/main.tf). The Terraform `null_resource` calls `aws bedrock-agentcore-control create-gateway-target` with `targetConfiguration.mcp.mcpServer` and `credentialProviderConfigurations[].credentialProvider.iamCredentialProvider`; stale CLIs reject both with `Parameter validation failed: Unknown parameter in targetConfiguration.mcp: "mcpServer"` / `Unknown parameter in credentialProviderConfigurations[0].credentialProvider: "iamCredentialProvider"`. The generic `aws-cli >= 2.15` floor in `pf_check_tool_versions` is **not** sufficient — AWS CLI 2.28.x ships an old service model and was observed in the field hitting this exact failure; AWS CLI 2.34.x and later include the required shape.
+**Detection:** Runs `aws bedrock-agentcore-control create-gateway-target --generate-cli-skeleton input` (offline, no auth, no network), parses the JSON with `python3`, and asserts both fields above are present in the local service model. Auto-skips if `aws` or `python3` is missing — those are reported by `pf_check_tool_versions`.
+**Fix (macOS / Homebrew):** `brew update && brew upgrade awscli && aws --version`.
+**Fix (macOS pkg / Linux):** Reinstall AWS CLI v2 from the official bundle for your arch (`https://awscli.amazonaws.com/AWSCLIV2.pkg` on macOS, `awscli-exe-linux-x86_64.zip` or `awscli-exe-linux-aarch64.zip` on Linux), then `aws --version` to confirm.
+**Fix (CI):** Update the runner base image, or add an "install AWS CLI v2" step before the deploy step. The official `awscli-exe-linux-<arch>.zip` flow works inside `ubuntu-latest`.
 
 #### network-egress
 **Function:** `pf_check_network_egress`
@@ -353,5 +363,5 @@ If you add a new feature, **do not introduce `declare -A`, `local -n`, `mapfile`
 
 - [`AGENTS.md`](../AGENTS.md) — repository conventions; preflight is referenced under "Conventions for code changes".
 - [`docs/deployment-guide.md`](deployment-guide.md) — deploy flow + prerequisites; preflight runs are the first phase of every script listed there.
-- [`docs/debugging.md`](debugging.md) — operational runbook; the **Known persistent pitfalls** section is the long-form companion to this catalog.
+- [`docs/status/debugging.md`](status/debugging.md) — operational runbook; the **Known persistent pitfalls** section is the long-form companion to this catalog.
 - [`README.md`](../README.md) — top-level deploy commands.

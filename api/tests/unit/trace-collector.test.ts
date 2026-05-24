@@ -298,11 +298,69 @@ describe("TraceCollector — attachEventsNested", () => {
 
     const summary = c.toJSON().summary;
     expect(summary.toolCalls).toBe(1);
-    expect(summary.mongoQueries).toBe(1);
+    // mongoQueries uses MAX across per-kind counters to dedupe sibling
+    // events from the same logical call (tool.mcp + mongo.query + mongo.result
+    // are all emitted for ONE Mongo query — summing would 3× the count).
+    // In this synthetic scenario:
+    //   tool.mcp(mongo) = 1, mongo.query = 1, mongo.result = 2, vector_search = 0
+    // → max = 2 (the 2 mongo.result events represent two real upstream
+    //  results — the explicit mongo.query already accounts for one of them,
+    //  the second is treated as a standalone result that must count).
+    // Without the max-dedupe this test produced 4, which silently
+    // double-counted gateway-stripped vs. direct-MCP paths. See
+    // docs/status/debugging.md "AgentCore Gateway response strips meta.traces …".
+    expect(summary.mongoQueries).toBe(2);
     expect(summary.mcpCalls).toBe(1);
     expect(summary.mongoDocsReturned).toBe(5);
     // 1 outer (parent's wrapper) + 1 inner (spliced nested completion).
     expect(summary.agentcoreHops).toBe(2);
+  });
+
+  test("dedupes mongoQueries when tool.mcp + mongo.query + mongo.result are siblings (full direct-MCP path)", () => {
+    // Real-world: a single logical MongoDB call emits ONE of each event kind.
+    // Pre-fix, the rollup summed them and reported 3 queries. Post-fix,
+    // max-across-kinds correctly reports 1.
+    const c = makeCollector();
+    const wrapper = c.start("agentcore.invoke", { arn: "x", mode: "orchestrator_to_specialist", latencyMs: 50 });
+    c.end(wrapper);
+    const wrapperEv = c.getEvents().find((e) => e.id === wrapper)!;
+    const baseTs = wrapperEv.ts;
+
+    const nested = [
+      { id: "tm1", type: "tool.mcp", ts: baseTs - 9, payload: { name: "mongodb-mcp___mongodb_query" } },
+      { id: "mq1", type: "mongo.query", ts: baseTs - 8, payload: { collection: "orders" } },
+      { id: "mr1", type: "mongo.result", ts: baseTs - 6, payload: { docCount: 3 } },
+    ] as any;
+    c.attachEventsNested(nested, wrapper);
+
+    const summary = c.toJSON().summary;
+    expect(summary.mongoQueries).toBe(1);  // ONE logical call, despite 3 event kinds
+    expect(summary.mcpCalls).toBe(1);
+    expect(summary.mongoDocsReturned).toBe(3);
+  });
+
+  test("dedupes mongoQueries on gateway-stripped path (only tool.mcp survives)", () => {
+    // When the AgentCore Gateway strips `meta.traces`, only the tool.mcp
+    // wrapper reaches the parent. The dedicated `toolMcpMongoEvents` counter
+    // ensures mongoQueries stays accurate when no `mongo.*` siblings exist.
+    const c = makeCollector();
+    const wrapper = c.start("agentcore.invoke", { arn: "x", mode: "orchestrator_to_specialist", latencyMs: 50 });
+    c.end(wrapper);
+    const wrapperEv = c.getEvents().find((e) => e.id === wrapper)!;
+    const baseTs = wrapperEv.ts;
+
+    const nested = [
+      { id: "tm1", type: "tool.mcp", ts: baseTs - 9, payload: { toolName: "mongodb-mcp___mongodb_query" } },
+      { id: "tm2", type: "tool.mcp", ts: baseTs - 7, payload: { toolName: "mongodb-mcp___mongodb_vector_search" } },
+      // Deliberately a name that does NOT contain the substring "mongo" so
+      // the /mongo/i fallback regex doesn't mistakenly bump mongoQueries.
+      { id: "tm3", type: "tool.mcp", ts: baseTs - 5, payload: { toolName: "payments-mcp___charge_card" } },
+    ] as any;
+    c.attachEventsNested(nested, wrapper);
+
+    const summary = c.toJSON().summary;
+    expect(summary.mcpCalls).toBe(3);
+    expect(summary.mongoQueries).toBe(2);  // only the two mongo-named tools count
   });
 
   test("idempotency: replaying the same nestedEvents twice (defensive copies) is stable", () => {

@@ -167,7 +167,7 @@ if [[ "$SKIP_DOCKER" == "true" ]]; then
 else
   log "Phase 3 — Building + pushing UI image only..."
   DOCKER_CONFIG_DIR=$(mktemp -d -t deploy-ui-docker-XXXXXX)
-  trap 'rm -rf "$DOCKER_CONFIG_DIR"' EXIT
+  trap 'rm -rf "$DOCKER_CONFIG_DIR"; _pf_release_lock_on_exit' EXIT
   if [[ -d "$HOME/.docker" ]]; then
     cp -R "$HOME/.docker/." "$DOCKER_CONFIG_DIR/"
     if [[ -f "$DOCKER_CONFIG_DIR/config.json" ]]; then
@@ -189,13 +189,12 @@ PY
 
   aws ecr get-login-password --region "$AWS_REGION" \
     | docker login --username AWS --password-stdin "$ECR_REGISTRY" >/dev/null
-  docker buildx build \
-    --platform linux/amd64 \
-    -f "$REPO_ROOT/ui/Dockerfile" \
-    -t "$ECR_UI_REPO:$UI_TAG" \
-    -t "$ECR_UI_REPO:latest" \
-    --push \
-    "$REPO_ROOT/ui"
+  source "$SCRIPT_DIR/scripts/_docker-build.sh"
+  docker_build_push_image linux/amd64 \
+    "$REPO_ROOT/ui/Dockerfile" \
+    "$REPO_ROOT/ui" \
+    "$ECR_UI_REPO:$UI_TAG" \
+    "$ECR_UI_REPO:latest"
   ok "UI image pushed: $ECR_UI_REPO:$UI_TAG"
 fi
 

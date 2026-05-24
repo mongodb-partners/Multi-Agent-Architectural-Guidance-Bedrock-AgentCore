@@ -293,13 +293,28 @@ export class TraceCollector {
     toolUseId?: string;
     latencyMs?: number;
   }>>();
-  /** Per-turn counters consumed by `summary()`. */
+  /** Per-turn counters consumed by `summary()`.
+   *
+   * The mongo counters are split per-event-kind so the summary can take a
+   * MAX across kinds instead of summing them. A single logical Mongo call
+   * fans out into siblings (`tool.mcp` + `mongo.query` + `mongo.result`,
+   * or only the surviving `tool.mcp` when the AgentCore Gateway strips
+   * `meta.traces`), and summing those would 2–3× the real count. Taking
+   * the max correctly returns 1 in every transit configuration. See
+   * docs/status/debugging.md "AgentCore Gateway response strips meta.traces".
+   */
   private toolCallCount = 0;
-  private mongoQueryCount = 0;
   private mongoDocsReturned = 0;
   private mcpCallCount = 0;
   private agentcoreHops = 0;
   private agentcoreRuntimeMs = 0;
+  // Per-kind mongo counters. summary() returns max(...) across these.
+  // Updated by `end(...)` (in-process spans), `attachEventsNested(...)`
+  // (spliced runtime traces), and re-derived from events in summary().
+  private mongoQueryEvents = 0;          // from `mongo.query` start events
+  private mongoResultEvents = 0;         // from `mongo.result` events (1 per logical call)
+  private mongoVectorSearchEvents = 0;   // from `mongo.vector_search` events
+  private toolMcpMongoEvents = 0;        // from `tool.mcp` events whose toolName matches /mongo/i
   private bytesIn = 0;
   private bytesOut = 0;
   private finalAgentId?: string;
@@ -366,7 +381,8 @@ export class TraceCollector {
     if (idx !== -1) this.spanStack.splice(idx, 1);
     // Tally tool / mongo / mcp / agentcore counters.
     if (span?.type === "tool.call") this.toolCallCount += 1;
-    if (span?.type === "mongo.query") this.mongoQueryCount += 1;
+    if (span?.type === "mongo.query") this.mongoQueryEvents += 1;
+    if (span?.type === "mongo.vector_search") this.mongoVectorSearchEvents += 1;
     if (span?.type === "tool.mcp") this.mcpCallCount += 1;
     if (span?.type === "agentcore.invoke") {
       this.agentcoreHops += 1;
@@ -872,11 +888,19 @@ export class TraceCollector {
     let allKnown = true;
     let anyUsage = false;
     let derivedToolCalls = 0;
-    let derivedMongoQueries = 0;
     let derivedMongoDocsReturned = 0;
     let derivedMcpCalls = 0;
     let derivedAgentcoreHops = 0;
     let derivedAgentcoreRuntimeMs = 0;
+    // Per-kind mongo event counts re-derived from `this.events` so summary()
+    // is correct even when in-process counters were not updated (e.g. when
+    // events were spliced from a nested AgentCore runtime trace). Take max
+    // across kinds (not sum) to dedupe sibling events from the same logical
+    // call. See comment on the private mongo*Events fields.
+    let evMongoQueryCount = 0;
+    let evMongoResultCount = 0;
+    let evMongoVectorSearchCount = 0;
+    let evToolMcpMongoCount = 0;
 
     for (const ev of this.events) {
       const payload = (ev.payload ?? {}) as Record<string, unknown>;
@@ -903,19 +927,52 @@ export class TraceCollector {
       } else if (ev.type === "tool.call" && ev.durationMs !== undefined) {
         derivedToolCalls += 1;
       } else if (ev.type === "mongo.query") {
-        derivedMongoQueries += 1;
+        // Span start (no durationMs) AND one-off `event(...)` (also no
+        // durationMs) both denote one logical call. The end half (with
+        // durationMs) is the same span and must not be counted again.
+        if (ev.durationMs === undefined) evMongoQueryCount += 1;
       } else if (ev.type === "mongo.result") {
+        evMongoResultCount += 1;
         derivedMongoDocsReturned += Number(payload.docCount ?? 0) || 0;
       } else if (ev.type === "mongo.vector_search") {
-        derivedMongoQueries += 1;
+        if (ev.durationMs === undefined) evMongoVectorSearchCount += 1;
         derivedMongoDocsReturned += Array.isArray(payload.scores) ? payload.scores.length : 0;
       } else if (ev.type === "tool.mcp") {
-        derivedMcpCalls += 1;
+        if (ev.durationMs === undefined) derivedMcpCalls += 1;
+        const toolName = (payload as { toolName?: unknown; name?: unknown }).toolName
+          ?? (payload as { name?: unknown }).name;
+        if (typeof toolName === "string" && /mongo/i.test(toolName)) {
+          if (ev.durationMs === undefined) evToolMcpMongoCount += 1;
+        }
       } else if (ev.type === "agentcore.invoke" && ev.durationMs !== undefined) {
         derivedAgentcoreHops += 1;
         derivedAgentcoreRuntimeMs += Number(payload.latencyMs ?? ev.durationMs ?? 0) || 0;
       }
     }
+
+    // Dedupe: a single logical mongo call typically emits one of each of
+    // `tool.mcp` (mongo-named) + `mongo.query` + `mongo.result`, depending
+    // on whether the AgentCore Gateway path strips `meta.traces`. Summing
+    // them double/triple-counts; the MAX is correct in every transit shape:
+    //   * Gateway path: only tool.mcp survives → max = tool.mcp count
+    //   * Direct MCP:  all three present, 1:1 ratio → max = any one
+    //   * Legacy in-process: no MCP wrapper → max = mongo.query / .result
+    const mongoQueriesFromEvents = Math.max(
+      evMongoQueryCount,
+      evMongoResultCount,
+      evMongoVectorSearchCount,
+      evToolMcpMongoCount,
+    );
+    // Also consider the in-process counters (updated by `end()` from
+    // `mongo.query` / `mongo.vector_search` spans). Re-derive their max
+    // too so they don't double-add to event-derived counts.
+    const mongoQueriesFromSpans = Math.max(
+      this.mongoQueryEvents,
+      this.mongoVectorSearchEvents,
+      this.mongoResultEvents,
+      this.toolMcpMongoEvents,
+    );
+    const mongoQueries = Math.max(mongoQueriesFromEvents, mongoQueriesFromSpans);
 
     return {
       inputTokens,
@@ -924,7 +981,7 @@ export class TraceCollector {
       cacheReadInputTokens: cacheReadInputTokens || undefined,
       cacheWriteInputTokens: cacheWriteInputTokens || undefined,
       toolCalls: Math.max(this.toolCallCount, derivedToolCalls),
-      mongoQueries: Math.max(this.mongoQueryCount, derivedMongoQueries),
+      mongoQueries,
       mongoDocsReturned: Math.max(this.mongoDocsReturned, derivedMongoDocsReturned),
       mcpCalls: Math.max(this.mcpCallCount, derivedMcpCalls),
       agentcoreHops: Math.max(this.agentcoreHops, derivedAgentcoreHops) || undefined,
@@ -1026,12 +1083,35 @@ export class TraceCollector {
       // `mongoQueries: 0` for AgentCore Runtime turns even though every
       // mongo.* / tool.* event is present in the events list — exactly the
       // observability gap that motivated the runtime trace splice.
+      //
+      // Per-kind mongo counters: increment the matching kind on every
+      // spliced event and let `summary()` take the MAX across kinds at
+      // rollup time. Summing kinds would 2–3× the real query count
+      // because a single logical Mongo call fans out into siblings
+      // (`tool.mcp` + `mongo.query` + `mongo.result`, or only the surviving
+      // `tool.mcp` when the AgentCore Gateway strips `meta.traces`).
+      //
+      // For span pairs (start: no durationMs, end: durationMs set), count
+      // only the start half to avoid double-counting within a single kind.
       if (ev.type === "tool.call") {
         if (ev.durationMs != null) this.toolCallCount += 1;
       } else if (ev.type === "mongo.query") {
-        this.mongoQueryCount += 1;
+        if (ev.durationMs === undefined) this.mongoQueryEvents += 1;
+      } else if (ev.type === "mongo.vector_search") {
+        if (ev.durationMs === undefined) this.mongoVectorSearchEvents += 1;
       } else if (ev.type === "tool.mcp") {
-        this.mcpCallCount += 1;
+        if (ev.durationMs === undefined) this.mcpCallCount += 1;
+        // MongoDB-targeted gateway tool: the AgentCore Gateway path strips
+        // `meta.traces` from MCP envelopes so `mongo.query` events from the
+        // MongoDB MCP runtime never reach the rollup; only this `tool.mcp`
+        // survives. Without bumping the dedicated counter, the gateway-path
+        // turn summary would show `mongoQueries: 0` even though every
+        // gateway hop ran a real Mongo query.
+        const toolName = (payload as { toolName?: unknown; name?: unknown }).toolName
+          ?? (payload as { name?: unknown }).name;
+        if (typeof toolName === "string" && /mongo/i.test(toolName)) {
+          if (ev.durationMs === undefined) this.toolMcpMongoEvents += 1;
+        }
       } else if (ev.type === "agentcore.invoke") {
         // Roll up the orchestrator → specialist hop (and any deeper hops in
         // future) so `summary.agentcoreHops` reflects the real runtime
@@ -1047,11 +1127,14 @@ export class TraceCollector {
         if (ev.durationMs != null) this.agentcoreHops += 1;
       }
 
-      // Roll up mongo docs returned. Each `mongo.result` event payload
-      // carries `docCount: <n>` (see lambda/mongodb-mcp/index.mjs →
-      // `tracing.mjs` and the `traceMongoResult` helper). Earlier in-process
-      // emitters used `count`, so accept both fields for backward compat.
+      // mongo.result: bump the dedicated counter (mutually exclusive with
+      // the kinds above — summary takes max), and accumulate doc counts.
+      // Each `mongo.result` event payload carries `docCount: <n>` from
+      // mcp-runtimes/mongodb-mcp/src/vendor/handlers.mjs (the MongoDB MCP
+      // runtime). Legacy in-process emitters used `count` — accept both
+      // for backward compat.
       if (ev.type === "mongo.result") {
+        this.mongoResultEvents += 1;
         const p = payload as { docCount?: unknown; count?: unknown };
         const c = typeof p.docCount === "number" ? p.docCount
                 : typeof p.count === "number" ? p.count

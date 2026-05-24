@@ -19,7 +19,5 @@ groups:
 
   - title: Memory
     prompts:
-      - label: Identity fact
-        text: My email is alice@example.com — remember that for future questions.
       - label: Preference fact
         text: I prefer dark roast coffee and 12oz cups.

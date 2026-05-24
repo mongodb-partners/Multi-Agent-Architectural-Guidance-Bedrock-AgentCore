@@ -49,6 +49,25 @@ variable "mcp_server_runtime_arn" {
   default     = ""
 }
 
+variable "mcp_server_image_digest" {
+  type        = string
+  description = <<-EOT
+    SHA256 digest (or any opaque change-tracking string) of the MCP server's
+    container image. When this value changes the gateway-target `null_resource`
+    re-runs its local-exec, which deletes the existing target and recreates it
+    so the gateway re-fetches `tools/list` against the freshly-deployed MCP
+    runtime version. Without this trigger the gateway caches the schema
+    captured at create-time and silently serves stale tool shapes. See
+    docs/status/debugging.md "AgentCore Gateway target caches tool schemas — refresh
+    after MCP runtime change".
+
+    Pass empty string ("") to opt out of digest-driven refresh — the
+    `deploy-project.sh` Phase 4d helper still force-recreates the target after
+    every image push as a belt-and-suspenders fallback.
+  EOT
+  default     = ""
+}
+
 variable "cognito_user_pool_id" {
   type        = string
   description = "Cognito User Pool ID (used as JWT authorizer issuer)"

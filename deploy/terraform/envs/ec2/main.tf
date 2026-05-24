@@ -953,9 +953,16 @@ module "agentcore_gateway" {
   create_mcp_server_target = true
   mcp_server_endpoint      = local.mongodb_mcp_runtime_endpoint
   mcp_server_runtime_arn   = local.mongodb_mcp_runtime_arn
-  cognito_user_pool_id     = module.cognito.user_pool_id
-  cognito_app_client_id    = module.cognito.user_pool_client_id
-  tags                     = local.common_tags
+  # Make the digest of the live MCP runtime image part of the gateway-target
+  # triggers. When `docker push` updates :latest, the digest moves and the next
+  # `terraform apply` re-runs the target's local-exec — which detects the
+  # existing target, deletes it, and recreates it so the gateway refreshes its
+  # cached tool schemas. Empty string is tolerated (no-op trigger) for first
+  # deploys / cold ECR repos.
+  mcp_server_image_digest = var.mongodb_mcp_image_digest
+  cognito_user_pool_id    = module.cognito.user_pool_id
+  cognito_app_client_id   = module.cognito.user_pool_client_id
+  tags                    = local.common_tags
 
   depends_on = [
     module.cognito,

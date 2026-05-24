@@ -244,6 +244,12 @@ resource "null_resource" "mcp_server_gateway_target" {
     endpoint   = var.mcp_server_endpoint
     region     = var.aws_region
     name       = local.target_name
+    # When the operator passes a non-empty digest, any change forces the
+    # local-exec to re-run, which deletes the existing target (in the case
+    # branch below) and recreates it so the gateway re-fetches tool schemas
+    # from the new MCP runtime version. See docs/status/debugging.md "AgentCore
+    # Gateway target caches tool schemas — refresh after MCP runtime change".
+    mcp_server_image_digest = var.mcp_server_image_digest
   }
 
   provisioner "local-exec" {
@@ -255,16 +261,55 @@ resource "null_resource" "mcp_server_gateway_target" {
       ENDPOINT="${var.mcp_server_endpoint}"
       REGION="${var.aws_region}"
 
-      # Idempotency: skip creation if a target with this name already exists
+      # Idempotency: if a target with this name already exists, only skip when it
+      # is actively healthy. A target stuck in CREATING/UPDATING is still settling,
+      # so we treat it as in-progress and exit 0. A FAILED target is a permanent
+      # error that the previous "name-only" guard hid for hours (no MCP tools at
+      # all in the gateway); we now delete it so this apply re-creates a clean one
+      # below. Any other status is treated as in-progress and we exit 0 to avoid
+      # racing the API.
       EXISTING=$(aws bedrock-agentcore-control list-gateway-targets \
         --gateway-identifier "$GW" \
         --region "$REGION" \
-        --query "items[?name=='$NAME'].targetId" \
-        --output text 2>/dev/null || true)
+        --query "items[?name=='$NAME'] | [0]" \
+        --output json 2>/dev/null || echo null)
 
-      if [[ -n "$EXISTING" ]]; then
-        echo "[agentcore-gateway] MCP target '$NAME' already exists (id=$EXISTING) — skipping create"
-        exit 0
+      if [[ "$EXISTING" != "null" && -n "$EXISTING" ]]; then
+        EXISTING_ID=$(echo "$EXISTING" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("targetId",""))')
+        EXISTING_STATUS=$(echo "$EXISTING" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("status",""))')
+        case "$EXISTING_STATUS" in
+          READY|ACTIVE)
+            echo "[agentcore-gateway] MCP target '$NAME' (id=$EXISTING_ID) is $EXISTING_STATUS — skipping create"
+            exit 0
+            ;;
+          FAILED)
+            REASON=$(aws bedrock-agentcore-control get-gateway-target \
+              --gateway-identifier "$GW" --region "$REGION" --target-id "$EXISTING_ID" \
+              --query 'statusReasons' --output text 2>/dev/null || true)
+            echo "[agentcore-gateway] MCP target '$NAME' (id=$EXISTING_ID) is FAILED — deleting and recreating"
+            echo "[agentcore-gateway]   statusReasons: $REASON"
+            aws bedrock-agentcore-control delete-gateway-target \
+              --gateway-identifier "$GW" --region "$REGION" --target-id "$EXISTING_ID" \
+              --output text >/dev/null
+            # Wait for deletion so the create below uses a clean name slot.
+            for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do
+              STILL=$(aws bedrock-agentcore-control list-gateway-targets \
+                --gateway-identifier "$GW" --region "$REGION" \
+                --query "items[?targetId=='$EXISTING_ID'] | length(@)" \
+                --output text 2>/dev/null || echo 0)
+              if [[ "$STILL" == "0" ]]; then break; fi
+              sleep 5
+            done
+            ;;
+          CREATING|UPDATING|DELETING)
+            echo "[agentcore-gateway] MCP target '$NAME' (id=$EXISTING_ID) is $EXISTING_STATUS — leaving alone, next apply will reconcile"
+            exit 0
+            ;;
+          *)
+            echo "[agentcore-gateway] MCP target '$NAME' (id=$EXISTING_ID) has unexpected status '$EXISTING_STATUS' — leaving alone, next apply will reconcile"
+            exit 0
+            ;;
+        esac
       fi
 
       echo "[agentcore-gateway] Creating MCP server target '$NAME' on gateway $GW …"

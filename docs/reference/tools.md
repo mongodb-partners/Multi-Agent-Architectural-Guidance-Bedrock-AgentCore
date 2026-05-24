@@ -49,12 +49,12 @@ Rules:
 - `activate_skill` is automatic. You do not list it in `tools:`.
 - Specialists pre-activate their configured `skills:` before the first model call, so they usually do not need to call `activate_skill`.
 - `read_skill_resource`, `run_skill_script`, and skill HTTP tools are gated by the agent's `skills:` allowlist and by skill activation.
-- MongoDB tool calls never open a MongoDB driver inside the chat runtime. They go through the MongoDB MCP AgentCore Runtime.
+- MongoDB tool calls never open a MongoDB driver inside the chat runtime. They go through AgentCore Gateway, whose target invokes the MongoDB MCP AgentCore Runtime.
 - `GET /http-tools` lists configured HTTP tools only. It is not the full tool catalog.
 
 ## 3. MongoDB MCP tools
 
-MongoDB tools are served by the dedicated MongoDB MCP AgentCore Runtime under `mcp-runtimes/mongodb-mcp/`. The API/runtime wrapper in `api/src/adapters/mongodb-mcp-client.ts` handles transport, trace events, user scoping, vector embedding, and compatibility with the agent-facing tool names.
+MongoDB tools are served through AgentCore Gateway. The Gateway target invokes the dedicated MongoDB MCP AgentCore Runtime under `mcp-runtimes/mongodb-mcp/`. The API/runtime wrapper in `api/src/adapters/mongodb-mcp-client.ts` handles transport, trace events, user scoping, vector embedding, and compatibility with the agent-facing tool names.
 
 ### `mongodb_query`
 
@@ -302,23 +302,55 @@ Global HTTP tools are not skill-activation gated. Use them only when the tool is
 
 1. Confirm the tool is listed in the agent's `tools:` array, except for `activate_skill`.
 2. Confirm the required skill is listed in the agent's `skills:` array and is activated for skill-gated tools.
-3. For Mongo tools, verify `/health` shows `mcpServer: "connected"` and check `MONGODB_MCP_RUNTIME_ARN` / `MONGODB_MCP_RUNTIME_ENDPOINT` in `.env.live`.
+3. For Mongo tools, verify `/health` shows `mcpServer: "connected"` and check `AGENTCORE_GATEWAY_URL` in `.env.live`. Use `MCP_SERVER_URL` only for explicit local-development overrides.
 4. For vector search, verify indexes with `db-seeding/seed-indexes.ts` and confirm the embedding provider env (`VOYAGE_SAGEMAKER_ENDPOINT` or `EMBEDDING_MODEL_ID`).
 5. For HTTP tools, call `GET /http-tools` and check URL configured status plus root SSRF allowlist.
 6. Open the Trace Viewer for a failed chat turn and inspect `tool.call`, `tool.mcp`, `tool.http`, `mongo.query`, and `mongo.vector_search` events.
 7. Check service logs by component: API logs for tool registration/wrapping, AgentCore runtime logs for model-side tool choice, MCP runtime logs for Mongo guard failures.
 
-## 9. Source of truth
+## 9. Adding a new MCP runtime behind the AgentCore Gateway
+
+When you add another MCP server runtime alongside `mcp-runtimes/mongodb-mcp/` (e.g. a payments MCP, an inventory MCP, a third-party SaaS MCP wrapped as a runtime), **every tool's input schema must spread the `_meta` passthrough or it will fail every gateway-routed call with `ValidationException - property '_meta' is not defined in the schema`**. The AgentCore Gateway proxies `tools/call` upstream with `_meta` populated (correlation IDs, progress tokens, etc.) and AWS validates the forwarded arguments against the tool's declared `inputSchema`.
+
+Required pattern (mirror from `mcp-runtimes/mongodb-mcp/src/schemas.ts`):
+
+```typescript
+import { z } from "zod";
+
+export const META_PASSTHROUGH = { _meta: z.record(z.string(), z.unknown()).optional() };
+
+export const myToolInputSchema = {
+  // ...real fields...
+  ...META_PASSTHROUGH,
+};
+```
+
+And strip `_meta` in your dispatch before invoking the underlying handler so the handler's own validation/logging never sees the envelope key:
+
+```typescript
+async function dispatch(toolName, args) {
+  const { _meta: _ignored, ...handlerArgs } = args ?? {};
+  // ...invoke handler with handlerArgs...
+}
+```
+
+Pinned by `api/tests/unit/mcp-meta-passthrough.test.ts`. Add your tool to `ALL_TOOL_INPUT_SCHEMAS` in `mcp-runtimes/<your-mcp>/src/schemas.ts` and the test's `baseArgsFor()` switch so the regression auto-covers it.
+
+Also update `_agents-common.sh::force_mcp_runtime_image_sync` (or add a sibling helper) so the operator-driven deploy bumps your runtime's container version after every image push — without it the AgentCore runtime keeps serving the previous image because `:latest` is a constant string in Terraform. See [`docs/status/debugging.md`](../status/debugging.md) "AgentCore Runtime image push does not auto-trigger a runtime version bump" and "AgentCore Gateway target caches tool schemas — refresh after MCP runtime change".
+
+## 10. Source of truth
 
 | Concern | Source file |
 |---|---|
 | Static Bedrock + skill tools | `api/src/lib/base-tools.ts` |
 | Mongo tool wrapper, vector embedding, user scoping | `api/src/adapters/mongodb-mcp-client.ts` |
 | Mongo MCP server registration | `mcp-runtimes/mongodb-mcp/src/server.ts` |
+| Mongo MCP tool input schemas (incl. `_meta` passthrough) | `mcp-runtimes/mongodb-mcp/src/schemas.ts` |
 | Mongo guard/handler behavior | `mcp-runtimes/mongodb-mcp/src/vendor/handlers.mjs`, `mcp-runtimes/mongodb-mcp/src/vendor/guards.mjs` |
 | HTTP tool schema | `api/src/lib/http-tools-schema.ts` |
 | Root HTTP tool loading | `api/src/lib/http-tools-load.ts` |
 | Skill HTTP tool loading | `api/src/lib/skill-http-tools-load.ts` |
 | HTTP tool execution | `api/src/lib/http-tools-runtime.ts` |
 | Agent config schema | `api/src/lib/schemas.ts` |
+| MCP runtime image-sync + gateway-target refresh | `deploy/scripts/_agents-common.sh::force_mcp_runtime_image_sync` |
 
