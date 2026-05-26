@@ -52,11 +52,21 @@ validate_aws_auth() {
     See deploy/iam/README.md for the STS / SSO / OIDC setup."
       return 1
     fi
+    # AUTH_MODE=iam + static keys present is the unambiguous case. The AWS
+    # SDK v3 emits a loud "Multiple credential sources detected" warning
+    # whenever both AWS_PROFILE and the static key pair coexist (visible to
+    # operators in db-seeding/seed-embeddings.ts and any other node-side
+    # tool downstream of the deploy). Same fix for AWS_SESSION_TOKEN: a
+    # token from a previous STS run, left behind in the shell, can
+    # short-circuit static-key signing if the SDK picks the wrong chain.
+    # We actively unset both — opt-out is to flip AUTH_MODE=sts in .env.
     if [[ -n "${AWS_SESSION_TOKEN:-}" ]]; then
-      _auth_warn "AWS_SESSION_TOKEN is set with AUTH_MODE=iam — mixing static keys with a session token is the #1 source of 'wrong creds used' bugs. Unset it, or switch to AUTH_MODE=sts."
+      _auth_warn "AWS_SESSION_TOKEN is set with AUTH_MODE=iam — unsetting it. Mixing static keys with a session token is the #1 source of 'wrong creds used' bugs. Switch to AUTH_MODE=sts if you intended a token-based flow."
+      unset AWS_SESSION_TOKEN
     fi
     if [[ -n "${AWS_PROFILE:-}" ]]; then
-      _auth_warn "AWS_PROFILE='${AWS_PROFILE}' is set with AUTH_MODE=iam — the AWS CLI may silently prefer the profile over your static keys. Unset it, or switch to AUTH_MODE=sts."
+      _auth_warn "AWS_PROFILE='${AWS_PROFILE}' is set with AUTH_MODE=iam — unsetting it so downstream tools (AWS SDK v3, bun, node) signal-source the static keys without ambiguity. Switch to AUTH_MODE=sts if you intended profile-based credentials."
+      unset AWS_PROFILE
     fi
   else
     # sts

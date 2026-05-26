@@ -39,6 +39,11 @@ import {
 import { BedrockRuntimeClient, InvokeModelCommand } from "@aws-sdk/client-bedrock-runtime";
 import type { Collection } from "mongodb";
 import { connect } from "./connect.ts";
+// Single source of truth for the Voyage request envelope. The historical
+// local copy of buildVoyageBody here caused 'input' vs 'inputs' drift to land
+// in the recovery path — the worst possible time. Pure function: reads env
+// (VOYAGE_REQUEST_FORMAT, VOYAGE_OUTPUT_DIM) at call time.
+import { buildVoyageRequestBody } from "../api/src/adapters/voyage-embedding.ts";
 
 // ---------------------------------------------------------------------------
 // Config + strict provider gate
@@ -50,11 +55,6 @@ const DECLARED_PROVIDER = (process.env.EMBEDDINGS_PROVIDER ?? "").trim().toLower
 const VOYAGE_ENDPOINT = process.env.VOYAGE_SAGEMAKER_ENDPOINT?.trim();
 const BEDROCK_MODEL_ID = process.env.EMBEDDING_MODEL_ID?.trim();
 const region = process.env.AWS_REGION ?? "us-east-1";
-const VOYAGE_OUTPUT_DIM = Number(process.env.VOYAGE_OUTPUT_DIM ?? 1024);
-const VOYAGE_REQUEST_FORMAT =
-  (process.env.VOYAGE_REQUEST_FORMAT ?? "multimodal").trim().toLowerCase() === "legacy"
-    ? "legacy"
-    : "multimodal";
 
 let BATCH_SIZE = 100;
 const batchIdx = process.argv.indexOf("--batch");
@@ -108,22 +108,10 @@ const reembedFilter = {
 // on the API runtime). Both providers return 1024-d vectors.
 // ---------------------------------------------------------------------------
 
-function buildVoyageBody(text: string): string {
-  const truncated = text.slice(0, 32_000);
-  if (VOYAGE_REQUEST_FORMAT === "legacy") {
-    return JSON.stringify({
-      input: [truncated],
-      input_type: "document",
-      output_dimension: VOYAGE_OUTPUT_DIM,
-    });
-  }
-  return JSON.stringify({
-    inputs: [{ content: [{ type: "text", text: truncated }] }],
-    input_type: "document",
-    truncation: true,
-    output_encoding: null,
-  });
-}
+// Body builder imported below from the api adapter — DO NOT inline a third
+// copy here. The historical local copy caused 'input' vs 'inputs' drift to
+// land in operator recovery runs (worst possible time) the moment the API
+// adapter changed shape.
 
 async function embedViaVoyage(text: string): Promise<{ vector: number[]; model: string }> {
   const client = new SageMakerRuntimeClient({ region });
@@ -131,7 +119,7 @@ async function embedViaVoyage(text: string): Promise<{ vector: number[]; model: 
     EndpointName: VOYAGE_ENDPOINT!,
     ContentType: "application/json",
     Accept: "application/json",
-    Body: Buffer.from(buildVoyageBody(text)),
+    Body: Buffer.from(buildVoyageRequestBody(text, "document")),
   });
   const res = await client.send(cmd);
   const decoded = JSON.parse(new TextDecoder().decode(res.Body)) as {

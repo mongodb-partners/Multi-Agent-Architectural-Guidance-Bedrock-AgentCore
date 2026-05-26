@@ -262,6 +262,24 @@ for p in "${REQUIRED_PARAMS[@]}"; do
 done
 ok "All ${#REQUIRED_PARAMS[@]} SSM params populated"
 
+# Post-apply preflight: confirm the freshly-provisioned Voyage SageMaker
+# endpoint actually accepts the configured VOYAGE_REQUEST_FORMAT envelope.
+# Skipped automatically when EMBEDDINGS_PROVIDER != voyage. Catches the case
+# where VOYAGE_MARKETPLACE_MODEL claims voyage-multimodal-3 but
+# VOYAGE_MODEL_PACKAGE_ARN points at a text-only Voyage listing — without
+# this, db-seeding/seed-embeddings.ts is the first place to hit the 4xx,
+# minutes after Phase 11 of deploy-project.sh has already started.
+#
+# Export VOYAGE_SAGEMAKER_ENDPOINT so the check uses the just-published name
+# (matches what deploy-project.sh writes into .env.live a few phases later).
+if [[ -n "$VOYAGE_MODEL_PACKAGE_ARN" ]]; then
+  VOYAGE_ENDPOINT_FROM_TF="$(terraform output -raw voyage_endpoint_name 2>/dev/null || echo "")"
+  if [[ -n "$VOYAGE_ENDPOINT_FROM_TF" ]]; then
+    export VOYAGE_SAGEMAKER_ENDPOINT="$VOYAGE_ENDPOINT_FROM_TF"
+  fi
+  preflight_validate shared-post-apply
+fi
+
 VOYAGE_NAME=$(terraform output -raw voyage_endpoint_name 2>/dev/null || echo "")
 API_LG=$(terraform output -raw cloudwatch_api_log_group 2>/dev/null || echo "")
 FLEET_URL=$(terraform output -raw fleet_dashboard_url 2>/dev/null || echo "")

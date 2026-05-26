@@ -49,6 +49,11 @@ import {
 import { BedrockRuntimeClient, InvokeModelCommand } from "@aws-sdk/client-bedrock-runtime";
 import type { Filter } from "mongodb";
 import { connect } from "./connect.ts";
+// Single source of truth for the Voyage request envelope. Importing the
+// API-side builder eliminates the drift surface that caused 'Field required'
+// 400s when the seeder copy and the runtime copy disagreed about
+// 'input' vs 'inputs'. Pure function: only reads env at call time.
+import { buildVoyageRequestBody } from "../api/src/adapters/voyage-embedding.ts";
 
 const DECLARED_PROVIDER = (process.env.EMBEDDINGS_PROVIDER ?? "").trim().toLowerCase();
 const VOYAGE_ENDPOINT = process.env.VOYAGE_SAGEMAKER_ENDPOINT?.trim();
@@ -149,29 +154,13 @@ const TROUBLESHOOTING_PLAN: CollectionPlan = {
 // voyage-3.5-lite (legacy) returns 2048-d by default and accepts output_dimension —
 // keep VOYAGE_OUTPUT_DIM=1024 there too. Override via env if you rebuild the
 // index for a different size.
-const VOYAGE_OUTPUT_DIM = Number(process.env.VOYAGE_OUTPUT_DIM ?? 1024);
-const VOYAGE_REQUEST_FORMAT = (process.env.VOYAGE_REQUEST_FORMAT ?? "multimodal")
-  .trim()
-  .toLowerCase() === "legacy"
-  ? "legacy"
-  : "multimodal";
-
-function buildVoyageBody(text: string): string {
-  const truncated = text.slice(0, 32_000);
-  if (VOYAGE_REQUEST_FORMAT === "legacy") {
-    return JSON.stringify({
-      input: [truncated],
-      input_type: "document",
-      output_dimension: VOYAGE_OUTPUT_DIM,
-    });
-  }
-  return JSON.stringify({
-    inputs: [{ content: [{ type: "text", text: truncated }] }],
-    input_type: "document",
-    truncation: true,
-    output_encoding: null,
-  });
-}
+//
+// The request envelope itself is built by `buildVoyageRequestBody` imported
+// from api/src/adapters/voyage-embedding.ts (above). DO NOT inline a local
+// copy here — historical drift between this seeder and the API adapter was
+// the proximate cause of the "Field required: input" SageMaker 400 burn.
+// Both readers honor VOYAGE_REQUEST_FORMAT + VOYAGE_OUTPUT_DIM at runtime,
+// so seeder runs and API runs see the same envelope guaranteed by import.
 
 async function embedViaVoyage(text: string): Promise<number[]> {
   const client = new SageMakerRuntimeClient({ region });
@@ -179,7 +168,7 @@ async function embedViaVoyage(text: string): Promise<number[]> {
     EndpointName: VOYAGE_ENDPOINT!,
     ContentType: "application/json",
     Accept: "application/json",
-    Body: Buffer.from(buildVoyageBody(text)),
+    Body: Buffer.from(buildVoyageRequestBody(text, "document")),
   });
   const res = await client.send(cmd);
   const decoded = JSON.parse(new TextDecoder().decode(res.Body)) as {
