@@ -264,7 +264,7 @@ def test_render_memory_write_surfaces_outcome_extractor_and_user_input(monkeypat
 
 
 def test_dev_memory_internals_renders_full_candidates_table_with_rejected_reasons(monkeypatch) -> None:
-    """The "All candidates considered" expander moved from client → dev.
+    """The "All candidates considered" expander moved from summary → dev.
     Assert its body (matched candidate text + rejected reasons) lands in
     the recorder when `_dev_memory_internals` is called."""
     recorder = _Recorder()

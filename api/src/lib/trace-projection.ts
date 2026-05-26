@@ -60,9 +60,15 @@ const STRIP_FIELDS_BY_TYPE: Partial<Record<TraceEventType, ReadonlyArray<string>
   "prompt.assembled": ["body"],
   "model.request": ["userMessage", "messagesSeed", "priorTurnsPreview"],
   "model.thinking_block": ["text"],
-  "mongo.query": ["pipeline", "filter", "normalizedFilter", "projection", "sort"],
-  "mongo.result": ["sampleDocs"],
-  "mongo.vector_search": ["documentPreviews.fields", "queryVectorPreview", "filter"],
+  // All `mongo.*` payload fields are intentionally NOT stripped in core mode
+  // — the client-facing MongoDB dashboard renders the filter, pipeline,
+  // sample docs, queryVectorPreview, vector filter, and per-document
+  // previews inline (it's the demo-critical "what Mongo did this turn"
+  // view). The trace collector's per-event byte cap (`shrinkPayload` trims
+  // `sampleDocs` when an event exceeds `TRACE_MAX_EVENT_BYTES`) still
+  // bounds the worst case, and `mongo.vector_search.documentPreviews` is
+  // additionally capped to the top-3 entries below (separately from
+  // STRIP_FIELDS_BY_TYPE) so a 50-hit search doesn't bloat the payload.
   "memory.long_term_write": [
     "factCandidates",
     "extractorRawText",
@@ -88,7 +94,14 @@ const STRIP_FIELDS_BY_TYPE: Partial<Record<TraceEventType, ReadonlyArray<string>
 };
 
 /** Event types dropped entirely from `core` mode. The Developer details
- *  panel is the only consumer of these. */
+ *  panel is the only consumer of these.
+ *
+ *  Intentionally NOT in this set (kept in client-mode trace):
+ *    - `chat.mirror.embedding_failed` — surfaces strict-mode embedding
+ *      failures in the per-turn Trace Viewer so operators can see at a
+ *      glance when `chat_messages` rows landed without vectors. The payload
+ *      is tiny (messageId, sessionId, code, message) so no stripping needed.
+ */
 const DEV_ONLY_EVENT_TYPES: ReadonlySet<TraceEventType> = new Set<TraceEventType>([
   "dev.environment",
   "dev.byte_cap_hit",
@@ -171,23 +184,33 @@ function projectEventForCore(ev: TraceEvent): TraceEvent | null {
   if (DEV_ONLY_EVENT_TYPES.has(ev.type)) return null;
 
   const stripFields = STRIP_FIELDS_BY_TYPE[ev.type];
-  if (!stripFields || stripFields.length === 0) return ev;
+  const isVectorSearch = ev.type === "mongo.vector_search";
+  // If there's nothing to strip AND no per-event cap to apply, the event
+  // passes through untouched.
+  if ((!stripFields || stripFields.length === 0) && !isVectorSearch) return ev;
 
   const payload = { ...((ev.payload ?? {}) as Record<string, unknown>) };
 
-  for (const field of stripFields) {
-    if (field.includes(".")) {
-      stripNestedPath(payload, field);
-      continue;
+  if (stripFields) {
+    for (const field of stripFields) {
+      if (field.includes(".")) {
+        stripNestedPath(payload, field);
+        continue;
+      }
+      if (!(field in payload)) continue;
+      const value = payload[field];
+      if (value === undefined || value === null) continue;
+      payload[field] = stripSentinel(value);
     }
-    if (!(field in payload)) continue;
-    const value = payload[field];
-    if (value === undefined || value === null) continue;
-    payload[field] = stripSentinel(value);
   }
 
-  // mongo.vector_search: keep only top-3 documentPreviews in core mode.
-  if (ev.type === "mongo.vector_search") {
+  // mongo.vector_search: keep only top-3 documentPreviews in core mode. This
+  // cap is independent of STRIP_FIELDS_BY_TYPE because the vector_search
+  // payload fields (filter, queryVectorPreview, documentPreviews[].fields)
+  // are intentionally NOT sentinel-stripped — the client dashboard renders
+  // them inline — but a 50-hit search would still bloat the trace doc, so
+  // we keep the array cap.
+  if (isVectorSearch) {
     const previews = payload.documentPreviews;
     if (Array.isArray(previews) && previews.length > CORE_DOC_PREVIEWS_LIMIT) {
       payload.documentPreviews = previews.slice(0, CORE_DOC_PREVIEWS_LIMIT);

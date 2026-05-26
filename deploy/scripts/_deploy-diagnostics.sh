@@ -108,9 +108,15 @@ deploy_diag_terraform_context() {
   local tf_dir="${2:-${PWD}}"
   local backend_file="${3:-}"
   local plan_file="${4:-}"
-  local terraform_path terraform_version
+  local terraform_path terraform_version tf_raw
   terraform_path="$(command -v terraform 2>/dev/null || echo "not found")"
-  terraform_version="$(terraform version 2>/dev/null | awk 'NR == 1 {print; exit}' || true)"
+  # SIGPIPE-safe: capture full multi-line `terraform version` output (3+ lines
+  # on terraform ≥ 1.6) into a variable, then slice the first line via bash
+  # parameter expansion. Avoids the `| awk 'NR==1 {print; exit}'` pattern that
+  # closes terraform's stdout early under `set -o pipefail` (sourced into
+  # every deploy script). See docs/deployment-preflight-checks.md#shell-runtime-safe.
+  tf_raw="$(terraform version 2>/dev/null)" || tf_raw=""
+  terraform_version="${tf_raw%%$'\n'*}"
 
   deploy_diag_log "${phase}: cwd=$(pwd) tf_dir=${tf_dir}"
   deploy_diag_log "${phase}: terraform=${terraform_path} ${terraform_version:-version-unavailable}"

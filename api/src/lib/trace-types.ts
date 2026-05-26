@@ -33,6 +33,7 @@ export type TraceEventType =
   | "memory.scoped_read"
   | "memory.long_term_write"
   | "memory.long_term_skip"
+  | "chat.mirror.embedding_failed"
   | "prompt.assembled"
   | "model.request"
   | "model.text_delta_batch"
@@ -651,6 +652,19 @@ export type ErrorPayload = {
   source?: string;
 };
 
+// Chat-mirror embedding failure (strict-mode `EMBEDDINGS_PROVIDER` could not
+// produce a vector for this chat message — row was still persisted to
+// `chat_messages` with an `embeddingError` marker, but vector search will
+// miss it until backfilled).
+export type ChatMirrorEmbeddingFailedPayload = {
+  messageId: string;
+  sessionId: string;
+  agentId?: string;
+  role: "user" | "assistant";
+  code: string;
+  message: string;
+};
+
 // ---------------------------------------------------------------------------
 // Discriminated union
 // ---------------------------------------------------------------------------
@@ -663,6 +677,7 @@ export type TraceEvent =
   | (TraceEventBase & { type: "memory.scoped_read"; payload: MemoryReadPayload })
   | (TraceEventBase & { type: "memory.long_term_write"; payload: MemoryLongTermWritePayload })
   | (TraceEventBase & { type: "memory.long_term_skip"; payload: MemoryLongTermSkipPayload })
+  | (TraceEventBase & { type: "chat.mirror.embedding_failed"; payload: ChatMirrorEmbeddingFailedPayload })
   | (TraceEventBase & { type: "prompt.assembled"; payload: PromptAssembledPayload })
   | (TraceEventBase & { type: "model.request"; payload: ModelRequestPayload })
   | (TraceEventBase & { type: "model.text_delta_batch"; payload: ModelTextDeltaBatchPayload })

@@ -1,15 +1,8 @@
 import { tool, type JSONValue, type Tool } from "@strands-agents/sdk";
 import { z } from "zod";
 import { logger } from "./logger.ts";
-import {
-  bedrockKbRetrieve,
-  bedrockGenerateEmbedding,
-} from "../adapters/bedrock-retrieval.ts";
-import {
-  voyageGenerateEmbedding,
-  isVoyageConfigured,
-  getVoyageEndpoint,
-} from "../adapters/voyage-embedding.ts";
+import { bedrockKbRetrieve } from "../adapters/bedrock-retrieval.ts";
+import { embedDocumentText, embedQueryText } from "./embed-query.ts";
 import { pathToFileURL } from "node:url";
 import type { Sort } from "mongodb";
 import { readSkillResourceFile, resolveSkillResourcePath, type SkillRegistry } from "./skill-loader.ts";
@@ -258,23 +251,32 @@ export const bedrockKbRetrieveTool = tool({
 export const generateEmbeddingTool = tool({
   name: "generate_embedding",
   description:
-    "Generate a text embedding. " +
-    "EC2/POC mode: uses Voyage AI voyage-3.5-lite via SageMaker (VOYAGE_SAGEMAKER_ENDPOINT). " +
-    "Local mode: falls back to Amazon Bedrock Titan (EMBEDDING_MODEL_ID). " +
+    "Generate a text embedding. Uses the embedding provider declared by " +
+    "EMBEDDINGS_PROVIDER ('voyage' or 'titan') — no cross-provider fallback. " +
     "input_type: 'query' for search queries, 'document' for content to be indexed.",
   inputSchema: z.object({
     text: z.string(),
     input_type: z.enum(["query", "document"]).optional().default("query"),
   }),
   callback: async (input): Promise<JSONValue> => {
-    if (isVoyageConfigured()) {
-      return voyageGenerateEmbedding(input.text, getVoyageEndpoint(), input.input_type ?? "query");
+    const inputType = input.input_type ?? "query";
+    // Delegate to the single strict-mode provider gate in `embed-query.ts`.
+    // Both LTM writes, the chat-mirror, MCP vector search, and this agent
+    // tool now share the same provider selection — there is no longer a
+    // duplicated Voyage→Bedrock fallback in this file.
+    const r = inputType === "document"
+      ? await embedDocumentText(input.text)
+      : await embedQueryText(input.text);
+    if (!r.ok) {
+      return { status: "error", code: r.code, message: r.message };
     }
-    const modelId = process.env.EMBEDDING_MODEL_ID?.trim();
-    if (!modelId) {
-      return { status: "not_configured", hint: "Set VOYAGE_SAGEMAKER_ENDPOINT or EMBEDDING_MODEL_ID." };
-    }
-    return bedrockGenerateEmbedding(input.text, modelId);
+    return {
+      status: "ok",
+      embedding: r.vector,
+      model: r.modelId,
+      source: r.source,
+      dimensions: r.vector.length,
+    };
   },
 });
 

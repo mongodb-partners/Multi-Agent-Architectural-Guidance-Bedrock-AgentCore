@@ -2,12 +2,12 @@
 
 > **Audience:** anyone trying to reason about what the system remembers, when it remembers, and where that data lives.
 
-The system uses **two memory layers** with different jobs and different backends. For client handover and SoW discussions, use this shorthand:
+The system uses **two memory layers** with different jobs and different backends. For architecture discussions, use this shorthand:
 
 - **Short-term memory → AgentCore Memory** in deployed AWS.
 - **Long-term memory → MongoDB Atlas** (`agent_memory_facts` + `chat_messages`) with hybrid vector + BM25 retrieval.
 
-MongoDB `chat_sessions` is still useful, but it is a session mirror for UI/history/cold-read fallback, not the primary short-term memory authority in the SoW deployment.
+MongoDB `chat_sessions` is still useful, but it is a session mirror for UI/history/cold-read fallback, not the primary short-term memory authority in production deployment.
 
 ```mermaid
 flowchart TB
@@ -29,7 +29,7 @@ For an editable picture: [`diagrams/03-memory-architecture.drawio`](diagrams/03-
 
 **What it is:** per-turn chat transcript for a `sessionId`.
 
-**Primary path in EC2 auth mode:** AgentCore short-term events keyed by `(memoryId, actorId=userId, sessionId)`. This is the SoW narrative and the deploy-script default.
+**Primary path in EC2 auth mode:** AgentCore short-term events keyed by `(memoryId, actorId=userId, sessionId)`. This is the production default and the deploy-script default.
 
 ### Read/write flow
 

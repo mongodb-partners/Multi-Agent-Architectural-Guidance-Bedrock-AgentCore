@@ -52,7 +52,7 @@ variable "voyage_instance_type" {
 
 variable "voyage_endpoint_name_suffix" {
   type        = string
-  description = "Identifier baked into the SageMaker endpoint name. Use voyage-multimodal-3 for the SoW model or voyage-3-5-lite for the supported legacy text-only listing."
+  description = "Identifier baked into the SageMaker endpoint name. Use voyage-multimodal-3 for voyage-multimodal-3 or voyage-3-5-lite for the supported legacy text-only listing."
   default     = "voyage-multimodal-3"
 }
 

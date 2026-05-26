@@ -2,7 +2,7 @@
 
 > **Audience:** anyone trying to understand the whole tracing UI surface area, not just the Trace Viewer page. Read this first, then drill into one of:
 >
-> - [`trace-viewer-client-guide.md`](trace-viewer-client-guide.md) — the section-by-section field guide to the client-facing view
+> - [`trace-viewer-guide.md`](trace-viewer-guide.md) — the section-by-section field guide to the summary view
 > - [`trace-viewer-developer-guide.md`](trace-viewer-developer-guide.md) — the field guide to the Developer details panel
 > - [`observability-runbook.md`](observability-runbook.md) §1.b — the Day-2 workflow that uses both
 
@@ -15,7 +15,7 @@ The Trace UI is not one page. It is **four surfaces** rendering the same trace d
 | # | Surface | Where | Audience | What loads |
 |---|---|---|---|---|
 | 1 | **Inline summary card** | Chat panel, under every assistant reply | End user / demo viewer | Streamed in-band (no extra fetch) |
-| 2 | **Trace Viewer page — client view** | `/Trace_Viewer?traceId=…` | PM / AE / customer / support | `GET /traces/<id>?include=core` (15 KB typical) |
+| 2 | **Trace Viewer page — summary view** | `/Trace_Viewer?traceId=…` | PM / AE / customer / support | `GET /traces/<id>?include=core` (15 KB typical) |
 | 3 | **Trace Viewer page — Developer details panel** | Same page, behind a button | Engineer debugging a turn | `GET /traces/<id>?include=dev` (40 KB typical), cached in `st.session_state` |
 | 4 | **Sessions page** | `/Sessions` | Anyone with access | `GET /sessions` + on click `GET /traces?sessionId=` |
 | 5 | **Developer fixture harness** | `streamlit run ui/scripts/render_dev_fixture.py` | Engineer iterating on the dev panel | No API at all — loads `ui/tests/fixtures/dev_trace_*.json` |
@@ -75,9 +75,9 @@ The discipline is "anything that makes the chat panel feel busy goes to the Trac
 
 ---
 
-## 2. Trace Viewer page — client view (default)
+## 2. Trace Viewer page — summary view (default)
 
-The full per-turn dashboard. Loads `?include=core` (no system prompts, no raw tool args, no internal flags). See [`trace-viewer-client-guide.md`](trace-viewer-client-guide.md) for the section-by-section walk.
+The full per-turn dashboard. Loads `?include=core` (no system prompts, no raw tool args, no internal flags). See [`trace-viewer-guide.md`](trace-viewer-guide.md) for the section-by-section walk.
 
 **Sidebar features** (left rail of the page):
 
@@ -164,21 +164,21 @@ Pair the harness with `bun test tests/unit/trace-projection.test.ts` if you've c
 
 ## 6. Print / PDF
 
-The Trace Viewer is print-friendly by default. `Cmd/Ctrl + P` from any browser produces a clean PDF suitable for client deliverables. The `@media print` rule in `ui/lib/trace_css.py` does the heavy lifting:
+The Trace Viewer is print-friendly by default. `Cmd/Ctrl + P` from any browser produces a clean PDF suitable for demo deliverables. The `@media print` rule in `ui/lib/trace_css.py` does the heavy lifting:
 
 - **Removes** the brand strip (`MongoDB Atlas` / `AWS Bedrock` pills) — it's a screen ornament, not a deliverable.
 - **Flattens** tile shadows and just-loaded animations.
 - **Hides the Developer details body** but keeps the expander summaries — so the printed PDF carries an outline of what's in the dev panel without dumping every JSON block. (CSS can't toggle `<details open>` so this is the best-effort approximation.)
 - **Keeps `details` blocks `page-break-inside: avoid`** so an expander doesn't get split across pages.
 
-Practical tip: open the **client view only** before printing — opening the dev panel first will keep its body visible in print despite the CSS, because Streamlit re-renders the expander state.
+Practical tip: open the **summary view only** before printing — opening the dev panel first will keep its body visible in print despite the CSS, because Streamlit re-renders the expander state.
 
 ---
 
 ## Mobile / responsive posture
 
 - **Inline summary card**: works on a phone. Vector-source bullets and memory expanders are single-column and don't overflow.
-- **Trace Viewer client view**: works on a phone. Tiles wrap to multiple rows; tables fit because they're rendered as Markdown.
+- **Trace Viewer summary view**: works on a phone. Tiles wrap to multiple rows; tables fit because they're rendered as Markdown.
 - **Trace Viewer Developer details panel**: **does not** work on a phone. The Mongo internals tables, span tree tree, and `latency.checkpoint` tables are wide and will overflow horizontally; pinch-to-zoom is your only escape. The dev panel is designed for desktop debugging.
 - **Sessions page**: works on a phone (single-column rows).
 
@@ -190,7 +190,7 @@ If you need to share dev-grade data from a phone, screenshot the relevant sub-se
 
 | Operation | Endpoint | Auth | Returns |
 |---|---|---|---|
-| Get a trace, client-fast view | `GET /traces/<id>?include=core` | Bearer JWT | Trace JSON minus sentinels + dev-only events + dev-only top-level fields; `X-Trace-Include: core` header |
+| Get a trace, core projection | `GET /traces/<id>?include=core` | Bearer JWT | Trace JSON minus sentinels + dev-only events + dev-only top-level fields; `X-Trace-Include: core` header |
 | Get a trace, full dev view | `GET /traces/<id>?include=dev` | Bearer JWT | Identity (full trace); `X-Trace-Include: dev` header |
 | Get a trace, identity (back-compat) | `GET /traces/<id>?include=full` | Bearer JWT | Identity; `X-Trace-Include: full` header |
 | List recent traces | `GET /traces?limit=10` | Bearer JWT | Array of `{ traceId, agentId, createdAt, summary }` |
@@ -218,7 +218,7 @@ All trace fetches are logged to the audit channel with `include` so you can late
 
 ## Related docs
 
-- [`trace-viewer-client-guide.md`](trace-viewer-client-guide.md) — section-by-section field guide to the client view (sections 1–15)
+- [`trace-viewer-guide.md`](trace-viewer-guide.md) — section-by-section field guide to the summary view (sections 1–15)
 - [`trace-viewer-developer-guide.md`](trace-viewer-developer-guide.md) — section-by-section field guide to the dev panel (sub-sections 1–14)
 - [`observability-runbook.md`](observability-runbook.md) §1.b — Day-2 workflow ("I have a trace id, now what?")
 - [`api-reference.md`](api-reference.md) — `GET /traces` + `?include=` contract

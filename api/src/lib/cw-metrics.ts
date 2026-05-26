@@ -11,7 +11,10 @@
  *   - Multiagent/Chat    -> TurnsTotal, TurnErrors, TurnLatencyMs,
  *                          AgentCoreInvokes, AgentCoreInvokeErrors
  *   - Multiagent/Mongo   -> QueryCount, QueryLatencyMs, VectorSearchLatencyMs
- *   - Multiagent/Memory  -> FactsExtracted, FactsWritten, EmbeddingFailures
+ *   - Multiagent/Memory  -> FactsExtracted, FactsWritten, EmbeddingFailures,
+ *                          MemoryEmbeddingSkipped (per-code)
+ *   - Multiagent/Chat    -> ChatMirrorEmbeddingSkipped (per-code, in addition
+ *                          to the chat metrics above)
  *
  * Without this emitter, those widgets stay empty. Call sites:
  *   - `recordChatTurn(...)`   — at chat.turn.end in run-chat-stream
@@ -200,6 +203,51 @@ export function recordMemoryWrite(opts: {
       { def: { name: "FactsExtracted", unit: "Count" }, value: opts.factsExtracted },
       { def: { name: "FactsWritten", unit: "Count" }, value: opts.factsWritten },
       { def: { name: "EmbeddingFailures", unit: "Count" }, value: opts.embeddingFailures },
+    ],
+  });
+}
+
+/**
+ * Strict-mode-only: emitted when one or more LTM facts could not be embedded
+ * because the declared `EMBEDDINGS_PROVIDER` failed. Carries the
+ * `EmbedErrorCode` as a low-cardinality dimension so dashboards can group
+ * `voyage_strict_failed` separately from `titan_strict_failed`.
+ */
+export function recordMemoryEmbeddingSkipped(opts: {
+  agentId?: string;
+  code: string;
+  count: number;
+}): void {
+  emitMetric({
+    namespace: "Multiagent/Memory",
+    dimensions: {
+      agentId: opts.agentId ?? "unknown",
+      code: opts.code,
+    },
+    metrics: [
+      { def: { name: "MemoryEmbeddingSkipped", unit: "Count" }, value: opts.count },
+    ],
+  });
+}
+
+/**
+ * Strict-mode-only: emitted from `mirrorMessageToMongo` when chat-message
+ * embedding failed. The chat row is still written to `chat_messages` (without
+ * `embedding`/`embeddingModel` fields and with an `embeddingError` marker), so
+ * this metric tracks the rate at which mirrored rows are missing vectors.
+ */
+export function recordChatMirrorEmbeddingSkipped(opts: {
+  agentId?: string;
+  code: string;
+}): void {
+  emitMetric({
+    namespace: "Multiagent/Chat",
+    dimensions: {
+      agentId: opts.agentId ?? "unknown",
+      code: opts.code,
+    },
+    metrics: [
+      { def: { name: "ChatMirrorEmbeddingSkipped", unit: "Count" }, value: 1 },
     ],
   });
 }

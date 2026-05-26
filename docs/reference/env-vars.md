@@ -52,7 +52,7 @@ The stack supports two **mutually exclusive per account** connectivity modes for
 | `NETWORK_MODE` | `privatelink` | `privatelink` (default, partner-validated) or `peering` (alternative, with experimental KB ingestion) | Always | [`deploy/scripts/deploy-network.sh`](../../deploy/scripts/deploy-network.sh), [`envs/network/main.tf`](../../deploy/terraform/envs/network/main.tf), [`envs/ec2/main.tf`](../../deploy/terraform/envs/ec2/main.tf) |
 | `ATLAS_PEERING_CIDR` | `192.168.248.0/21` | Atlas-side CIDR for peering mode; must not overlap `VPC_CIDR` | `NETWORK_MODE=peering` | `deploy-network.sh`, `envs/network/main.tf` |
 | `VPC_CIDR` | `10.0.0.0/16` | AWS-side VPC CIDR | Always (peering mode validates non-overlap) | `deploy-network.sh`, `envs/network/main.tf` |
-| `TF_VAR_enable_kb_privatelink` | `true` | KB ingestion through PL NLB + Atlas VPCE — partner-validated, SoW-aligned | Consulted only when `NETWORK_MODE=privatelink` | `envs/ec2/main.tf` |
+| `TF_VAR_enable_kb_privatelink` | `true` | KB ingestion through PL NLB + Atlas VPCE — partner-validated, recommended | Consulted only when `NETWORK_MODE=privatelink` | `envs/ec2/main.tf` |
 | `TF_VAR_enable_kb_peering` | `true` | KB ingestion through peering NLB whose targets are Atlas private peering IPs | Consulted only when `NETWORK_MODE=peering`. **EXPERIMENTAL — TLS not partner-validated; see [`modules/bedrock-kb-peering/README.md`](../../deploy/terraform/modules/bedrock-kb-peering/README.md)** | `envs/ec2/main.tf` |
 
 > **Public Atlas SRV for KB is NOT a default and NOT recommended.** It is reached only by explicitly setting the matching flag to `=false`. Doing so is a deliberate privacy regression (KB ingestion leaves the private fabric, though TLS + Atlas auth still apply). The one place this opt-out is documented as a risk-managed alternative is the `bedrock-kb-peering` README — for environments that cannot accept the experimental TLS path, `TF_VAR_enable_kb_peering=false` keeps runtime traffic on peering while degrading KB to public SRV.
@@ -125,7 +125,7 @@ The default chat path classifies the user message in the API (`api/src/lib/agent
 |---|---|---|---|---|
 | `AUTH_JWKS_URI` | — | OIDC JWKS endpoint used to verify Bearer JWTs | API boot. `assertJwksAuthConfigured()` refuses to start without it. **No bypass.** | [`api/src/lib/jwt-verify.ts`](../../api/src/lib/jwt-verify.ts), [`api/src/index.ts`](../../api/src/index.ts) |
 | `AUTH_ISSUER` | — | Token issuer URL (e.g. Cognito pool URL) | API boot. Same | `jwt-verify.ts` |
-| `AUTH_APP_CLIENT_ID` | — | Cognito app client ID; checked against the JWT `aud` / `client_id` claim | Cognito deployments | `jwt-verify.ts` |
+| `AUTH_APP_CLIENT_ID` | — | Cognito app ID; checked against the JWT `aud` / `client_id` claim | Cognito deployments | `jwt-verify.ts` |
 | `AUTH_TOKEN_USE` | unset (accept either) | `access` or `id` — match Cognito ID vs access tokens | Tightening | `jwt-verify.ts` |
 | `AUTH_CONTEXT_CACHE_TTL_MS` | `90000` (90 s) | TTL for the per-`(userId, hash(bearer))` auth-context LRU cache. `0` disables | Performance tuning | [`api/src/lib/auth-user-context.ts`](../../api/src/lib/auth-user-context.ts) |
 
@@ -133,14 +133,42 @@ There is no `REQUIRE_AUTH=false` / `ALLOW_UNAUTHENTICATED` bypass.
 
 ---
 
-## 8. Embedding provider (must be explicit)
+## 8. Embedding provider (strict mode — mandatory and explicit)
+
+`EMBEDDINGS_PROVIDER` is the single source of truth for which embedding
+backend the API uses. It is **mandatory** in every environment (deployed
+and local). There is no implicit default and no cross-provider failover at
+runtime — `voyage` calls only Voyage; `titan` calls only Bedrock Titan.
+Empty / missing / unrecognised values throw at API boot
+(`api/src/lib/assert-embeddings-provider.ts`).
+
+`embed-query.ts` returns one of these structured `EmbedErrorCode` values
+when an embed call cannot succeed:
+
+- `voyage_strict_failed` — `EMBEDDINGS_PROVIDER=voyage` but the Voyage
+  call threw, returned an unrecognised shape, or the SageMaker endpoint
+  env is empty. Bedrock is **never** tried.
+- `titan_strict_failed` — symmetrical for `EMBEDDINGS_PROVIDER=titan`.
+  Voyage is **never** tried.
+- `no_provider_configured` — the env var is empty / unrecognised, or the
+  caller passed empty input text.
+- `embed_threw` — defensive catch in `long-term-memory.ts` /
+  `session-store.ts` for unexpected thrown errors not already wrapped in
+  the strict result envelope.
+
+When an embed fails, write paths still persist the row to MongoDB so the
+transcript / Sessions UI / lexical search stay complete — but with
+`embedding` / `embeddingModel` absent and (for `chat_messages`) an
+`embeddingError` marker. The backfill script
+[`db-seeding/reembed-mismatched.ts`](../../db-seeding/reembed-mismatched.ts)
+re-embeds those rows once the provider is healthy again.
 
 | Variable | Default | Effect | Required when | Reader |
 |---|---|---|---|---|
-| `EMBEDDINGS_PROVIDER` | — | `voyage` (SoW) or `titan` (explicit deviation). `assertEmbeddingsProvider()` rejects unset / unrecognized values | API boot | [`api/src/lib/assert-embeddings-provider.ts`](../../api/src/lib/assert-embeddings-provider.ts), [`api/src/lib/embed-query.ts`](../../api/src/lib/embed-query.ts) |
-| `VOYAGE_MODEL_PACKAGE_ARN` | — | Marketplace ARN for a Voyage model package. The validator requires a `model-package/voyage-...` ARN; SoW uses the `voyage-multimodal-3` family, which AWS may expose as `voyage-multimodel-3-updated-*` | `EMBEDDINGS_PROVIDER=voyage` | `deploy-project.sh`, [`modules/voyage-sagemaker/`](../../deploy/terraform/modules/voyage-sagemaker/) |
-| `VOYAGE_MARKETPLACE_MODEL` | `voyage-multimodal-3` | SoW model pin; override only with written deviation | Default-on | `setup-voyage-marketplace.sh` |
-| `VOYAGE_INSTANCE_TYPE` | `ml.g6.xlarge` | SageMaker real-time endpoint instance | Default-on for SoW | `modules/voyage-sagemaker` |
+| `EMBEDDINGS_PROVIDER` | — (mandatory) | `voyage` or `titan`. Boot-fails if empty / unrecognised. Strict — no cross-provider fallback at runtime. | API boot, every env | [`api/src/lib/assert-embeddings-provider.ts`](../../api/src/lib/assert-embeddings-provider.ts), [`api/src/lib/embed-query.ts`](../../api/src/lib/embed-query.ts) |
+| `VOYAGE_MODEL_PACKAGE_ARN` | — | Marketplace ARN for a Voyage model package. The validator requires a `model-package/voyage-...` ARN; The reference stack uses the `voyage-multimodal-3` family, which AWS may expose as `voyage-multimodel-3-updated-*` | `EMBEDDINGS_PROVIDER=voyage` | `deploy-project.sh`, [`modules/voyage-sagemaker/`](../../deploy/terraform/modules/voyage-sagemaker/) |
+| `VOYAGE_MARKETPLACE_MODEL` | `voyage-multimodal-3` | Pinned model; override only with written deviation | Default-on | `setup-voyage-marketplace.sh` |
+| `VOYAGE_INSTANCE_TYPE` | `ml.g6.xlarge` | SageMaker real-time endpoint instance | Default-on | `modules/voyage-sagemaker` |
 | `VOYAGE_REQUEST_FORMAT` | `multimodal` | `multimodal` (voyage-multimodal-3) or `legacy` (voyage-3.5-lite / voyage-3) | Per-model contract | [`api/src/adapters/voyage-embedding.ts`](../../api/src/adapters/voyage-embedding.ts) |
 | `VOYAGE_OUTPUT_DIM` | `1024` | Voyage output dimension; must match Atlas vector index | Legacy format only | `voyage-embedding.ts` |
 | `VOYAGE_SAGEMAKER_ENDPOINT` | — | SageMaker endpoint name written to `.env.live` by `deploy-project.sh` | `EMBEDDINGS_PROVIDER=voyage` | `voyage-embedding.ts`, `embed-query.ts` |
@@ -260,8 +288,8 @@ These are read by `ui/lib/config.py` + `ui/lib/cognito_gate.py`. See [`ui/README
 |---|---|---|
 | `API_URL` | `http://localhost:3000` | Hono API base URL |
 | `STREAMLIT_COGNITO_POOL_ID` | — | Cognito user pool id; required for hosted-UI login. Pool id already encodes the region (`<region>_<id>`), so a separate region var is not required. |
-| `STREAMLIT_COGNITO_CLIENT_ID` | — | Cognito app client id |
-| `STREAMLIT_COGNITO_CLIENT_SECRET` | — | Cognito app client secret (required when the client is configured "with secret" in Cognito) |
+| `STREAMLIT_COGNITO_CLIENT_ID` | — | Cognito app id |
+| `STREAMLIT_COGNITO_CLIENT_SECRET` | — | Cognito app secret (required when the app is configured "with secret" in Cognito) |
 | `STREAMLIT_COGNITO_DOMAIN` | — | Hosted-UI domain (optional; embedded login otherwise) |
 | `STREAMLIT_COGNITO_REDIRECT_URI` | — | Hosted-UI callback URL |
 | `STREAMLIT_PORT` | `8501` | Streamlit listen port (Docker / compose `compose.yaml` only — Streamlit itself binds 8501) |
@@ -277,7 +305,7 @@ These are set in `deploy-project.sh` from `.env` and rarely overridden by hand.
 | `TF_VAR_voyage_endpoint_name_suffix` | `voyage-multimodal-3` | Endpoint name fragment |
 | `VOYAGE_INSTANCE_TYPE` | `ml.g6.xlarge` | SageMaker endpoint instance type (GPU required — `ml.g6.xlarge` or `ml.g5.xlarge`). Set in `.env`, consumed by `deploy-shared.sh` |
 | `VOYAGE_REQUEST_FORMAT` | `multimodal` | Voyage request envelope — `multimodal` (default, `voyage-multimodal-3`) or `legacy` (`voyage-3.5-lite` / `voyage-3`) |
-| `VOYAGE_MARKETPLACE_MODEL` | `voyage-multimodal-3` | Pinned to the SoW model; override only for explicit written deviation |
+| `VOYAGE_MARKETPLACE_MODEL` | `voyage-multimodal-3` | Pinned to the default model; override only for explicit written deviation |
 
 > The `voyage-sagemaker` module's `instance_count` Terraform variable defaults to `1` and is not currently sourced from an env var — edit the module call in `envs/shared/main.tf` if you need to scale beyond one instance.
 

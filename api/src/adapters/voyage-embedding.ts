@@ -4,7 +4,7 @@
  *
  * Two listings are supported and selected by `VOYAGE_REQUEST_FORMAT`:
  *
- * - `multimodal` (default — voyage-multimodal-3, the SoW model):
+ * - `multimodal` (default — voyage-multimodal-3):
  *     Request:  { "inputs": [{ "content": [{ "type": "text", "text": "..." }] }],
  *                 "input_type": "query" | "document",
  *                 "truncation": true,
@@ -49,7 +49,7 @@ function getClient(): SageMakerRuntimeClient {
  *  because voyage-multimodal-3 returns a fixed 1024-d vector. */
 const VOYAGE_OUTPUT_DIM = Number(process.env.VOYAGE_OUTPUT_DIM ?? 1024);
 
-/** Request envelope shape — defaults to "multimodal" (voyage-multimodal-3, SoW).
+/** Request envelope shape — defaults to "multimodal" (voyage-multimodal-3).
  *  Set VOYAGE_REQUEST_FORMAT=legacy to fall back to the voyage-3.5-lite shape
  *  for environments that still subscribe to that older Marketplace listing. */
 function requestFormat(): VoyageRequestFormat {

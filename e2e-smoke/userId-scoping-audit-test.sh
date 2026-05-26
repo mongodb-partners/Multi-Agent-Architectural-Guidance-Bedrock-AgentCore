@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # userId-scoping-audit-test.sh
 # ─────────────────────────────────────────────────────────────────────────────
-# SOW Security Audit — userId isolation / jwt.sub scoping
+# Security audit — userId isolation / jwt.sub scoping
 #
 # Verifies that every data-bearing HTTP endpoint binds the tenant key to the
 # verified JWT `sub` claim and that no path lets User A read User B's data.
@@ -76,7 +76,7 @@ section_summary() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-banner "SOW Security Audit — userId / jwt.sub Isolation"
+banner "Security audit — userId / jwt.sub Isolation"
 # ─────────────────────────────────────────────────────────────────────────────
 
 echo -e "\nChecking prerequisites..."
@@ -90,11 +90,11 @@ echo -e "  bun: $(bun --version)"
 ENV_PREFIX="AUTH_JWKS_URI=https://test.example.com/.well-known/jwks.json AUTH_ISSUER=https://test.example.com"
 
 # ─────────────────────────────────────────────────────────────────────────────
-section "S1 · POST /chat body schema — userId must NOT be accepted from client"
+section "S1 · POST /chat body schema — userId must NOT be accepted from caller"
 # ─────────────────────────────────────────────────────────────────────────────
 echo "  Source: api/src/routes/chat.ts"
 echo "  Requirement: The request body schema must only accept message, sessionId,"
-echo "               and optional agentId. A client-supplied userId field must NOT"
+echo "               and optional agentId. A caller-supplied userId field must NOT"
 echo "               be present — the server always derives userId from jwt.sub."
 
 run_test "chat body schema has no userId field" \
@@ -419,7 +419,7 @@ section_summary
 section "S11 · Static analysis — no route accepts userId in request body/params"
 # ─────────────────────────────────────────────────────────────────────────────
 echo "  Source: api/src/routes/*.ts"
-echo "  Requirement: No route handler may use a client-supplied userId as a tenant"
+echo "  Requirement: No route handler may use a caller-supplied userId as a tenant"
 echo "               key. All userId values must come from jwt.sub."
 
 run_test "chat.ts body schema zod object has no 'userId' key" \

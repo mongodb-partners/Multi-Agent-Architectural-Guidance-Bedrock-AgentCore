@@ -9,7 +9,7 @@ source .env
 bash e2e-smoke/ltm/ltm-smoke.sh
 ```
 
-The suite reads `.env.live` for `STREAMLIT_API_URL` and Cognito client id, then uses the same Cognito demo user defaults as the broader smoke:
+The suite reads `.env.live` for `STREAMLIT_API_URL` and Cognito app id, then uses the same Cognito demo user defaults as the broader smoke:
 
 ```bash
 E2E_USER=alex@example.com E2E_PASS='DemoUser#2026' bash e2e-smoke/ltm/ltm-smoke.sh

@@ -1,19 +1,25 @@
 /**
- * Boot-time assertion that the embedding provider declared by the deploy
- * pipeline matches what is actually wired in the runtime env.
+ * Boot-time assertion that the embedding provider declared by `.env` is
+ * actually wired into the runtime env.
  *
- * Why this exists:
- *   The SoW pins this stack to voyage-multimodal-3. deploy.sh now refuses to
- *   ship unless EMBEDDINGS_PROVIDER is set explicitly to either "voyage"
- *   (SoW-aligned, VOYAGE_SAGEMAKER_ENDPOINT provisioned) or "titan" (an
- *   explicit, written deviation that falls back to amazon.titan-embed-text-v2:0).
+ * Strict-only — `EMBEDDINGS_PROVIDER` is **mandatory** in every environment
+ * (deployed and local). There is no implicit default and no cross-provider
+ * fallback at runtime. The container fails to start rather than serving
+ * silently-degraded embeddings.
  *
- *   At runtime we re-check that the env we received agrees with the declared
- *   provider so that nothing silently flips between deploys (e.g. the manifest
- *   says "voyage" but the endpoint env var was dropped). The container fails
- *   to start rather than serving silently-degraded embeddings.
+ * Allowed values:
  *
- * Set EMBEDDINGS_PROVIDER="" to skip the check (local dev only).
+ *   - `voyage` — Voyage multimodal default. Requires `VOYAGE_SAGEMAKER_ENDPOINT`. The API
+ *     will refuse Bedrock fallback even if `EMBEDDING_MODEL_ID` is also set
+ *     (and we warn so the operator can clean up `.env.live`).
+ *   - `titan` — Explicit deviation. Requires `EMBEDDING_MODEL_ID`
+ *     (`amazon.titan-embed-text-v2:0`). The API will refuse Voyage fallback
+ *     even if `VOYAGE_SAGEMAKER_ENDPOINT` is also set.
+ *
+ * Empty / missing / unrecognised values throw — no escape hatch.
+ *
+ * Boot-guard call sites: `api/src/index.ts` and (when bundled into AgentCore)
+ * `api/src/agent-runtime-code.ts`.
  */
 
 import { logger } from "./logger.ts";
@@ -24,12 +30,10 @@ export function assertEmbeddingsProvider(): void {
   const bedrockModelId = (process.env.EMBEDDING_MODEL_ID ?? "").trim();
 
   if (!declared) {
-    logger.warn(
-      "[embeddings] EMBEDDINGS_PROVIDER is empty — boot-time assertion skipped. " +
-        "This is acceptable for local dev but must NEVER happen in deployed stacks " +
-        "(deploy.sh injects an explicit value).",
+    throw new Error(
+      "EMBEDDINGS_PROVIDER is required. Set it to 'voyage' or 'titan' in .env. " +
+        "Strict mode — no implicit default, no cross-provider fallback.",
     );
-    return;
   }
 
   switch (declared) {
@@ -37,15 +41,21 @@ export function assertEmbeddingsProvider(): void {
       if (!voyageEndpoint) {
         throw new Error(
           "EMBEDDINGS_PROVIDER=voyage but VOYAGE_SAGEMAKER_ENDPOINT is empty. " +
-            "Refusing to start — the SoW-aligned provider is not actually wired. " +
+            "Refusing to start — the Voyage provider is not actually wired. " +
             "Either provision the SageMaker endpoint or switch EMBEDDINGS_PROVIDER=titan.",
         );
       }
-      logger.info("[embeddings] provider=voyage", {
+      logger.info("[embeddings] strict voyage mode — no Bedrock fallback", {
         endpoint: voyageEndpoint,
         format: process.env.VOYAGE_REQUEST_FORMAT ?? "multimodal",
-        sowAligned: true,
+        voyageMultimodal: true,
       });
+      if (bedrockModelId) {
+        logger.warn(
+          "[embeddings] EMBEDDING_MODEL_ID is set but ignored in voyage mode — clean up .env.live to avoid confusion",
+          { modelId: bedrockModelId },
+        );
+      }
       return;
     }
     case "titan": {
@@ -55,16 +65,23 @@ export function assertEmbeddingsProvider(): void {
             "Refusing to start — Bedrock fallback is not wired.",
         );
       }
-      logger.warn("[embeddings] provider=titan (EXPLICIT SoW DEVIATION)", {
+      logger.warn("[embeddings] strict titan mode — no Voyage fallback (EXPLICIT TITAN MODE)", {
         modelId: bedrockModelId,
-        sowAligned: false,
-        note: "amazon.titan-embed-text-v2:0 — restore voyage-multimodal-3 to align with SoW",
+        voyageMultimodal: false,
+        note: "amazon.titan-embed-text-v2:0 — set EMBEDDINGS_PROVIDER=voyage to use voyage-multimodal-3",
       });
+      if (voyageEndpoint) {
+        logger.warn(
+          "[embeddings] VOYAGE_SAGEMAKER_ENDPOINT is set but ignored in titan mode — clean up .env.live to avoid confusion",
+          { endpoint: voyageEndpoint },
+        );
+      }
       return;
     }
     default:
       throw new Error(
-        `EMBEDDINGS_PROVIDER='${declared}' is not recognised. Use 'voyage' or 'titan'.`,
+        `EMBEDDINGS_PROVIDER='${declared}' is not recognised. Use 'voyage' or 'titan'. ` +
+          "Strict mode — no implicit default, no cross-provider fallback.",
       );
   }
 }

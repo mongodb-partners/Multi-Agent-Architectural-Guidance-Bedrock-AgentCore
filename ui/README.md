@@ -1,11 +1,11 @@
-# `ui/` — Streamlit demo client
+# `ui/` — Streamlit demo UI
 
 Python + Streamlit chat UI for the Bedrock Multi-Agent stack. Connects to the API at `API_BASE_URL` and streams SSE chat responses, with a Sessions page, a debug-grade Trace Viewer, and a Cognito hosted-UI / embedded login gate.
 
 > **Authoritative docs:**
 >
 > - [`docs/demo/demo-mode-guide.md`](../docs/demo/demo-mode-guide.md) — demo flow + env knobs
-> - [`docs/trace-viewer-client-guide.md`](../docs/trace-viewer-client-guide.md) — client-friendly Trace Viewer walkthrough
+> - [`docs/trace-viewer-guide.md`](../docs/trace-viewer-guide.md) — operator-friendly Trace Viewer walkthrough
 > - [`docs/trace-viewer-developer-guide.md`](../docs/trace-viewer-developer-guide.md) — debug-grade Trace Viewer
 > - [`docs/configuration-guide.md`](../docs/configuration-guide.md) + [`docs/reference/env-vars.md`](../docs/reference/env-vars.md) — env vars
 
@@ -18,7 +18,7 @@ export API_BASE_URL=http://localhost:3000
 streamlit run app.py
 ```
 
-The UI runs on `http://localhost:8501`. With `DEV_MOCK_BACKENDS=1` on the API and no Cognito env vars set, you can chat anonymously (the API issues a stub user). For live AWS, set `STREAMLIT_COGNITO_POOL_ID` + `STREAMLIT_COGNITO_CLIENT_ID` (+ `STREAMLIT_COGNITO_CLIENT_SECRET` when the client is configured "with secret"; the region is encoded in the pool id). For the hosted UI flow, also set `STREAMLIT_COGNITO_DOMAIN` + `STREAMLIT_COGNITO_REDIRECT_URI`.
+The UI runs on `http://localhost:8501`. With `DEV_MOCK_BACKENDS=1` on the API and no Cognito env vars set, you can chat anonymously (the API issues a stub user). For live AWS, set `STREAMLIT_COGNITO_POOL_ID` + `STREAMLIT_COGNITO_CLIENT_ID` (+ `STREAMLIT_COGNITO_CLIENT_SECRET` when the app is configured "with secret"; the region is encoded in the pool id). For the hosted UI flow, also set `STREAMLIT_COGNITO_DOMAIN` + `STREAMLIT_COGNITO_REDIRECT_URI`.
 
 ## Layout
 
@@ -27,7 +27,7 @@ The UI runs on `http://localhost:8501`. With `DEV_MOCK_BACKENDS=1` on the API an
 | `app.py` | Streamlit entrypoint — chat panel, demo prompts, sidebar agent picker. |
 | `pages/1_Sessions.py` | Lists past sessions for the signed-in user; resume / delete actions. |
 | `pages/2_Trace_Viewer.py` | Debug-grade Trace Viewer — fetches `?include=core` by default and `?include=dev` on demand. |
-| `lib/api_client.py` | Typed HTTP client for the API (SSE chat, sessions, agents, traces, health). |
+| `lib/api_client.py` | Typed HTTP API wrapper for the API (SSE chat, sessions, agents, traces, health). |
 | `lib/cognito_gate.py` | Hosted-UI redirect or embedded login (uses `streamlit-cognito-auth` when configured). |
 | `lib/inline_summary.py` | Per-turn summary card on the chat panel (skills, vector search previews, LTM toast). |
 | `lib/client_trace_view.py` | Demo-friendly Trace Viewer renderers (default mode). |

@@ -121,10 +121,11 @@ export class AliasedMcpTool extends Tool {
 //   1. Advertise a model-friendly schema (queryText optional but preferred,
 //      indexName accepted as an alias for index, sensible default `index`
 //      inferred from collection name).
-//   2. On invocation: extract `queryText`, run `embedQueryText()` (Voyage →
-//      Bedrock fallback), splice the resulting vector into the args under
-//      `queryVector`, and forward to the underlying `McpTool` so the existing
-//      MCP / gateway / Lambda trace plumbing still fires.
+//   2. On invocation: extract `queryText`, run `embedQueryText()` (strict
+//      provider per `EMBEDDINGS_PROVIDER` — no cross-provider fallback),
+//      splice the resulting vector into the args under `queryVector`, and
+//      forward to the underlying `McpTool` so the existing MCP / gateway /
+//      Lambda trace plumbing still fires.
 //   3. Emit a `mongo.vector_search` trace event with the embedding source,
 //      query text, vector preview, and (when the call succeeds) per-doc
 //      similarity scores so the Trace Viewer's vector-search panel populates.
@@ -1436,9 +1437,10 @@ async function loadMcpTools(): Promise<Tool[]> {
 
 /**
  * Probe: check if the MCP server is reachable (connect + listTools handshake).
- * Used by the health endpoint. Does not rely on the tool cache — a prior failed
- * loadMcpTools() can leave `_mcpTools` unset while still returning [] without
- * throwing, which must not be reported as connected.
+ * Used by the health endpoint when a caller JWT is in scope (`withGatewayJwt`).
+ * Does not rely on the tool cache — a prior failed loadMcpTools() can leave
+ * `_mcpTools` unset while still returning [] without throwing, which must not
+ * be reported as connected.
  */
 export async function probeMcpServer(): Promise<"connected" | "unreachable"> {
   try {
@@ -1464,6 +1466,98 @@ async function probeMcpServerInner(): Promise<"connected" | "unreachable"> {
   if (!client) return "unreachable";
   await client.listTools();
   return "connected";
+}
+
+/**
+ * Deep MCP probe — issue a real `mongodb_query` for `products.findOne` via
+ * the Gateway. Same code path as a chat-driven tool call (Gateway-prefixed
+ * name resolution, JWT injection, MCP wrapper) but without an LLM. Surfaces
+ * the most common runtime-side failure mode: MCP runtime cannot reach Atlas
+ * (wrong MONGODB_URI) — which `/health`'s shallow MCP probe (listTools only)
+ * cannot detect.
+ *
+ * Returns an envelope rather than throwing so the `/health/deep` route can
+ * report a clean JSON status to the operator's smoke step.
+ */
+export async function deepProbeMcpQuery(): Promise<{
+  mcpProbe: "connected" | "unreachable" | "timeout";
+  latencyMs: number;
+  gatewayUrl: string;
+  error?: string;
+}> {
+  const gatewayUrl = getMcpServerUrl();
+  const started = Date.now();
+  try {
+    const result = await Promise.race([
+      runDeepProbe(),
+      new Promise<{ status: "timeout"; error: string }>((resolve) => {
+        setTimeout(
+          () => resolve({ status: "timeout", error: "deep MCP probe exceeded 10s" }),
+          10_000,
+        );
+      }),
+    ]);
+    const latencyMs = Date.now() - started;
+    if (result.status === "timeout") {
+      return { mcpProbe: "timeout", latencyMs, gatewayUrl, error: result.error };
+    }
+    if (result.status === "ok") {
+      return { mcpProbe: "connected", latencyMs, gatewayUrl };
+    }
+    return {
+      mcpProbe: "unreachable",
+      latencyMs,
+      gatewayUrl,
+      error: result.error,
+    };
+  } catch (err) {
+    return {
+      mcpProbe: "unreachable",
+      latencyMs: Date.now() - started,
+      gatewayUrl,
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
+async function runDeepProbe(): Promise<
+  { status: "ok" } | { status: "error"; error: string }
+> {
+  const client = await ensureMcpClient();
+  if (!client) {
+    return { status: "error", error: "mcp client unavailable (auth or transport)" };
+  }
+  // Resolve the actual tool name as exposed by the Gateway (target-prefixed)
+  // by listing once. Cache miss is fine — this is a deploy-time probe path.
+  const tools = await client.listTools();
+  const queryTool = tools.find(
+    (t) => (stripGatewayTargetPrefix(t.name) ?? t.name) === "mongodb_query",
+  );
+  if (!queryTool) {
+    return { status: "error", error: "mongodb_query tool not exposed by Gateway target" };
+  }
+  try {
+    // Public collection (`products`) is exempt from userId injection in the
+    // wrapped callTool — health-deep never has a chat userId in scope.
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const result: any = await (client as any).callTool(
+      { name: queryTool.name },
+      { collection: "products", filter: {}, projection: { _id: 1 }, limit: 1 },
+    );
+    if (result && result.isError) {
+      const text =
+        Array.isArray(result.content) && result.content[0]?.text
+          ? String(result.content[0].text).slice(0, 240)
+          : "mcp tool returned isError";
+      return { status: "error", error: text };
+    }
+    return { status: "ok" };
+  } catch (err) {
+    return {
+      status: "error",
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
 }
 
 /** Reset the cached client (for tests). */

@@ -38,7 +38,8 @@ import {
 } from "./llm-fact-extractor.ts";
 import { logger } from "./logger.ts";
 import { currentTrace } from "./trace-context.ts";
-import { recordMemoryWrite } from "./cw-metrics.ts";
+import { recordMemoryWrite, recordMemoryEmbeddingSkipped } from "./cw-metrics.ts";
+import type { EmbedErrorCode } from "./embed-query.ts";
 
 export type { FactCandidate } from "./llm-fact-extractor.ts";
 
@@ -53,6 +54,26 @@ export type MemoryTurn = {
 /** Read at call-time so tests can override MEMORY_INJECT_TURNS at runtime. */
 function maxInjectTurns(): number {
   return Math.max(1, Number(process.env.MEMORY_INJECT_TURNS ?? 5));
+}
+
+/**
+ * Pick the most common `EmbedErrorCode` from a list of failures so the trace
+ * event + skipped-embedding metric can surface a single dominant reason
+ * (instead of N separate trace fields for an N-way mixed failure).
+ */
+function dominantCode(codes: EmbedErrorCode[]): EmbedErrorCode | undefined {
+  if (codes.length === 0) return undefined;
+  const counts = new Map<EmbedErrorCode, number>();
+  for (const c of codes) counts.set(c, (counts.get(c) ?? 0) + 1);
+  let winner: EmbedErrorCode | undefined;
+  let max = 0;
+  for (const [code, n] of counts) {
+    if (n > max) {
+      max = n;
+      winner = code;
+    }
+  }
+  return winner;
 }
 
 // ---------------------------------------------------------------------------
@@ -225,6 +246,25 @@ export type ExtractFactCandidatesResult = {
 };
 
 /**
+ * Test-only injection point. When set, `extractFactCandidates()` returns
+ * the override result instead of calling Bedrock. Lets unit tests exercise
+ * the strict-mode embedding-skip path in `mongoWriteFacts` without mocking
+ * `@aws-sdk/client-bedrock-runtime` (whose process-global mock would leak
+ * into the Strands retry-contract test).
+ */
+let _factExtractorOverride: ((msg: string) => Promise<ExtractFactCandidatesResult>) | null = null;
+
+export function setFactExtractorForTests(
+  fn: (msg: string) => Promise<ExtractFactCandidatesResult>,
+): void {
+  _factExtractorOverride = fn;
+}
+
+export function clearFactExtractorForTests(): void {
+  _factExtractorOverride = null;
+}
+
+/**
  * Run the LLM extractor and return its candidates. On Bedrock failure we
  * return an empty result with `extractorError` set; the caller (`mongoWriteFacts`)
  * treats that as a skip. Extractor never throws.
@@ -232,6 +272,7 @@ export type ExtractFactCandidatesResult = {
 export async function extractFactCandidates(
   userMessage: string,
 ): Promise<ExtractFactCandidatesResult> {
+  if (_factExtractorOverride) return _factExtractorOverride(userMessage);
   const t0 = Date.now();
   try {
     const llm = await extractFactsWithLlm(userMessage);
@@ -275,6 +316,16 @@ type MongoWriteFactsResult = {
   embeddedCount: number;
   /** Embedding model id (Voyage or `bedrock:<modelId>`). */
   embeddingModel?: string;
+  /**
+   * Number of facts whose embedding failed and were stored without `embedding`.
+   * In strict mode this is non-zero only when the declared provider is unavailable
+   * (e.g. `EMBEDDINGS_PROVIDER=voyage` with a transient SageMaker error). The
+   * fact row still lands in the collection — it just won't be vector-retrievable
+   * until re-embedded by `db-seeding/reembed-mismatched.ts` or a fresh write.
+   */
+  embeddingSkipped: number;
+  /** Dominant `EmbedErrorCode` for the skipped facts (if any). */
+  embeddingSkipReason?: EmbedErrorCode;
   priorEntryCount: number | null;
   newEntryCount: number | null;
   ttlExpiresAt: string;
@@ -309,6 +360,7 @@ async function mongoWriteFacts(turn: MemoryTurn): Promise<MongoWriteFactsResult>
       inserted: 0,
       duplicates: 0,
       embeddedCount: 0,
+      embeddingSkipped: 0,
       priorEntryCount: null,
       newEntryCount: null,
       ttlExpiresAt,
@@ -327,6 +379,7 @@ async function mongoWriteFacts(turn: MemoryTurn): Promise<MongoWriteFactsResult>
       inserted: 0,
       duplicates: 0,
       embeddedCount: 0,
+      embeddingSkipped: 0,
       priorEntryCount: null,
       newEntryCount: null,
       ttlExpiresAt,
@@ -343,6 +396,7 @@ async function mongoWriteFacts(turn: MemoryTurn): Promise<MongoWriteFactsResult>
       inserted: 0,
       duplicates: 0,
       embeddedCount: 0,
+      embeddingSkipped: 0,
       priorEntryCount: null,
       newEntryCount: null,
       ttlExpiresAt,
@@ -354,8 +408,16 @@ async function mongoWriteFacts(turn: MemoryTurn): Promise<MongoWriteFactsResult>
   // Failures don't block persistence — the row is stored without `embedding`.
   // Vector retrieval won't surface it until an embedding is present; lexical
   // search still will, and the trace payload exposes the degraded write.
-  const embedSettled = await Promise.all(
-    accepted.map(async (fact) => {
+  //
+  // Strict mode (`embed-query.ts`): the embedder never silently falls back to
+  // the other provider, so an `!ok` here means the declared provider failed.
+  // We capture the failure code so the trace event surfaces *why* the fact
+  // landed without a vector.
+  type EmbedSettled =
+    | { ok: true; source: "voyage" | "bedrock"; modelId: string; vector: number[] }
+    | { ok: false; code: EmbedErrorCode };
+  const embedSettled: EmbedSettled[] = await Promise.all(
+    accepted.map(async (fact): Promise<EmbedSettled> => {
       const r = await embedDocumentText(fact);
       if (!r.ok) {
         logger.warn("[memory] fact embedding failed; storing fact without vector", {
@@ -364,13 +426,16 @@ async function mongoWriteFacts(turn: MemoryTurn): Promise<MongoWriteFactsResult>
           code: r.code,
           message: r.message,
         });
-        return null;
+        return { ok: false, code: r.code };
       }
-      return r;
+      return { ok: true, source: r.source, modelId: r.modelId, vector: r.vector };
     }),
   );
-  const embeddingModel = embedSettled.find((r) => r && r.ok)?.modelId;
-  const embeddedCount = embedSettled.filter((r) => r !== null).length;
+  const embeddingModel = embedSettled.find((r): r is Extract<EmbedSettled, { ok: true }> => r.ok)?.modelId;
+  const embeddedCount = embedSettled.filter((r) => r.ok).length;
+  const failedCodes = embedSettled.filter((r): r is Extract<EmbedSettled, { ok: false }> => !r.ok).map((r) => r.code);
+  const embeddingSkipped = failedCodes.length;
+  const embeddingSkipReason = dominantCode(failedCodes);
 
   const ops: AnyBulkWriteOperation<MemoryFact>[] = accepted.map((fact, i) => {
     const factHash = computeFactHash(turn.userId, turn.agentId, fact);
@@ -382,7 +447,7 @@ async function mongoWriteFacts(turn: MemoryTurn): Promise<MongoWriteFactsResult>
       source: "user",
       ts: new Date(turn.ts),
       factHash,
-      ...(emb && emb.ok
+      ...(emb.ok
         ? { embedding: emb.vector, embeddingModel: emb.modelId }
         : {}),
     };
@@ -422,6 +487,8 @@ async function mongoWriteFacts(turn: MemoryTurn): Promise<MongoWriteFactsResult>
       duplicates: 0,
       embeddedCount,
       embeddingModel,
+      embeddingSkipped,
+      embeddingSkipReason,
       priorEntryCount,
       newEntryCount,
       ttlExpiresAt,
@@ -445,6 +512,8 @@ async function mongoWriteFacts(turn: MemoryTurn): Promise<MongoWriteFactsResult>
     duplicates,
     embeddedCount,
     embeddingModel,
+    embeddingSkipped,
+    embeddingSkipReason,
     priorEntryCount,
     newEntryCount,
     ttlExpiresAt,
@@ -543,6 +612,7 @@ export async function writeLongTermMemory(
       inserted: 0,
       duplicates: 0,
       embeddedCount: 0,
+      embeddingSkipped: 0,
       priorEntryCount: null,
       newEntryCount: null,
       ttlExpiresAt: "",
@@ -630,6 +700,8 @@ export async function writeLongTermMemory(
     duplicatesSkipped: result.duplicates,
     embeddedCount: result.embeddedCount,
     embeddingModel: result.embeddingModel,
+    "embedding.skipped": result.embeddingSkipped,
+    "embedding.skipReason": result.embeddingSkipReason,
     primaryBackend: "mongodb",
     primaryOutcome: result.outcome,
     primaryErrorClass: result.errorClass,
@@ -664,6 +736,20 @@ export async function writeLongTermMemory(
     });
   } catch {
     // metric emission must never destabilize the memory write
+  }
+  // Strict-mode: surface *why* embeddings were skipped (per-code dimension) so
+  // dashboards can distinguish a Voyage outage from a Bedrock outage from a
+  // misconfigured EMBEDDINGS_PROVIDER.
+  if (result.embeddingSkipped > 0 && result.embeddingSkipReason) {
+    try {
+      recordMemoryEmbeddingSkipped({
+        agentId,
+        code: result.embeddingSkipReason,
+        count: result.embeddingSkipped,
+      });
+    } catch {
+      // metric emission must never destabilize the memory write
+    }
   }
 }
 
@@ -999,7 +1085,7 @@ export async function readLongTermMemoryContext(
   const embed = await embedQueryText(trimmedQuery, embedAbort.signal)
     .catch((err) => ({
       ok: false as const,
-      code: "bedrock_failed" as const,
+      code: "embed_threw" as const,
       message: err instanceof Error ? err.message : String(err),
     }))
     .finally(() => clearTimeout(embedTimer));

@@ -12,7 +12,7 @@ variable "voyage_model_package_arn" {
   type        = string
   description = <<EOT
 AWS Marketplace model package ARN for Voyage AI.
-Default target listing is voyage-multimodal-3 (SoW).
+Default target listing is voyage-multimodal-3.
 Subscribe at: https://aws.amazon.com/marketplace/pp/prodview-hrid2zxusacxy
 Then find the region-specific ARN via:
   aws sagemaker list-model-packages --model-package-group-name voyage-multimodal-3

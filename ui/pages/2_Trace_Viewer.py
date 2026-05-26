@@ -146,10 +146,10 @@ if narrative_lines:
 
 st.divider()
 for render_section in (
+    render_memory,
     render_timeline,
     render_context,
     render_prompt_and_skills,
-    render_memory,
     render_model_activity,
     render_routing,
     render_tool_calls,

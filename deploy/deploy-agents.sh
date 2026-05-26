@@ -246,6 +246,7 @@ AGENTCORE_ORCHESTRATOR_ID=$(terraform output -raw acr_orchestrator_id 2>/dev/nul
 AGENTCORE_ORCHESTRATOR_ARN=$(terraform output -raw acr_orchestrator_arn 2>/dev/null || echo "")
 AGENTCORE_MEMORY_STORE_ID=$(terraform output -raw agentcore_memory_id 2>/dev/null || echo "")
 AGENTCORE_GATEWAY_URL=$(terraform output -raw agentcore_gateway_url 2>/dev/null || echo "")
+MONGODB_MCP_RUNTIME_ARN=$(terraform output -raw mongodb_mcp_runtime_arn 2>/dev/null || echo "")
 ECR_RUNTIME_REPO=$(terraform output -raw ecr_agent_runtime_repository_url 2>/dev/null || echo "")
 BEDROCK_KB_ID=$(terraform output -raw knowledge_base_id 2>/dev/null || echo "")
 
@@ -294,6 +295,15 @@ if [[ -z "${AGENTCORE_GATEWAY_URL:-}" ]]; then
   err "AGENTCORE_GATEWAY_URL is empty. Provision the AgentCore Gateway first (deploy.sh)."
 fi
 
+# Strict-mode embeddings: only export EMBEDDING_MODEL_ID for titan stacks.
+# Voyage stacks ship AgentCore runtimes without a Bedrock fallback model id,
+# matching the API container's `.env.live` (deploy-project.sh / deploy-api.sh).
+if [[ "$EMBEDDINGS_PROVIDER" == "titan" ]]; then
+  export EMBEDDING_MODEL_ID="${EMBEDDING_MODEL_ID:-amazon.titan-embed-text-v2:0}"
+else
+  unset EMBEDDING_MODEL_ID
+fi
+
 # Export everything build_dynamic_env_base / update_runtime_env_dynamic need.
 export AWS_REGION MONGODB_URI ATLAS_DB_NAME BEDROCK_KB_ID \
        AGENTCORE_MEMORY_STORE_ID AGENTCORE_GATEWAY_URL \
@@ -303,6 +313,10 @@ export AWS_REGION MONGODB_URI ATLAS_DB_NAME BEDROCK_KB_ID \
 
 build_dynamic_env_base   # sets DYNAMIC_ENV_BASE
 update_runtime_env_dynamic
+
+if [[ -n "${MONGODB_MCP_RUNTIME_ARN:-}" ]]; then
+  update_mcp_runtime_mongodb_env "${MONGODB_MCP_RUNTIME_ARN##*/}" "$MONGODB_URI" "$ATLAS_DB_NAME"
+fi
 
 sep
 log "Phase 8b — Verifying runtime environment variables..."

@@ -26,8 +26,8 @@
 #
 # Usage:
 #   ./deploy/deploy-full-with-vpc-peering.sh [--auto-approve] [--skip-docker]
-#                                            [--skip-network] [--skip-shared]
-#                                            [--env-file <path>]
+#                                            [--skip-smoke] [--skip-network]
+#                                            [--skip-shared] [--env-file <path>]
 #
 # Flags: identical to deploy-full-with-privatelink.sh.
 #
@@ -59,11 +59,13 @@ AUTO_APPROVE=false
 SKIP_DOCKER=false
 SKIP_NETWORK=false
 SKIP_SHARED=false
+SKIP_SMOKE=false
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --auto-approve) AUTO_APPROVE=true ;;
     --skip-docker)  SKIP_DOCKER=true ;;
+    --skip-smoke)   SKIP_SMOKE=true ;;
     --skip-network) SKIP_NETWORK=true ;;
     --skip-shared)  SKIP_SHARED=true ;;
     --env-file)     ENV_FILE="$2"; shift ;;
@@ -262,6 +264,7 @@ sep
 PROJECT_ARGS=("--env-file" "$ENV_FILE")
 [[ "$AUTO_APPROVE" == "true" ]] && PROJECT_ARGS+=("--auto-approve")
 [[ "$SKIP_DOCKER"  == "true" ]] && PROJECT_ARGS+=("--skip-docker")
+[[ "$SKIP_SMOKE"   == "true" ]] && PROJECT_ARGS+=("--skip-smoke")
 
 deploy_diag_checkpoint "launching child script: NETWORK_MODE=peering ATLAS_PEERING_CIDR=${ATLAS_PEERING_CIDR} bash ${PROJECT_SCRIPT} ${PROJECT_ARGS[*]}"
 NETWORK_MODE=peering ATLAS_PEERING_CIDR="$ATLAS_PEERING_CIDR" bash "$PROJECT_SCRIPT" "${PROJECT_ARGS[@]}"

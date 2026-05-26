@@ -6,7 +6,7 @@ groups:
       - label: Order status
         text: Where is my order #12345?
       - label: Product question
-        text: What's the difference between the X-2 and X-3 models?
+        text: What's the difference between the SKU-2 and SKU-3 models?
       - label: Troubleshooting
         text: My device shows error code E-104 — can you help?
 
@@ -15,7 +15,7 @@ groups:
       - label: Find an order (Atlas)
         text: Look up order 12345 in MongoDB and tell me the shipment status.
       - label: Vector search
-        text: Show me similar products to the X-2 using vector search.
+        text: Show me similar products to the SKU-2 using vector search.
 
   - title: Memory
     prompts:

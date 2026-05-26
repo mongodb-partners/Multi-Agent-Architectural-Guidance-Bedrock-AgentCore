@@ -234,30 +234,96 @@ describe("projectTraceForInclude — core mode strips heavy fields", () => {
     });
   });
 
-  test("mongo.vector_search.documentPreviews is capped at top-3 in core mode", () => {
+  test("mongo.query.{filter,pipeline,normalizedFilter,projection,sort} survive core mode verbatim", () => {
+    // The client-facing MongoDB dashboard (`render_mongo_dashboard`) renders
+    // these fields inline; stripping them in core would force users into the
+    // Developer details panel for the demo-critical "what query ran" view.
+    // Keep this contract pinned so a future regression that re-adds mongo.*
+    // to STRIP_FIELDS_BY_TYPE fails CI.
+    const filter = { customerEmail: "alice@example.com", status: "shipped" };
+    const pipeline = [
+      { $match: { orderId: "ORD-1001" } },
+      { $lookup: { from: "customers", localField: "customerId", foreignField: "_id", as: "customer" } },
+    ];
+    const trace = makeTrace([
+      makeEvent("e1", "mongo.query", {
+        mode: "direct",
+        collection: "orders",
+        op: "find",
+        filter,
+        normalizedFilter: filter,
+        projection: { orderId: 1, status: 1 },
+        sort: { createdAt: -1 },
+      }),
+      makeEvent("e2", "mongo.query", {
+        mode: "direct",
+        collection: "orders",
+        op: "aggregate",
+        pipeline,
+      }),
+    ]);
+    const out = projectTraceForInclude(trace, "core");
+    const p1 = out.events[0].payload as any;
+    expect(p1.filter).toEqual(filter);
+    expect(p1.normalizedFilter).toEqual(filter);
+    expect(p1.projection).toEqual({ orderId: 1, status: 1 });
+    expect(p1.sort).toEqual({ createdAt: -1 });
+    const p2 = out.events[1].payload as any;
+    expect(p2.pipeline).toEqual(pipeline);
+  });
+
+  test("mongo.result.sampleDocs survives core mode verbatim", () => {
+    const sampleDocs = [
+      { _id: "1", orderId: "ORD-1001", status: "shipped" },
+      { _id: "2", orderId: "ORD-1002", status: "delivered" },
+    ];
+    const trace = makeTrace([
+      makeEvent("e1", "mongo.result", {
+        status: "ok",
+        docCount: 2,
+        latencyMs: 12,
+        sampleDocs,
+      }),
+    ]);
+    const out = projectTraceForInclude(trace, "core");
+    const p = out.events[0].payload as any;
+    expect(p.sampleDocs).toEqual(sampleDocs);
+    expect(p.docCount).toBe(2);
+    expect(p.status).toBe("ok");
+  });
+
+  test("mongo.vector_search payload fields survive core mode; documentPreviews is capped at top-3 (fields kept)", () => {
     const previews = Array.from({ length: 7 }, (_, i) => ({
       rank: i + 1,
       title: `doc ${i + 1}`,
       snippet: `snippet ${i + 1}`,
       fields: { sku: `SKU-${i}` },
     }));
+    const filter = { customerId: "cust-123", status: { $in: ["active", "trial"] } };
+    const queryVectorPreview = { length: 1024, head: [0.1, 0.2, 0.3], tail: [0.7, 0.8, 0.9] };
     const trace = makeTrace([
       makeEvent("e1", "mongo.vector_search", {
         collection: "products",
         embeddingSource: "voyage",
         indexName: "products_vector",
         scores: [0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3],
+        filter,
+        queryVectorPreview,
         documentPreviews: previews,
       }),
     ]);
     const out = projectTraceForInclude(trace, "core");
     const p = out.events[0].payload as any;
+    // documentPreviews is still capped to top-3 but each preview keeps its
+    // nested `fields` so the client-facing dashboard can render the source
+    // document metadata without bouncing into Developer details.
     expect(p.documentPreviews).toHaveLength(3);
-    // The nested `fields` are stripped from every preview kept.
     for (const preview of p.documentPreviews) {
-      expect("fields" in preview).toBe(false);
+      expect(preview).toHaveProperty("fields");
     }
-    // Keep-list fields (indexName, scores) survive.
+    // Everything else (filter, queryVectorPreview, indexName, scores) survives verbatim.
+    expect(p.filter).toEqual(filter);
+    expect(p.queryVectorPreview).toEqual(queryVectorPreview);
     expect(p.indexName).toBe("products_vector");
     expect(p.scores).toEqual([0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3]);
   });
@@ -280,6 +346,29 @@ describe("projectTraceForInclude — core mode strips heavy fields", () => {
     const out = projectTraceForInclude(trace, "core");
     const types = out.events.map((e) => e.type);
     expect(types).toEqual(["chat.turn.start"]);
+  });
+
+  test("chat.mirror.embedding_failed survives core projection (client-mode visibility)", () => {
+    const trace = makeTrace([
+      makeEvent("e1", "chat.turn.start", { sessionId: "s", messageId: "m", agentId: "a", startTs: 0 }),
+      makeEvent("e2", "chat.mirror.embedding_failed", {
+        messageId: "m1",
+        sessionId: "s1",
+        agentId: "a1",
+        role: "user",
+        code: "voyage_strict_failed",
+        message: "SageMaker 503",
+      }),
+    ]);
+    const out = projectTraceForInclude(trace, "core");
+    const types = out.events.map((e) => e.type);
+    expect(types).toContain("chat.mirror.embedding_failed");
+    const ev = out.events.find((e) => e.type === "chat.mirror.embedding_failed");
+    expect(ev?.payload).toMatchObject({
+      messageId: "m1",
+      sessionId: "s1",
+      code: "voyage_strict_failed",
+    });
   });
 
   test("dev-only top-level fields are removed from core mode", () => {

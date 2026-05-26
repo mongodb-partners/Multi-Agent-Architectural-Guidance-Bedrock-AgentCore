@@ -103,7 +103,7 @@ These are typically set in `.env.live` by `deploy-project.sh`. For local dev wit
 | `BEDROCK_KB_ID` | `YDF16V4CRX` | Default knowledge base for `bedrock_kb_retrieve` |
 | `EMBEDDINGS_PROVIDER` | `titan` or `voyage` | Explicit embedding provider. `titan` needs no Voyage ARN; `voyage` provisions/uses SageMaker from `VOYAGE_MODEL_PACKAGE_ARN`. |
 | `EMBEDDING_MODEL_ID` | `amazon.titan-embed-text-v2:0` | Bedrock embedding model for `EMBEDDINGS_PROVIDER=titan` and fallback paths. Must match Atlas vector index dimensionality (Titan v2 = 1024-d). |
-| `VOYAGE_MODEL_PACKAGE_ARN` | `arn:aws:sagemaker:...:model-package/voyage-...` | Required only for `EMBEDDINGS_PROVIDER=voyage`. Must point at a Voyage package. The SoW default is `voyage-multimodal-3`; AWS may expose that family as `voyage-multimodel-3-updated-*`. |
+| `VOYAGE_MODEL_PACKAGE_ARN` | `arn:aws:sagemaker:...:model-package/voyage-...` | Required only for `EMBEDDINGS_PROVIDER=voyage`. Must point at a Voyage package. The default is `voyage-multimodal-3`; AWS may expose that family as `voyage-multimodel-3-updated-*`. |
 | `VOYAGE_MARKETPLACE_MODEL` | `voyage-multimodal-3` or `voyage-3-5-lite` | Selected Voyage Marketplace model. Used for endpoint naming and env consistency. |
 | `VOYAGE_SAGEMAKER_ENDPOINT` | `mongodb-multiagent3-voyage-multimodal-3-dev` | Runtime endpoint name written by deploy when Voyage is enabled. If empty, API + AgentCore runtimes use Titan. |
 | `VOYAGE_REQUEST_FORMAT` | `multimodal` or `legacy` | SageMaker request envelope. Use `multimodal` for `voyage-multimodal-3`; use `legacy` for `voyage-3-5-lite`. |
@@ -116,7 +116,7 @@ These are typically set in `.env.live` by `deploy-project.sh`. For local dev wit
 | `MONGODB_URI` | `mongodb+srv://...` (local) or `mongodb://...:1024,...:1025/?ssl=true` (AgentCore Runtime PrivateLink) | Atlas connection string |
 | `MONGODB_DB` | `<project>_<env>` (e.g. `mongodb_multiagent_dev`) | Database name; project+env-derived (underscored) by `.env` |
 | `MONGODB_ALLOW_WRITE` | `1` or `true` | Required for `updateOne` against real Atlas. Default off (read-only). |
-| `SHORT_TERM_MEMORY_BACKEND` | `agentcore` (EC2 deploy default) | `agentcore` makes AgentCore Memory the short-term conversation backend when authenticated. This is the SoW deployment narrative. |
+| `SHORT_TERM_MEMORY_BACKEND` | `agentcore` (EC2 deploy default) | `agentcore` makes AgentCore Memory the short-term conversation backend when authenticated. This is the production deployment default. |
 | `PERSIST_CHAT_SESSIONS` | unset (default-on when `MONGODB_URI` is set), `0`/`false` to opt out | Mirror session history to MongoDB `chat_sessions` for the Sessions page, audit/debug history, and cold-read fallback. This does not make MongoDB the primary short-term memory backend in deployed AWS. |
 | `MEMORY_TTL_DAYS` | `30` in EC2 `.env.live` (`90` code fallback if unset) | TTL for `agent_memory_facts` long-term facts collection |
 | `MEMORY_INJECT_TURNS` | `5` (default) | Number of past turns injected into system prompt as long-term memory |
@@ -129,7 +129,7 @@ JWKS auth is mandatory — the API refuses to boot without `AUTH_JWKS_URI` + `AU
 |---|---|---|
 | `AUTH_JWKS_URI` | `https://cognito-idp.<region>.amazonaws.com/<pool-id>/.well-known/jwks.json` | **Required** — JWKS for JWT signature verification |
 | `AUTH_ISSUER` | `https://cognito-idp.<region>.amazonaws.com/<pool-id>` | **Required** — JWT `iss` claim must match |
-| `AUTH_APP_CLIENT_ID` | Cognito app client ID | Optional `aud`/`client_id` validation |
+| `AUTH_APP_CLIENT_ID` | Cognito app ID | Optional `aud`/`client_id` validation |
 | `AUTH_TOKEN_USE` | `access` (recommended) or `id` | Optional Cognito token type pin |
 
 ### Streamlit UI
@@ -138,7 +138,7 @@ JWKS auth is mandatory — the API refuses to boot without `AUTH_JWKS_URI` + `AU
 |---|---|
 | `STREAMLIT_API_URL` | API URL the UI calls. Default: `http://127.0.0.1:3000`. |
 | `STREAMLIT_COGNITO_POOL_ID` | If set, UI gates with Cognito hosted-UI or embedded login |
-| `STREAMLIT_COGNITO_CLIENT_ID` | Cognito app client ID |
+| `STREAMLIT_COGNITO_CLIENT_ID` | Cognito app ID |
 | `STREAMLIT_COGNITO_DOMAIN` | Optional; if set with `REDIRECT_URI` + `CLIENT_SECRET`, uses hosted UI |
 | `STREAMLIT_COGNITO_REDIRECT_URI` | OAuth callback |
 | `STREAMLIT_COGNITO_CLIENT_SECRET` | Hosted UI mode only |
@@ -156,7 +156,7 @@ The deployment supports three explicit modes:
 | Mode | Required env | Runtime behavior |
 |---|---|---|
 | Titan/no ARN | `EMBEDDINGS_PROVIDER=titan` | No SageMaker endpoint is created. API + AgentCore runtimes use Bedrock Titan v2 (`amazon.titan-embed-text-v2:0`). |
-| Voyage multimodal | `EMBEDDINGS_PROVIDER=voyage`, `VOYAGE_MARKETPLACE_MODEL=voyage-multimodal-3`, `VOYAGE_REQUEST_FORMAT=multimodal`, `VOYAGE_MODEL_PACKAGE_ARN=...voyage-multimodal-3...` or `...voyage-multimodel-3-updated...` | Provisions SageMaker and uses Voyage multimodal embeddings. This is the SoW-aligned path. |
+| Voyage multimodal | `EMBEDDINGS_PROVIDER=voyage`, `VOYAGE_MARKETPLACE_MODEL=voyage-multimodal-3`, `VOYAGE_REQUEST_FORMAT=multimodal`, `VOYAGE_MODEL_PACKAGE_ARN=...voyage-multimodal-3...` or `...voyage-multimodel-3-updated...` | Provisions SageMaker and uses Voyage multimodal embeddings. This is the recommended path. |
 | Voyage legacy/text | `EMBEDDINGS_PROVIDER=voyage`, `VOYAGE_MARKETPLACE_MODEL=voyage-3-5-lite`, `VOYAGE_REQUEST_FORMAT=legacy`, `VOYAGE_OUTPUT_DIM=1024`, `VOYAGE_MODEL_PACKAGE_ARN=...voyage-3-5-lite...` | Provisions SageMaker and uses the older text-only Voyage listing. |
 | Voyage custom | `EMBEDDINGS_PROVIDER=voyage`, `VOYAGE_MARKETPLACE_MODEL=voyage-...`, `VOYAGE_REQUEST_FORMAT=multimodal` or `legacy`, `VOYAGE_MODEL_PACKAGE_ARN=...model-package/voyage-...` | Provisions SageMaker for another Voyage Marketplace package. The package tail and model label must start with `voyage-`. |
 
@@ -176,7 +176,7 @@ The deployment supports three explicit modes:
 ### One-time setup
 
 1. **Subscribe to the Marketplace listing** (manual; cannot be automated — requires EULA acceptance):
-   - SoW path: [MongoDB voyage-multimodal-3](https://aws.amazon.com/marketplace/pp/prodview-hrid2zxusacxy)
+   - Voyage path: [MongoDB voyage-multimodal-3](https://aws.amazon.com/marketplace/pp/prodview-hrid2zxusacxy)
    - Legacy path: [MongoDB voyage-3.5-lite Embedding Model](https://aws.amazon.com/marketplace/pp/prodview-xj76cqxng4wyw)
    - Click **Continue to Subscribe** → **Accept Offer**
 2. **Request GPU quota** (if not already granted):
@@ -198,16 +198,17 @@ source .env                                          # EMBEDDINGS_PROVIDER=voyag
 # or
 ./deploy/deploy-full-with-vpc-peering.sh --auto-approve  # peering mode
 
-# After deployment finishes, re-seed Atlas embeddings with Voyage (1024-d):
-cd db-seeding
-MONGODB_URI="$(cd ../deploy/terraform/envs/ec2 && terraform output -raw atlas_connection_string)" \
-MONGODB_DB="${ATLAS_DB_NAME}" \
-VOYAGE_SAGEMAKER_ENDPOINT="$(cd ../deploy/terraform/envs/ec2 && terraform output -raw voyage_endpoint_name)" \
-REWIRE_EMBEDDINGS=1 \
-bun seed-embeddings.ts
+# Deployment auto-detects provider drift and re-seeds embeddings in Phase 5b — no manual step required.
+# If you need to force a re-seed (e.g. you tweaked seed-embeddings.ts):
+REWIRE_EMBEDDINGS=1 bun db-seeding/seed-embeddings.ts
 ```
 
-`REWIRE_EMBEDDINGS=1` wipes the existing `embedding` field on every product + troubleshooting doc and regenerates from scratch. **This is required when switching providers** because Titan and Voyage embeddings live in different vector spaces — mixing them gives garbage similarity scores.
+**Automatic REWIRE detection.** `deploy/scripts/_seed-embeddings.sh::run_embedding_seed` (Phase 5b) inspects three signals before invoking the seeder:
+1. SSM `/<SHARED_VPC_NAME>/<region>/embeddings/dim` vs current `EMBEDDING_DIMENSIONS`.
+2. A sampled seeder-owned row's stored `embedding.length`.
+3. A sampled seeder-owned row's `embeddingModel` prefix (`voyage:` vs `bedrock:`).
+
+Any mismatch forces `REWIRE_EMBEDDINGS=1` automatically and the seeder wipes seeder-owned rows (KB-managed chunks are explicitly excluded via `bedrock_text_chunk: { $exists: false }`) before regenerating.
 
 ### What deploy-project.sh does for you
 

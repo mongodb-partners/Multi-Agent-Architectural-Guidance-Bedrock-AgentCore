@@ -6,7 +6,7 @@ public Atlas SRV hostname.
 
 > **Status:** Opt-in. The module is gated by `var.enable_kb_privatelink` in
 > `envs/ec2` (default `false`). Flipping it on adds an NLB (~$22/mo) plus
-> per-LCU usage. We ship the module so the SoW-aligned PrivateLink path is
+> per-LCU usage. We ship the module so the recommended PrivateLink path is
 > available without further code changes.
 
 ## When to enable

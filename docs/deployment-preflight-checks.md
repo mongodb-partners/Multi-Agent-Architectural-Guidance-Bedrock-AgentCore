@@ -93,8 +93,9 @@ Each deploy script invokes `preflight_validate <profile>`. Profiles are defined 
 | `network`                   | [`deploy/scripts/deploy-network.sh`](../deploy/scripts/deploy-network.sh) | After AWS auth |
 | `shared`                    | [`deploy/scripts/deploy-shared.sh`](../deploy/scripts/deploy-shared.sh) | After AWS auth |
 | `project-pre-apply`         | [`deploy/scripts/deploy-project.sh`](../deploy/scripts/deploy-project.sh) | After AWS auth, before terraform apply |
-| `project-post-apply`        | [`deploy/scripts/deploy-project.sh`](../deploy/scripts/deploy-project.sh) | After `seed-indexes`, before MongoDB URI normalization |
-| `project-pre-env-sync`      | [`deploy/scripts/deploy-project.sh`](../deploy/scripts/deploy-project.sh) | Before `.env.live` SSM copy to EC2 |
+| `project-post-apply`        | [`deploy/scripts/deploy-project.sh`](../deploy/scripts/deploy-project.sh) | After `seed-indexes` + embedding seed, before MongoDB URI normalization |
+| `project-pre-env-sync`      | [`deploy/scripts/deploy-project.sh`](../deploy/scripts/deploy-project.sh) | After Phase 6b runtime env sync + Phase 7 `.env.live` write; before SSM copy to EC2. Includes `mcp-runtime-env-complete`. |
+| `local-post-apply`          | [`deploy/scripts/deploy-local.sh`](../deploy/scripts/deploy-local.sh) | After seed-all + seed-indexes + embedding seed. **Intentionally omits** `pf_check_shell_runtime_safe` (orchestrator-only), `pf_check_privatelink_endpoint_available` and `pf_check_mcp_runtime_env_complete` (no PrivateLink endpoint / AgentCore runtimes in the local path). |
 | `agents`                    | [`deploy/deploy-agents.sh`](../deploy/deploy-agents.sh) | After AWS auth |
 | `api`                       | [`deploy/deploy-api.sh`](../deploy/deploy-api.sh) | After AWS auth |
 | `ui`                        | [`deploy/deploy-ui.sh`](../deploy/deploy-ui.sh) | After AWS auth |
@@ -156,8 +157,27 @@ Each check below corresponds to a `pf_check_*` (or `pf_advise_*`) function. The 
 
 #### aws-service-limits
 **Function:** `pf_check_aws_service_limits`
-**Catches:** Account-level service quotas at floor (VPC 5/region default, Elastic IP 5/region default).
+**Catches:** Account-level service quotas at floor (VPC 5/region default, Elastic IP 5/region default). Does **not** cover SageMaker — see [`sagemaker-endpoint-quota`](#sagemaker-endpoint-quota) for the Voyage GPU endpoint quota check.
 **Fix:** Request a quota increase via Service Quotas console.
+
+#### shell-runtime-safe
+**Function:** `pf_check_shell_runtime_safe`
+**Profiles:** `orchestrator-privatelink`, `orchestrator-peering` (inherited), `shared`.
+**Catches:** Regression of the `cmd | head -1` / SIGPIPE class of bug that previously killed `deploy-shared.sh` with `rc=141` halfway through preflight, leaving the operator with only `[full-deploy:diag] ERROR rc=141 line=… command=bash …deploy-shared.sh` and no actionable failure envelope. Root cause was `pf_check_tool_versions` parsing `terraform version | head -1 | awk … | tr -d v` inside command substitution: terraform ≥ 1.6 emits 3+ lines, `head -1` exits early, terraform receives SIGPIPE on its second write, `set -o pipefail` propagates 141, and `set -e` in `deploy-shared.sh` exits the script.
+
+**Two-prong fix is now in place:**
+
+1. **`pf_check_tool_versions` uses SIGPIPE-safe helpers** (`_pf_capture_first_line` / `_pf_capture_first_line_2`) that capture the producer's full stdout into a shell variable, then extract the first line via `${var%%$'\n'*}` parameter expansion. No early-exiting downstream reader exists, so the producer never receives SIGPIPE.
+2. **`preflight_validate` invokes each check via `if ! "$id"; then …`** — a form that POSIX/bash treat as exempt from `set -e`. A check that returns non-zero (SIGPIPE, accidental rc, or otherwise) is therefore captured by the runner and recorded as a `module bug (rc=N)` _pf_fail entry instead of killing the deploy script.
+
+**What this check verifies at runtime:**
+
+- Captures `BASH_VERSION` for support tickets (warns on bash 3.2 as a future-proofing nudge — module remains compatible).
+- Confirms the platform raises SIGPIPE on a synthetic `yes | head -1` pipeline (purely informational; some sandboxes suppress SIGPIPE).
+- Drives a synthetic check that returns rc=141 and asserts the runner deflected it (regression test for prong 2 — locked down by self-test 13).
+
+**Skipped when:** never.
+**Fix on failure:** the failure envelope walks you through re-sourcing `_preflight-checks.sh` (in case a downstream wrapper monkey-patched `preflight_validate`) and falling back to `/bin/bash` explicitly if the operator is on a non-bash shell. The self-test (`bash deploy/scripts/_preflight-checks.sh --self-test`) covers both fix prongs and will catch any regression in CI before deploy.
 
 #### deploy preview (`pf_advise_cost_and_duration`)
 Advisory only — never fails. Prints expected resources, ~$240–320/month estimate, ~25–40 min build time, and the teardown command. Silence with `PREFLIGHT_NO_COST_PREVIEW=1`.
@@ -239,7 +259,25 @@ Advisory only — never fails. Prints expected resources, ~$240–320/month esti
 #### embedding-dim-consistency
 **Function:** `pf_check_embedding_dim_consistency` *(post-apply only)*
 **Catches:** `EMBEDDINGS_PROVIDER` switched (e.g. titan ↔ voyage) without re-seeding documents — the stored vector dim in SSM (`/<SHARED_VPC_NAME>/<region>/embeddings/dim`) ≠ the new provider's expected dim. First vector search would return 0 hits.
-**Fix:** Re-seed: `bun db-seeding/seed-indexes.ts && bun db-seeding/seed-knowledge-base.ts`, **or** revert `EMBEDDINGS_PROVIDER`.
+**Fix:** `REWIRE_EMBEDDINGS=1 bun db-seeding/seed-embeddings.ts` (also runs `seed-indexes.ts` upstream), **or** revert `EMBEDDINGS_PROVIDER`.
+
+#### privatelink-endpoint-available
+**Function:** `pf_check_privatelink_endpoint_available` *(post-apply only)*
+**Profiles:** `project-post-apply` (skipped when `NETWORK_MODE != privatelink`).
+**Catches:** AWS VPC endpoint or Atlas PrivateLink endpoint service is still `pendingAcceptance` / `Failed` / not `available`. Without an `available` endpoint, EC2 → Atlas traffic falls back to public-SRV (PrivateLink mode would silently route over the internet) or fails outright.
+**Fix:** Wait 1–3 minutes for endpoint provisioning to finish; inspect with `aws ec2 describe-vpc-endpoints --vpc-endpoint-ids $ATLAS_PRIVATELINK_ENDPOINT_ID`.
+
+#### mcp-runtime-env-complete
+**Function:** `pf_check_mcp_runtime_env_complete` *(post-apply only)*
+**Profiles:** `project-pre-env-sync` (after Phase 6b + `.env.live` generation; **not** `project-post-apply` — running earlier compares against a stale `.env.live`).
+**Catches:** Phase 6b didn't run (or partially ran), so the `mongodb-mcp` AgentCore Runtime's `MONGODB_URI` / `MONGODB_DB` are empty, the MCP URI **authority** (user@hosts; query params like `retryWrites` are ignored) drifted from shell `MONGODB_URI` / `.env.live`, OR a specialist runtime is missing `AGENTCORE_GATEWAY_URL`. Visible symptom: chat returns "tool returned 0 results" because the MCP runtime can't reach Atlas, even though the API's `/health` says `mongodb: connected`.
+**Fix:** `./deploy/deploy-agents.sh --auto-approve` re-runs Phase 6b (`update_runtime_env_dynamic` + `update_mcp_runtime_mongodb_env`). See [docs/status/debugging.md "AgentCore Runtime env wipe"](status/debugging.md#agentcore-runtime-env-wipe).
+
+#### kb-ingestion-complete
+**Function:** `pf_check_kb_ingestion_complete` *(post-apply only)*
+**Profiles:** `project-post-apply`, `local-post-apply` (skipped when `BEDROCK_KB_ID` empty).
+**Catches:** The latest Bedrock KB ingestion job is not `COMPLETE`, OR completed with `0` documents indexed. Uses `aws bedrock-agent list-ingestion-jobs` (authoritative, schema-independent — survives Bedrock chunk-shape changes).
+**Fix:** Inspect with `aws bedrock-agent list-ingestion-jobs --knowledge-base-id <kb-id> --data-source-id <ds-id>`; re-trigger by running `terraform apply` on the `bedrock-kb` module.
 
 ### Voyage (Marketplace)
 
@@ -247,6 +285,14 @@ Advisory only — never fails. Prints expected resources, ~$240–320/month esti
 **Function:** `pf_check_voyage_marketplace_subscribed`
 **Catches:** `EMBEDDINGS_PROVIDER=voyage` but `VOYAGE_MODEL_PACKAGE_ARN` is unset, **or** `aws sagemaker describe-model-package` returns an error (not subscribed in this region).
 **Fix:** `./deploy/scripts/setup-voyage-marketplace.sh` walks you through the Marketplace subscription, then prints the per-region ARN to paste into `.env`.
+
+#### sagemaker-endpoint-quota
+**Function:** `pf_check_sagemaker_endpoint_quota`
+**Profiles:** `orchestrator-privatelink`, `orchestrator-peering` (inherited), `shared`.
+**Catches:** `EMBEDDINGS_PROVIDER=voyage` but the account has **0** quota for the chosen Voyage GPU instance type (`VOYAGE_INSTANCE_TYPE`, default `ml.g6.xlarge`) under the Service Quotas key `"<instance-type> for endpoint usage"`. New AWS accounts default to 0 for many `ml.g5.*` / `ml.g6.*` types; without an explicit quota grant `envs/shared` fails ~6 min into `terraform apply` with `ResourceLimitExceeded` at `module.voyage_sagemaker`. The check first queries customer-applied quotas (`list-service-quotas`); if absent it falls back to `list-aws-default-service-quotas` so brand-new accounts still see a precise pre-flight failure instead of a 6-minute terraform regression.
+**Skipped when:** `EMBEDDINGS_PROVIDER != voyage` (Titan deploys don't need SageMaker), or the chosen instance type has no matching Service Quotas entry (rare — the inline terraform apply still catches it).
+**Fix:** Open Service Quotas → SageMaker → search for `"<instance-type> for endpoint usage"` → Request quota increase → value ≥ 1. Approval is usually 0–60 min on accounts with payment history, up to 24 h on brand-new accounts. Alternatively set `EMBEDDINGS_PROVIDER=titan` in `.env` to skip Voyage entirely.
+**Why this isn't covered by `aws-service-limits`:** that check is region-default sanity (VPCs + EIPs) and doesn't introspect SageMaker; this one specifically resolves the per-instance-type endpoint quota.
 
 ### Network / VPC / SSM
 
@@ -289,8 +335,10 @@ Advisory only — never fails. Prints expected resources, ~$240–320/month esti
 
 #### documents-have-embeddings
 **Function:** `pf_check_documents_have_embeddings` *(post-apply only)*
-**Catches:** `products` collection has documents but ≥ 1 row without an `embedding` field (provider misconfig during seeding).
-**Fix:** `bun db-seeding/seed-knowledge-base.ts` (forces embedding regeneration).
+**Profiles:** `project-post-apply`, `local-post-apply`.
+**Catches:** Either `products` OR seeder-owned `troubleshooting_docs` (KB-managed rows are intentionally excluded via `bedrock_text_chunk: { $exists: false }`) has ≥ 1 row without an `embedding`, OR the sample row's `embedding.length` differs from `EMBEDDING_DIMENSIONS`, OR the sample row's `embeddingModel` doesn't start with the expected provider prefix (`voyage:` / `bedrock:`).
+**Implementation:** Uses `bun -e` directly (no `mongosh` / `pymongo` skip path — this check NEVER silently passes now). The target database name is resolved by `_pf_resolve_mongodb_db` in priority order: `MONGODB_DB` → `ATLAS_DB_NAME` → `${PROJECT_NAME//-/_}_${ENVIRONMENT}` (the canonical project convention). `deploy-project.sh` exports `MONGODB_DB="$ATLAS_DB_NAME"` early so both env vars are always populated when preflight runs inside a deploy.
+**Fix:** `bun db-seeding/seed-embeddings.ts` is idempotent (gap-fills missing). For a provider switch: `REWIRE_EMBEDDINGS=1 bun db-seeding/seed-embeddings.ts`.
 
 ---
 

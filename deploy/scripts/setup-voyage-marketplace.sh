@@ -29,7 +29,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 ENV_FILE="$REPO_ROOT/.env"
 
-# Default to the SoW model, but keep voyage-3-5-lite as a supported legacy
+# Default to voyage-multimodal-3, but keep voyage-3-5-lite as a supported legacy
 # option for lower-cost/text-only deployments.
 MODEL="${VOYAGE_MARKETPLACE_MODEL:-voyage-multimodal-3}"
 MODEL_FROM_ARGS=false
@@ -106,9 +106,9 @@ ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text 2>/dev/n
   || err "AWS credentials invalid or expired. Run: source .env"
 ok "AWS account: $ACCOUNT_ID (region: $AWS_REGION)"
 
-# Optional SoW guard — fail fast on any silent deviation from voyage-multimodal-3.
+# Optional model guard — fail fast on any silent deviation from voyage-multimodal-3.
 if [[ "$REQUIRE_VOYAGE_MULTIMODAL_3" == "true" && "$MODEL" != "voyage-multimodal-3" ]]; then
-  err "Refusing to subscribe to '$MODEL' — SoW pins this stack to 'voyage-multimodal-3'.
+  err "Refusing to subscribe to '$MODEL' — this stack pins voyage-multimodal-3.
      To override, re-run with REQUIRE_VOYAGE_MULTIMODAL_3=false (requires written sign-off)."
 fi
 if [[ ! "$MODEL" =~ ^voyage- ]]; then

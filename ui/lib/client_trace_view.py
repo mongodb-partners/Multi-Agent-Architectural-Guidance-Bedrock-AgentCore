@@ -424,7 +424,12 @@ def render_mongo_dashboard(events: list[dict]) -> None:
         ):
             cfilter = qp.get("filter") or qp.get("normalizedFilter")
             if cfilter:
+                st.caption("Filter")
                 st.code(json.dumps(cfilter, indent=2, default=str), language="json")
+            pipeline = qp.get("pipeline")
+            if pipeline:
+                st.caption("Pipeline")
+                _render_jsonish(pipeline)
             if rp.get("sampleDocs"):
                 st.caption("Sample documents")
                 _render_jsonish(rp["sampleDocs"])

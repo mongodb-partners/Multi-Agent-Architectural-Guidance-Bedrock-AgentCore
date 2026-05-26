@@ -13,7 +13,7 @@ This checks:
 
 - `/health` dependencies: `mongodb`, `longTermMemory`, `agentcore`, `mcpServer`, and `bedrockKnowledgeBase` when a KB is configured.
 - `/agents` metadata for all four configured agents.
-- Manifest alignment for `embeddings_provider`, exact Voyage model package, and SoW alignment.
+- Manifest alignment for `embeddings_provider`, exact Voyage model package, and Voyage multimodal default.
 - SageMaker endpoint existence and `InService` status when `EMBEDDINGS_PROVIDER=voyage`.
 - Terraform outputs for Voyage endpoint and Bedrock KB PrivateLink.
 - Bedrock KB `ACTIVE` status with Atlas `-pl` endpoint and `endpointServiceName`.
@@ -27,6 +27,12 @@ SKIP_TERRAFORM_CHECKS=1 python3 e2e-smoke/post-deploy-smoke.py
 SKIP_CHAT_CHECKS=1 python3 e2e-smoke/post-deploy-smoke.py
 E2E_USER=alex@example.com E2E_PASS='DemoUser#2026' python3 e2e-smoke/post-deploy-smoke.py
 ```
+
+> **Strict-mode embeddings:** every smoke probe assumes `EMBEDDINGS_PROVIDER`
+> is set on the API container (`voyage` or `titan`). Empty values are now
+> rejected at API boot (`api/src/lib/assert-embeddings-provider.ts`), so a
+> manifest with no provider declared will fail the `/health` check before any
+> chat probe runs.
 
 ## Legacy deep smoke
 

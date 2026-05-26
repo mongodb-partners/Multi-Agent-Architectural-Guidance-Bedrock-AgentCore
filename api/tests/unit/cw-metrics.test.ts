@@ -20,7 +20,9 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import {
   recordAgentCoreInvoke,
+  recordChatMirrorEmbeddingSkipped,
   recordChatTurn,
+  recordMemoryEmbeddingSkipped,
   recordMemoryWrite,
   recordMongoQuery,
 } from "../../src/lib/cw-metrics.ts";
@@ -136,6 +138,59 @@ describe("cw-metrics EMF emitter", () => {
     expect(r.FactsExtracted).toBe(5);
     expect(r.FactsWritten).toBe(3);
     expect(r.EmbeddingFailures).toBe(1);
+  });
+
+  test("recordMemoryEmbeddingSkipped emits MemoryEmbeddingSkipped under Multiagent/Memory with code dimension", () => {
+    // Strict-mode lock-down: when EMBEDDINGS_PROVIDER is unable to embed a
+    // fact (e.g. voyage_strict_failed during a SageMaker outage), the LTM
+    // write path keeps the row but emits this metric so the Memory dashboard
+    // can distinguish a Voyage outage from a Bedrock outage from a
+    // misconfigured EMBEDDINGS_PROVIDER. Renaming this metric or moving the
+    // value off the top level breaks the alarm silently.
+    recordMemoryEmbeddingSkipped({
+      agentId: "orchestrator",
+      code: "voyage_strict_failed",
+      count: 2,
+    });
+    expect(captured.length).toBe(1);
+    const r = captured[0];
+    expect(r._aws.CloudWatchMetrics[0].Namespace).toBe("Multiagent/Memory");
+    const names = r._aws.CloudWatchMetrics[0].Metrics.map((m) => m.Name);
+    expect(names).toEqual(["MemoryEmbeddingSkipped"]);
+    expect(r.MemoryEmbeddingSkipped).toBe(2);
+    expect(r.agentId).toBe("orchestrator");
+    expect(r.code).toBe("voyage_strict_failed");
+    const dimKeys = r._aws.CloudWatchMetrics[0].Dimensions[0];
+    expect(dimKeys).toContain("agentId");
+    expect(dimKeys).toContain("code");
+  });
+
+  test("recordChatMirrorEmbeddingSkipped emits ChatMirrorEmbeddingSkipped under Multiagent/Chat with code dimension", () => {
+    // Strict-mode lock-down: per-message counter for chat-mirror embedding
+    // failures. Distinct namespace from Memory so the Chat dashboard can show
+    // both turn-level and embedding-level health on one panel.
+    recordChatMirrorEmbeddingSkipped({
+      agentId: "order-management",
+      code: "voyage_strict_failed",
+    });
+    expect(captured.length).toBe(1);
+    const r = captured[0];
+    expect(r._aws.CloudWatchMetrics[0].Namespace).toBe("Multiagent/Chat");
+    const names = r._aws.CloudWatchMetrics[0].Metrics.map((m) => m.Name);
+    expect(names).toEqual(["ChatMirrorEmbeddingSkipped"]);
+    expect(r.ChatMirrorEmbeddingSkipped).toBe(1);
+    expect(r.agentId).toBe("order-management");
+    expect(r.code).toBe("voyage_strict_failed");
+    const dimKeys = r._aws.CloudWatchMetrics[0].Dimensions[0];
+    expect(dimKeys).toContain("agentId");
+    expect(dimKeys).toContain("code");
+  });
+
+  test("recordMemoryEmbeddingSkipped defaults agentId to 'unknown' when omitted", () => {
+    recordMemoryEmbeddingSkipped({ code: "no_provider_configured", count: 1 });
+    expect(captured.length).toBe(1);
+    expect(captured[0].agentId).toBe("unknown");
+    expect(captured[0].code).toBe("no_provider_configured");
   });
 
   test("METRICS_EMITTER_ENABLED=0 silences all emission", () => {

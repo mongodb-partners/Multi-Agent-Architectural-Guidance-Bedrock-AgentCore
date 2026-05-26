@@ -146,7 +146,7 @@ Four surfaces must line up:
 1. **EC2 API** `.env.live` has `VOYAGE_SAGEMAKER_ENDPOINT` set.
 2. **AgentCore Runtime env vars** also have `VOYAGE_SAGEMAKER_ENDPOINT` — written by `deploy-agents.sh` Phase 8 via `aws bedrock-agentcore-control update-agent-runtime`.
 3. **Runtime IAM role** grants `sagemaker:InvokeEndpoint` on the endpoint ARN — wired by the `voyage_sagemaker_endpoint_arn` input in `modules/agentcore-agent-runtime`. Without it the runtime gets `AccessDenied` and `embedQueryText` silently falls back to Bedrock Titan (visible in traces as `embeddingSource: "bedrock"`).
-4. **Vector index dimensions** match the request `output_dimension`. SoW pins `voyage-multimodal-3` at 1024-d; index must be 1024-d. When changing provider/dim, re-seed with `REWIRE_EMBEDDINGS=1`.
+4. **Vector index dimensions** match the request `output_dimension`. This stack pins `voyage-multimodal-3` at 1024-d; index must be 1024-d. When changing provider/dim, re-seed with `REWIRE_EMBEDDINGS=1`.
 
 Regression check: against the `product-recommendation` agent, send "I need waterproof outdoor headphones, IP67, under $80" and look for `mongo.vector_search` events with `embeddingSource: "voyage"`, `length: 1024`, top scores in `0.7–0.8`.
 
@@ -190,6 +190,8 @@ The peering KB path is **EXPERIMENTAL** and not partner-validated. If KB ingesti
 
 ### Trace UI shows `_omittedForCoreMode` instead of payload
 Expected for `core` mode (UI default). Click **Show developer details** in the Trace Viewer to fetch `?include=dev`. If the dev view also shows the sentinel, the payload exceeded the per-event byte cap — look for a `dev.byte_cap_hit` event in the same trace.
+
+All `mongo.*` payload fields are intentionally **kept visible in core mode** so the summary MongoDB dashboard can render the actual query, sample docs, and vector-search details inline. Specifically: `mongo.query.{filter,pipeline,normalizedFilter,projection,sort}`, `mongo.result.sampleDocs`, `mongo.vector_search.{filter,queryVectorPreview,documentPreviews[].fields}`. If you see the `_omittedForCoreMode` sentinel on any of those, the `core` projection regressed — file a bug against `api/src/lib/trace-projection.ts` (the `STRIP_FIELDS_BY_TYPE` map must not list `mongo.query`, `mongo.result`, or `mongo.vector_search`). `mongo.vector_search.documentPreviews` is still independently capped to the top-3 entries.
 
 ## 6. Memory debugging
 
@@ -289,6 +291,19 @@ These are non-obvious failure modes that have recurred more than twice or are se
 
 Permanent guardrail: targeted deploy scripts that add their own `EXIT` cleanup after `preflight_validate` must chain the preflight release, for example `trap 'rm -rf "$DOCKER_CONFIG_DIR"; _pf_release_lock_on_exit' EXIT`.
 
+### Preflight checks must never use `cmd | head -1` inside command substitution
+**Symptom.** Deploy aborts mid-preflight with no failure envelope, just `[full-deploy:diag] ERROR rc=141 line=… command=bash deploy/scripts/deploy-shared.sh`. Last visible preflight tick is whichever check ran immediately before `pf_check_tool_versions`. Operators have no actionable signal — `rc=141` is the canonical SIGPIPE-under-`pipefail` exit code (`128 + 13`) but is invisible without a trace.
+
+**Cause.** `pf_check_tool_versions` previously parsed each tool version like `v="$(terraform version 2>/dev/null | head -1 | awk '{print $2}' | tr -d v)"`. With `set -o pipefail` active in `deploy-shared.sh` (and `deploy-network.sh`, `deploy-project.sh`, …), the pipeline returns 141 when the upstream producer outputs more lines than `head -1` consumes. terraform 1.6+ emits 3+ lines of `version` output, so the producer receives SIGPIPE on its second write, pipefail propagates 141 out of the subshell, the assignment carries that rc, and `set -e` kills the parent before any `_pf_fail` envelope is recorded. The runner also called each check via a bare `"$id"` invocation, so even a non-`tool_versions` check that future-engineered the same bug would have killed the deploy the same way.
+
+**Permanent guardrails (do not remove):**
+- All tool-version parsing in `pf_check_tool_versions` goes through `_pf_capture_first_line` / `_pf_capture_first_line_2` in [`deploy/scripts/_preflight-checks.sh`](../../deploy/scripts/_preflight-checks.sh). Those helpers capture the producer's stdout into a shell variable and slice the first line via `${var%%$'\n'*}` — no downstream reader closes early, so the producer never receives SIGPIPE. Never reintroduce `cmd | head -1 | …` inside `$(…)` in any preflight check.
+- `preflight_validate` invokes every check via `if ! "$id"; then …` (the bare `"$id"` form is gone). That form is exempt from `set -e`, so any future check that returns non-zero — SIGPIPE, accidental `return rc`, anything — is captured by the runner and surfaced as a `module bug (rc=N)` `_pf_fail` envelope instead of killing the deploy script. The runner also annotates rc=141 specifically with a "SIGPIPE under set -o pipefail" message so operators don't have to look it up.
+- `pf_check_shell_runtime_safe` runs early in `orchestrator-privatelink` / `orchestrator-peering` / `shared` profiles and drives a synthetic SIGPIPE pattern plus a synthetic `return 141` check to verify both guardrails are still in place at deploy time.
+- Self-test (`bash deploy/scripts/_preflight-checks.sh --self-test`) Tests 13 + 14 lock down both prongs: runner deflects rc=141 with the SIGPIPE annotation, and `_pf_capture_first_line` survives a 2000-line synthetic producer under `set -euo pipefail`.
+
+**Recovery for an in-progress deploy that hit this bug:** re-run after pulling the fix. The pre-existing inline `aws sts get-caller-identity` and `terraform init` guards still apply, so no state was mutated by a 141 abort — preflight crashes before any phase-1 work.
+
 ### Bedrock KB — `troubleshooting_docs.docId` must be partial-unique
 See § 5 above. Code: [`db-seeding/seed-indexes.ts`](../../db-seeding/seed-indexes.ts).
 
@@ -338,6 +353,73 @@ Unfiltered `aws_availability_zones` can return Local Zones (`*-bos-1a`) or Wavel
 
 **Recovery for an already-broken stack:** `source .env && source .env.live && ./deploy/deploy-agents.sh --auto-approve`. The script bumps the code artifact pointer, so AgentCore drops the poisoned containers and the next invocation rebuilds the agent template against a populated MCP tool list.
 
+### `embeddingModel: amazon.titan-embed-text-v2:0` rows in voyage stacks
+**Symptom.** `.env` declares `EMBEDDINGS_PROVIDER=voyage` and the SageMaker endpoint is `InService`, but `chat_messages` (and historically `agent_memory_facts`) contain rows tagged `embeddingModel: amazon.titan-embed-text-v2:0`. Vector search still returns results — they're just semantically meaningless similarity scores. The bug stayed silent for long because both Titan v2 and Voyage default to 1024-d, so dimension mismatches don't crash queries.
+
+**Historical root cause.** `embed-query.ts` did not consult `EMBEDDINGS_PROVIDER`. It tried Voyage first; on any thrown error or unrecognised response shape it silently fell through to Bedrock. Deploy scripts also wrote `EMBEDDING_MODEL_ID=amazon.titan-embed-text-v2:0` into `.env.live` and AgentCore runtime env unconditionally, so the fallback path always had a working Bedrock target.
+
+**Strict-mode behavior change.**
+- `embed-query.ts` now reads `EMBEDDINGS_PROVIDER` exactly once and runs only the declared branch. Voyage failures return `{ ok: false, code: "voyage_strict_failed" }` — Bedrock is never called.
+- Write paths (`session-store.ts::mirrorMessageToMongo`, `long-term-memory.ts::mongoWriteFacts`) still persist the row but with `embedding` / `embeddingModel` absent. `chat_messages` rows get an extra `embeddingError: { code, message, ts }` marker; the per-fact LTM trace event includes `embedding.skipped` + `embedding.skipReason`.
+- Failures surface on three channels: JSON log (`[session-store] chat message embedding failed; storing without vector`), trace event `chat.mirror.embedding_failed` (visible in summary-mode Trace Viewer), and EMF metric `Multiagent/Chat ChatMirrorEmbeddingSkipped` / `Multiagent/Memory MemoryEmbeddingSkipped` (per-code dimension).
+- `assertEmbeddingsProvider()` now throws when `EMBEDDINGS_PROVIDER` is empty / unrecognised — the API container fails to start instead of running with an undefined provider. Deploy scripts only write `EMBEDDING_MODEL_ID` when `EMBEDDINGS_PROVIDER=titan`; voyage stacks ship without the Bedrock model id even reaching the runtime env.
+
+**Identify residual stale rows** (manual; the new behavior prevents new ones):
+
+```javascript
+// In mongosh — counts rows that escaped the silent-fallback before the strict-mode upgrade.
+db.chat_messages.countDocuments({ embeddingModel: /^amazon\.titan/ })
+db.agent_memory_facts.countDocuments({ embeddingModel: /^amazon\.titan/ })
+// And rows the strict-mode path persisted with the new error marker:
+db.chat_messages.countDocuments({ embeddingError: { $exists: true } })
+```
+
+**Atlas index dimension footnote.** Both `amazon.titan-embed-text-v2:0` (1024-d) and `voyage-multimodal-3` / `voyage-3.5-lite` (1024-d via `VOYAGE_OUTPUT_DIM=1024`) share the same Atlas vector index dimension. Mismatched rows therefore don't crash vector search — they just return wrong results. This is why the silent-fallback bug took so long to surface.
+
+**Backfill.** Run [`db-seeding/reembed-mismatched.ts`](../../db-seeding/reembed-mismatched.ts) (dry-run by default; `--apply` to write) to re-embed mismatched rows with the declared provider. Idempotent — safe to re-run after every provider switch.
+
+```bash
+bun db-seeding/reembed-mismatched.ts             # dry-run, prints counts
+bun db-seeding/reembed-mismatched.ts --apply     # actually re-embed
+```
+
+### Embedding seed silently skipped — `products` / `troubleshooting_docs` ship without vectors
+
+**Symptom.** Deploy completes green. First chat turn returns 0 vector hits ("no relevant products / docs"). `db.products.findOne({}, { projection: { embedding: 1 } })` returns `embedding: null` or missing. The post-deploy preflight check `pf_check_documents_have_embeddings` silently skipped because the operator's laptop has neither `mongosh` nor `pymongo` installed.
+
+**Cause.** `deploy-project.sh` Phase 5b historically ran `seed-all.ts` and `seed-indexes.ts` but **never** invoked `seed-embeddings.ts`. The script's own header explicitly states "embeddings are NOT run here". `pf_check_documents_have_embeddings` was the supposed safety net, but it used `mongosh` first, fell back to `pymongo`, and printed a confusing skip message when neither tool was available — which is the default on most operator laptops.
+
+**Permanent guardrails (do not remove):**
+- `deploy-project.sh` Phase 5b now calls `run_embedding_seed "$ATLAS_DB_NAME" "$MONGODB_URI"` from [`deploy/scripts/_seed-embeddings.sh`](../../deploy/scripts/_seed-embeddings.sh). The helper waits for the Voyage endpoint InService (when `EMBEDDINGS_PROVIDER=voyage`), auto-detects REWIRE on dim / provider drift (SSM + in-Mongo fingerprint), and exits non-zero on any per-row failure. `deploy-local.sh` Phase 7 and `setup-troubleshooting-infra.sh` Phase 4 use the same helper.
+- `pf_check_documents_have_embeddings` is now `bun`-based (no `mongosh`/`pymongo` skip path) and covers BOTH `products` AND seeder-owned rows of `troubleshooting_docs`. It validates `embedding.length == EMBEDDING_DIMENSIONS` AND `embeddingModel` matches the provider prefix. Unreachable Mongo is a hard FAIL.
+- `seed-embeddings.ts` now writes `embeddingModel` alongside `embedding`, auto-stamps legacy rows missing the tag, and exits 2 on any incomplete run.
+- `e2e-smoke/post-deploy-smoke.py` adds `check_seeded_corpus_embeddings()` and extends `check_long_term_memory_recall` to assert Mongo-side `embedding` + `embeddingModel` on `agent_memory_facts` and `chat_messages` after the test chat turn.
+
+**Latent KB-chunk safety bug fixed in the same change:** the previous `seed-embeddings.ts` REWIRE path wiped Bedrock-managed chunks in `troubleshooting_docs` and re-embedded them with garbage text (KB chunks have no `title`/`body`/`symptoms`). The seeder now filters seeder-owned rows via `{ bedrock_text_chunk: { $exists: false } }` for every wipe / find / verification step.
+
+### MongoDB connectivity errors silently swallowed at Phase 5b
+
+**Symptom.** Operator reports "Atlas connection string is not working" with uncertainty about whether the cluster was created. Deploy log shows `Atlas appears unseeded — running first-time seed scripts...` followed by a `MongoServerSelectionError` from inside `seed-all.ts`. Re-running often "fixes it" with no apparent code change.
+
+**Cause.** The legacy SEED_NEEDED probe at `deploy-project.sh:899-924` ran `bun -e '...connect...' 2>/dev/null || echo "yes"`. That `2>/dev/null || echo "yes"` swallowed every connection error and forced `SEED_NEEDED=yes`. So when the cluster was still `CREATING`, when the allowlist hadn't propagated, when the operator deployed from a different network with a stale `ATLAS_CONNECTION_STRING` in state, or when PrivateLink DNS hadn't propagated — the operator saw "seed-all.ts failed with MongoServerSelectionError" without any signal that the upstream probe had silently absorbed a connection failure.
+
+**Permanent guardrails (do not remove):**
+- The SEED_NEEDED probe now calls `assert_mongo_reachable` from [`deploy/scripts/_mongo-connect.sh`](../../deploy/scripts/_mongo-connect.sh) BEFORE the collection-existence check. Mongo unreachable is a fatal abort with a sanitized URI + structured envelope (NETWORK_MODE, allowlist CIDR, PrivateLink endpoint id). The collection probe inherits `set -euo pipefail` and never falls back to `echo "yes"`.
+- `MONGODB_URI` is asserted non-empty AND parsable (`mongodb(+srv)://user:password@host/...`) immediately after construction at `deploy-project.sh:890`. Empty `TF_VAR_atlas_db_password` no longer slides through to a generic driver error.
+- Atlas cluster IDLE polling wait runs BEFORE Phase 5b (up to 600s).
+- `pf_check_privatelink_endpoint_available` in `project-post-apply` asserts the AWS + Atlas PrivateLink endpoints are `available` / `AVAILABLE`.
+- `e2e-smoke/post-deploy-smoke.py::check_mongo_runtime_reachable` runs `db.command({ping:1})` inside the `multiagent-api` container via SSM — catches PrivateLink-DNS-only failures that pass laptop-side probes but fail at runtime.
+
+### "Second deploy fixed it" — first-deploy Gateway target races a cold MCP runtime
+
+**Symptom.** First deploy completes green but Phase 9b backend smoke fails with `mongoQueries == 0`. `/health` reports `mongodb: connected, mcpServer: connected`, but `tools/list` from inside the MCP runtime returns an empty array. Running `deploy-project.sh` a second time (no code change) fixes everything.
+
+**Cause.** Phase 4d.5's `force_mcp_runtime_image_sync` skips on first deploy because the runtime doesn't exist yet. `terraform apply` then creates the AgentCore runtime AND the Gateway target concurrently. The Gateway target's `null_resource.mcp_server_gateway_target[0]` runs `tools/list` against the still-cold runtime, caches an empty schema, and never refreshes within the same deploy. On the second deploy, `force_mcp_runtime_image_sync` runs against the now-warm runtime, deletes + recreates the target, and `tools/list` succeeds.
+
+**Permanent guardrail (do not remove):** `deploy-project.sh` detects first-deploy via `_MCP_RUNTIME_ID_PRE` being empty BEFORE `terraform apply` AND the post-apply ARN now populated. When tripped, the script polls the mongodb-mcp runtime to `READY` (up to 300s), then calls `force_mcp_runtime_image_sync` to delete + recreate the Gateway target against the warm runtime. A targeted `terraform apply` recreates the null_resource. Operator log line to grep for: `[mcp-bootstrap] first-deploy Gateway target refresh complete`.
+
+**Defense-in-depth:** Phase 9a2 is now authenticated (`SMOKE_ID_TOKEN` acquisition moved BEFORE the /health probe) and `mcpServer != connected` is escalated from warn to err. Phase 9a3 hits `/health/deep` (issues a real `mongodb_query` for products.findOne via the Gateway) and asserts `mcpProbe == "connected"` — three layers before Phase 9b's LLM-dependent smoke.
+
 ### AgentCore Gateway target stuck `FAILED` — Terraform must not silently skip
 **Symptom.** Specialist runtimes log `[mcp] connected` followed by `[mcp] loaded tools — tools: []`, then refuse to run with `tools.degraded` / SSE `stream_error` (`TOOLS_UNAVAILABLE`). Post-deploy smoke times out waiting for an assistant reply. `aws bedrock-agentcore-control get-gateway-target` reports `status: FAILED` with reasons such as:
 - `Gateway service is not authorized to assume the execution role` — IAM trust/permission lag (target was created before the gateway role policy propagated).
@@ -368,7 +450,7 @@ Unknown parameter in credentialProviderConfigurations[0].credentialProvider: "ia
 ```
 The deployment looks healthy through earlier phases — Atlas, EC2, Bedrock KB, AgentCore runtimes all apply — and only the gateway target step blows up. `aws --version` reports something like `aws-cli/2.28.21`.
 
-**Cause.** The Terraform `null_resource` at [`deploy/terraform/modules/agentcore-gateway/main.tf`](../../deploy/terraform/modules/agentcore-gateway/main.tf) shells out to `aws bedrock-agentcore-control create-gateway-target` with `targetConfiguration.mcp.mcpServer` and `credentialProviderConfigurations[].credentialProvider.iamCredentialProvider`. Both keys were added to the AWS service model in a recent `botocore` release. AWS CLI 2.28.x and earlier ship an older model that simply does not know those fields and rejects the request client-side. The generic `aws-cli >= 2.15` floor in `pf_check_tool_versions` was not sufficient — the CLI is on PATH, it just speaks an outdated dialect.
+**Cause.** The Terraform `null_resource` at [`deploy/terraform/modules/agentcore-gateway/main.tf`](../../deploy/terraform/modules/agentcore-gateway/main.tf) shells out to `aws bedrock-agentcore-control create-gateway-target` with `targetConfiguration.mcp.mcpServer` and `credentialProviderConfigurations[].credentialProvider.iamCredentialProvider`. Both keys were added to the AWS service model in a recent `botocore` release. AWS CLI 2.28.x and earlier ship an older model that simply does not know those fields and rejects the request locally. The generic `aws-cli >= 2.15` floor in `pf_check_tool_versions` was not sufficient — the CLI is on PATH, it just speaks an outdated dialect.
 
 **Permanent guardrails (do not remove):**
 - [`deploy/scripts/_preflight-checks.sh`](../../deploy/scripts/_preflight-checks.sh) ships `pf_check_aws_cli_agentcore_gateway_model`, registered in `orchestrator-privatelink`, `orchestrator-peering`, and `project-pre-apply`. It runs `aws bedrock-agentcore-control create-gateway-target --generate-cli-skeleton input` (offline; no auth, no network), parses the JSON with `python3`, and hard-fails with `--exit-class tool` if either `targetConfiguration.mcp.mcpServer` or `credentialProviderConfigurations[].credentialProvider.iamCredentialProvider` is missing from the local service model. A failing run prints the parsed `aws --version`, the missing field paths, and the macOS / Linux / CI upgrade steps from [`docs/deployment-preflight-checks.md`](../deployment-preflight-checks.md#aws-cli-agentcore-gateway-model) before any Terraform state is mutated.

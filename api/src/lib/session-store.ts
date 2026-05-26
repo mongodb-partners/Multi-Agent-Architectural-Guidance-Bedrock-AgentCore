@@ -11,6 +11,9 @@ import {
 } from "./chat-messages-collection.ts";
 import { embedDocumentText } from "./embed-query.ts";
 import { logger } from "./logger.ts";
+import { currentTrace } from "./trace-context.ts";
+import { persistTrace } from "./trace-store.ts";
+import { recordChatMirrorEmbeddingSkipped } from "./cw-metrics.ts";
 
 export type ChatMessage = {
   id: string;
@@ -112,9 +115,25 @@ async function deleteFromMongo(sessionId: string): Promise<void> {
 
 /**
  * Mirror a chat message into the vector-searchable `chat_messages` collection.
- * Best-effort: embedding failures fall back to storing the row without an
- * `embedding` so lexical search still indexes the content. Runs in the
- * background — callers should never await this on the chat hot path.
+ *
+ * Strict-mode embedding failures (the declared `EMBEDDINGS_PROVIDER` was
+ * unable to produce a vector) are non-fatal: the row is still persisted so
+ * the transcript and Sessions UI stay complete, but with `embedding` /
+ * `embeddingModel` absent and an `embeddingError` marker set instead. We
+ * surface the failure on three channels:
+ *
+ *   1. JSON log line (operators / CloudWatch).
+ *   2. Trace event `chat.mirror.embedding_failed` on the live collector
+ *      (Trace Viewer per-turn timeline). `currentTrace()` returns the
+ *      active collector via AsyncLocalStorage even from the
+ *      `queueMicrotask` callback that schedules this function.
+ *   3. EMF metric `Multiagent/Chat ChatMirrorEmbeddingSkipped` with the
+ *      `EmbedErrorCode` as a low-cardinality dimension.
+ *
+ * After the row is persisted, if a trace event was emitted we re-persist
+ * the trace doc (idempotent upsert; same pattern long-term-memory uses)
+ * so the Trace Viewer's stored copy includes the new event. Runs as a
+ * microtask — never on the user's TTFB clock — so the extra upsert is free.
  */
 async function mirrorMessageToMongo(
   rec: SessionRecord,
@@ -132,27 +151,92 @@ async function mirrorMessageToMongo(
     timestamp: message.timestamp,
     ts,
   };
+  let failureCode: string | undefined;
   try {
     const emb = await embedDocumentText(message.content);
     if (emb.ok) {
       doc.embedding = emb.vector;
       doc.embeddingModel = emb.modelId;
     } else {
+      failureCode = emb.code;
+      doc.embeddingError = {
+        code: emb.code,
+        message: emb.message,
+        ts: new Date(),
+      };
       logger.warn("[session-store] chat message embedding failed; storing without vector", {
         sessionId: rec.sessionId,
         messageId: message.id,
         code: emb.code,
         message: emb.message,
       });
+      currentTrace()?.event("chat.mirror.embedding_failed", {
+        messageId: message.id,
+        sessionId: rec.sessionId,
+        agentId: message.agentId,
+        role: message.role,
+        code: emb.code,
+        message: emb.message,
+      });
+      try {
+        recordChatMirrorEmbeddingSkipped({
+          agentId: message.agentId,
+          code: emb.code,
+        });
+      } catch {
+        // metric emission must never destabilize the mirror
+      }
     }
   } catch (e) {
+    failureCode = "embed_threw";
+    const errMessage = e instanceof Error ? e.message : String(e);
+    doc.embeddingError = {
+      code: "embed_threw",
+      message: errMessage,
+      ts: new Date(),
+    };
     logger.warn("[session-store] chat message embedding threw; storing without vector", {
       sessionId: rec.sessionId,
       messageId: message.id,
-      error: e instanceof Error ? e.message : String(e),
+      error: errMessage,
     });
+    currentTrace()?.event("chat.mirror.embedding_failed", {
+      messageId: message.id,
+      sessionId: rec.sessionId,
+      agentId: message.agentId,
+      role: message.role,
+      code: "embed_threw",
+      message: errMessage,
+    });
+    try {
+      recordChatMirrorEmbeddingSkipped({
+        agentId: message.agentId,
+        code: "embed_threw",
+      });
+    } catch {
+      /* see above */
+    }
   }
   await persistChatMessage(doc);
+
+  // Re-persist the trace so the stored doc includes the new event. The route
+  // already persisted the trace before sending `done`; this microtask outlives
+  // that, so without re-persisting the event would only live in memory until
+  // the collector is GC'd. `persistTrace` is upsert-idempotent (same contract
+  // as the long-term-memory re-persist in routes/chat.ts).
+  if (failureCode) {
+    const collector = currentTrace();
+    if (collector) {
+      try {
+        await persistTrace(collector.toJSON());
+      } catch (e) {
+        logger.warn("[session-store] post-mirror trace re-persist failed", {
+          traceId: collector.traceId,
+          error: e instanceof Error ? e.message : String(e),
+        });
+      }
+    }
+  }
 }
 
 /** Schedule the chat_messages mirror as a microtask so it never sits on the
@@ -178,7 +262,7 @@ export type ForbiddenSession = typeof FORBIDDEN_SESSION;
 /**
  * Strict ownership check: the session must be explicitly bound to `userId`.
  * Sessions with no `userId` are denied — they must be migrated before use.
- * This enforces the SOW requirement that jwt.sub is the sole tenant key and
+ * This enforces the security requirement that jwt.sub is the sole tenant key and
  * one user can never access another user's session data.
  */
 function owns(record: SessionRecord, userId: string): boolean {

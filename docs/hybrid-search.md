@@ -207,6 +207,6 @@ If the LLM hallucinates a call to `mongodb_hybrid_search` directly, Strands will
 - [`memory-architecture.md`](memory-architecture.md) — full memory architecture, including the LTM read path that uses the same hybrid algorithm directly (no MCP) for latency reasons.
 - [`api-reference.md`](api-reference.md) — `mongo.vector_search` trace event shape.
 - [`../AGENTS.md`](../AGENTS.md) — agent-author conventions and the `tools:` field.
-- [`../give client/why-structured-memory-beats-vector-memory.md`](../give%20client/why-structured-memory-beats-vector-memory.md) — narrative defence of the structured-plus-hybrid design for client conversations.
+- [`../getting-started/why-structured-memory-beats-vector-memory.md`](../getting-started/why-structured-memory-beats-vector-memory.md) — narrative defence of the structured-plus-hybrid design for field discussions.
 - Source of truth on the routing decision: [`api/src/adapters/mongodb-mcp-client.ts`](../api/src/adapters/mongodb-mcp-client.ts) (`transformVectorSearchArgs`, `VectorSearchEmbedTool`, `loadMcpTools`).
 - Source of truth on the server-side merge: [`mcp-runtimes/mongodb-mcp/src/vendor/handlers.mjs`](../mcp-runtimes/mongodb-mcp/src/vendor/handlers.mjs) (`mongodb_hybrid_search`).

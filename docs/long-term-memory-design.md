@@ -6,7 +6,7 @@ How long-term memory (LTM) is implemented today, why every major design choice w
 >
 > - [`memory-architecture.md`](memory-architecture.md) — short-term + long-term + auth-context overview (the "where things live" map).
 > - [`hybrid-search.md`](hybrid-search.md) — the same hybrid retrieval algorithm but **as exposed to agents** through `mongodb_vector_search`. LTM does not go through MCP; it uses the underlying primitives directly.
-> - [`../give client/why-structured-memory-beats-vector-memory.md`](../give%20client/why-structured-memory-beats-vector-memory.md) — narrative defence of the hybrid design for client conversations.
+> - [`../getting-started/why-structured-memory-beats-vector-memory.md`](../getting-started/why-structured-memory-beats-vector-memory.md) — narrative defence of the hybrid design for field discussions.
 >
 > This doc focuses on **internal-only LTM**: the per-user fact store and chat-message mirror that the API reads from before every turn and writes to after every turn.
 
@@ -16,7 +16,7 @@ How long-term memory (LTM) is implemented today, why every major design choice w
 
 LTM is **cross-session personalization**: things the agent should remember about a specific user between sessions. It is not:
 
-- **Short-term conversation history.** That's short-term memory, keyed by `sessionId` and backed by AgentCore Memory in deployed AWS. The in-memory map and MongoDB `chat_sessions` collection are cache/mirror/fallback layers, not the SoW short-term memory authority. See [`memory-architecture.md §1`](memory-architecture.md).
+- **Short-term conversation history.** That's short-term memory, keyed by `sessionId` and backed by AgentCore Memory in deployed AWS. The in-memory map and MongoDB `chat_sessions` collection are cache/mirror/fallback layers, not the authoritative short-term memory backend. See [`memory-architecture.md §1`](memory-architecture.md).
 - **The knowledge base.** Product catalog, troubleshooting docs, etc. live in `products` / `troubleshooting_docs` and are retrieved by `mongodb_vector_search` / `bedrock_kb_retrieve`. The agent does the same hybrid lookup against those collections, but those rows are not "memory" — they are reference data.
 - **A summary / consolidation layer.** There is no nightly job that rewrites or condenses facts. Recall leans on retrieval ranking, not on consolidation.
 
@@ -303,7 +303,7 @@ All knobs are read at call time so they can be flipped at runtime without restar
 | `MEMORY_EMBED_TIMEOUT_MS` | Read-side query embedding timeout (abort-controlled). On timeout the retriever drops from `hybrid` to `lexical` mode so the chat turn is never blocked on the embedder. | `5000` | `memoryEmbedTimeoutMs()` |
 | `MEMORY_VECTOR_FETCHK` | Per-leg over-fetch before RRF merge. | `24` | `memoryFetchK()` |
 | `MEMORY_VECTOR_NUM_CANDIDATES` | `$vectorSearch.numCandidates` width. Atlas guidance: ≥ 10× limit. | `200` | `memoryNumCandidates()` |
-| `MEMORY_SEARCH_MAX_TIME_MS` | Server/client timeout per Atlas vector/BM25 aggregation leg. | `8000` | `memorySearchMaxTimeMs()` |
+| `MEMORY_SEARCH_MAX_TIME_MS` | Server-side timeout per Atlas vector/BM25 aggregation leg. | `8000` | `memorySearchMaxTimeMs()` |
 | `MEMORY_EMBED_TIMEOUT_MS` | Query embedding timeout before lexical fallback. | `5000` | `memoryEmbedTimeoutMs()` |
 | `MEMORY_RECENCY_HALFLIFE_DAYS` | Exponential recency decay half-life. `0` disables decay. | `30` | `memoryRecencyHalfLifeDays()` |
 | `MEMORY_MMR_LAMBDA` | MMR diversification: `1` = pure relevance, `0` = pure diversity. | `0.7` | `memoryMmrLambda()` |
@@ -635,5 +635,5 @@ EC2 deploy default is 30 days; older facts age out by design. To extend, bump `M
 - [`hybrid-search.md`](hybrid-search.md) — the same hybrid retrieval algorithm but **as exposed to agents** through `mongodb_vector_search` over MCP. Read this if you want to understand why LTM is the lone exception to the MCP-only rule for chat-path Mongo calls.
 - [`api-reference.md`](api-reference.md) — full schema of every memory trace event.
 - [`logging-architecture.md`](logging-architecture.md) — how the audit channel ships separately from regular logs.
-- [`../give client/why-structured-memory-beats-vector-memory.md`](../give%20client/why-structured-memory-beats-vector-memory.md) — the same design from a client narrative angle.
-- [`../give client/long-term-memory-for-agents.md`](../give%20client/long-term-memory-for-agents.md) — vendor-neutral landscape of LTM patterns in industry.
+- [`../getting-started/why-structured-memory-beats-vector-memory.md`](../getting-started/why-structured-memory-beats-vector-memory.md) — the same design from a overview narrative angle.
+- [`../getting-started/long-term-memory-for-agents.md`](../getting-started/long-term-memory-for-agents.md) — vendor-neutral landscape of LTM patterns in industry.

@@ -2,14 +2,14 @@
 
 > **Audience:** engineers debugging a real turn — your own bug, a customer report, a flaky CI smoke. This is the catalog of every sub-section inside the **"Developer details"** panel of the Trace Viewer, what data each surfaces, where the data comes from in the code, and what failure mode it's designed to surface.
 >
-> **For the default client-facing view** (tiles, narrative, Mongo dashboard, etc.), see [`trace-viewer-client-guide.md`](trace-viewer-client-guide.md).
+> **For the default summary view** (tiles, narrative, Mongo dashboard, etc.), see [`trace-viewer-guide.md`](trace-viewer-guide.md).
 
 ---
 
 ## How to open the developer panel
 
 1. Load any trace at `https://<ui-host>/Trace_Viewer?traceId=<UUID>`. The page fetches `?include=core` by default (no system prompts, no raw tool args, no internal flags — see §"Projection contract" below).
-2. Scroll past every client-facing section to the divider:
+2. Scroll past every summary section to the divider:
 
    > **Developer details (loaded on demand)**
 
@@ -36,7 +36,7 @@ Three modes, served by `api/src/lib/trace-projection.ts`:
 
 | `?include=` | `X-Trace-Include` header | What it returns |
 |---|---|---|
-| `core` (default) | `core` | Strips dev-only event types + heavy payload fields, drops dev-only top-level fields. Sentinels (`{ _omittedForCoreMode: true, bytesAvailable: N }`) mark where fields were removed so the UI can render a "click to load" caption. |
+| `core` (default) | `core` | Strips dev-only event types + heavy payload fields, drops dev-only top-level fields. Sentinels (`{ _omittedForCoreMode: true, bytesAvailable: N }`) mark where fields were removed so the UI can render a "click to load" caption. All `mongo.*` payload fields (query filter/pipeline/projection/sort, result sampleDocs, vector_search filter/queryVectorPreview/documentPreviews-with-fields) are kept visible — the summary MongoDB dashboard renders them inline. The trace collector's `shrinkPayload` already enforces a per-event byte cap on `sampleDocs`, and `mongo.vector_search.documentPreviews` is independently capped to the top-3 entries. |
 | `dev` | `dev` | Identity. Full trace doc, including dev-only event types (`dev.environment`, `dev.byte_cap_hit`, `model.retry`, `agentcore.retry`, `model.text_delta_batch`, `latency.checkpoint`) and dev-only top-level fields (`release`, `correlation`, `otel`, `spanTree`). |
 | `full` | `full` | Identity. Same as `dev` — kept as a stable wire shape for external callers + the `verify-trace-ui-shape.py` smoke. |
 
@@ -59,7 +59,7 @@ Every `_dev_*` renderer tolerates these sentinels via `is_omitted_sentinel()` / 
 You don't need to open Streamlit to inspect what the panel will render — every trace fetch is a plain authenticated `GET`:
 
 ```bash
-# Client-fast core (what the page loads on first paint)
+# Core projection (what the page loads on first paint)
 curl -sS -H "Authorization: Bearer $TOKEN" \
   "$API_BASE/traces/$TRACE_ID?include=core" -D - | head -20
 
@@ -74,7 +74,7 @@ curl -sS -H "Authorization: Bearer $TOKEN" \
 
 The response header `X-Trace-Include: <mode>` confirms what the server actually returned (useful when a CDN or proxy is rewriting query params). The audit-log line described above also fires for `curl` access, so off-UI debugging is still tracked.
 
-The Streamlit client (`ui/lib/api_client.py::get_trace`) also reads `X-Trace-Include` from the response and **logs a warning** when it doesn't match the requested mode — a signal that the API is older than the client and is silently returning a different projection. If you see `api get_trace include mismatch` in the UI process logs, redeploy the API first.
+The Streamlit app (`ui/lib/api_client.py::get_trace`) also reads `X-Trace-Include` from the response and **logs a warning** when it doesn't match the requested mode — a signal that the API is older than the UI and is silently returning a different projection. If you see `api get_trace include mismatch` in the UI process logs, redeploy the API first.
 
 ---
 
@@ -104,7 +104,7 @@ At the bottom: a **"Reproduce this turn"** code block — a `curl` command pre-b
 
 ### 2. Span tree (call hierarchy)
 
-**What's shown.** Indented tree of every span on the turn. Each row: `<code>span.type</code> — Nms · agentId`. Nodes are precomputed server-side via `TraceCollector.buildSpanTree()` (cheaper than recomputing client-side on every rerun) and shipped in `trace.spanTree`. Falls back to a parent-id recompute when older traces have no `spanTree` field.
+**What's shown.** Indented tree of every span on the turn. Each row: `<code>span.type</code> — Nms · agentId`. Nodes are precomputed server-side via `TraceCollector.buildSpanTree()` (cheaper than recomputing in the browser on every rerun) and shipped in `trace.spanTree`. Falls back to a parent-id recompute when older traces have no `spanTree` field.
 
 **Where in code.** `_dev_span_tree` + `_compute_span_tree_from_parent_id` (fallback). API-side builder is `buildSpanTree()` in `trace-collector.ts`.
 
@@ -137,9 +137,11 @@ Each block respects redaction sentinels: if you see `[omitted in core mode]` des
 
 - `collection`, `operation`, `documentCount`
 - The actual `pipeline` (full JSON, often the most useful payload in the whole dev panel)
-- `documentPreviews[]` (same field surfaced as hover-tooltips in the client view)
+- `documentPreviews[]` (same field surfaced as hover-tooltips in the summary view)
 - `scoping`: `user_scoped` vs `missing_user_filter` — the latter renders as a red `.trace-chip.danger` chip ("you forgot to scope this aggregate to the current user")
 - **`indexName`** — the actual `$vectorSearch.index` / `$search.index` operand the MongoDB MCP client expanded. Plumbed via `vectorIndexFromTransformArgs()` in `mongodb-mcp-client.ts`. An `indexName` of `default` on a vector search is almost always the bug ("you forgot to set `index:` in the pipeline and Atlas silently lexical-scanned").
+
+> The basic per-query view (filter / pipeline / projection / sort + sample docs) is also rendered in the **summary MongoDB dashboard** above — these fields are kept visible in `?include=core`. The dev panel still adds the scoping chip, raw plan/diagnostic JSON, `indexName`, and the per-candidate hybrid score breakdown.
 
 **Where in code.** `_dev_mongo_internals`. Source events from `MongoQueryPayload` / `MongoVectorSearchPayload` in `trace-types.ts`.
 
@@ -193,7 +195,7 @@ For HTTP tools (`tool.http`): method, URL, status code, request body preview, re
 
 For MCP tools (`tool.mcp`): MCP server URL, tool name, raw `args`, raw `result`.
 
-**Where in code.** `_dev_tool_calls_verbose`. The client view (§11 in the client guide) shows just tool name + duration; this is where you copy-paste the actual argument blob into your reproducer.
+**Where in code.** `_dev_tool_calls_verbose`. The summary view (§11 in [`trace-viewer-guide.md`](trace-viewer-guide.md)) shows just tool name + duration; this is where you copy-paste the actual argument blob into your reproducer.
 
 **What it surfaces.** Tool call failed with an unhelpful summary; the model hallucinated tool args; an HTTP tool got 401/403 (Auth header redaction does NOT hide the call itself); an MCP tool is being invoked with the wrong server URL.
 
@@ -405,7 +407,7 @@ The panel also deliberately does **not**:
 When the panel renders wrong (missing field, blank expander, sentinel where there shouldn't be one), the *panel itself* is the thing under investigation. The triage order:
 
 1. **Browser DevTools → Network tab.** Filter for `/traces/`. Confirm: status is 200, the URL ends in `?include=dev`, the response header `X-Trace-Include: dev` is set, and the JSON body has the field you expected. If `X-Trace-Include` echoes back `core`, the page sent the wrong query param (almost always means the click didn't fire — see step 3).
-2. **Browser DevTools → Console tab.** The Streamlit client logs `api get_trace include mismatch` here when the response header doesn't match the request. That message means the API container is older than the UI.
+2. **Browser DevTools → Console tab.** The Streamlit app logs `api get_trace include mismatch` here when the response header doesn't match the request. That message means the API container is older than the UI.
 3. **Streamlit's "View source" widget (`?embed=true&embedOptions=light_theme`)** plus `st.session_state` inspection. Add this line near the panel in `developer_trace_view.py` while reproducing:
 
    ```python
@@ -445,7 +447,7 @@ See [`trace-ui-system-overview.md`](trace-ui-system-overview.md#mobile--responsi
 ## Related docs
 
 - [`trace-ui-system-overview.md`](trace-ui-system-overview.md) — **start here** — all six trace surfaces in one place (inline card, viewer, sessions, fixture harness, print, mobile)
-- [`trace-viewer-client-guide.md`](trace-viewer-client-guide.md) — the default client-facing view (tiles, narrative, Mongo dashboard, etc.)
+- [`trace-viewer-guide.md`](trace-viewer-guide.md) — the default summary view (tiles, narrative, Mongo dashboard, etc.)
 - [`observability-runbook.md`](observability-runbook.md) §1.b — Day-2 "debug a single turn" walkthrough including all 14 sub-sections (this guide is the catalog; the runbook is the workflow)
 - [`api-reference.md`](api-reference.md) `GET /traces/:traceId?include=` — wire-level contract for the projection
 - [`logging-architecture.md`](logging-architecture.md) — how `trace.otel` connects to CloudWatch / X-Ray

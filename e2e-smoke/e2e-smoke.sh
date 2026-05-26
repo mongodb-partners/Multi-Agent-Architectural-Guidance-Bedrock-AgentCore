@@ -50,10 +50,13 @@ echo ""
 echo "═══ 1. Health check ($API_URL) ═══"
 HEALTH="$(curl -s --max-time 15 "$API_URL/health" 2>/dev/null)"
 echo "  raw: $HEALTH" | head -c 400; echo
-for dep in mongodb longTermMemory agentcore mcpServer; do
+for dep in mongodb longTermMemory agentcore; do
   ok=$(echo "$HEALTH" | python3 -c "import json,sys; d=json.load(sys.stdin); v=d.get('dependencies',{}).get('$dep',''); print(1 if v=='connected' else 0)" 2>/dev/null || echo 0)
   assert "health.$dep connected" "$ok" "$(echo "$HEALTH" | python3 -c "import json,sys; print(json.load(sys.stdin).get('dependencies',{}).get('$dep','?'))" 2>/dev/null)"
 done
+# mcpServer is omitted on unauthenticated /health (Gateway MCP needs JWT)
+mcp_ok=$(echo "$HEALTH" | python3 -c "import json,sys; d=json.load(sys.stdin).get('dependencies',{}); print(1 if 'mcpServer' not in d else (1 if d.get('mcpServer')=='connected' else 0))" 2>/dev/null || echo 0)
+assert "health.mcpServer absent or connected" "$mcp_ok" "$(echo "$HEALTH" | python3 -c "import json,sys; print(json.load(sys.stdin).get('dependencies',{}).get('mcpServer','(omitted)'))" 2>/dev/null)"
 # Optional KB probe when manifest carries bedrock_kb_id
 KB_ID="${BEDROCK_KB_ID:-}"
 if [[ -n "$KB_ID" ]]; then

@@ -134,7 +134,7 @@ OpenTelemetry context lives in `@opentelemetry/context-async-hooks.AsyncLocalSto
 
 - `X-Trace-Id` from a single `POST /chat` matches the `trace_id` field in **every** log line emitted by that turn — in `/<SHARED_RESOURCE_PREFIX>/<env>/api`, in the AgentCore runtime's log group (`/aws/bedrock-agentcore/runtimes/<runtime-id>/...`), and in any MCP runtime group.
 - The Trace Viewer's `traceId` is a **different** identifier (the `TraceCollector` UUID, persisted in MongoDB `traces`). Both coexist; both are useful. The `TraceCollector` UUID is included on the OTel span as the `trace.collector_id` attribute so they can be joined.
-- The persisted trace doc now also carries `trace.otel = { traceId, rootSpanId }` (32-hex / 16-hex) at the top level — captured at finalize time by `TraceCollector.captureOtelIds()`. The Trace Viewer's **Developer details → Identifiers** sub-section builds ServiceLens / X-Ray / Logs Insights deep links from this directly, so on-call doesn't have to copy the W3C trace id by hand. Only present on `?include=dev|full` projections (stripped from `?include=core` for client-demo size).
+- The persisted trace doc now also carries `trace.otel = { traceId, rootSpanId }` (32-hex / 16-hex) at the top level — captured at finalize time by `TraceCollector.captureOtelIds()`. The Trace Viewer's **Developer details → Identifiers** sub-section builds ServiceLens / X-Ray / Logs Insights deep links from this directly, so on-call doesn't have to copy the W3C trace id by hand. Only present on `?include=dev|full` projections (stripped from `?include=core` for operator-demo size).
 
 See [`tests/integration/chat-sse-trace.integration.test.ts`](../api/tests/integration/chat-sse-trace.integration.test.ts) for the wire-level contract.
 

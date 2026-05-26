@@ -50,7 +50,7 @@ fields @timestamp, msg, level, agent_id, span_id, requestId
 
 Once you have a `traceId` (see §1) and a URL like `https://<ui-host>/Trace_Viewer?traceId=<UUID>`, the **Streamlit Trace Viewer** is the single console where you can answer almost every "what happened on this turn?" question without leaving the browser.
 
-The page loads `?include=core` by default — a client-safe view (no system-prompt bodies, no raw tool args, no per-vector-leg internals). Click **"Show developer details"** to lazy-load the `?include=dev` projection (cached in `st.session_state[f"dev_trace_{traceId}"]` for the lifetime of the page; the cache survives every sidebar/control rerun, but **not** navigation to a different `traceId` — see `ui/tests/test_trace_view.py::test_render_developer_details_caches_dev_fetch_across_reruns`). Each access is recorded in the audit channel as `[trace] fetch include=dev userId=<sub>` so you can later grep who looked at what.
+The page loads `?include=core` by default — a summary-safe view (no system-prompt bodies, no raw tool args, no per-vector-leg internals). Click **"Show developer details"** to lazy-load the `?include=dev` projection (cached in `st.session_state[f"dev_trace_{traceId}"]` for the lifetime of the page; the cache survives every sidebar/control rerun, but **not** navigation to a different `traceId` — see `ui/tests/test_trace_view.py::test_render_developer_details_caches_dev_fetch_across_reruns`). Each access is recorded in the audit channel as `[trace] fetch include=dev userId=<sub>` so you can later grep who looked at what.
 
 The bordered "Developer details" container then shows thirteen sub-sections in a fixed order. Read them top-down — each answers one specific debug question:
 
@@ -82,7 +82,7 @@ The full assembled system prompt body (the same one that hit Bedrock), the seede
 
 ### 1.b.4 Mongo internals — "Which collection, which index, which docs?"
 
-Per `mongo.query` and `mongo.vector_search` event: `collection`, `operation`, the actual `pipeline` (JSON), `documentCount`, `documentPreviews[]` (the field surfaced as hover-tooltip in the client view), `scoping` (`user_scoped` vs `missing_user_filter`), and crucially **`indexName`** — the actual `$vectorSearch.index` / `$search.index` operand the MongoDB MCP client expanded. `missing_user_filter` rows render with the `.trace-chip.danger` red chip; an `index` of `default` on a vector search is almost always the bug ("you forgot to set `index:` in the pipeline and Atlas silently lexical-scanned").
+Per `mongo.query` and `mongo.vector_search` event: `collection`, `operation`, the actual `pipeline` (JSON), `documentCount`, `documentPreviews[]` (the field surfaced as hover-tooltip in the summary view), `scoping` (`user_scoped` vs `missing_user_filter`), and crucially **`indexName`** — the actual `$vectorSearch.index` / `$search.index` operand the MongoDB MCP client expanded. `missing_user_filter` rows render with the `.trace-chip.danger` red chip; an `index` of `default` on a vector search is almost always the bug ("you forgot to set `index:` in the pipeline and Atlas silently lexical-scanned").
 
 **Use this when:** memory recall surfaced wrong / no documents, the new index you just added isn't being hit, or the cost dashboard shows unexpected vector-search ops.
 
@@ -96,7 +96,7 @@ The full `AgentcoreInvokePayload` per invocation: `arn`, `mode` (`ec2_to_orchest
 
 ### 1.b.7 Tool calls (verbose) — "What args, what result, what error?"
 
-Full `tool.call` / `tool.result` pairs with raw `arguments` and `result` JSON (after PII redaction, which exempts structural identifiers like `skill.activated.name` — see `PII_EXEMPT_FIELDS` in `api/src/lib/trace-collector.ts`). The client-facing view shows just the tool name + duration; this is where you copy-paste the actual argument blob into your reproducer.
+Full `tool.call` / `tool.result` pairs with raw `arguments` and `result` JSON (after PII redaction, which exempts structural identifiers like `skill.activated.name` — see `PII_EXEMPT_FIELDS` in `api/src/lib/trace-collector.ts`). The summary view shows just the tool name + duration; this is where you copy-paste the actual argument blob into your reproducer.
 
 ### 1.b.8 Skill resource reads — "Which `references/`, `scripts/`, or `http-tools.json` did each skill pull?"
 

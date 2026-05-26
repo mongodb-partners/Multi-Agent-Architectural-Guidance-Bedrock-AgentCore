@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # security-audit-test.sh
 # ─────────────────────────────────────────────────────────────────────────────
-# SOW Security Testing — Comprehensive audit of the four P0 gaps reported in
+# Security testing — comprehensive audit of the four P0 gaps reported in
 # the weekly task review. Run from repo root or from e2e-smoke/. Requires Bun.
 #
 # Audited items:
@@ -64,7 +64,7 @@ section_summary() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-banner "SOW Security Audit — all four P0 items"
+banner "Security audit — all four P0 items"
 # ─────────────────────────────────────────────────────────────────────────────
 
 echo -e "\nChecking prerequisites..."
@@ -351,6 +351,6 @@ if [[ $fail -gt 0 ]]; then
   exit 1
 else
   echo -e "  ${GREEN}Failed: 0${NC}"
-  echo -e "\n${GREEN}${BOLD}  ✓ All four SOW security controls are comprehensively implemented.${NC}"
+  echo -e "\n${GREEN}${BOLD}  ✓ All four security controls are comprehensively implemented.${NC}"
   exit 0
 fi

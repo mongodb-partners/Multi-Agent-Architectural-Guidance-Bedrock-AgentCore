@@ -2,6 +2,7 @@ import { getMongoDb } from "./mongo-client.ts";
 import { getAgent, listAgents } from "./config-scan.ts";
 import { bedrockKbRetrieve } from "../adapters/bedrock-retrieval.ts";
 import { probeMcpServer } from "../adapters/mongodb-mcp-client.ts";
+import { withGatewayJwt } from "./gateway-auth-context.ts";
 import {
   BedrockAgentCoreClient,
   ListSessionsCommand,
@@ -195,37 +196,52 @@ export function resolveLongTermMemoryStatus(
   return "connected";
 }
 
-export async function buildHealthPayload(): Promise<{
+export type HealthDependencies = {
+  mongodb: MongoDependencyStatus;
+  longTermMemory: LongTermMemoryStatus;
+  agentcore: AgentcoreStatus;
+  bedrockKnowledgeBase: BedrockKbDependencyStatus;
+  /** Omitted on unauthenticated GET /health — MCP requires a Gateway JWT. */
+  mcpServer?: McpStatus;
+};
+
+export async function buildHealthPayload(opts?: {
+  gatewayJwt?: string;
+}): Promise<{
   status: "ok" | "degraded";
   version: string;
   timestamp: string;
-  dependencies: {
-    mongodb: MongoDependencyStatus;
-    longTermMemory: LongTermMemoryStatus;
-    agentcore: AgentcoreStatus;
-    mcpServer: McpStatus;
-    bedrockKnowledgeBase: BedrockKbDependencyStatus;
-  };
+  dependencies: HealthDependencies;
 }> {
-  const mongo = await resolveMongoDependencyStatus();
-  const longTermMemory = resolveLongTermMemoryStatus(mongo);
-  const [agentcore, mcpServer, bedrockKnowledgeBase] = await Promise.all([
-    resolveAgentcoreDependencyStatus(),
-    resolveMcpDependencyStatus(),
-    resolveBedrockKbDependencyStatus(),
-  ]);
-  const degraded = mongo === "unreachable";
+  const jwt = opts?.gatewayJwt?.trim();
+  const probeMcp = Boolean(jwt);
 
-  return {
-    status: degraded ? "degraded" : "ok",
-    version: "0.1.0",
-    timestamp: new Date().toISOString(),
-    dependencies: {
+  const build = async () => {
+    const mongo = await resolveMongoDependencyStatus();
+    const longTermMemory = resolveLongTermMemoryStatus(mongo);
+    const [agentcore, bedrockKnowledgeBase] = await Promise.all([
+      resolveAgentcoreDependencyStatus(),
+      resolveBedrockKbDependencyStatus(),
+    ]);
+    const dependencies: HealthDependencies = {
       mongodb: mongo,
       longTermMemory,
       agentcore,
-      mcpServer,
       bedrockKnowledgeBase,
-    },
+    };
+    if (probeMcp) {
+      dependencies.mcpServer = await resolveMcpDependencyStatus();
+    }
+    return {
+      status: mongo === "unreachable" ? ("degraded" as const) : ("ok" as const),
+      version: "0.1.0",
+      timestamp: new Date().toISOString(),
+      dependencies,
+    };
   };
+
+  if (jwt) {
+    return withGatewayJwt(jwt, build);
+  }
+  return build();
 }

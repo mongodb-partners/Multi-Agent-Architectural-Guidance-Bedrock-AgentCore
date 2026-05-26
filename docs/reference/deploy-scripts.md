@@ -38,8 +38,8 @@ The single entrypoint for a PrivateLink deployment. Probes SSM canaries and only
 **Usage:**
 ```bash
 ./deploy/deploy-full-with-privatelink.sh [--auto-approve] [--skip-docker]
-                                          [--skip-network] [--skip-shared]
-                                          [--env-file <path>]
+                                          [--skip-smoke] [--skip-network]
+                                          [--skip-shared] [--env-file <path>]
 ```
 
 **Flow:**
@@ -116,7 +116,7 @@ The big one — applies `envs/ec2`, builds images, syncs `.env.live`, restarts E
 
 **Usage:**
 ```bash
-./deploy/scripts/deploy-project.sh [--auto-approve] [--skip-docker] [--env-file <path>]
+./deploy/scripts/deploy-project.sh [--auto-approve] [--skip-docker] [--skip-smoke] [--env-file <path>]
 ```
 
 **Phase index** (one block per phase in the script):
@@ -131,8 +131,9 @@ The big one — applies `envs/ec2`, builds images, syncs `.env.live`, restarts E
 | 6 | Build + push Docker images (API/UI = amd64; agent-runtime = arm64) — skipped under `--skip-docker` |
 | 7 | Write `.env.live` (PUBLIC URI for harness use, PrivateLink/peering URI for runtime), copy to EC2 via SSM |
 | 8 | Pull images + restart `multiagent-api` / `multiagent-ui` / `mongodb-mcp` on EC2 |
-| 9 | Health check + summary |
+| 9 | Health + MCP probes + deterministic backend smoke (`backend-smoke.py`, phases 9a–9b) |
 | 10 | Write `deploy-manifest.json` (resource inventory; consumed by smoke tests + harnesses) |
+| 11 | Full post-deploy smoke (`e2e-smoke/post-deploy-smoke.py`; `--skip-smoke` to disable) |
 
 **Outputs:** `deploy-manifest.json` at repo root, `.env.live` on EC2 (`/opt/multiagent/.env.live`), Terraform outputs (read by `deploy-api.sh` / `deploy-ui.sh` / `deploy-agents.sh`).
 

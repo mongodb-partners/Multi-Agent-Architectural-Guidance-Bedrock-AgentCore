@@ -64,7 +64,7 @@ For the editable historical diagram: [`diagrams/01-aws-infrastructure.drawio`](d
 
 You could put all the agent logic in one big container. We don't, for two reasons:
 
-1. **The SoW asked for it.** The architecture diagram in the Statement of Work shows the orchestrator as a separate AgentCore Runtime from the specialists.
+1. **Separation of concerns.** The reference architecture shows the orchestrator as a separate AgentCore Runtime from the specialists.
 2. **Isolation.** Each runtime has its own IAM role, its own log group, its own scaling envelope. If the troubleshooting agent crashes or hangs, the order-management agent keeps serving requests.
 
 The **5 AgentCore Runtimes** are:
@@ -218,7 +218,7 @@ Per-environment resource names are emitted into `deploy-manifest.json` after eac
 | Bedrock | KB | KB id from `module.bedrock_kb.knowledge_base_id` |
 | Atlas | Cluster | `<project>-<env>` (M10 default) |
 | Atlas | Connectivity | PrivateLink endpoint (PL mode) **or** network peering (peering mode) |
-| Cognito | User pool + app client + JWKS | Read `jwks_uri` from `module.cognito` |
+| Cognito | User pool + app + JWKS | Read `jwks_uri` from `module.cognito` |
 | Route 53 | Private zone (PL mode only) | per-cluster zone bound to the shared VPC |
 | S3 | Shared bucket | `<project>-<env>-<account-id>` (tfstate + KB docs + runtime code) |
 | Secrets Manager | KB Atlas creds | `<project>-bedrock-kb-creds-<env>` |
@@ -313,7 +313,7 @@ Every Mongo tool call from every runtime goes to the AgentCore Gateway (`AGENTCO
 **Trade-off:** routing Mongo through the Gateway adds one IAM-authorized hop (~10–30 ms) over a direct `bedrock-agentcore:InvokeAgentRuntime` call, but in exchange:
 - Every Mongo tool call shares the same Cognito-authenticated audit surface as future tools — one place to enforce policy and inspect traffic.
 - The application runtime never needs `bedrock-agentcore:InvokeAgentRuntime` IAM on the MongoDB MCP runtime ARN, just `GET` on the Gateway URL.
-- The legacy direct-invoke path remains in deploy/Terraform outputs (`MONGODB_MCP_RUNTIME_ARN`, `MONGODB_MCP_RUNTIME_ENDPOINT`) for Gateway-target wiring only. The application client (`api/src/adapters/mongodb-mcp-client.ts::resolveMcpEndpoint`) fails fast when `AGENTCORE_GATEWAY_URL` is missing — there is **no localhost fallback** in deployed runtimes; `MCP_SERVER_URL` is honored only when `ENVIRONMENT=local`, `NODE_ENV=development`, or `DEV_MOCK_BACKENDS=1` is set.
+- The legacy direct-invoke path remains in deploy/Terraform outputs (`MONGODB_MCP_RUNTIME_ARN`, `MONGODB_MCP_RUNTIME_ENDPOINT`) for Gateway-target wiring only. The MCP client (`api/src/adapters/mongodb-mcp-client.ts::resolveMcpEndpoint`) fails fast when `AGENTCORE_GATEWAY_URL` is missing — there is **no localhost fallback** in deployed runtimes; `MCP_SERVER_URL` is honored only when `ENVIRONMENT=local`, `NODE_ENV=development`, or `DEV_MOCK_BACKENDS=1` is set.
 
 Gateway-target schema cache (the Gateway snapshots `tools/list` from the upstream MCP server at target-create time and serves it from cache thereafter) is invalidated on every redeploy by `deploy-project.sh` Phase 4d: the MCP image digest is exported as `TF_VAR_mongodb_mcp_image_digest`, fed to the gateway module's `null_resource` triggers, and any digest change re-creates the target so fresh tool schemas are picked up. See `docs/status/debugging.md` "AgentCore Gateway target caches tool schemas".
 
@@ -348,7 +348,7 @@ The API and UI run as Docker containers managed by systemd. ECR is the image reg
 
 MongoDB credentials traversing the public internet would be a security concern, so Atlas access is always private. The framework supports **two mutually-exclusive connectivity modes** selected by `NETWORK_MODE` in `.env` (default `privatelink`):
 
-* **PrivateLink mode** (`NETWORK_MODE=privatelink`, default) — Atlas Interface VPCE + per-cluster Route 53 private zone + VPC endpoint. SoW-aligned, partner-validated.
+* **PrivateLink mode** (`NETWORK_MODE=privatelink`, default) — Atlas Interface VPCE + per-cluster Route 53 private zone + VPC endpoint. partner-validated, recommended.
 * **VPC peering mode** (`NETWORK_MODE=peering`) — AWS-side VPC peering accepter + route entries in both route tables + Atlas-side `mongodbatlas_network_peering` + Atlas Private DNS for Peering (auto-enabled via Admin API). The `-pri.mongodb.net` SRV resolves directly to private peering IPs.
 
 The two modes are **mutually exclusive per account** — there is no hybrid path. Switching modes requires destroy + redeploy (`./deploy/scripts/destroy.sh --mode ec2 / shared / network`, then re-run the matching orchestrator). SSM canary `/{SHARED_VPC_NAME}/{REGION}/network_mode` guards against silent mode swaps; an `envs/ec2` `check` block also fails plan when the tfvars mode disagrees with the SSM canary.
@@ -373,7 +373,7 @@ Why a separate module: Atlas SRV connection strings (`mongodb+srv://...`) resolv
 
 > **Bedrock KB ingestion — private by default in both modes.** The EC2 / `mongodb-mcp-runtime` runtime paths and Bedrock KB ingestion are both private by default:
 >
-> - In **PrivateLink mode**, KB ingestion runs through [`bedrock-kb-privatelink/`](../deploy/terraform/modules/bedrock-kb-privatelink/) (internal NLB → VPC Endpoint Service in front of the existing Atlas Interface VPCE). Gated by `TF_VAR_enable_kb_privatelink` (defaults to `true` in PL mode). Verify with `terraform output bedrock_kb_endpoint_service_name`. SoW-aligned and partner-validated.
+> - In **PrivateLink mode**, KB ingestion runs through [`bedrock-kb-privatelink/`](../deploy/terraform/modules/bedrock-kb-privatelink/) (internal NLB → VPC Endpoint Service in front of the existing Atlas Interface VPCE). Gated by `TF_VAR_enable_kb_privatelink` (defaults to `true` in PL mode). Verify with `terraform output bedrock_kb_endpoint_service_name`. partner-validated, recommended.
 > - In **VPC peering mode**, KB ingestion runs through [`bedrock-kb-peering/`](../deploy/terraform/modules/bedrock-kb-peering/) (internal NLB pointed at the peered Atlas mongod IPs). Gated by `TF_VAR_enable_kb_peering`. **EXPERIMENTAL — NLB-over-peering is not partner-validated**; mongod IP drift on Atlas-side scaling/upgrade requires re-running `envs/ec2` to re-pin NLB targets.
 > - Setting `TF_VAR_enable_kb_privatelink=false` (in PL mode) or `TF_VAR_enable_kb_peering=false` (in peering mode) falls back to the **public Atlas SRV endpoint**. This is **not the default and not recommended** — KB traffic leaves the private fabric and constitutes a privacy regression. TLS + Atlas auth still apply, but documented deviation is required.
 >
@@ -383,7 +383,7 @@ Bedrock, AgentCore, Cognito, ECR, S3 — all are reached over the public interne
 
 ### 7.5 Per-agent Bedrock model selection
 
-The SoW originally specified Amazon Nova. Per a verbal client decision, the agents now run on Anthropic Claude. Per-agent models are configured in each `.agent.md` frontmatter:
+The original design specified Amazon Nova. Per a verbal product decision, the agents now run on Anthropic Claude. Per-agent models are configured in each `.agent.md` frontmatter:
 
 | Agent | Model | Why |
 |---|---|---|
@@ -408,7 +408,7 @@ Voyage AI on SageMaker is the **active** embedding provider for both online quer
 
 `deploy/scripts/deploy-project.sh` writes `VOYAGE_SAGEMAKER_ENDPOINT` and `VOYAGE_OUTPUT_DIM=1024` into both the EC2 API's `.env.live` and into each AgentCore Runtime's env vars, so Voyage is reachable from every place that needs an embedding. If the SageMaker endpoint is unconfigured or fails, the wrapper falls back to Bedrock Titan / Cohere via `EMBEDDING_MODEL_ID`; if neither is available the tool returns a structured `status: "error"` so the LLM can degrade to keyword search via `mongodb_query`.
 
-The Voyage **model name** vs SoW (`voyage-3.5-lite` vs `voyage-multimodal-3`) is pinned to `voyage-multimodal-3` in `.env.sample` and [`deploy/scripts/setup-voyage-marketplace.sh`](../deploy/scripts/setup-voyage-marketplace.sh).
+The Voyage **model name** historically (`voyage-3.5-lite` vs `voyage-multimodal-3`) is pinned to `voyage-multimodal-3` in `.env.sample` and [`deploy/scripts/setup-voyage-marketplace.sh`](../deploy/scripts/setup-voyage-marketplace.sh).
 
 ---
 

@@ -1,4 +1,4 @@
-# Trace Viewer — client-facing guide
+# Trace Viewer — summary guide
 
 > **Audience:** product managers, account executives, support engineers, and customers walking through a live demo. Every section below is what's on screen **by default** when you open the Trace Viewer — no toggles, no developer mode.
 >
@@ -19,7 +19,7 @@ Section names below match the on-screen headings.
 | Direct URL | `https://<ui-host>/Trace_Viewer?traceId=<UUID>` |
 | Direct URL (by session + message) | `…/Trace_Viewer?sessionId=<id>&messageId=<msg>` |
 
-The page fetches `?include=core` from the API (a lite, client-safe projection — system prompt bodies, raw tool inputs, and internal flags are stripped). It loads in well under a second on a typical turn.
+The page fetches `?include=core` from the API (a lite, summary-safe projection — system prompt bodies, raw tool inputs, and internal flags are stripped). It loads in well under a second on a typical turn.
 
 The "← previous turn" / "next turn →" arrows in the header (and `[1] [2] [3]…` jump-to-turn pills) let you walk every turn in the session without going back to the Sessions page.
 
@@ -65,6 +65,7 @@ A short row of MongoDB-Atlas-branded chips and tables that surface anything Atla
 - **Vector searches** — count, top scores, and a tooltip on each result showing the first ~200 chars of the matched document (sourced from `mongo.vector_search.documentPreviews[]`). Hover any result to see what the model actually retrieved. Tooltips are rendered with the browser-native HTML `title=` attribute — no custom JS — so they work on every browser and survive PDF export as alt-text. The contract is documented in `AGENTS.md` under `mongo.vector_search.documentPreviews[]`; do not switch to a custom JS tooltip without updating that contract first.
 - **BM25 (lexical) hits** — same shape as vector when hybrid search ran on the turn.
 - **Per-query latency strip** — small bar for each `mongo.query` so you can see at a glance which collection dominated the turn's wall time.
+- **Real filter / pipeline JSON + sample documents** — the actual query operand and the first sample docs returned by Atlas, rendered inline. No longer hidden behind Developer details.
 
 This section is **always rendered first** after the tiles because customer demos are almost always centered on the Atlas story.
 
@@ -239,7 +240,7 @@ The toggle is **ungated** — anyone with access to the Trace Viewer can open it
 
 The page is print-friendly without any toggles. `Cmd/Ctrl + P` produces a clean PDF that strips the brand strip, flattens tile shadows, and hides the **body** of every Developer details expander (but keeps the summary labels so the reader can see an outline of what's behind the toggle). See [`trace-ui-system-overview.md`](trace-ui-system-overview.md#6-print-pdf) for the exact CSS contract.
 
-**Tip for the cleanest PDF:** open the page in the *client* view only — don't click "Show developer details" first. Streamlit re-renders the expander state on print, so an open dev panel may keep its body visible despite the `@media print` rule.
+**Tip for the cleanest PDF:** open the page in the *summary* view only — don't click "Show developer details" first. Streamlit re-renders the expander state on print, so an open dev panel may keep its body visible despite the `@media print` rule.
 
 For sharing with a customer, **prefer a PDF export over a live URL** — the URL is meaningless without API access (auth is enforced server-side), but a PDF is self-contained.
 
@@ -247,7 +248,7 @@ For sharing with a customer, **prefer a PDF export over a live URL** — the URL
 
 ## Mobile
 
-This page works on a phone for the **client view only**. The Developer details panel is desktop-only — its tables and span tree are wide and overflow horizontally on a phone screen. See the system overview's [Mobile / responsive posture](trace-ui-system-overview.md#mobile--responsive-posture) section for the full posture matrix.
+This page works on a phone for the **summary view only**. The Developer details panel is desktop-only — its tables and span tree are wide and overflow horizontally on a phone screen. See the system overview's [Mobile / responsive posture](trace-ui-system-overview.md#mobile--responsive-posture) section for the full posture matrix.
 
 The inline summary card in the chat panel (the small card under each assistant reply) also works on a phone.
 
@@ -271,7 +272,7 @@ No — the truncation flag is **trace-only**. The streamed assistant reply was c
 30 days by default (`TRACE_TTL_DAYS=30`). The MongoDB `traces` collection has a TTL index that the API auto-ensures on first write. After the TTL fires, the Trace Viewer URL returns a "Trace not found" page; the structured CloudWatch logs (which include the same `trace_id`) are kept for the log group's own retention.
 
 **Q: Can I share a trace URL with a customer?**
-Yes — the URL is by `traceId` (UUID) and is meaningless without API access. Auth is enforced server-side; without a valid Bearer token the API returns 401. For client-facing demos, share a screenshot or PDF export rather than a live URL.
+Yes — the URL is by `traceId` (UUID) and is meaningless without API access. Auth is enforced server-side; without a valid Bearer token the API returns 401. For summary demos, share a screenshot or PDF export rather than a live URL.
 
 ---
 
@@ -279,6 +280,6 @@ Yes — the URL is by `traceId` (UUID) and is meaningless without API access. Au
 
 - [`trace-ui-system-overview.md`](trace-ui-system-overview.md) — **start here** — all six trace surfaces in one place (inline card, viewer, sessions, fixture harness, print, mobile)
 - [`trace-viewer-developer-guide.md`](trace-viewer-developer-guide.md) — the Developer details panel, sub-section by sub-section
-- [`demo/demo-mode-guide.md`](demo/demo-mode-guide.md) — Trace UI walkthrough + env knobs for client demos
+- [`demo/demo-mode-guide.md`](demo/demo-mode-guide.md) — Trace UI walkthrough + env knobs for demos
 - [`observability-runbook.md`](observability-runbook.md) §1.b — Day-2 "debug a single turn" pointers (CloudWatch / ServiceLens / X-Ray correlation)
-- [`api-reference.md`](api-reference.md) `GET /traces/:traceId?include=` — the wire shape that backs both client and developer views
+- [`api-reference.md`](api-reference.md) `GET /traces/:traceId?include=` — the wire shape that backs both summary and developer views

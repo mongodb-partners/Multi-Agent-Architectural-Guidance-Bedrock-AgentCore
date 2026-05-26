@@ -12,12 +12,13 @@
 #
 # Usage:
 #   ./deploy/deploy-full-with-privatelink.sh [--auto-approve] [--skip-docker]
-#                                             [--skip-network] [--skip-shared]
-#                                             [--env-file <path>]
+#                                             [--skip-smoke] [--skip-network]
+#                                             [--skip-shared] [--env-file <path>]
 #
 # Flags:
 #   --auto-approve   Pass -auto-approve to all terraform applies (no interactive prompts)
 #   --skip-docker    Skip Docker image build/push in deploy-project.sh
+#   --skip-smoke     Skip Phase 11 full post-deploy smoke in deploy-project.sh
 #   --skip-network   Skip the network existence check and deploy-network.sh entirely
 #                    (use when you know the VPC is already deployed and want to save time)
 #   --skip-shared    Skip the shared-stack existence check and deploy-shared.sh entirely
@@ -58,11 +59,13 @@ AUTO_APPROVE=false
 SKIP_DOCKER=false
 SKIP_NETWORK=false
 SKIP_SHARED=false
+SKIP_SMOKE=false
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --auto-approve) AUTO_APPROVE=true ;;
     --skip-docker)  SKIP_DOCKER=true ;;
+    --skip-smoke)   SKIP_SMOKE=true ;;
     --skip-network) SKIP_NETWORK=true ;;
     --skip-shared)  SKIP_SHARED=true ;;
     --env-file)     ENV_FILE="$2"; shift ;;
@@ -82,7 +85,7 @@ sep()  { echo "═════════════════════�
 sep
 log "Starting full deployment (network + project) ..."
 log "Env file : $ENV_FILE"
-log "Flags    : auto-approve=$AUTO_APPROVE  skip-docker=$SKIP_DOCKER  skip-network=$SKIP_NETWORK  skip-shared=$SKIP_SHARED"
+log "Flags    : auto-approve=$AUTO_APPROVE  skip-docker=$SKIP_DOCKER  skip-smoke=$SKIP_SMOKE  skip-network=$SKIP_NETWORK  skip-shared=$SKIP_SHARED"
 sep
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -220,6 +223,7 @@ sep
 PROJECT_ARGS=("--env-file" "$ENV_FILE")
 [[ "$AUTO_APPROVE" == "true" ]] && PROJECT_ARGS+=("--auto-approve")
 [[ "$SKIP_DOCKER"  == "true" ]] && PROJECT_ARGS+=("--skip-docker")
+[[ "$SKIP_SMOKE"   == "true" ]] && PROJECT_ARGS+=("--skip-smoke")
 
 deploy_diag_checkpoint "launching child script: bash ${PROJECT_SCRIPT} ${PROJECT_ARGS[*]}"
 bash "$PROJECT_SCRIPT" "${PROJECT_ARGS[@]}"

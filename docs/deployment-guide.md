@@ -210,8 +210,8 @@ source .env
 # Handles everything: network (first time) + shared (first time) + project stack
 ./deploy/deploy-full-with-privatelink.sh --auto-approve
 
-# Post-deploy smoke
-source .env && python3 e2e-smoke/post-deploy-smoke.py
+# Post-deploy smoke runs in deploy-project.sh Phase 11 (skip: --skip-smoke on full deploy)
+# Manual re-run: source .env && python3 e2e-smoke/post-deploy-smoke.py
 ```
 
 When the script finishes, open the **UI URL** printed in the deploy summary (`ec2_ui_url`, Streamlit on port 8501) and sign in with the seeded Cognito user.
@@ -255,7 +255,7 @@ The orchestrator hard-exports `NETWORK_MODE=peering` before delegating, runs the
 |---|---|---|
 | Atlas-side networking (`envs/network`) | Interface VPCE + Atlas endpoint service | AWS-side VPC peering accepter + route entries in both route tables; Atlas-side `mongodbatlas_network_peering` + project IP access list scoped to the VPC CIDR; **Atlas Private DNS for Peering** auto-enabled via Admin API so `-pri.mongodb.net` SRV resolves to private peering IPs |
 | Runtime `MONGODB_URI` (`envs/ec2`) | Atlas `awsPrivateLink` direct multi-host URI with `tlsAllowInvalidHostnames=true` | `connectionStrings.privateSrv` (when Atlas Private DNS for Peering is on) else `connectionStrings.private` (multi-host non-SRV). Peering hostnames ARE in the cluster cert SAN — no `tlsAllowInvalidHostnames` |
-| Bedrock KB ingestion path | PL NLB + Atlas VPCE (partner-validated, SoW-aligned) | **EXPERIMENTAL** peering NLB whose targets are Atlas mongod private peering IPs discovered via `dig` from EC2 over SSM (`modules/bedrock-kb-peering`). Bedrock's MongoDB driver may reject the cluster TLS cert when reached through NLB-over-peering — see [`modules/bedrock-kb-peering/README.md`](../deploy/terraform/modules/bedrock-kb-peering/README.md) |
+| Bedrock KB ingestion path | PL NLB + Atlas VPCE (partner-validated, recommended) | **EXPERIMENTAL** peering NLB whose targets are Atlas mongod private peering IPs discovered via `dig` from EC2 over SSM (`modules/bedrock-kb-peering`). Bedrock's MongoDB driver may reject the cluster TLS cert when reached through NLB-over-peering — see [`modules/bedrock-kb-peering/README.md`](../deploy/terraform/modules/bedrock-kb-peering/README.md) |
 | SG egress | `0.0.0.0/0` on port 27017 + 1024-65535 (constrained by VPCE routing) | Narrowed to `ATLAS_PEERING_CIDR` for defense-in-depth |
 
 **Operational caveats (peering KB ingestion):**

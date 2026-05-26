@@ -88,13 +88,13 @@ variable "embed_model_id" {
 variable "enable_kb_privatelink" {
   type        = bool
   description = <<-EOT
-    SoW alignment for CLIENT_REVIEW P1-6 (Option A): provision an NLB + VPC
+    PrivateLink KB ingestion (CLIENT_REVIEW P1-6, Option A): provision an NLB + VPC
     Endpoint Service so Bedrock Knowledge Base ingestion connects to MongoDB
     Atlas via AWS PrivateLink instead of the public SRV hostname.
 
-    Default `true` — the SoW requires PrivateLink end-to-end for Atlas access,
+    Default `true` — PrivateLink end-to-end is required for Atlas access,
     including KB ingestion. Setting this to `false` is an explicit, written
-    deviation from the SoW (admin-only ingestion still avoids runtime PII, but
+    non-default configuration (admin-only ingestion still avoids runtime PII, but
     leaves the path on public Atlas SRV) — do not flip without sign-off.
 
     When true, an instance of modules/bedrock-kb-privatelink is created and

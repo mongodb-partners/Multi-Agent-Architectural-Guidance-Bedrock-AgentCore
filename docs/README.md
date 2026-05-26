@@ -1,6 +1,6 @@
-# Documentation — Client Handover Entry Point
+# Documentation — Getting Started
 
-This folder is the **canonical handover pack** for the Bedrock Multi-Agent reference. Code beats docs — every claim here has been cross-checked against `api/src/`, Terraform, deploy scripts, and `config/`.
+This folder is the **canonical getting started pack** for the Bedrock Multi-Agent reference. Code beats docs — every claim here has been cross-checked against `api/src/`, Terraform, deploy scripts, and `config/`.
 
 *Last refreshed: 2026-05-20.*
 
@@ -8,7 +8,7 @@ This folder is the **canonical handover pack** for the Bedrock Multi-Agent refer
 
 ## 1. What this project is
 
-A **configuration-driven multi-agent reference** on **AWS Bedrock** (via the [Strands Agents TypeScript SDK](https://github.com/strands-agents/sdk-typescript)) and **MongoDB Atlas**. A user types a question into a Streamlit web UI; the Hono API receives it, an **in-API classifier** picks the right specialist (or falls back to an orchestrator AgentCore Runtime), and a **specialist AgentCore Runtime** (order-management, troubleshooting, product-recommendation) streams the answer back over SSE. MongoDB tools run in a **dedicated MongoDB MCP AgentCore Runtime** behind the AgentCore Gateway. Memory follows the SoW split: **short-term conversation memory lives in AgentCore Memory**, while **long-term cross-session memory lives in MongoDB Atlas** with hybrid vector + BM25 across `agent_memory_facts` + `chat_messages`. Observability lands in CloudWatch (logs, EMF metrics, four dashboards, alarms) plus OpenTelemetry / X-Ray.
+A **configuration-driven multi-agent reference** on **AWS Bedrock** (via the [Strands Agents TypeScript SDK](https://github.com/strands-agents/sdk-typescript)) and **MongoDB Atlas**. A user types a question into a Streamlit web UI; the Hono API receives it, an **in-API classifier** picks the right specialist (or falls back to an orchestrator AgentCore Runtime), and a **specialist AgentCore Runtime** (order-management, troubleshooting, product-recommendation) streams the answer back over SSE. MongoDB tools run in a **dedicated MongoDB MCP AgentCore Runtime** behind the AgentCore Gateway. Memory uses a two-layer split: **short-term conversation memory lives in AgentCore Memory**, while **long-term cross-session memory lives in MongoDB Atlas** with hybrid vector + BM25 across `agent_memory_facts` + `chat_messages`. Observability lands in CloudWatch (logs, EMF metrics, four dashboards, alarms) plus OpenTelemetry / X-Ray.
 
 The product goal: **add specialists by editing markdown config**, not by forking business logic for every customer. New agent = new `config/agents/<name>.agent.md` + skill folder + redeploy.
 
@@ -21,13 +21,13 @@ The product goal: **add specialists by editing markdown config**, not by forking
 1. **Skim** [`AGENTS.md`](../AGENTS.md), this file, and [`architecture.md`](architecture.md).
 2. **Configure `.env`** from [`.env.sample`](../.env.sample). Decisions to make up front:
    - `NETWORK_MODE` — `privatelink` (default) or `peering`. **Mutually exclusive per account.** Switching = destroy + redeploy.
-   - `EMBEDDINGS_PROVIDER` — `voyage` (SoW-aligned, requires Marketplace subscription) or `titan` (Bedrock built-in).
+   - `EMBEDDINGS_PROVIDER` — `voyage` (recommended, requires Marketplace subscription) or `titan` (Bedrock built-in).
    - `AUTH_MODE` — `iam` (long-lived keys) or `sts` (assumed role / SSO).
 3. **Verify AWS permissions:** `./deploy/scripts/probe-resources.sh`.
 4. **Pick the matching orchestrator** and run it:
    - PrivateLink: `./deploy/deploy-full-with-privatelink.sh --auto-approve`
    - VPC peering: `./deploy/deploy-full-with-vpc-peering.sh --auto-approve`
-5. **Run post-deploy smoke:** `source .env && python3 e2e-smoke/post-deploy-smoke.py`.
+5. **Post-deploy smoke:** runs in `deploy-project.sh` Phase 11 (or `source .env && python3 e2e-smoke/post-deploy-smoke.py` to re-run).
 6. **Open the Streamlit UI** (URL printed by the deploy script), log in via the seeded Cognito user, send a chat.
 7. **Open the Trace Viewer** for that turn (link in the chat inline card), toggle **Show developer details**.
 8. **Tail logs without SSH:** `aws ssm send-command --document-name AWS-RunShellScript --instance-ids <id> --parameters 'commands=["journalctl -u multiagent-api -n 100"]'` — see [`status/debugging.md`](status/debugging.md) §3.
@@ -63,10 +63,10 @@ Pick the path that matches your role.
 4. [`dashboards/README.md`](dashboards/README.md) — fleet / mongo / cost / atlas widget catalog
 5. [`status/debugging.md`](status/debugging.md) — when alarms fire
 
-### 3.4 Demo engineer / SE (client demos)
+### 3.4 Demo engineer / SE (demos)
 1. [`demo/demo-script.md`](demo/demo-script.md) — narrated walkthrough
 2. [`demo/demo-mode-guide.md`](demo/demo-mode-guide.md) — trace UI knobs for live demos
-3. [`trace-viewer-client-guide.md`](trace-viewer-client-guide.md) — client-friendly Trace Viewer surface
+3. [`trace-viewer-guide.md`](trace-viewer-guide.md) — operator-friendly Trace Viewer surface
 
 ### 3.5 Advanced (optional — not required for most contributors)
 1. [`advanced/deploy-tweak-guide.md`](advanced/deploy-tweak-guide.md) — mode flags, AWS ARNs, embedding provider switches, operational env knobs, local-dev wiring
@@ -92,14 +92,14 @@ Pick the path that matches your role.
 | [`logging-architecture.md`](logging-architecture.md) | Structured logs, OTel, CloudWatch shipping, ADOT sidecar, audit | 2026-05-20 |
 | [`observability-runbook.md`](observability-runbook.md) | Day-2 ops — traces, log groups, alarms, dashboards, emergency knobs | 2026-05-20 |
 | [`trace-ui-system-overview.md`](trace-ui-system-overview.md) | All Trace UI surfaces — inline card, Trace Viewer, fixture harness | 2026-05-20 |
-| [`trace-viewer-client-guide.md`](trace-viewer-client-guide.md) | Client-friendly Trace Viewer tour | 2026-05-20 |
+| [`trace-viewer-guide.md`](trace-viewer-guide.md) | Operator-friendly Trace Viewer tour | 2026-05-20 |
 | [`trace-viewer-developer-guide.md`](trace-viewer-developer-guide.md) | Debug-grade Trace Viewer tour, `?include=core\|dev\|full` projection | 2026-05-20 |
 | [`agentcore-runtime-design.md`](agentcore-runtime-design.md) | 5-runtime topology, code vs container artifact strategy | 2026-05-20 |
 | [`status/README.md`](status/README.md) | Status / ops doc index | 2026-05-24 |
 | [`status/debugging.md`](status/debugging.md) | Developer playbook: EC2 access, log tailing, trace-driven debug, common failures, memory diag, validation scripts, persistent pitfalls | 2026-05-20 |
 | [`dashboards/README.md`](dashboards/README.md) | Widget catalog, console URLs, alarm thresholds | 2026-05-20 |
 | [`estimate.md`](estimate.md) | Monthly AWS cost estimate | 2026-05-20 |
-| [`demo/demo-script.md`](demo/demo-script.md) | Narrated client-demo walkthrough | 2026-05-20 |
+| [`demo/demo-script.md`](demo/demo-script.md) | Narrated demo walkthrough | 2026-05-20 |
 | [`demo/demo-mode-guide.md`](demo/demo-mode-guide.md) | Trace UI knobs for live demos | 2026-05-20 |
 | **Reference appendix** | | |
 | [`reference/env-vars.md`](reference/env-vars.md) | **NEW** — every env var catalogued | 2026-05-20 |

@@ -806,7 +806,7 @@ def test_render_developer_details_caches_dev_fetch_across_reruns(monkeypatch) ->
 
     This pins the contract behind the "Toggling the panel is one fetch,
     not one fetch per Streamlit rerun" promise the Trace Viewer page makes
-    to demo clients (otherwise every interaction with any sidebar control
+    to demo viewers (otherwise every interaction with any sidebar control
     would re-pull the dev trace and the bordered container would flicker).
     """
     recorder = _StreamlitRecorder()
@@ -841,7 +841,7 @@ def test_render_developer_details_caches_dev_fetch_across_reruns(monkeypatch) ->
     settings = _Settings()
 
     # First render: panel closed → no fetch (button stub returns False, no
-    # toggle, no fetch path). This is the "demo client never pays" promise.
+    # toggle, no fetch path). This is the "demo viewer never pays" promise.
     render_developer_details(trace, settings=settings, api_token="tok")
     assert fetch_calls == [], "fetch must not run while panel is closed"
 

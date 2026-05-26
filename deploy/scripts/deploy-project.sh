@@ -2,7 +2,8 @@
 # deploy-project.sh — EC2 deployment (envs/ec2 terraform)
 #
 # Usage:
-#   ./deploy/scripts/deploy-project.sh [--auto-approve] [--skip-docker] [--env-file <path>]
+#   ./deploy/scripts/deploy-project.sh [--auto-approve] [--skip-docker] [--skip-smoke]
+#                                     [--env-file <path>]
 #
 # What it does:
 #   Phase 1  — Validate prerequisites (aws, terraform, bun, python3, zip,
@@ -17,7 +18,9 @@
 #   Phase 6  — Build + push Docker images to ECR (unless --skip-docker)
 #   Phase 7  — Write .env.live + copy to EC2 via SSM
 #   Phase 8  — Pull images + restart multiagent-api, multiagent-ui, mongodb-mcp on EC2
-#   Phase 9  — Health check, summary, manifest
+#   Phase 9  — Health + deterministic backend smoke (9a–9b)
+#   Phase 10 — Write deploy-manifest.json
+#   Phase 11 — Full post-deploy smoke (e2e-smoke/post-deploy-smoke.py; --skip-smoke to disable)
 #
 # Embedding: explicit provider selection via EMBEDDINGS_PROVIDER.
 #            titan  -> Bedrock Titan v2, no SageMaker ARN required.
@@ -42,6 +45,7 @@ BOOTSTRAP_DIR="$TF_ROOT/bootstrap"
 ENV_FILE="$REPO_ROOT/.env"
 AUTO_APPROVE=false
 SKIP_DOCKER=false
+SKIP_SMOKE=false
 
 # Source shared agent helpers (discover_agents, write_specialist_agents_tfvars,
 # build_and_upload_code_artifact, update_runtime_env_dynamic, etc.)
@@ -59,6 +63,14 @@ _PROJECT_SLUG="${PROJECT_NAME//-/_}"
 ATLAS_DB_USER="${ATLAS_DB_USER:-${_PROJECT_SLUG}_${ENVIRONMENT}_user}"
 ATLAS_DB_NAME="${ATLAS_DB_NAME:-${_PROJECT_SLUG}_${ENVIRONMENT}}"
 unset _PROJECT_SLUG
+# Canonical DB name is ATLAS_DB_NAME (used in terraform.tfvars and seed
+# scripts). Mirror it into MONGODB_DB so every downstream helper that reads
+# the application-side env var name (preflight checks, ad-hoc bun probes,
+# Mongo MCP runtime sync, etc.) sees the same value without re-deriving it.
+# The .env.live emitted in Phase 7 already does this for the EC2 host; this
+# extra export ensures the deploy script's own shell (and the preflight calls
+# it runs before .env.live exists on disk) see the canonical value too.
+export MONGODB_DB="$ATLAS_DB_NAME"
 VPC_CIDR="${VPC_CIDR:-10.0.0.0/16}"
 SHARED_VPC_NAME="${SHARED_VPC_NAME:-shared-network}"
 COGNITO_SEED_USERS="${COGNITO_SEED_USERS:-true}"
@@ -68,9 +80,10 @@ COGNITO_SMOKE_USER_EMAIL="${COGNITO_SMOKE_USER_EMAIL:-alex@example.com}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --auto-approve) AUTO_APPROVE=true ;;
-    --skip-docker)  SKIP_DOCKER=true ;;
-    --env-file)     ENV_FILE="$2"; shift ;;
+    --auto-approve)    AUTO_APPROVE=true ;;
+    --skip-docker)     SKIP_DOCKER=true ;;
+    --skip-smoke)      SKIP_SMOKE=true ;;
+    --env-file)        ENV_FILE="$2"; shift ;;
     *) echo "  [ec2] Unknown arg: $1" >&2; exit 1 ;;
   esac
   shift
@@ -84,6 +97,12 @@ sep()  { echo "─────────────────────�
 
 # shellcheck source=deploy/scripts/_sg-cleanup.sh
 source "$SCRIPT_DIR/_sg-cleanup.sh"
+
+# shellcheck source=deploy/scripts/_mongo-connect.sh
+source "$SCRIPT_DIR/_mongo-connect.sh"
+
+# shellcheck source=deploy/scripts/_seed-embeddings.sh
+source "$SCRIPT_DIR/_seed-embeddings.sh"
 
 # Wrap `terraform apply` with retry-on-transient-errors.
 # The MongoDB Atlas API at cloud.mongodb.com occasionally returns i/o timeouts
@@ -298,8 +317,8 @@ ok "Network mode: ${NETWORK_MODE}"
 # ── Bedrock KB ingestion path auto-derived from NETWORK_MODE ────────────────
 # envs/ec2 only consults the flag matching the active mode (the other is
 # silently ignored — see locals.use_kb_* in envs/ec2/main.tf). So the
-# operator never has to set both. We default the active flag to "true" (SoW-
-# aligned private path) and force the inactive one to "false" for clarity.
+# operator never has to set both. We default the active flag to "true" (recommended
+# private path) and force the inactive one to "false" for clarity.
 # Override either in .env to drop KB onto Atlas public SRV — this is a
 # privacy regression and the only documented escape hatch for the
 # experimental peering-NLB TLS path (see modules/bedrock-kb-peering/README.md).
@@ -372,7 +391,7 @@ VOYAGE_REQUEST_FORMAT="${VOYAGE_REQUEST_FORMAT:-}"
 VOYAGE_MARKETPLACE_MODEL="${VOYAGE_MARKETPLACE_MODEL:-}"
 VOYAGE_MODEL_LABEL=""
 EMBEDDINGS_MODEL_ID=""
-EMBEDDINGS_SOW_ALIGNED="false"
+EMBEDDINGS_VOYAGE_MULTIMODAL="false"
 VOYAGE_ENDPOINT_SUFFIX="${TF_VAR_voyage_endpoint_name_suffix:-}"
 EC2_KEY_PAIR="${EC2_KEY_PAIR:-}"
 AGENTCORE_RUNTIME_DEPLOYMENT_MODE="${AGENTCORE_RUNTIME_DEPLOYMENT_MODE:-code}"
@@ -405,7 +424,7 @@ case "$EMBEDDINGS_PROVIDER" in
       VOYAGE_MODEL_LABEL="voyage-multimodal-3"
       VOYAGE_REQUEST_FORMAT="${VOYAGE_REQUEST_FORMAT:-multimodal}"
       [[ "$VOYAGE_REQUEST_FORMAT" == "multimodal" ]] || err "voyage-multimodal-3 requires VOYAGE_REQUEST_FORMAT=multimodal"
-      EMBEDDINGS_SOW_ALIGNED="true"
+      EMBEDDINGS_VOYAGE_MULTIMODAL="true"
     elif [[ "$VOYAGE_ARN_TAIL" =~ ^voyage-3-5-lite($|-) ]]; then
       VOYAGE_MODEL_LABEL="voyage-3-5-lite"
       VOYAGE_REQUEST_FORMAT="${VOYAGE_REQUEST_FORMAT:-legacy}"
@@ -428,7 +447,7 @@ case "$EMBEDDINGS_PROVIDER" in
     ok "Embeddings: ${VOYAGE_MODEL_LABEL} via SageMaker (${VOYAGE_REQUEST_FORMAT} request format; package ${VOYAGE_ARN_TAIL})"
     ;;
   titan)
-    # Explicit, deliberate deviation from the SoW — Bedrock Titan v2 only. No
+    # Explicit, deliberate non-default embeddings provider — Bedrock Titan v2 only. No
     # SageMaker endpoint is created; API + runtimes embed via Bedrock. Override
     # any leaked VOYAGE_ARN so the tfvars block below cannot trigger SageMaker.
     VOYAGE_ARN=""
@@ -436,17 +455,17 @@ case "$EMBEDDINGS_PROVIDER" in
     EMBEDDINGS_MODEL_ID="amazon.titan-embed-text-v2:0"
     VOYAGE_REQUEST_FORMAT="${VOYAGE_REQUEST_FORMAT:-multimodal}"
     warn "═══════════════════════════════════════════════════════════════════════"
-    warn "  EMBEDDINGS_PROVIDER=titan — explicit deviation from SoW"
+    warn "  EMBEDDINGS_PROVIDER=titan — explicit non-default embeddings provider"
     warn "  Voyage SageMaker endpoint will NOT be provisioned."
     warn "  Embeddings: amazon.titan-embed-text-v2:0 (1024-d) via Bedrock."
-    warn "  This is recorded in deploy-manifest.json. To restore SoW alignment,"
+    warn "  This is recorded in deploy-manifest.json. To restore the Voyage multimodal default,"
     warn "  set EMBEDDINGS_PROVIDER=voyage and re-run setup-voyage-marketplace.sh."
     warn "═══════════════════════════════════════════════════════════════════════"
     ;;
   "")
     err "EMBEDDINGS_PROVIDER is not set — refusing to deploy with an implicit default.
        Set one of the following in .env (or your shell) and re-source it:
-         export EMBEDDINGS_PROVIDER=voyage   # SoW-aligned, requires Marketplace subscription
+         export EMBEDDINGS_PROVIDER=voyage   # Voyage multimodal default; requires Marketplace subscription
          export EMBEDDINGS_PROVIDER=titan    # explicit deviation, Bedrock Titan v2"
     ;;
   *)
@@ -456,7 +475,7 @@ esac
 export VOYAGE_REQUEST_FORMAT
 export VOYAGE_MARKETPLACE_MODEL
 export EMBEDDINGS_MODEL_ID
-export EMBEDDINGS_SOW_ALIGNED
+export EMBEDDINGS_VOYAGE_MULTIMODAL
 export VOYAGE_ENDPOINT_SUFFIX
 
 # Re-read SHARED_VPC_NAME after sourcing .env so a .env override wins.
@@ -761,7 +780,7 @@ if [[ "$SKIP_DOCKER" != "true" ]]; then
     "latest" \
     "$_GATEWAY_ID_PRE" \
     "mongodb-mcp"
-  unset _MCP_RUNTIME_ID_PRE _GATEWAY_ID_PRE
+  unset _GATEWAY_ID_PRE
 
   # Capture the pushed image digest so the next `terraform plan` propagates it
   # as a trigger on module.agentcore_gateway.null_resource.mcp_server_gateway_target.
@@ -780,6 +799,11 @@ if [[ "$SKIP_DOCKER" != "true" ]]; then
     unset TF_VAR_mongodb_mcp_image_digest
   fi
 fi
+
+# MCP ECR repo name + pre-apply runtime id (for R.0 first-deploy Gateway refresh).
+# Must be set even when --skip-docker: Phase 4d only runs inside the docker block.
+MCP_RUNTIME_REPO_NAME="${PROJECT_NAME}-mongodb-mcp-${ENVIRONMENT}"
+_MCP_RUNTIME_ID_PRE=$(terraform output -raw mongodb_mcp_runtime_id 2>/dev/null || echo "")
 
 sep
 log "Running terraform plan..."
@@ -824,6 +848,7 @@ load_tf_outputs() {
   AGENTCORE_CODE_ARTIFACT_PREFIX=$(terraform output -raw agentcore_code_artifact_prefix 2>/dev/null || echo "$AGENTCORE_CODE_ARTIFACT_PREFIX")
   AGENTCORE_MEMORY_STORE_ID=$(terraform output -raw agentcore_memory_id 2>/dev/null || echo "")
   AGENTCORE_GATEWAY_URL=$(terraform output -raw agentcore_gateway_url 2>/dev/null || echo "")
+  AGENTCORE_GATEWAY_ID=$(terraform output -raw agentcore_gateway_id 2>/dev/null || echo "")
   AGENTCORE_ORCHESTRATOR_ARN=$(terraform output -raw acr_orchestrator_arn 2>/dev/null || echo "")
   AGENTCORE_ORCHESTRATOR_ID=$(terraform output -raw acr_orchestrator_id 2>/dev/null || echo "")
   # Load specialist ARNs + IDs from the for_each map outputs.
@@ -847,6 +872,74 @@ if [[ -z "$AGENTCORE_ORCHESTRATOR_ARN" ]] || \
   load_tf_outputs
 fi
 
+# ── R.0 First-deploy Gateway target refresh ──────────────────────────────────
+# Prevents the long-documented "second deploy fixed it" race:
+#   1. First deploy: force_mcp_runtime_image_sync (Phase 4d.5) skipped because
+#      the runtime didn't exist yet.
+#   2. terraform apply creates the runtime + Gateway target concurrently.
+#   3. The Gateway target's tools/list runs against a still-cold runtime and
+#      caches an empty/stale schema.
+#   4. Until the NEXT deploy runs force_mcp_runtime_image_sync against the
+#      now-warm runtime, MCP tool calls return 0 results.
+#
+# Detect first deploy via `_MCP_RUNTIME_ID_PRE` (captured before apply at
+# Phase 4d.5) being empty AND the post-apply ARN now populated. If true,
+# poll the runtime to READY and force the Gateway target to recreate so
+# tools/list runs against the warm runtime.
+MONGODB_MCP_RUNTIME_ID_POST="${MONGODB_MCP_RUNTIME_ARN##*/}"
+GATEWAY_ID_POST="$(terraform output -raw agentcore_gateway_id 2>/dev/null || echo "")"
+if [[ -z "${_MCP_RUNTIME_ID_PRE:-}" && -n "$MONGODB_MCP_RUNTIME_ID_POST" && -n "$GATEWAY_ID_POST" ]]; then
+  if ! declare -F force_mcp_runtime_image_sync >/dev/null 2>&1; then
+    source "$SCRIPT_DIR/_agents-common.sh"
+  fi
+  log "[mcp-bootstrap] first-deploy detected — refreshing Gateway target against warm runtime…"
+
+  # Poll the mongodb-mcp runtime until status=READY (max 5 min).
+  RUNTIME_READY_BUDGET_S=300
+  RUNTIME_READY_STARTED=$SECONDS
+  RUNTIME_STATUS=""
+  while (( SECONDS - RUNTIME_READY_STARTED < RUNTIME_READY_BUDGET_S )); do
+    RUNTIME_STATUS="$(aws bedrock-agentcore-control get-agent-runtime \
+      --region "$AWS_REGION" \
+      --agent-runtime-id "$MONGODB_MCP_RUNTIME_ID_POST" \
+      --query 'status' --output text 2>/dev/null || echo '')"
+    if [[ "$RUNTIME_STATUS" == "READY" ]]; then
+      ok "[mcp-bootstrap] mongodb-mcp runtime READY"
+      break
+    fi
+    log "  runtime status: ${RUNTIME_STATUS:-?} ($(( SECONDS - RUNTIME_READY_STARTED ))s elapsed)"
+    sleep 10
+  done
+  if [[ "$RUNTIME_STATUS" != "READY" ]]; then
+    warn "[mcp-bootstrap] mongodb-mcp runtime did not reach READY in ${RUNTIME_READY_BUDGET_S}s (last: ${RUNTIME_STATUS:-?}) — Gateway target refresh may run against a cold runtime"
+  fi
+
+  # Force the Gateway target to be recreated so its tools/list cache is rebuilt
+  # against the warm runtime. The helper deletes the target + removes the
+  # null_resource from TF state; the targeted apply below recreates it.
+  if force_mcp_runtime_image_sync \
+       "$MONGODB_MCP_RUNTIME_ID_POST" \
+       "$MCP_RUNTIME_REPO_NAME" \
+       "latest" \
+       "$GATEWAY_ID_POST" \
+       "mongodb-mcp"; then
+    log "[mcp-bootstrap] running targeted terraform apply to recreate Gateway target…"
+    if terraform apply -auto-approve -input=false \
+         -target='module.agentcore_gateway.null_resource.mcp_server_gateway_target[0]' \
+         2>&1 | tee /tmp/_mcp-bootstrap-tf.out >/dev/null; then
+      ok "[mcp-bootstrap] first-deploy Gateway target refresh complete — tool schemas cached against warm runtime"
+    else
+      warn "[mcp-bootstrap] targeted terraform apply did not succeed; tools/list may still be empty (see /tmp/_mcp-bootstrap-tf.out)"
+    fi
+    # Refresh outputs in case the targeted apply changed any values.
+    load_tf_outputs
+  else
+    warn "[mcp-bootstrap] force_mcp_runtime_image_sync returned non-zero on first-deploy refresh"
+  fi
+  unset RUNTIME_READY_BUDGET_S RUNTIME_READY_STARTED RUNTIME_STATUS
+fi
+unset MONGODB_MCP_RUNTIME_ID_POST GATEWAY_ID_POST _MCP_RUNTIME_ID_PRE
+
 [[ -n "$EC2_IP" ]]        || err "EC2 instance IP not in outputs. Check terraform apply logs."
 [[ -n "$ECR_API_REPO" ]]  || err "ECR API repo URL not in outputs."
 [[ -n "$ATLAS_MONGO_HOST" ]] || err "Atlas host not in outputs."
@@ -864,14 +957,12 @@ unset _spec_id
 if [[ "$EMBEDDINGS_PROVIDER" == "voyage" ]]; then
   [[ -n "$VOYAGE_ENDPOINT" ]] || err "EMBEDDINGS_PROVIDER=voyage but Terraform output voyage_endpoint_name is empty."
 
-  VOYAGE_ENDPOINT_STATUS="$(aws sagemaker describe-endpoint \
-    --endpoint-name "$VOYAGE_ENDPOINT" \
-    --region "$AWS_REGION" \
-    --query 'EndpointStatus' --output text 2>/tmp/_voyage_endpoint_err.txt || true)"
-  if [[ "$VOYAGE_ENDPOINT_STATUS" != "InService" ]]; then
-    _VOYAGE_ERR="$(cat /tmp/_voyage_endpoint_err.txt 2>/dev/null || true)"
-    err "Terraform output says Voyage endpoint '$VOYAGE_ENDPOINT' should exist, but SageMaker status is '${VOYAGE_ENDPOINT_STATUS:-missing}'.
-       AWS error: ${_VOYAGE_ERR:-none}
+  # Polling wait (replaces the legacy single-shot describe-endpoint check).
+  # First-deploy: the endpoint may still be Creating when we land here; the
+  # helper retries every 30s up to 900s.
+  log "Verifying Voyage endpoint InService (polling)..."
+  if ! wait_voyage_endpoint_inservice "$VOYAGE_ENDPOINT"; then
+    err "Voyage endpoint '$VOYAGE_ENDPOINT' did not reach InService within 900s.
        Refusing to continue because EMBEDDINGS_PROVIDER=voyage must not silently fall back or write a stale manifest."
   fi
   ok "Voyage endpoint verified InService: $VOYAGE_ENDPOINT"
@@ -889,39 +980,102 @@ else
   MONGODB_URI="mongodb+srv://${ATLAS_DB_USER}:${TF_VAR_atlas_db_password}@${ATLAS_MONGO_HOST}/?retryWrites=true&w=majority"
 fi
 
+# Preserve the public-SRV form before Phase 5c rewrites MONGODB_URI to the
+# PrivateLink/peering URI. Laptop-side helpers (memory-recall-diagnostic.py,
+# scenario tests T1/T3/T9/T10, post-deploy-smoke.py) cannot resolve the
+# PrivateLink hostname from outside the VPC and must fall back to the SRV form.
+MONGODB_URI_PUBLIC="$MONGODB_URI"
+
+# ── MONGODB_URI sanity: must be non-empty and parsable ───────────────────────
+# The legacy code only validated ATLAS_MONGO_HOST. An empty atlas_db_password
+# (TF_VAR or merge-conflict) would produce `mongodb+srv://user:@host/...`
+# that the Mongo driver rejects with a generic MongoServerSelectionError far
+# down the line, obscuring the real cause.
+[[ -n "$MONGODB_URI" ]] || err "MONGODB_URI is empty — both atlas_connection_string output and ATLAS_DB_USER/PASSWORD/HOST construction yielded nothing. Check terraform outputs and TF_VAR_atlas_db_password."
+if ! [[ "$MONGODB_URI" =~ ^mongodb(\+srv)?://[^:]+:[^@]+@[^/]+/.* ]]; then
+  err "MONGODB_URI is malformed (no user:password@host). Did TF_VAR_atlas_db_password leak as empty? Sanitized: $(sanitize_mongo_uri "$MONGODB_URI")"
+fi
+
+# ── Atlas cluster IDLE wait (covers the first-deploy race where SRV DNS
+#    has not yet propagated when terraform apply returns)
+ATLAS_PROJECT_ID_RESOLVED="${TF_VAR_atlas_project_id:-${TF_VAR_mongodb_atlas_project_id:-}}"
+if [[ -n "$ATLAS_PROJECT_ID_RESOLVED" && -n "$MONGODB_ATLAS_PUBLIC_KEY" && -n "$MONGODB_ATLAS_PRIVATE_KEY" ]]; then
+  CLUSTER_NAME="${PROJECT_NAME}-${ENVIRONMENT}"
+  log "Waiting for Atlas cluster '$CLUSTER_NAME' to reach IDLE state..."
+  CLUSTER_IDLE_BUDGET_S=600
+  CLUSTER_IDLE_STARTED=$SECONDS
+  CLUSTER_STATE="UNKNOWN"
+  while (( SECONDS - CLUSTER_IDLE_STARTED < CLUSTER_IDLE_BUDGET_S )); do
+    CLUSTER_RESP="$(curl -sS \
+      --user "${MONGODB_ATLAS_PUBLIC_KEY}:${MONGODB_ATLAS_PRIVATE_KEY}" \
+      --digest \
+      -H "Accept: application/vnd.atlas.2024-08-05+json" \
+      "https://cloud.mongodb.com/api/atlas/v2/groups/${ATLAS_PROJECT_ID_RESOLVED}/clusters/${CLUSTER_NAME}" 2>/dev/null || echo '')"
+    if [[ -n "$CLUSTER_RESP" ]]; then
+      CLUSTER_STATE="$(python3 -c 'import json,sys
+try:
+  d=json.loads(sys.stdin.read() or "{}")
+  print(d.get("stateName", "UNKNOWN"))
+except Exception:
+  print("UNKNOWN")' <<<"$CLUSTER_RESP" 2>/dev/null || echo "UNKNOWN")"
+    fi
+    if [[ "$CLUSTER_STATE" == "IDLE" ]]; then
+      ok "Atlas cluster IDLE"
+      break
+    fi
+    log "  cluster state: ${CLUSTER_STATE} ($(( SECONDS - CLUSTER_IDLE_STARTED ))s elapsed)"
+    sleep 15
+  done
+  if [[ "$CLUSTER_STATE" != "IDLE" ]]; then
+    err "Atlas cluster '$CLUSTER_NAME' did not reach IDLE within ${CLUSTER_IDLE_BUDGET_S}s (last state: ${CLUSTER_STATE})"
+  fi
+else
+  log "Skipping Atlas cluster IDLE wait (Atlas project id or API keys missing)"
+fi
+unset ATLAS_PROJECT_ID_RESOLVED CLUSTER_RESP CLUSTER_STATE CLUSTER_IDLE_BUDGET_S CLUSTER_IDLE_STARTED
+
 # ══════════════════════════════════════════════════════════════════════════════
 # PHASE 5b — First-time MongoDB seeding (idempotent)
 # Seed demo collections only when core collections are missing/empty.
 # ══════════════════════════════════════════════════════════════════════════════
 sep
-log "Phase 5b — Checking MongoDB seed state..."
+log "Phase 5b — Asserting Atlas reachability before seed gate..."
 
-SEED_NEEDED=$(MONGODB_URI="$MONGODB_URI" MONGODB_DB="$ATLAS_DB_NAME" \
-  bun -e '
-    import { MongoClient } from "mongodb";
-    const uri = process.env.MONGODB_URI;
-    const dbName = process.env.MONGODB_DB;
-    if (!dbName) { console.error("MONGODB_DB env not set"); process.exit(1); }
-    const client = new MongoClient(uri, { appName: "deploy-seed-check" });
-    await client.connect();
-    const db = client.db(dbName);
-    const required = ["customers", "products", "orders", "troubleshooting_docs"];
-    let seeded = true;
-    for (const coll of required) {
-      const exists = (await db.listCollections({ name: coll }, { nameOnly: true }).toArray()).length > 0;
-      if (!exists) {
-        seeded = false;
-        break;
-      }
-      const count = await db.collection(coll).countDocuments();
-      if (count === 0) {
-        seeded = false;
-        break;
-      }
-    }
-    await client.close();
-    process.stdout.write(seeded ? "no" : "yes");
-  ' 2>/dev/null || echo "yes")
+# REPLACES the legacy probe at deploy-project.sh:899-924 that swallowed all
+# errors via `2>/dev/null || echo "yes"`. Now we cleanly separate:
+#   - Mongo unreachable → fatal abort with sanitized URI + diagnostic envelope
+#   - Mongo reachable but collections empty → SEED_NEEDED=yes
+#   - Mongo reachable and collections populated → SEED_NEEDED=no
+assert_mongo_reachable "$MONGODB_URI" "$ATLAS_DB_NAME" 300 \
+  || err "Mongo reachability assertion failed before Phase 5b seed gate (see diagnostic envelope above)"
+
+log "Checking MongoDB seed state..."
+SEED_NEEDED="$(MONGODB_URI="$MONGODB_URI" MONGODB_DB="$ATLAS_DB_NAME" bun -e '
+import { MongoClient } from "mongodb";
+const uri = process.env.MONGODB_URI;
+const dbName = process.env.MONGODB_DB;
+if (!dbName) { console.error("MONGODB_DB env not set"); process.exit(1); }
+const client = new MongoClient(uri, { appName: "deploy-seed-check" });
+try {
+  await client.connect();
+  const db = client.db(dbName);
+  const required = ["customers", "products", "orders", "troubleshooting_docs"];
+  let seeded = true;
+  for (const coll of required) {
+    const exists = (await db.listCollections({ name: coll }, { nameOnly: true }).toArray()).length > 0;
+    if (!exists) { seeded = false; break; }
+    const count = await db.collection(coll).countDocuments();
+    if (count === 0) { seeded = false; break; }
+  }
+  process.stdout.write(seeded ? "no" : "yes");
+} finally {
+  try { await client.close(); } catch (_) {}
+}
+')"
+
+if [[ "$SEED_NEEDED" != "yes" && "$SEED_NEEDED" != "no" ]]; then
+  err "SEED_NEEDED probe returned unexpected output (this should be unreachable now that connectivity is asserted): '${SEED_NEEDED}'"
+fi
 
 if [[ "$SEED_NEEDED" == "yes" ]]; then
   log "Atlas appears unseeded — running first-time seed scripts..."
@@ -945,6 +1099,19 @@ log "Reconciling MongoDB indexes (safe to re-run)..."
 )
 ok "MongoDB indexes verified (seed-indexes)"
 
+# ── Embedding seed (gap-fill semantics; REWIRE auto-detected) ────────────────
+# This is the FIX for the long-standing silent gap where production deploys
+# never embedded `products` / `troubleshooting_docs`. The helper:
+#   - filters seeder-owned rows only (KB chunks are never touched)
+#   - auto-stamps embeddingModel on legacy rows
+#   - auto-detects REWIRE on provider/dim drift (SSM + in-Mongo fingerprint)
+#   - waits for the Voyage SageMaker endpoint when EMBEDDINGS_PROVIDER=voyage
+#   - exits non-zero on incomplete results (no more warn-only)
+log "Generating embeddings for products + troubleshooting_docs (provider=${EMBEDDINGS_PROVIDER})..."
+run_embedding_seed "$ATLAS_DB_NAME" "$MONGODB_URI" \
+  || err "Embedding seed failed — refusing to continue (see [embed-seed] envelope above)"
+ok "Embedding seed complete"
+
 # ── Centralized preflight checks: post-apply (see docs/deployment-preflight-checks.md) ──
 # shellcheck source=deploy/scripts/_preflight-checks.sh
 source "$SCRIPT_DIR/_preflight-checks.sh"
@@ -960,9 +1127,8 @@ preflight_validate project-post-apply
 #   (multi-host non-SRV). Peering hostnames are in the cluster's TLS SAN list,
 #   so NO tlsAllowInvalidHostnames is needed.
 #
-# The mongodb-mcp AgentCore Runtime gets its MONGODB_URI baked in by
-# Terraform (mode-aware in envs/ec2/main.tf), so this normalization is now
-# API-only in both modes.
+# Terraform seeds the mongodb-mcp runtime URI at apply time; Phase 6b
+# update_mcp_runtime_mongodb_env re-syncs it to this normalized URI.
 # ══════════════════════════════════════════════════════════════════════════════
 sep
 if [[ "$NETWORK_MODE" == "privatelink" ]]; then
@@ -1171,6 +1337,17 @@ if [[ -n "$AGENTCORE_ORCHESTRATOR_ID" ]]; then
   # ARN/endpoint are infrastructure wiring for the Gateway target only and are
   # intentionally not injected into application runtimes.
 
+  # Strict-mode embeddings: only export EMBEDDING_MODEL_ID for titan stacks.
+  # `_agents-common.sh::build_dynamic_env_base` reads EMBEDDING_MODEL_ID via
+  # `os.environ.get(..., '')` and the heredoc's `if v` filter drops empty
+  # values, so voyage stacks ship AgentCore runtimes without any Bedrock
+  # fallback model id present in the runtime env.
+  if [[ "$EMBEDDINGS_PROVIDER" == "titan" ]]; then
+    export EMBEDDING_MODEL_ID="${EMBEDDING_MODEL_ID:-amazon.titan-embed-text-v2:0}"
+  else
+    unset EMBEDDING_MODEL_ID
+  fi
+
   export AWS_REGION MONGODB_URI ATLAS_DB_NAME BEDROCK_KB_ID \
          AGENTCORE_MEMORY_STORE_ID AGENTCORE_GATEWAY_URL \
          VOYAGE_ENDPOINT EMBEDDINGS_PROVIDER VOYAGE_REQUEST_FORMAT \
@@ -1179,6 +1356,10 @@ if [[ -n "$AGENTCORE_ORCHESTRATOR_ID" ]]; then
 
   build_dynamic_env_base
   update_runtime_env_dynamic
+
+  if [[ -n "${MONGODB_MCP_RUNTIME_ARN:-}" ]]; then
+    update_mcp_runtime_mongodb_env "${MONGODB_MCP_RUNTIME_ARN##*/}" "$MONGODB_URI" "$ATLAS_DB_NAME"
+  fi
 
   log "Phase 6c — Verifying runtime environment variables..."
   verify_runtime_env_dynamic
@@ -1206,6 +1387,19 @@ else
   EMBEDDING_LINE="Bedrock Titan (amazon.titan-embed-text-v2:0)"
 fi
 
+# Strict-mode embeddings (api/src/lib/embed-query.ts):
+# In voyage stacks, EMBEDDING_MODEL_ID must NOT be present in .env.live —
+# its mere presence used to enable a silent Bedrock fallback when Voyage
+# stuttered, which produced `embeddingModel: amazon.titan-embed-text-v2:0`
+# rows in `chat_messages` / `agent_memory_facts`. The runtime now refuses to
+# fall back, but we strip the env var here as defense in depth so a
+# misconfigured runtime can never even attempt Bedrock.
+if [[ "$EMBEDDINGS_PROVIDER" == "titan" ]]; then
+  EMBEDDING_MODEL_ID_LINE="EMBEDDING_MODEL_ID=amazon.titan-embed-text-v2:0"
+else
+  EMBEDDING_MODEL_ID_LINE="# EMBEDDING_MODEL_ID intentionally omitted — strict ${EMBEDDINGS_PROVIDER} mode (no Bedrock fallback)"
+fi
+
 cat > "$REPO_ROOT/.env.live" <<EOF
 # EC2 mode — generated by deploy.sh on $(date -u +"%Y-%m-%dT%H:%M:%SZ")
 # Embedding: ${EMBEDDING_LINE}
@@ -1216,20 +1410,26 @@ AGENT_CONFIG_REFRESH_TOKEN=${AGENT_CONFIG_REFRESH_TOKEN}
 
 # MongoDB Atlas
 MONGODB_URI=${MONGODB_URI}
+# Public-SRV fallback for laptop-side tools (memory-recall-diagnostic.py,
+# scenario tests, post-deploy-smoke). The API container itself uses MONGODB_URI
+# (PrivateLink) for VPC-only egress.
+MONGODB_URI_PUBLIC=${MONGODB_URI_PUBLIC}
 MONGODB_DB=${ATLAS_DB_NAME}
 
 # Bedrock
 BEDROCK_KB_ID=${BEDROCK_KB_ID}
 AWS_REGION=${AWS_REGION}
 
-# Embedding — explicit provider switch from deploy.sh (no silent fallback).
+# Embedding — explicit provider switch from deploy.sh (strict mode, no silent fallback).
 #   voyage  → VOYAGE_SAGEMAKER_ENDPOINT set, selected Voyage Marketplace model
+#             EMBEDDING_MODEL_ID is intentionally NOT written (would enable
+#             a forbidden Bedrock fallback if it leaked into the runtime).
 #   titan   → VOYAGE_SAGEMAKER_ENDPOINT empty, Bedrock Titan v2 (deviation)
 EMBEDDINGS_PROVIDER=${EMBEDDINGS_PROVIDER}
 VOYAGE_SAGEMAKER_ENDPOINT=${VOYAGE_ENDPOINT}
 VOYAGE_OUTPUT_DIM=1024
 VOYAGE_REQUEST_FORMAT=${VOYAGE_REQUEST_FORMAT:-multimodal}
-EMBEDDING_MODEL_ID=amazon.titan-embed-text-v2:0
+${EMBEDDING_MODEL_ID_LINE}
 
 # AgentCore — Memory store, Gateway, Agent runtimes (orchestrator + specialists)
 AGENTCORE_MEMORY_STORE_ID=${AGENTCORE_MEMORY_STORE_ID}
@@ -1352,6 +1552,8 @@ if [[ -n "$CWA_STATUS_CMD_ID" ]]; then
 fi
 
 # ── Centralized preflight checks: pre-env-sync (see docs/deployment-preflight-checks.md) ──
+export MONGODB_URI MONGODB_MCP_RUNTIME_ARN AGENTCORE_GATEWAY_URL
+export MONGODB_MCP_RUNTIME_ID="${MONGODB_MCP_RUNTIME_ARN##*/}"
 # shellcheck source=deploy/scripts/_preflight-checks.sh
 source "$SCRIPT_DIR/_preflight-checks.sh"
 preflight_validate project-pre-env-sync
@@ -1480,35 +1682,63 @@ if [[ "$HEALTH_OK" != "yes" ]]; then
 fi
 
 # ── CloudWatch Logs streams probe ────────────────────────────────────────────
-# After the API restarted, the CW agent should have created at least one log
-# stream in $CW_API_LOG_GROUP from the multiagent-api journald unit within 60s.
-# We probe up to 12 times every 5s — non-fatal so a flaky agent doesn't block
-# the deploy, but we surface a loud warn() so an operator notices.
+# EC2 ships /var/log/multiagent-api.log via amazon-cloudwatch-agent (file tail).
+# Nudge the agent after API restart so PutLogEvents creates the {instance_id} stream.
 if [[ -n "${CW_API_LOG_GROUP:-}" ]]; then
+  log "Nudging CloudWatch agent after API restart..."
+  CW_NUDGE_CMD_ID=$(send_ssm_command_retry \
+    "$EC2_INSTANCE_ID" \
+    "multiagent: nudge cw-agent log shipping" \
+    '["curl -sf --max-time 10 http://127.0.0.1:3000/health >/dev/null 2>&1 || true; systemctl restart amazon-cloudwatch-agent; sleep 3"]' \
+    12) || warn "Failed to send CloudWatch agent nudge via SSM"
+  if [[ -n "${CW_NUDGE_CMD_ID:-}" ]]; then
+    wait_for_ssm_command_success "$CW_NUDGE_CMD_ID" "$EC2_INSTANCE_ID" 12 || true
+  fi
+
   log "Probing CloudWatch log streams in ${CW_API_LOG_GROUP}..."
   CW_STREAMS_OK="no"
-  for i in $(seq 1 12); do
-    STREAM_COUNT=$(aws logs describe-log-streams \
+  for i in $(seq 1 24); do
+    CW_STREAM_NAME=$(aws logs describe-log-streams \
       --region "$AWS_REGION" \
       --log-group-name "$CW_API_LOG_GROUP" \
+      --order-by LastEventTime \
+      --descending \
       --max-items 1 \
-      --query 'length(logStreams)' --output text 2>/dev/null || echo 0)
-    if [[ "$STREAM_COUNT" =~ ^[0-9]+$ ]] && (( STREAM_COUNT >= 1 )); then
+      --query 'logStreams[0].logStreamName' --output text 2>/dev/null || echo "")
+    CW_STREAM_NAME="${CW_STREAM_NAME%%$'\n'*}"
+    if [[ -n "$CW_STREAM_NAME" && "$CW_STREAM_NAME" != "None" && "$CW_STREAM_NAME" != "null" ]]; then
       CW_STREAMS_OK="yes"
       break
     fi
     sleep 5
   done
   if [[ "$CW_STREAMS_OK" == "yes" ]]; then
-    ok "CloudWatch agent is shipping API logs (${CW_API_LOG_GROUP})"
+    ok "CloudWatch agent is shipping API logs (${CW_API_LOG_GROUP}, stream=${CW_STREAM_NAME})"
   else
-    warn "No log streams found in ${CW_API_LOG_GROUP} after 60s — CloudWatch agent may not be shipping. Check journalctl -u amazon-cloudwatch-agent on EC2."
+    warn "No log streams found in ${CW_API_LOG_GROUP} after 120s — check /var/log/multiagent-api.log and systemctl status amazon-cloudwatch-agent on EC2."
   fi
 fi
 
 sep
-log "Phase 9a2 — /health dependency smoke (mongodb + agentcore must report 'connected'; mcpServer warns if unreachable)..."
-HEALTH_PAYLOAD=$(curl -sf --max-time 10 "http://${EC2_IP}:3000/health" 2>/dev/null || echo "")
+# Obtain SMOKE_ID_TOKEN BEFORE Phase 9a2 so the /health probe can be
+# authenticated. With a valid JWT the API populates the `mcpServer` key (real
+# MCP transport status). Without it, /health returns mcpServer omitted which
+# is the source of the original "deploy succeeded but Mongo not connected" gap.
+log "Phase 9a1 — Acquiring Cognito JWT for authenticated smoke probes..."
+SMOKE_ID_TOKEN=$(aws cognito-idp initiate-auth \
+  --region "$AWS_REGION" \
+  --client-id "$COGNITO_CLIENT_ID" \
+  --auth-flow USER_PASSWORD_AUTH \
+  --auth-parameters "USERNAME=${COGNITO_SMOKE_USER_EMAIL},PASSWORD=${COGNITO_TEST_PASSWORD}" \
+  --query "AuthenticationResult.IdToken" \
+  --output text 2>/dev/null || echo "")
+[[ -n "$SMOKE_ID_TOKEN" && "$SMOKE_ID_TOKEN" != "None" ]] || err "Could not obtain Cognito IdToken for smoke user ${COGNITO_SMOKE_USER_EMAIL}"
+
+sep
+log "Phase 9a2 — Authenticated /health dependency smoke (mongodb + agentcore + mcpServer must report 'connected')..."
+HEALTH_PAYLOAD=$(curl -sf --max-time 10 \
+  -H "Authorization: Bearer $SMOKE_ID_TOKEN" \
+  "http://${EC2_IP}:3000/health" 2>/dev/null || echo "")
 if [[ -n "$HEALTH_PAYLOAD" ]]; then
   python3 - "$HEALTH_PAYLOAD" <<'PY'
 import json, sys
@@ -1524,6 +1754,11 @@ required = {
     # `ResourceNotFoundException` + `/actor/i` carve-out in
     # api/src/lib/health-status.ts.
     "agentcore": "connected",
+    # MCP transport (Gateway URL, IAM, Gateway target schema cache). Phase 9a2
+    # is now AUTHENTICATED so this key is populated. Escalated from warn to
+    # err — the original deploy regression (`mongoQueries == 0` in Phase 9b)
+    # would have been caught here if /health were authenticated.
+    "mcpServer": "connected",
 }
 mismatches = []
 for key, want in required.items():
@@ -1537,30 +1772,154 @@ if mismatches:
         + json.dumps(payload, indent=2)
         + "\nMismatches:\n" + "\n".join(mismatches)
     )
-mcp = deps.get("mcpServer")
-if mcp != "connected":
-    print(f"  warning: mcpServer={mcp}; API deploy can proceed, but Mongo MCP tool calls may be degraded")
-else:
-    print("  /health dependencies all 'connected' as expected")
+print("  /health dependencies all 'connected' as expected (mongodb, agentcore, mcpServer)")
 PY
-  ok "/health dependency smoke passed"
+  ok "Authenticated /health dependency smoke passed"
 else
-  warn "/health probe returned no body — skipping dependency smoke"
+  err "/health probe returned no body — refusing to continue"
 fi
+
+sep
+log "Phase 9a3 — Direct MCP tool probe (/health/deep mongodb_query via Gateway)..."
+# This catches end-to-end MCP path failures (Gateway target wiring, MCP runtime
+# MONGODB_URI, Atlas connectivity from inside the MCP runtime) BEFORE the
+# LLM-dependent Phase 9b smoke. mcpProbe must equal "connected" — anything
+# else (unreachable / timeout) fails the deploy with a precise diagnosis.
+#
+# Bounded retry: Gateway IAM propagation can take 60-90s after a new target.
+# 3 attempts × 30s between tries. If all 3 attempts fail, we make one extra
+# attempt AFTER trying to self-heal a FAILED gateway target in-place (see the
+# `self_heal_failed_gateway_target` helper in _agents-common.sh). The self-heal
+# step exists because Terraform's `null_resource.mcp_server_gateway_target`
+# only re-runs its delete+recreate logic when its triggers change (image
+# digest, endpoint, name) — so a target that turned FAILED during this apply
+# stays FAILED until the next apply unless we recover it here.
+HEALTH_DEEP_RETRY_MAX=3
+HEALTH_DEEP_RETRY_DELAY=30
+HEALTH_DEEP_PAYLOAD=""
+HEALTH_DEEP_HTTP_CODE=""
+HEALTH_DEEP_PROBE=""
+HEALTH_DEEP_LAST_ERROR=""
+HEALTH_DEEP_ATTEMPT=0
+HEALTH_DEEP_HEAL_TRIED="no"
+
+# Local helper — runs ONE /health/deep probe and updates the shared vars
+# (HEALTH_DEEP_HTTP_CODE / HEALTH_DEEP_PAYLOAD / HEALTH_DEEP_PROBE /
+# HEALTH_DEEP_LAST_ERROR). 404 is fatal here (stale API image). Returns 0 if
+# mcpProbe came back "connected", non-zero otherwise. Bumps
+# HEALTH_DEEP_ATTEMPT so the post-loop diagnostic line counts every probe
+# (bounded retry + post-heal re-probe) consistently.
+_phase_9a3_probe_once() {
+  HEALTH_DEEP_ATTEMPT=$(( HEALTH_DEEP_ATTEMPT + 1 ))
+  local raw
+  raw=$(curl -s --max-time 15 -o /tmp/health-deep.body -w "%{http_code}" \
+    -H "Authorization: Bearer $SMOKE_ID_TOKEN" \
+    "http://${EC2_IP}:3000/health/deep" 2>/dev/null || echo "000")
+  HEALTH_DEEP_HTTP_CODE="$raw"
+  HEALTH_DEEP_PAYLOAD="$(cat /tmp/health-deep.body 2>/dev/null || true)"
+  if [[ "$HEALTH_DEEP_HTTP_CODE" == "404" ]]; then
+    err "/health/deep returned 404 — running API image is missing this route (stale container or --skip-docker). Rebuild and redeploy: ./deploy/deploy-api.sh"
+  fi
+  if [[ -z "$HEALTH_DEEP_PAYLOAD" ]]; then
+    HEALTH_DEEP_PROBE=""
+    HEALTH_DEEP_LAST_ERROR="empty response body (http=${HEALTH_DEEP_HTTP_CODE})"
+    return 1
+  fi
+  HEALTH_DEEP_PROBE=$(python3 -c "import json,sys; print(json.loads(sys.argv[1]).get('mcpProbe',''))" "$HEALTH_DEEP_PAYLOAD" 2>/dev/null || echo "")
+  HEALTH_DEEP_LAST_ERROR="http=${HEALTH_DEEP_HTTP_CODE} mcpProbe=${HEALTH_DEEP_PROBE:-<unparseable>}"
+  [[ "$HEALTH_DEEP_PROBE" == "connected" ]]
+}
+
+while (( HEALTH_DEEP_ATTEMPT < HEALTH_DEEP_RETRY_MAX )); do
+  if _phase_9a3_probe_once; then
+    break
+  fi
+  if (( HEALTH_DEEP_ATTEMPT < HEALTH_DEEP_RETRY_MAX )); then
+    log "  attempt ${HEALTH_DEEP_ATTEMPT}/${HEALTH_DEEP_RETRY_MAX} failed (${HEALTH_DEEP_LAST_ERROR}); retrying in ${HEALTH_DEEP_RETRY_DELAY}s (Gateway IAM propagation typically takes 60-90s)..."
+    sleep "$HEALTH_DEEP_RETRY_DELAY"
+  fi
+done
+
+if [[ -z "$HEALTH_DEEP_PAYLOAD" ]]; then
+  err "/health/deep probe returned no body after ${HEALTH_DEEP_RETRY_MAX} attempts — refusing to continue"
+fi
+
+# Self-heal attempt: bounded retry exhausted and mcpProbe is still not
+# "connected". If the gateway target is stuck in FAILED, recreate it in-place
+# and probe once more. See `self_heal_failed_gateway_target` for return codes.
+if [[ "$HEALTH_DEEP_PROBE" != "connected" ]]; then
+  HEALTH_DEEP_HEAL_TRIED="yes"
+  log "Phase 9a3 — bounded retry exhausted; attempting in-place gateway target self-heal..."
+  if [[ -z "${AGENTCORE_GATEWAY_ID:-}" ]]; then
+    warn "AGENTCORE_GATEWAY_ID unset (load_tf_outputs miss) — skipping self-heal"
+  elif [[ -z "${MONGODB_MCP_RUNTIME_ENDPOINT:-}" ]]; then
+    warn "MONGODB_MCP_RUNTIME_ENDPOINT unset — skipping self-heal"
+  else
+    HEAL_RC=0
+    self_heal_failed_gateway_target \
+      "$AGENTCORE_GATEWAY_ID" \
+      "mongodb-mcp" \
+      "$MONGODB_MCP_RUNTIME_ENDPOINT" \
+      || HEAL_RC=$?
+    case "$HEAL_RC" in
+      0)
+        log "Phase 9a3 — gateway target healed; re-probing /health/deep once..."
+        _phase_9a3_probe_once || true
+        ;;
+      2)
+        log "Phase 9a3 — gateway target is healthy; probe failure is from a different cause (skipping re-probe)"
+        ;;
+      3)
+        log "Phase 9a3 — gateway target is mid-flight (CREATING/UPDATING); waiting 30s + one more probe..."
+        sleep 30
+        _phase_9a3_probe_once || true
+        ;;
+      *)
+        warn "Phase 9a3 — self-heal did not recover the gateway target (rc=${HEAL_RC}); falling through to fatal diagnostic"
+        ;;
+    esac
+    unset HEAL_RC
+  fi
+fi
+unset -f _phase_9a3_probe_once
+
+python3 - "$HEALTH_DEEP_PAYLOAD" "$HEALTH_DEEP_ATTEMPT" "$HEALTH_DEEP_RETRY_MAX" "$HEALTH_DEEP_HEAL_TRIED" <<'PY'
+import json, sys
+payload = json.loads(sys.argv[1])
+attempts = sys.argv[2]
+retry_max = sys.argv[3]
+heal_tried = sys.argv[4] == "yes"
+probe = payload.get("mcpProbe")
+if probe != "connected":
+    heal_note = (
+        "  The deploy already attempted an in-place self-heal of the gateway target\n"
+        "  (delete + recreate); that did not fix it, so the remaining causes are:\n"
+    ) if heal_tried else (
+        "  Self-heal was NOT attempted (AGENTCORE_GATEWAY_ID or MCP_RUNTIME_ENDPOINT\n"
+        "  missing from Terraform outputs). The likely causes are:\n"
+    )
+    raise SystemExit(
+        f"Phase 9a3 failed — /health/deep MCP probe did not return 'connected' after {attempts} attempts (bounded retry budget {retry_max}{', + self-heal' if heal_tried else ''}).\n"
+        "Diagnosis: the API can reach the AgentCore Gateway but the gateway-routed\n"
+        "  mongodb_query tool did not succeed.\n"
+        + heal_note +
+        "    1. mongodb-mcp runtime's MONGODB_URI wrong / env wiped by partial Phase 6b\n"
+        "       → ./deploy/deploy-agents.sh --auto-approve\n"
+        "    2. mongodb-mcp runtime cannot actually reach Atlas (PrivateLink / SG misconfig)\n"
+        "       → check runtime CloudWatch logs at /multiagent/${ENVIRONMENT:-dev}/mcp\n"
+        "    3. Gateway role IAM trust still propagating beyond the retry+heal budget\n"
+        "       → wait 60s and re-run deploy-project.sh\n"
+        "Full payload:\n" + json.dumps(payload, indent=2)
+    )
+print(f"  /health/deep mcpProbe=connected latencyMs={payload.get('latencyMs')} gatewayUrl={payload.get('gatewayUrl')} attempts={attempts}/{retry_max}")
+PY
+ok "Direct MCP tool probe passed"
 
 sep
 log "Phase 9b — Deterministic backend smoke validation..."
 SMOKE_SESSION_ID="deploy-smoke-$(date +%s)"
 EC2_API_URL="http://${EC2_IP}:3000"
 BACKEND_SMOKE_SCRIPT="${SCRIPT_DIR}/backend-smoke.py"
-SMOKE_ID_TOKEN=$(aws cognito-idp initiate-auth \
-  --region "$AWS_REGION" \
-  --client-id "$COGNITO_CLIENT_ID" \
-  --auth-flow USER_PASSWORD_AUTH \
-  --auth-parameters "USERNAME=${COGNITO_SMOKE_USER_EMAIL},PASSWORD=${COGNITO_TEST_PASSWORD}" \
-  --query "AuthenticationResult.IdToken" \
-  --output text 2>/dev/null || echo "")
-[[ -n "$SMOKE_ID_TOKEN" && "$SMOKE_ID_TOKEN" != "None" ]] || err "Could not obtain Cognito IdToken for smoke user ${COGNITO_SMOKE_USER_EMAIL}"
 
 python3 "$BACKEND_SMOKE_SCRIPT" \
   --api-url "$EC2_API_URL" \
@@ -1578,8 +1937,8 @@ echo "  EC2 IP     : ${EC2_IP}"
 echo "  Shell      : ${EC2_SSM}"
 echo ""
 echo "  Atlas      : ${ATLAS_MONGO_HOST}"
-echo "  Bedrock KB : ${BEDROCK_KB_ID:-'(not yet provisioned)'}"
-echo "  Embedding  : ${VOYAGE_ENDPOINT:-'Titan (amazon.titan-embed-text-v2:0)'}"
+echo "  Bedrock KB : ${BEDROCK_KB_ID:-not yet provisioned}"
+echo "  Embedding  : ${VOYAGE_ENDPOINT:-Titan amazon.titan-embed-text-v2:0}"
 echo "  AgentCore  : memory=${AGENTCORE_MEMORY_STORE_ID:-?}"
 echo "               gateway=${AGENTCORE_GATEWAY_URL:-?}"
 echo "  Tools/MCP  : MongoDB tools via AgentCore Gateway ${AGENTCORE_GATEWAY_URL:-?}"
@@ -1609,7 +1968,7 @@ export _M_COGNITO_POOL="$COGNITO_POOL_ID" _M_COGNITO_CLIENT="$COGNITO_CLIENT_ID"
 export _M_VOYAGE="$VOYAGE_ENDPOINT"
 export _M_EMBEDDINGS_PROVIDER="$EMBEDDINGS_PROVIDER"
 export _M_EMBEDDINGS_MODEL="$EMBEDDINGS_MODEL_ID"
-export _M_EMBEDDINGS_SOW_ALIGNED="$EMBEDDINGS_SOW_ALIGNED"
+export _M_EMBEDDINGS_VOYAGE_MULTIMODAL="$EMBEDDINGS_VOYAGE_MULTIMODAL"
 export _M_ECR_API="$ECR_API_REPO"  _M_ECR_UI="$ECR_UI_REPO"
 export _M_AC_MEM="$AGENTCORE_MEMORY_STORE_ID" _M_AC_GW="$AGENTCORE_GATEWAY_URL" _M_MCP_RUNTIME_ARN="$MONGODB_MCP_RUNTIME_ARN" _M_MCP_RUNTIME_ENDPOINT="$MONGODB_MCP_RUNTIME_ENDPOINT"
 export _M_ATLAS_PROJ="$TF_VAR_atlas_project_id" _M_ATLAS_HOST="$ATLAS_MONGO_HOST"
@@ -1660,7 +2019,7 @@ manifest = {
     "voyage_sagemaker_endpoint":  v("_M_VOYAGE"),
     "embeddings_provider":        v("_M_EMBEDDINGS_PROVIDER"),
     "embeddings_model":           v("_M_EMBEDDINGS_MODEL"),
-    "embeddings_sow_aligned":     v("_M_EMBEDDINGS_SOW_ALIGNED") == "true",
+    "embeddings_voyage_multimodal":     v("_M_EMBEDDINGS_VOYAGE_MULTIMODAL") == "true",
     "ecr_api_repo":               v("_M_ECR_API"),
     "ecr_ui_repo":                v("_M_ECR_UI"),
     "agentcore_memory_id":        v("_M_AC_MEM"),
@@ -1677,4 +2036,23 @@ manifest = {
 print(json.dumps(manifest, indent=2))
 PYEOF
 ok "Resource manifest written: $MANIFEST_FILE"
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PHASE 11 — Full post-deploy smoke (all agents, LTM, CloudWatch join, …)
+# ══════════════════════════════════════════════════════════════════════════════
+if [[ "$SKIP_SMOKE" == "true" ]]; then
+  warn "Phase 11 — Skipping full post-deploy smoke (--skip-smoke)"
+else
+  sep
+  log "Phase 11 — Full post-deploy smoke (e2e-smoke/post-deploy-smoke.py)..."
+  log "  NOTE: ~5–8 min — all four agents, LTM recall, Terraform/manifest parity, CloudWatch trace join."
+  POST_DEPLOY_SMOKE="$REPO_ROOT/e2e-smoke/post-deploy-smoke.py"
+  [[ -f "$POST_DEPLOY_SMOKE" ]] || err "post-deploy smoke script not found: $POST_DEPLOY_SMOKE"
+
+  E2E_USER="${COGNITO_SMOKE_USER_EMAIL}" \
+  E2E_PASS="${COGNITO_TEST_PASSWORD}" \
+  DEPLOY_MANIFEST_PATH="$MANIFEST_FILE" \
+  python3 "$POST_DEPLOY_SMOKE"
+  ok "Full post-deploy smoke passed"
+fi
 sep

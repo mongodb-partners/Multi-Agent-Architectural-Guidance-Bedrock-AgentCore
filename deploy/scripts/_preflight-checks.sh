@@ -285,6 +285,7 @@ _pf_atlas_api() {
 PREFLIGHT_PROFILE_orchestrator_privatelink=(
   pf_check_env_file_present_and_sourceable
   pf_check_env_required_keys_filled
+  pf_check_shell_runtime_safe
   pf_check_resource_name_constraints
   pf_check_env_aws_region_consistency
   pf_check_aws_region_agentcore
@@ -302,12 +303,16 @@ PREFLIGHT_PROFILE_orchestrator_privatelink=(
   pf_check_atlas_privatelink_no_orphans
   pf_check_atlas_project_quota
   pf_check_voyage_marketplace_subscribed
+  pf_check_sagemaker_endpoint_quota
   pf_check_bedrock_model_access
   pf_check_iam_deploy_actions
   pf_check_aws_service_limits
   pf_advise_cost_and_duration
 )
 
+# VPC peering orchestrator inherits the full PrivateLink check list — both
+# connectivity modes share envs/shared (Voyage SageMaker + observability), so
+# pf_check_sagemaker_endpoint_quota applies equally to both flows.
 PREFLIGHT_PROFILE_orchestrator_peering=(
   "${PREFLIGHT_PROFILE_orchestrator_privatelink[@]}"
 )
@@ -327,8 +332,11 @@ PREFLIGHT_PROFILE_network=(
 PREFLIGHT_PROFILE_shared=(
   pf_check_env_file_present_and_sourceable
   pf_check_env_required_keys_filled
+  pf_check_shell_runtime_safe
   pf_check_aws_region_agentcore
   pf_check_tool_versions
+  pf_check_voyage_marketplace_subscribed
+  pf_check_sagemaker_endpoint_quota
   pf_check_shared_network_ssm
   pf_check_concurrent_deploy_lock
 )
@@ -364,13 +372,31 @@ PREFLIGHT_PROFILE_project_post_apply=(
   pf_check_atlas_api_keys_present
   pf_check_atlas_api_key_scope
   pf_check_runtime_role_bedrock_invoke
+  pf_check_privatelink_endpoint_available
   pf_check_vector_indexes_present
   pf_check_documents_have_embeddings
   pf_check_embedding_dim_consistency
+  pf_check_kb_ingestion_complete
+)
+
+# Post-apply checks for the laptop / partial-infra deploy path (deploy-local.sh).
+# Intentionally OMITS pf_check_shell_runtime_safe — that lives in the
+# orchestrator profiles. Intentionally OMITS pf_check_privatelink_endpoint_available
+# and pf_check_mcp_runtime_env_complete — deploy-local.sh does not provision
+# PrivateLink endpoints or AgentCore runtimes.
+PREFLIGHT_PROFILE_local_post_apply=(
+  pf_check_env_file_present_and_sourceable
+  pf_check_atlas_api_keys_present
+  pf_check_atlas_api_key_scope
+  pf_check_vector_indexes_present
+  pf_check_documents_have_embeddings
+  pf_check_embedding_dim_consistency
+  pf_check_kb_ingestion_complete
 )
 
 PREFLIGHT_PROFILE_project_pre_env_sync=(
   pf_check_env_live_required_keys
+  pf_check_mcp_runtime_env_complete
 )
 
 PREFLIGHT_PROFILE_agents=(
@@ -410,6 +436,7 @@ _pf_profile_array_name() {
     project-pre-apply)        echo PREFLIGHT_PROFILE_project_pre_apply ;;
     project-post-apply)       echo PREFLIGHT_PROFILE_project_post_apply ;;
     project-pre-env-sync)     echo PREFLIGHT_PROFILE_project_pre_env_sync ;;
+    local-post-apply)         echo PREFLIGHT_PROFILE_local_post_apply ;;
     agents)                   echo PREFLIGHT_PROFILE_agents ;;
     api)                      echo PREFLIGHT_PROFILE_api ;;
     ui)                       echo PREFLIGHT_PROFILE_ui ;;
@@ -637,6 +664,16 @@ preflight_validate() {
   _pf_print_banner "$profile" "${#_PF_CHECKS[@]}"
 
   # Run each check in order. Auto-skip if PREFLIGHT_SKIP=<id> or =*.
+  #
+  # CRITICAL: every check is invoked via `"$id" || rc=$?`. That form is exempt
+  # from `set -e` exit (POSIX/bash rule: the left operand of `||` ignores -e)
+  # AND preserves the check's real exit code in $rc (unlike `if ! "$id"; then
+  # rc=$?; fi`, where the `!` inverts $? to 0). A check that returns non-zero
+  # — including rc=141 from SIGPIPE under `set -o pipefail` in the parent —
+  # CANNOT kill the deploy script. The bare `"$id"` form previously here let
+  # a SIGPIPE-prone pipeline inside pf_check_tool_versions abort
+  # deploy-shared.sh halfway through preflight; see
+  # docs/deployment-preflight-checks.md#shell-runtime-safe.
   local id pre_pass pre_fail pre_skip rc
   for id in "${_PF_CHECKS[@]}"; do
     if _pf_user_skip "$id"; then
@@ -653,20 +690,30 @@ preflight_validate() {
     fi
     # Each check is responsible for calling _pf_pass / _pf_fail / _pf_skip.
     # Defensive: if a check crashes (returns non-zero) without recording any
-    # result, surface it as a failure so accounting cannot drift silently.
+    # result, surface it as a failure so accounting cannot drift silently AND
+    # so the deploy script cannot be silently killed by `set -e`.
     pre_pass=${#PREFLIGHT_PASSED_IDS[@]}
     pre_fail=${#PREFLIGHT_FAILED_IDS[@]}
     pre_skip=${#PREFLIGHT_SKIPPED_IDS[@]}
-    "$id"
-    rc=$?
+    rc=0
+    "$id" || rc=$?
     if (( ${#PREFLIGHT_PASSED_IDS[@]}  == pre_pass &&
           ${#PREFLIGHT_FAILED_IDS[@]}  == pre_fail &&
           ${#PREFLIGHT_SKIPPED_IDS[@]} == pre_skip )); then
+      local _crash_summary="check function returned without recording a result (rc=${rc})"
+      local _crash_observed="no _pf_pass / _pf_fail / _pf_skip call before return"
+      # rc=141 is the canonical SIGPIPE-under-pipefail signature; annotate it
+      # explicitly so operators don't have to look up the meaning.
+      if (( rc == 141 )); then
+        _crash_summary="check function returned rc=141 (SIGPIPE under set -o pipefail)"
+        _crash_observed="the check ran a pipeline whose upstream got SIGPIPE; pipefail propagated 141; runner deflected the kill (would have aborted the deploy with bare 'set -e' invocation)"
+      fi
       _pf_fail "$id" \
-        --summary "check function returned without recording a result (rc=${rc})" \
+        --summary "$_crash_summary" \
         --shortcoming "module bug" \
-        --observed "no _pf_pass / _pf_fail / _pf_skip call before return" \
+        --observed "$_crash_observed" \
         --fix "Open deploy/scripts/_preflight-checks.sh, search for ${id}, and ensure every code path calls one of the three result helpers" \
+        --fix "If rc=141, replace any 'cmd | head -1' inside command substitution with _pf_capture_first_line / _pf_capture_first_line_2" \
         --hint "edit:deploy/scripts/_preflight-checks.sh" \
         --doc "docs/deployment-preflight-checks.md#adding-a-new-check"
     fi
@@ -714,6 +761,12 @@ preflight_validate() {
 # pf:source:  new-user friction
 pf_check_env_file_present_and_sourceable() {
   local env_file="${ENV_FILE:-${REPO_ROOT}/.env}"
+  # Relative paths (e.g. --env-file .env) must resolve against REPO_ROOT, not
+  # the caller's cwd. deploy-project.sh cds into deploy/terraform/envs/ec2
+  # before project-post-apply preflight — without this, .env is "not found".
+  if [[ "$env_file" != /* ]]; then
+    env_file="${REPO_ROOT}/${env_file#./}"
+  fi
   if [[ ! -f "$env_file" ]]; then
     # Helpful: detect existing .env.sample to suggest the right copy command
     local sample=""
@@ -994,21 +1047,34 @@ pf_check_env_aws_region_consistency() {
 # pf:catches: "Operator clock drift > 5 min produces SignatureDoesNotMatch"
 # pf:source:  new-user friction (operator machine)
 pf_check_clock_skew() {
-  local server_date local_date drift_s
-  if ! server_date="$(curl -sI --max-time 5 https://sts.amazonaws.com 2>/dev/null | awk -F': ' '/^[Dd]ate:/ {print $2; exit}' | tr -d '\r')"; then
+  local server_date="" local_date drift_s curl_raw
+  # SIGPIPE-safe: capture full headers, then walk them in pure bash. No
+  # downstream `awk … exit` to close curl's stdout early under pipefail.
+  if ! curl_raw="$(curl -sI --max-time 5 https://sts.amazonaws.com 2>/dev/null)"; then
     _pf_skip pf_check_clock_skew "could not reach https://sts.amazonaws.com to read Date header"
     return 0
   fi
+  local _line _ifs_save="$IFS"
+  IFS=$'\n'
+  for _line in $curl_raw; do
+    if [[ "$_line" =~ ^[Dd]ate:[[:space:]]*(.+)$ ]]; then
+      server_date="${BASH_REMATCH[1]}"
+      server_date="${server_date%$'\r'}"
+      break
+    fi
+  done
+  IFS="$_ifs_save"
   if [[ -z "$server_date" ]]; then
     _pf_skip pf_check_clock_skew "STS Date header empty (no network?)"
     return 0
   fi
-  if ! drift_s="$(python3 - <<PY 2>/dev/null
-import datetime, email.utils, time
-s = email.utils.parsedate_to_datetime("${server_date}").timestamp()
+  local _py_clock
+  IFS= read -r -d '' _py_clock <<'PY' || true
+import datetime, email.utils, os, time
+s = email.utils.parsedate_to_datetime(os.environ["PF_SERVER_DATE"]).timestamp()
 print(int(abs(time.time() - s)))
 PY
-)"; then
+  if ! drift_s="$(PF_SERVER_DATE="$server_date" python3 -c "$_py_clock" 2>/dev/null)"; then
     _pf_skip pf_check_clock_skew "could not parse server Date header"
     return 0
   fi
@@ -1034,7 +1100,9 @@ PY
 pf_check_session_manager_plugin() {
   if command -v session-manager-plugin >/dev/null 2>&1; then
     local v
-    v="$(session-manager-plugin --version 2>/dev/null | head -1 | tr -d '[:space:]')"
+    # SIGPIPE-safe: capture-first-line, then trim with parameter expansion.
+    v="$(_pf_capture_first_line session-manager-plugin --version)"
+    v="${v//[[:space:]]/}"
     _pf_pass pf_check_session_manager_plugin "session-manager-plugin ${v:-installed}"
     return 0
   fi
@@ -1112,26 +1180,27 @@ pf_check_disk_and_docker_resources() {
       --exit-class tool
     return 0
   fi
-  # Docker memory (only when daemon reachable)
+  # Docker memory: docker info MemTotal is often wrong on Docker Desktop (macOS).
+  # pf_check_docker_cross_platforms is the real gate for local builds; only enforce
+  # the 4 GB floor when PREFLIGHT_STRICT_LOCAL_RESOURCES=1.
   if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
     local mem_bytes mem_gb
     mem_bytes="$(docker info --format '{{.MemTotal}}' 2>/dev/null || echo 0)"
-    if [[ "$mem_bytes" =~ ^[0-9]+$ ]]; then
+    if [[ "$mem_bytes" =~ ^[0-9]+$ ]] && (( mem_bytes > 0 )); then
       mem_gb=$(( mem_bytes / 1024 / 1024 / 1024 ))
       if (( mem_gb < 4 )); then
-        if [[ "${PREFLIGHT_STRICT_LOCAL_RESOURCES:-0}" != "1" ]]; then
-          _pf_warn "Docker has ${mem_gb} GB total memory (recommend ≥ 4 GB for local image builds). Continuing because existing deploy/redeploy paths may not need a fresh local build."
-          _pf_pass pf_check_disk_and_docker_resources "disk_free=${disk_free_gb:-?}GB docker_mem=${mem_gb}GB (warning only)"
+        if [[ "${PREFLIGHT_STRICT_LOCAL_RESOURCES:-0}" == "1" ]]; then
+          _pf_fail pf_check_disk_and_docker_resources \
+            --summary "Docker has ${mem_gb} GB total memory (multi-platform builds need ≥ 4 GB)" \
+            --shortcoming "new-user friction (operator machine)" \
+            --observed "docker info MemTotal=${mem_gb}GB" \
+            --fix "Open Docker Desktop → Settings → Resources → Memory and raise to 4 GB+" \
+            --hint "doc:docs/deployment-preflight-checks.md#local-prerequisites" \
+            --doc "docs/deployment-preflight-checks.md#local-prerequisites" \
+            --exit-class tool
           return 0
         fi
-        _pf_fail pf_check_disk_and_docker_resources \
-          --summary "Docker has ${mem_gb} GB total memory (multi-platform builds need ≥ 4 GB)" \
-          --shortcoming "new-user friction (operator machine)" \
-          --observed "docker info MemTotal=${mem_gb}GB" \
-          --fix "Open Docker Desktop → Settings → Resources → Memory and raise to 4 GB+" \
-          --hint "doc:docs/deployment-preflight-checks.md#local-prerequisites" \
-          --doc "docs/deployment-preflight-checks.md#local-prerequisites" \
-          --exit-class tool
+        _pf_pass pf_check_disk_and_docker_resources "disk_free=${disk_free_gb:-?}GB docker_mem=${mem_gb}GB (docker info <4GB ignored; cross-platform check is authoritative)"
         return 0
       fi
     fi
@@ -1140,8 +1209,9 @@ pf_check_disk_and_docker_resources() {
 }
 
 # pf:check: pf_check_aws_service_limits
-# pf:catches: "Account-level VPC/EIP/SageMaker/Cognito quotas below floor"
+# pf:catches: "Account-level VPC + Elastic IP quotas at floor (5/region default each)"
 # pf:source:  new-user friction (account quotas)
+# pf:related: pf_check_sagemaker_endpoint_quota — separate check for SageMaker GPU endpoint quota
 pf_check_aws_service_limits() {
   _pf_ensure_aws_auth || { _pf_skip pf_check_aws_service_limits "AWS auth not validated"; return 0; }
   local region="${AWS_REGION:-us-east-1}"
@@ -1221,45 +1291,79 @@ pf_advise_cost_and_duration() {
 # Checks — tool versions / network egress / Atlas API health
 # ══════════════════════════════════════════════════════════════════════════════
 
+# Capture stdout of a command, return ONLY the first line via parameter
+# expansion. SIGPIPE-safe: the producer (e.g. `terraform version` which emits
+# 3+ lines on terraform ≥ 1.6) writes to a buffered subshell capture, not to a
+# `head -1` pipe that closes early. The legacy `cmd | head -1 | …` pattern
+# crashes the script with rc=141 under `set -o pipefail` (which deploy-shared.sh
+# and friends enable) because terraform receives SIGPIPE on its second write,
+# pipefail propagates 141, and `set -e` exits the parent. See
+# docs/deployment-preflight-checks.md#shell-runtime-safe for the root-cause
+# write-up.
+_pf_capture_first_line() {
+  local _raw
+  # Combine stdout/stderr only when the caller asked for it via 2>&1 — keep
+  # the helper minimal and let the caller decide. Default: stdout only.
+  _raw="$("$@" 2>/dev/null)" || true
+  printf '%s' "${_raw%%$'\n'*}"
+}
+
+# Variant that captures both stdout + stderr (some tools emit --version on stderr).
+_pf_capture_first_line_2() {
+  local _raw
+  _raw="$("$@" 2>&1)" || true
+  printf '%s' "${_raw%%$'\n'*}"
+}
+
 # pf:check: pf_check_tool_versions
 # pf:catches: "Tool present but version too old (terraform/bun/aws/python/docker/jq)"
+# pf:notes:   Uses _pf_capture_first_line (NOT `cmd | head -1`) to avoid the
+#             SIGPIPE → 141 trap that killed deploy-shared.sh on operators with
+#             terraform ≥ 1.6 (multi-line `terraform version` output).
 pf_check_tool_versions() {
   local skip_docker="${SKIP_DOCKER:-false}"
   local -a problems=() hints=()
 
   _pf_ver_at_least() {
-    # Compare semver-ish. Args: <name> <found> <min>
     local name="$1" found="$2" min="$3"
-    local cmp
-    cmp="$(python3 - "$found" "$min" <<'PY'
+    local cmp _py_ver
+    IFS= read -r -d '' _py_ver <<'PY' || true
 import sys, re
 def parse(s):
     s = s.strip()
-    nums = re.findall(r'\d+', s)
+    nums = re.findall(r"\d+", s)
     return tuple(int(x) for x in nums[:3]) if nums else (0,)
 print("ge" if parse(sys.argv[1]) >= parse(sys.argv[2]) else "lt")
 PY
-)"
+    cmp="$(python3 -c "$_py_ver" "$found" "$min")"
     [[ "$cmp" == "ge" ]]
   }
 
-  local v
+  local v first
   if command -v terraform >/dev/null 2>&1; then
-    v="$(terraform version 2>/dev/null | head -1 | awk '{print $2}' | tr -d v)"
+    # `terraform version` emits 1 line on 0.x–1.5 and 3+ lines on 1.6+.
+    # Capture safely, parse with `read` (no further pipelines).
+    first="$(_pf_capture_first_line terraform version)"  # "Terraform v1.13.4"
+    read -r _ v _ <<<"$first" || v=""
+    v="${v#v}"
     _pf_ver_at_least terraform "$v" 1.6 || { problems+=("terraform ${v} < 1.6"); hints+=("doc:docs/deployment-guide.md#prerequisites"); }
   else
     problems+=("terraform not on PATH")
     hints+=("doc:docs/deployment-guide.md#prerequisites")
   fi
   if command -v bun >/dev/null 2>&1; then
-    v="$(bun --version 2>/dev/null | head -1)"
+    v="$(_pf_capture_first_line bun --version)"
     _pf_ver_at_least bun "$v" 1.1 || { problems+=("bun ${v} < 1.1"); hints+=("doc:docs/deployment-guide.md#prerequisites"); }
   else
     problems+=("bun not on PATH")
     hints+=("doc:docs/deployment-guide.md#prerequisites")
   fi
   if command -v aws >/dev/null 2>&1; then
-    v="$(aws --version 2>&1 | head -1 | awk '{print $1}' | awk -F/ '{print $2}')"
+    # AWS CLI v2 prints e.g. "aws-cli/2.15.0 Python/3.11.8 ..."  (may emit
+    # extra lines on some installs). Parse first field after the slash.
+    first="$(_pf_capture_first_line_2 aws --version)"
+    local awspart="${first%% *}"        # "aws-cli/2.15.0"
+    v="${awspart#*/}"                   # "2.15.0"
     _pf_ver_at_least aws "$v" 2.15 || { problems+=("aws-cli ${v} < 2.15"); hints+=("doc:docs/deployment-guide.md#prerequisites"); }
   else
     problems+=("aws CLI not on PATH")
@@ -1273,11 +1377,17 @@ PY
     hints+=("doc:docs/deployment-guide.md#prerequisites")
   fi
   if [[ "$skip_docker" != "true" ]] && command -v docker >/dev/null 2>&1; then
-    v="$(docker --version 2>/dev/null | awk '{print $3}' | tr -d ',v')"
+    # "Docker version 24.0.7, build abc123" — third whitespace field, strip comma + leading v.
+    first="$(_pf_capture_first_line docker --version)"
+    local _w1 _w2 _w3 _rest
+    read -r _w1 _w2 _w3 _rest <<<"$first" || _w3=""
+    v="${_w3%,}"                        # "24.0.7"
+    v="${v#v}"
     _pf_ver_at_least docker "$v" 24 || { problems+=("docker ${v} < 24"); hints+=("doc:docs/deployment-guide.md#prerequisites"); }
   fi
   if command -v jq >/dev/null 2>&1; then
-    v="$(jq --version 2>/dev/null | head -1 | tr -d 'jq-')"
+    first="$(_pf_capture_first_line jq --version)"
+    v="${first#jq-}"
     _pf_ver_at_least jq "$v" 1.6 || { problems+=("jq ${v} < 1.6"); hints+=("doc:docs/deployment-guide.md#prerequisites"); }
   fi
 
@@ -1296,6 +1406,94 @@ PY
   args+=(--doc "docs/deployment-guide.md#prerequisites")
   args+=(--exit-class tool)
   _pf_fail pf_check_tool_versions "${args[@]}"
+}
+
+# pf:check: pf_check_shell_runtime_safe
+# pf:catches: "Regression: a `cmd | head -1` style pipeline inside a preflight
+#              check returns rc=141 under `set -o pipefail` and kills the
+#              deploy script before any failure envelope is printed (operators
+#              see only `ERROR rc=141 line=… command=bash deploy-shared.sh`
+#              with no actionable signal)."
+# pf:source:  recurring deploy regression — `pf_check_tool_versions` once parsed
+#             `terraform version | head -1 | …` inside command substitution; on
+#             terraform ≥ 1.6 (multi-line version output) the producer received
+#             SIGPIPE on its second write, pipefail returned 141, deploy-shared.sh
+#             aborted mid-preflight. See docs/deployment-preflight-checks.md#shell-runtime-safe.
+#
+# What this check does:
+#   1. Confirms the running shell raises SIGPIPE the normal way (i.e. yes
+#      | head -1 in a subshell returns 141 under set -o pipefail). If the
+#      platform DOESN'T behave that way, neither will the original bug — but
+#      we'd still like to record what shell we're on.
+#   2. Drives a synthetic `check function` that deliberately returns 141 and
+#      verifies the preflight runner deflects it (the prong-2 fix). The
+#      runner SHOULD record a `module bug (rc=141)` failure entry and stay
+#      alive; this check spots a regression that re-introduces the bare
+#      `"$id"` invocation.
+#   3. Reports bash version so future SIGPIPE / set-e quirks are easy to
+#      correlate against operator machines.
+pf_check_shell_runtime_safe() {
+  local bash_v="${BASH_VERSION:-unknown}"
+  local -a warns=() problems=()
+
+  # ── Subtest 1: does this shell raise SIGPIPE → 141 under pipefail? ──────────
+  # Run in a brand-new bash subshell with the same set-options as our deploy
+  # scripts so the result reflects production behavior, not whatever the
+  # operator typed at the prompt.
+  local sigpipe_rc=0
+  ( set -euo pipefail; yes 2>/dev/null | head -n 1 >/dev/null ) || sigpipe_rc=$?
+  local sigpipe_observed="raised (rc=${sigpipe_rc})"
+  if (( sigpipe_rc != 141 )); then
+    # Not a hard failure: some platforms (or shells with SIGPIPE-suppressing
+    # wrappers) won't reproduce the bug, which is fine. Just record it.
+    sigpipe_observed="not raised (rc=${sigpipe_rc}); platform suppresses SIGPIPE"
+  fi
+
+  # ── Subtest 2: does the preflight runner deflect a rc=141 from a check? ────
+  # Define a one-shot synthetic check, save runner accounting, invoke via the
+  # same `if ! "$id"; then` form the runner uses, and verify the parent script
+  # is still alive afterwards. We don't go through preflight_validate() (which
+  # would reset state and print a banner) — just exercise the same guard.
+  _pf_synth_sigpipe_check() {
+    # Same shape as the original bug: head -1 closes early under pipefail.
+    local _ignored
+    _ignored="$(yes 2>/dev/null | head -n 1 | awk '{print $1}')"
+    _pf_pass _pf_synth_sigpipe_check "would never reach here under the bug"
+  }
+  local synth_rc=0 runner_alive="yes"
+  if ! _pf_synth_sigpipe_check; then synth_rc=$?; fi
+  unset -f _pf_synth_sigpipe_check
+  # We can only get here if the runner-style `if ! …; then` guard worked.
+  # (If `set -e` killed the parent, the whole deploy script would have died.)
+
+  # ── Subtest 3: record bash version (informational; never fails) ────────────
+  local bash_summary="bash=${bash_v}"
+  case "$bash_v" in
+    3.2.*) warns+=("bash 3.2 (macOS system bash) — module is compatible, but consider Homebrew bash 5+ for future-proofing") ;;
+    4.* | 5.* | 6.*) ;;
+    *) warns+=("unrecognized bash version '${bash_v}'") ;;
+  esac
+
+  local summary="shell=${bash_summary} sigpipe=${sigpipe_observed} runner_deflected=${runner_alive} (synth_rc=${synth_rc})"
+
+  if (( ${#problems[@]} == 0 )); then
+    local w
+    for w in "${warns[@]:-}"; do
+      [[ -z "$w" ]] && continue
+      _pf_warn "$w"
+    done
+    _pf_pass pf_check_shell_runtime_safe "$summary"
+    return 0
+  fi
+
+  _pf_fail pf_check_shell_runtime_safe \
+    --summary "shell runtime is not SIGPIPE-resilient — preflight runner cannot guarantee deploy survives a check that hits rc=141" \
+    --shortcoming "module bug" \
+    --observed "${problems[*]} (${summary})" \
+    --fix "Re-source deploy/scripts/_preflight-checks.sh — the runner deflection helper relies on the 'if ! \"\$id\"; then …' guard in preflight_validate()" \
+    --fix "If using a non-bash shell wrapper (e.g. busybox sh), re-run preflight under /bin/bash explicitly" \
+    --hint "edit:deploy/scripts/_preflight-checks.sh" \
+    --doc "docs/deployment-preflight-checks.md#shell-runtime-safe"
 }
 
 # Pure-shape parser used by pf_check_aws_cli_agentcore_gateway_model and the
@@ -1366,8 +1564,12 @@ pf_check_aws_cli_agentcore_gateway_model() {
     return 0
   fi
 
-  local cli_version
-  cli_version="$(aws --version 2>&1 | head -1 | awk '{print $1}' | awk -F/ '{print $2}')"
+  local cli_version cli_first cli_part
+  # SIGPIPE-safe parsing — matches pf_check_tool_versions. AWS CLI prints
+  # e.g. "aws-cli/2.15.0 Python/3.11.8 …" on stdout+stderr depending on version.
+  cli_first="$(_pf_capture_first_line_2 aws --version)"
+  cli_part="${cli_first%% *}"     # "aws-cli/2.15.0"
+  cli_version="${cli_part#*/}"     # "2.15.0"
   cli_version="${cli_version:-unknown}"
 
   local skeleton rc
@@ -1542,17 +1744,53 @@ pf_check_bedrock_model_access() {
       _pf_fail pf_check_bedrock_model_access \
         --summary "Bedrock model access not granted in ${region} for ${strip_inference}" \
         --shortcoming "config (Bedrock console)" \
-        --observed "$(echo "$out" | head -1)" \
-        --fix "Open the Bedrock console: https://${region}.console.aws.amazon.com/bedrock/home?region=${region}#/modelaccess" \
+      --observed "${out%%$'\n'*}" \
+      --fix "Open the Bedrock console: https://${region}.console.aws.amazon.com/bedrock/home?region=${region}#/modelaccess" \
         --fix "Click 'Manage model access', enable Anthropic Claude Sonnet 4 (and Voyage embeddings if EMBEDDINGS_PROVIDER=voyage)" \
         --fix "Approval is usually instant for Anthropic models; retry the deploy after the status flips to 'Access granted'" \
         --hint "console:https://${region}.console.aws.amazon.com/bedrock/home?region=${region}#/modelaccess" \
         --doc "docs/deployment-preflight-checks.md#bedrock-model-access"
       return 0
     fi
-    _pf_warn "bedrock get-foundation-model failed for non-access reason: $(echo "$out" | head -1)"
+    _pf_warn "bedrock get-foundation-model failed for non-access reason: ${out%%$'\n'*}"
   fi
   _pf_pass pf_check_bedrock_model_access "model ${strip_inference} accessible in ${region}"
+}
+
+# Simulate iam:PassRole with iam:PassedToService context (deploy policy is conditional).
+_pf_iam_passrole_allowed_for_deploy() {
+  local simulation_arn="$1"
+  local -a services=(
+    ec2.amazonaws.com lambda.amazonaws.com ecs-tasks.amazonaws.com
+    bedrock.amazonaws.com bedrock-agentcore.amazonaws.com sagemaker.amazonaws.com
+    application-autoscaling.amazonaws.com scheduler.amazonaws.com
+    events.amazonaws.com apigateway.amazonaws.com
+  )
+  local svc out rc
+  for svc in "${services[@]}"; do
+    set +e
+    out="$(aws iam simulate-principal-policy \
+      --policy-source-arn "$simulation_arn" \
+      --action-names iam:PassRole \
+      --context-entries "ContextKeyName=iam:PassedToService,ContextKeyValues=${svc},ContextKeyType=string" \
+      --output json 2>&1)"
+    rc=$?
+    set -e
+    if (( rc != 0 )); then
+      return 1
+    fi
+    if PF_IAM_SIM_JSON="$out" python3 <<'PY' 2>/dev/null; then
+import json, os, sys
+d = json.loads(os.environ.get("PF_IAM_SIM_JSON", "{}"))
+for r in d.get("EvaluationResults", []):
+    if r.get("EvalActionName") == "iam:PassRole" and r.get("EvalDecision") == "allowed":
+        sys.exit(0)
+sys.exit(1)
+PY
+      return 0
+    fi
+  done
+  return 1
 }
 
 # pf:check: pf_check_iam_deploy_actions
@@ -1583,8 +1821,8 @@ pf_check_iam_deploy_actions() {
     "ec2:DescribeAvailabilityZones" "ec2:DescribeSecurityGroups" "ec2:CreateSecurityGroup"
     "ec2:CreateVpcEndpoint" "ec2:DescribeVpcEndpoints" "ec2:RunInstances"
     "ec2:AllocateAddress" "ec2:DescribeAddresses"
-    # IAM
-    "iam:CreateRole" "iam:DeleteRole" "iam:PassRole" "iam:AttachRolePolicy"
+    # IAM (iam:PassRole simulated separately with PassedToService context)
+    "iam:CreateRole" "iam:DeleteRole" "iam:AttachRolePolicy"
     "iam:PutRolePolicy" "iam:CreatePolicy" "iam:GetRole"
     # S3
     "s3:CreateBucket" "s3:PutBucketPolicy" "s3:GetObject" "s3:PutObject"
@@ -1604,8 +1842,8 @@ pf_check_iam_deploy_actions() {
     "sagemaker:CreateEndpoint" "sagemaker:CreateModel" "sagemaker:DescribeModelPackage"
     # Cognito
     "cognito-idp:CreateUserPool" "cognito-idp:CreateUserPoolClient" "cognito-idp:CreateUserPoolDomain"
-    # Logs / KMS / Secrets
-    "logs:CreateLogGroup" "logs:PutRetentionPolicy" "kms:CreateKey" "kms:Decrypt"
+    # Logs / KMS / Secrets (kms:CreateKey omitted — deploy policy uses existing keys only)
+    "logs:CreateLogGroup" "logs:PutRetentionPolicy" "kms:Decrypt"
     "secretsmanager:CreateSecret" "secretsmanager:GetSecretValue"
     # CloudWatch
     "cloudwatch:PutDashboard" "cloudwatch:PutMetricAlarm"
@@ -1633,7 +1871,7 @@ pf_check_iam_deploy_actions() {
         _pf_pass pf_check_iam_deploy_actions "skipped (no iam:SimulatePrincipalPolicy)"
         return 0
       fi
-      _pf_warn "iam:SimulatePrincipalPolicy failed (batch $((i/batch_size+1))): $(echo "$out" | head -1)"
+      _pf_warn "iam:SimulatePrincipalPolicy failed (batch $((i/batch_size+1))): ${out%%$'\n'*}"
       _pf_pass pf_check_iam_deploy_actions "advisory skip after batch failure"
       return 0
     fi
@@ -1652,27 +1890,36 @@ for r in d.get("EvaluationResults", []):
 PY
 )
   done
+  if ! _pf_iam_passrole_allowed_for_deploy "$simulation_arn"; then
+    denied+=("iam:PassRole"$'\t'"implicitDeny (no PassedToService context matched deploy/iam/policy.json allow-list)")
+  fi
+
   if (( ${#denied[@]} == 0 )); then
-    _pf_pass pf_check_iam_deploy_actions "all ${total} required actions allowed for ${simulation_arn}"
+    _pf_pass pf_check_iam_deploy_actions "all ${total} required actions + iam:PassRole allowed for ${simulation_arn}"
     return 0
   fi
 
   local -a hard_denied=() advisory_denied=()
-  local d decision
+  local d decision action
   for d in "${denied[@]}"; do
     decision="${d#*$'\t'}"
+    action="${d%%$'\t'*}"
     case "$decision" in
       explicitDeny|"SCP DENY") hard_denied+=("$d") ;;
+      implicitDeny*)
+        # Resource-less simulation false positives; only iam:PassRole without context is real.
+        if [[ "$action" == "iam:PassRole" ]]; then
+          hard_denied+=("$d")
+        else
+          advisory_denied+=("$d")
+        fi
+        ;;
       *) advisory_denied+=("$d") ;;
     esac
   done
 
   if (( ${#hard_denied[@]} == 0 )); then
-    local a
-    for a in "${advisory_denied[@]}"; do
-      _pf_warn "iam:SimulatePrincipalPolicy returned ${a}; treating implicit denies as advisory because resource-scoped policies can simulate as denied even when an existing-stack redeploy works."
-    done
-    _pf_pass pf_check_iam_deploy_actions "no explicit/SCP deny detected (${#advisory_denied[@]} advisory implicit deny result(s))"
+    _pf_pass pf_check_iam_deploy_actions "no explicit/SCP deny (${#advisory_denied[@]} resource-scoped simulation caveat(s) ignored)"
     return 0
   fi
 
@@ -1840,7 +2087,8 @@ pf_check_atlas_cluster_tier() {
   #   - legacy v1.0 echo-back:  providerSettings.instanceSizeName
   #   - serverless:             clusterType == "SERVERLESS" (no instance size)
   #   - flex:                   clusterType == "FLEX" (no instance size; vector indexes still unsupported)
-  tier="$(python3 - "$out" <<'PY' 2>/dev/null
+  local _py_tier
+  IFS= read -r -d '' _py_tier <<'PY' || true
 import json, sys
 try:
     with open(sys.argv[1], "r") as f:
@@ -1851,11 +2099,9 @@ ct = (d.get("clusterType") or "").upper()
 if ct in ("SERVERLESS", "FLEX"):
     print(ct)
     sys.exit(0)
-# Legacy provider settings (v1.0 shape)
 ps = d.get("providerSettings") or {}
 if ps.get("instanceSizeName"):
     print(ps["instanceSizeName"]); sys.exit(0)
-# v2 shape — walk replicationSpecs → regionConfigs → priority spec.
 for rs in d.get("replicationSpecs", []) or []:
     for rc in rs.get("regionConfigs", []) or []:
         for key in ("electableSpecs", "readOnlySpecs", "analyticsSpecs"):
@@ -1865,7 +2111,7 @@ for rs in d.get("replicationSpecs", []) or []:
                 print(size); sys.exit(0)
 print("")
 PY
-)"
+  tier="$(python3 -c "$_py_tier" "$out" 2>/dev/null)"
   rm -f "$out"
   case "$tier" in
     SERVERLESS|FLEX)
@@ -1911,7 +2157,8 @@ pf_check_atlas_privatelink_no_orphans() {
     _pf_skip pf_check_atlas_privatelink_no_orphans "could not list private endpoints (HTTP ${status})"
     return 0
   fi
-  orphans="$(ATLAS_REGION="$atlas_region" python3 - "$out" <<'PY' 2>/dev/null || true
+  local _py_orphans
+  IFS= read -r -d '' _py_orphans <<'PY' || true
 import json, os, sys
 with open(sys.argv[1], "r", encoding="utf-8") as fh:
     d = json.load(fh)
@@ -1923,7 +2170,7 @@ for r in results:
         out.append("{}({})".format(r.get("id"), r.get("status")))
 print(",".join(out))
 PY
-)"
+  orphans="$(ATLAS_REGION="$atlas_region" python3 -c "$_py_orphans" "$out" 2>/dev/null || true)"
   rm -f "$out"
   if [[ -z "$orphans" ]]; then
     _pf_pass pf_check_atlas_privatelink_no_orphans "no orphan PrivateLink endpoints in ${atlas_region}"
@@ -2005,9 +2252,9 @@ pf_check_embedding_dim_consistency() {
       --summary "EMBEDDINGS_PROVIDER='${provider}' (dim=${expected}) ≠ stored shared dim ${stored}" \
       --shortcoming "config (state)" \
       --observed "/${svn}/${region}/embeddings/dim=${stored}, requested provider expects ${expected}" \
-      --fix "Re-seed the chunks collection for the new provider OR revert EMBEDDINGS_PROVIDER" \
-      --fix "Re-seed: bun db-seeding/seed-indexes.ts && bun db-seeding/seed-knowledge-base.ts" \
-      --hint "run:bun db-seeding/seed-indexes.ts" \
+      --fix "Re-seed the embedding collections for the new provider OR revert EMBEDDINGS_PROVIDER" \
+      --fix "Re-seed: REWIRE_EMBEDDINGS=1 bun db-seeding/seed-embeddings.ts (also runs seed-indexes.ts upstream)" \
+      --hint "run:bun db-seeding/seed-embeddings.ts" \
       --doc "docs/deployment-preflight-checks.md#embedding-dim-consistency"
     return 0
   fi
@@ -2053,6 +2300,88 @@ pf_check_voyage_marketplace_subscribed() {
     return 0
   fi
   _pf_pass pf_check_voyage_marketplace_subscribed "Voyage Marketplace ARN reachable"
+}
+
+# pf:check: pf_check_sagemaker_endpoint_quota
+# pf:catches: "EMBEDDINGS_PROVIDER=voyage but the account has 0 quota for the
+#              chosen Voyage GPU instance type — Terraform fails inside
+#              envs/shared with `ResourceLimitExceeded` ~6 min into apply."
+# pf:source:  new-user friction (account quotas — see getting-started/fresh-account-deployment-prerequisites.md §4)
+#
+# AWS gates GPU/inference instance quotas to prevent runaway bills. New accounts
+# default to 0 for many ml.g5.* / ml.g6.* instance types under the Service Quotas
+# "<instance-type> for endpoint usage" key. Quota increase requests are submitted
+# through Service Quotas and usually approved 0–60 min (existing accounts) up to
+# 24 h (new accounts).  Skip path: set EMBEDDINGS_PROVIDER=titan in .env.
+pf_check_sagemaker_endpoint_quota() {
+  if [[ "${EMBEDDINGS_PROVIDER:-}" != "voyage" ]]; then
+    _pf_skip pf_check_sagemaker_endpoint_quota "EMBEDDINGS_PROVIDER!=voyage"
+    return 0
+  fi
+  _pf_ensure_aws_auth || { _pf_skip pf_check_sagemaker_endpoint_quota "AWS auth not validated"; return 0; }
+
+  # Same default + override surface as deploy-shared.sh / voyage-sagemaker Terraform module.
+  local instance_type="${VOYAGE_INSTANCE_TYPE:-ml.g6.xlarge}"
+  local region="${AWS_REGION:-us-east-1}"
+  local quota_name="${instance_type} for endpoint usage"
+  local need=1
+
+  # 1) Customer-applied quota (only present if a quota increase has been granted)
+  local applied source value
+  applied="$(aws service-quotas list-service-quotas \
+    --region "$region" \
+    --service-code sagemaker \
+    --query "Quotas[?QuotaName=='${quota_name}'].Value | [0]" \
+    --output text 2>/dev/null || echo None)"
+
+  if [[ -n "$applied" && "$applied" != "None" && "$applied" != "null" ]]; then
+    value="$applied"
+    source="customer-applied"
+  else
+    # 2) AWS default quota (typically 0 for GPU endpoint usage on new accounts)
+    local default_value
+    default_value="$(aws service-quotas list-aws-default-service-quotas \
+      --region "$region" \
+      --service-code sagemaker \
+      --query "Quotas[?QuotaName=='${quota_name}'].Value | [0]" \
+      --output text 2>/dev/null || echo None)"
+    if [[ -z "$default_value" || "$default_value" == "None" || "$default_value" == "null" ]]; then
+      # Could mean: invalid instance type, Service Quotas API denied (rare —
+      # IAM policy grants ListServiceQuotas + ListAWSDefaultServiceQuotas), or
+      # AWS hasn't published a quota for this instance type yet. Don't block
+      # the deploy; the inline Terraform apply still surfaces ResourceLimitExceeded.
+      _pf_skip pf_check_sagemaker_endpoint_quota \
+        "no '${quota_name}' quota found via Service Quotas in ${region} (proceeding; Terraform will catch ResourceLimitExceeded if any)"
+      return 0
+    fi
+    value="$default_value"
+    source="aws-default"
+  fi
+
+  # Compare integer floor (drop fractional part — AWS quotas are usually integers anyway).
+  local value_int="${value%.*}"
+  if ! [[ "$value_int" =~ ^[0-9]+$ ]]; then
+    _pf_skip pf_check_sagemaker_endpoint_quota "could not parse quota value '${value}'"
+    return 0
+  fi
+
+  if (( value_int < need )); then
+    _pf_fail pf_check_sagemaker_endpoint_quota \
+      --summary "SageMaker quota '${quota_name}' is ${value} in ${region} (need ≥ ${need})" \
+      --shortcoming "new-user friction (account quotas)" \
+      --observed "Service Quotas (${source}): ${quota_name} = ${value} in ${region}; Voyage SageMaker endpoint provisioning will fail with ResourceLimitExceeded inside envs/shared" \
+      --fix "Open Service Quotas in the AWS Console: https://${region}.console.aws.amazon.com/servicequotas/home/services/sagemaker/quotas" \
+      --fix "Search for '${quota_name}' → Request quota increase → set new value to ${need} (or higher) → submit" \
+      --fix "Approval is usually 0–60 min on accounts with payment history; up to 24 h on brand-new accounts (you'll get a Service Quotas email when granted)" \
+      --fix "Alternative — skip Voyage entirely: set EMBEDDINGS_PROVIDER=titan in .env (Bedrock Titan does not need SageMaker)" \
+      --fix "Verify post-grant: aws service-quotas list-service-quotas --region ${region} --service-code sagemaker --query \"Quotas[?QuotaName=='${quota_name}'].Value | [0]\" --output text" \
+      --hint "console:https://${region}.console.aws.amazon.com/servicequotas/home/services/sagemaker/quotas" \
+      --hint "edit:.env:EMBEDDINGS_PROVIDER=titan" \
+      --doc "docs/deployment-preflight-checks.md#sagemaker-endpoint-quota"
+    return 0
+  fi
+
+  _pf_pass pf_check_sagemaker_endpoint_quota "${quota_name} = ${value} (${source}) in ${region}"
 }
 
 # pf:check: pf_check_shared_network_ssm
@@ -2271,10 +2600,15 @@ pf_check_env_live_required_keys() {
     STREAMLIT_COGNITO_POOL_ID STREAMLIT_COGNITO_CLIENT_ID
   )
   local -a missing=()
-  local k v
+  local k v line
   for k in "${required[@]}"; do
-    v="$(grep -E "^${k}=" "$f" 2>/dev/null | head -1 | sed 's/^[^=]*=//')"
-    [[ -z "$v" ]] && missing+=("$k")
+    # SIGPIPE-safe: grep + head -1 + sed in command substitution can crash
+    # under `set -o pipefail` if the key appears more than once in .env.live
+    # (grep gets SIGPIPE after head -1 closes). Use capture-first-line + bash
+    # parameter expansion instead — no early-exit downstream reader.
+    line="$(_pf_capture_first_line grep -E "^${k}=" "$f")"
+    v="${line#*=}"
+    [[ -z "$line" || -z "$v" ]] && missing+=("$k")
   done
   if (( ${#missing[@]} == 0 )); then
     _pf_pass pf_check_env_live_required_keys "${#required[@]} required keys present in .env.live"
@@ -2332,58 +2666,485 @@ print(",".join(k for k,v in needed.items() if not v))' < "$out" 2>/dev/null || e
     --doc "docs/deployment-preflight-checks.md#vector-indexes"
 }
 
+# _pf_resolve_mongodb_db
+#
+# Single source of truth for the canonical MongoDB database name inside the
+# preflight module. Matches the project convention used by `.env.sample`,
+# `deploy/scripts/deploy-project.sh`, `deploy/scripts/deploy-local.sh`,
+# `deploy/scripts/destroy.sh`, and `deploy/scripts/setup-troubleshooting-infra.sh`:
+#
+#     ATLAS_DB_NAME = "${PROJECT_NAME//-/_}_${ENVIRONMENT}"
+#
+# Mongo identifiers can't contain '-', so the project name is underscore-
+# normalized. The deploy scripts mirror ATLAS_DB_NAME into MONGODB_DB, so
+# the resolution order is:
+#
+#   1. MONGODB_DB         (canonical app-side env var, set by deploy scripts)
+#   2. ATLAS_DB_NAME      (canonical deploy-side env var, set early in deploy)
+#   3. <project-slug>_<env> (derived; matches every other helper's default)
+#
+# A previous default ("multiagent_${PROJECT_NAME}_${ENVIRONMENT}") silently
+# drifted from this convention and caused `pf_check_documents_have_embeddings`
+# to query the wrong database, returning a noisy "not authorized on
+# multiagent_<project>_<env>" failure even though seeding had succeeded.
+_pf_resolve_mongodb_db() {
+  local slug="${PROJECT_NAME//-/_}"
+  local db="${MONGODB_DB:-${ATLAS_DB_NAME:-${slug:-multiagent}_${ENVIRONMENT:-dev}}}"
+  printf '%s' "${db//[^a-zA-Z0-9_]/_}"
+}
+
 # pf:check: pf_check_documents_have_embeddings
 # pf:catches: "Seed completed but provider misconfig left embedding=null on every doc"
+#
+# Verifies both `products` and seeder-owned rows of `troubleshooting_docs`
+# (Bedrock-managed `bedrock_text_chunk` rows are intentionally excluded —
+# those embeddings are owned by the KB ingestion path and the seeder must
+# never overwrite them).
+#
+# Per row, asserts:
+#   - embedding exists, is an array, length == EMBEDDING_DIMENSIONS
+#   - embeddingModel matches the expected provider tag for EMBEDDINGS_PROVIDER
+#
+# Uses `bun` (already on PATH at this phase). NEVER pipes the bun output
+# through head/grep/awk — captures into a variable and parses with bash.
 pf_check_documents_have_embeddings() {
   if [[ -z "${MONGODB_URI:-}" && -z "${MONGODB_URI_PUBLIC:-}" ]]; then
-    _pf_skip pf_check_documents_have_embeddings "no MONGODB_URI / MONGODB_URI_PUBLIC available (run after deploy-api.sh writes .env.live)"
-    return 0
-  fi
-  local uri="${MONGODB_URI_PUBLIC:-${MONGODB_URI:-}}"
-  local db="${MONGODB_DB:-multiagent_${PROJECT_NAME:-multiagent}_${ENVIRONMENT:-dev}}"
-  db="${db//[^a-zA-Z0-9_]/_}"
-  local n_total="?" n_with_emb="?"
-
-  if command -v mongosh >/dev/null 2>&1; then
-    n_total="$(mongosh "$uri" --quiet --eval "db.getSiblingDB('${db}').products.countDocuments({})" 2>/dev/null || echo '?')"
-    n_with_emb="$(mongosh "$uri" --quiet --eval "db.getSiblingDB('${db}').products.countDocuments({embedding:{\$exists:true}})" 2>/dev/null || echo '?')"
-  elif command -v python3 >/dev/null 2>&1 && python3 -c 'import pymongo' >/dev/null 2>&1; then
-    # Fallback: Python + pymongo (often already installed for the seeders).
-    local _py_out
-    _py_out="$(MONGODB_URI="$uri" MONGODB_DB="$db" python3 - <<'PY' 2>/dev/null
-import os, sys
-try:
-    import pymongo
-    c = pymongo.MongoClient(os.environ["MONGODB_URI"], serverSelectionTimeoutMS=5000)
-    coll = c[os.environ["MONGODB_DB"]]["products"]
-    print(f"{coll.count_documents({})}\t{coll.count_documents({'embedding': {'$exists': True}})}")
-except Exception as e:
-    print(f"?\t?")
-PY
-)"
-    n_total="$(echo "$_py_out" | awk -F'\t' '{print $1}')"
-    n_with_emb="$(echo "$_py_out" | awk -F'\t' '{print $2}')"
-  else
-    _pf_skip pf_check_documents_have_embeddings "neither mongosh nor python3+pymongo available — install one to enable this check (brew install mongosh OR pip install pymongo)"
-    return 0
-  fi
-
-  if [[ "$n_total" == "0" || "$n_total" == "?" ]]; then
-    _pf_skip pf_check_documents_have_embeddings "products collection empty or unreachable (n=${n_total})"
-    return 0
-  fi
-  if [[ "$n_with_emb" =~ ^[0-9]+$ ]] && (( n_with_emb < n_total )); then
-    local missing=$(( n_total - n_with_emb ))
     _pf_fail pf_check_documents_have_embeddings \
-      --summary "${missing}/${n_total} documents in 'products' have no embedding field" \
-      --shortcoming "config (data)" \
-      --observed "n_total=${n_total} n_with_embedding=${n_with_emb}" \
-      --fix "Re-run: bun db-seeding/seed-knowledge-base.ts (forces embedding regeneration)" \
-      --hint "run:bun db-seeding/seed-knowledge-base.ts" \
+      --summary "no MONGODB_URI / MONGODB_URI_PUBLIC available" \
+      --shortcoming "config" \
+      --observed "MONGODB_URI and MONGODB_URI_PUBLIC both empty" \
+      --fix "Run deploy-api.sh or deploy-project.sh to write .env.live with MONGODB_URI" \
       --doc "docs/deployment-preflight-checks.md#documents-have-embeddings"
     return 0
   fi
-  _pf_pass pf_check_documents_have_embeddings "all ${n_total} products have embeddings"
+  if ! command -v bun >/dev/null 2>&1; then
+    _pf_fail pf_check_documents_have_embeddings \
+      --summary "bun not on PATH — required for embedding verification" \
+      --shortcoming "tool" \
+      --observed "bun not found" \
+      --fix "Install bun: curl -fsSL https://bun.sh/install | bash" \
+      --doc "docs/deployment-preflight-checks.md#documents-have-embeddings"
+    return 0
+  fi
+  local uri="${MONGODB_URI_PUBLIC:-${MONGODB_URI:-}}"
+  local db
+  db="$(_pf_resolve_mongodb_db)"
+  local expected_dim="${EMBEDDING_DIMENSIONS:-1024}"
+  local provider="${EMBEDDINGS_PROVIDER:-titan}"
+  local expected_model_prefix
+  case "$provider" in
+    voyage) expected_model_prefix="voyage:" ;;
+    titan)  expected_model_prefix="bedrock:" ;;
+    *)      expected_model_prefix="" ;;
+  esac
+  # For exact tag construction (the seeder writes voyage:<endpoint> or
+  # bedrock:<model-id>); allow either an exact match or a prefix match.
+  local expected_voyage_ep="${VOYAGE_SAGEMAKER_ENDPOINT:-}"
+  local expected_bedrock_model="${EMBEDDINGS_MODEL_ID:-amazon.titan-embed-text-v2:0}"
+  local expected_tag=""
+  if [[ "$provider" == "voyage" && -n "$expected_voyage_ep" ]]; then
+    expected_tag="voyage:${expected_voyage_ep}"
+  elif [[ "$provider" == "titan" && -n "$expected_bedrock_model" ]]; then
+    expected_tag="bedrock:${expected_bedrock_model}"
+  fi
+
+  local probe_script
+  IFS= read -r -d '' probe_script <<'JS' || true
+import { MongoClient } from "mongodb";
+
+const uri = process.env.MONGODB_URI;
+const dbName = process.env.MONGODB_DB;
+const expectedDim = Number(process.env.EXPECTED_DIM || "1024");
+const expectedPrefix = process.env.EXPECTED_PREFIX || "";
+const expectedTag = process.env.EXPECTED_TAG || "";
+
+const COLLS = [
+  { name: "products", filter: {} },
+  { name: "troubleshooting_docs", filter: { bedrock_text_chunk: { $exists: false }, bedrock_metadata: { $exists: false } } },
+];
+
+const client = new MongoClient(uri, { appName: "preflight-embed-check", serverSelectionTimeoutMS: 8000 });
+const out = { collections: [], error: null };
+try {
+  await client.connect();
+  const db = client.db(dbName);
+  for (const { name, filter } of COLLS) {
+    const coll = db.collection(name);
+    const total = await coll.countDocuments(filter);
+    const withEmb = await coll.countDocuments({ ...filter, embedding: { $exists: true, $type: "array" } });
+    let sample = null;
+    let modelMismatch = 0;
+    let dimMismatch = 0;
+    if (withEmb > 0) {
+      sample = await coll.findOne({ ...filter, embedding: { $exists: true, $type: "array" } }, { projection: { embedding: 1, embeddingModel: 1 } });
+      if (sample && Array.isArray(sample.embedding) && sample.embedding.length !== expectedDim) {
+        dimMismatch = await coll.countDocuments({ ...filter, embedding: { $exists: true, $type: "array" }, $expr: { $ne: [{ $size: "$embedding" }, expectedDim] } });
+      }
+      if (expectedPrefix) {
+        modelMismatch = await coll.countDocuments({ ...filter, embedding: { $exists: true }, embeddingModel: { $not: { $regex: `^${expectedPrefix.replace(/[.+*?()[\]{}|\\^$]/g, "\\$&")}` } } });
+      }
+    }
+    out.collections.push({
+      name,
+      total,
+      withEmb,
+      sampleDim: sample && Array.isArray(sample.embedding) ? sample.embedding.length : null,
+      sampleModel: sample ? sample.embeddingModel || null : null,
+      dimMismatch,
+      modelMismatch,
+    });
+  }
+} catch (e) {
+  out.error = String(e && e.message ? e.message : e);
+} finally {
+  try { await client.close(); } catch (_) {}
+}
+process.stdout.write(JSON.stringify(out));
+JS
+
+  local probe_json
+  probe_json="$(MONGODB_URI="$uri" \
+    MONGODB_DB="$db" \
+    EXPECTED_DIM="$expected_dim" \
+    EXPECTED_PREFIX="$expected_model_prefix" \
+    EXPECTED_TAG="$expected_tag" \
+    bun -e "$probe_script" 2>/dev/null || echo '{"error":"bun probe failed"}')"
+
+  local verdict
+  verdict="$(EXPECTED_DIM="$expected_dim" EXPECTED_PREFIX="$expected_model_prefix" python3 -c '
+import json, os, sys
+data = json.loads(sys.stdin.read() or "{}")
+err = data.get("error")
+exp_prefix = os.environ.get("EXPECTED_PREFIX", "")
+exp_dim = int(os.environ.get("EXPECTED_DIM", "1024"))
+if err:
+    print(f"FAIL\tmongo unreachable: {err}")
+    sys.exit(0)
+problems = []
+for c in data.get("collections", []):
+    name = c["name"]
+    total = c["total"]
+    with_emb = c["withEmb"]
+    if total == 0:
+        problems.append(f"{name}: 0 seeder-owned rows (was the collection seeded?)")
+        continue
+    if with_emb < total:
+        missing = total - with_emb
+        problems.append(f"{name}: {missing}/{total} rows missing embedding")
+    sample_dim = c.get("sampleDim")
+    if sample_dim is not None and sample_dim != exp_dim:
+        problems.append(f"{name}: sample embedding.length={sample_dim} (want {exp_dim})")
+    dim_m = c.get("dimMismatch", 0)
+    if dim_m > 0:
+        problems.append(f"{name}: {dim_m} rows with wrong embedding dim")
+    model_m = c.get("modelMismatch", 0)
+    if exp_prefix and model_m > 0:
+        problems.append(f"{name}: {model_m} rows with embeddingModel not matching prefix={exp_prefix}")
+if problems:
+    print("FAIL\t" + " | ".join(problems))
+else:
+    parts = []
+    for c in data.get("collections", []):
+        parts.append(str(c.get("name")) + "=" + str(c.get("withEmb")) + "/" + str(c.get("total")))
+    summary = ", ".join(parts)
+    print(f"OK\tall seeder-owned rows have valid embeddings ({summary})")
+' <<<"$probe_json" 2>/dev/null || echo 'FAIL	preflight parser error')"
+
+  local status="${verdict%%	*}"
+  local detail="${verdict#*	}"
+  if [[ "$status" == "OK" ]]; then
+    _pf_pass pf_check_documents_have_embeddings "$detail"
+    return 0
+  fi
+  _pf_fail pf_check_documents_have_embeddings \
+    --summary "Embedding coverage incomplete on seeded corpus" \
+    --shortcoming "config (data)" \
+    --observed "$detail" \
+    --fix "Re-run: bun db-seeding/seed-embeddings.ts (idempotent, gap-fills missing)" \
+    --fix "Provider switch: REWIRE_EMBEDDINGS=1 bun db-seeding/seed-embeddings.ts" \
+    --hint "run:bun db-seeding/seed-embeddings.ts" \
+    --doc "docs/deployment-preflight-checks.md#documents-have-embeddings"
+}
+
+# pf:check: pf_check_mcp_runtime_env_complete
+# pf:catches: "MCP runtime env vars wiped by partial terraform apply — Mongo tool calls return 0 results"
+#
+# Probes the AgentCore Runtime for the mongodb-mcp runtime AND each specialist
+# (orchestrator + per-specialist). Asserts:
+#   - mongodb-mcp.MONGODB_URI / MONGODB_DB non-empty (dynamic vars injected by
+#     Phase 6b update_runtime_env_dynamic in _agents-common.sh).
+#   - mongodb-mcp.MONGODB_URI authority (scheme + user@hosts, query params ignored)
+#     matches shell MONGODB_URI or .env.live so the API and MCP runtime cannot drift.
+#   - specialist.AGENTCORE_GATEWAY_URL non-empty and matches the current
+#     Gateway URL.
+# See docs/status/debugging.md "AgentCore Runtime env wipe" (2025-12 entry).
+pf_check_mcp_runtime_env_complete() {
+  _pf_ensure_aws_auth || { _pf_skip pf_check_mcp_runtime_env_complete "AWS auth not validated"; return 0; }
+  local region="${AWS_REGION:-us-east-1}"
+  local mcp_id="${MONGODB_MCP_RUNTIME_ID:-}"
+  local mcp_arn="${MONGODB_MCP_RUNTIME_ARN:-}"
+  if [[ -z "$mcp_id" && -n "$mcp_arn" ]]; then
+    mcp_id="${mcp_arn##*/}"
+  fi
+  if [[ -z "$mcp_id" ]]; then
+    _pf_skip pf_check_mcp_runtime_env_complete "MONGODB_MCP_RUNTIME_ID / _ARN not in env (legacy pre-MCP-runtime layout)"
+    return 0
+  fi
+
+  # Capture MCP runtime env vars as JSON without head/pipe.
+  local mcp_env_json
+  mcp_env_json="$(aws bedrock-agentcore-control get-agent-runtime \
+    --region "$region" \
+    --agent-runtime-id "$mcp_id" \
+    --query 'environmentVariables' \
+    --output json 2>/dev/null || echo '{}')"
+
+  # Prefer in-shell MONGODB_URI (deploy-project Phase 5c/6b) over .env.live on disk.
+  local live_uri="${MONGODB_URI:-}"
+  local env_live="${REPO_ROOT:-${SCRIPT_DIR:-.}}/.env.live"
+  [[ -f "$env_live" ]] || env_live=".env.live"
+  if [[ -z "$live_uri" && -f "$env_live" ]]; then
+    local line
+    line="$(_pf_capture_first_line grep -E '^MONGODB_URI=' "$env_live")"
+    live_uri="${line#*=}"
+    live_uri="${live_uri%\"}"
+    live_uri="${live_uri#\"}"
+  fi
+
+  local gw_url="${AGENTCORE_GATEWAY_URL:-}"
+
+  # Collect specialist runtime IDs to probe.
+  local -a spec_ids=()
+  local _spec
+  for _spec in "${SPECIALIST_IDS[@]:-}"; do
+    [[ -n "$_spec" ]] && spec_ids+=("$_spec")
+  done
+
+  # Build a JSON map of specialist_id -> runtime_id (we'll query env for each).
+  local spec_env_map="{}"
+  local _sid _srid
+  if (( ${#spec_ids[@]} > 0 )) && declare -F specialist_runtime_id >/dev/null 2>&1; then
+    local _entries=""
+    for _sid in "${spec_ids[@]}"; do
+      _srid="$(specialist_runtime_id "$_sid" 2>/dev/null || true)"
+      [[ -z "$_srid" || "$_srid" == "None" ]] && continue
+      local _se_json
+      _se_json="$(aws bedrock-agentcore-control get-agent-runtime \
+        --region "$region" \
+        --agent-runtime-id "$_srid" \
+        --query 'environmentVariables' \
+        --output json 2>/dev/null || echo '{}')"
+      # Append as JSON object using python (bash 3.2 has no associative array literals).
+      spec_env_map="$(python3 -c '
+import json, sys
+m = json.loads(sys.argv[1] or "{}")
+m[sys.argv[2]] = json.loads(sys.argv[3] or "{}")
+print(json.dumps(m))' "$spec_env_map" "$_sid" "$_se_json")"
+    done
+  fi
+
+  # Defer judgment to python so we can produce a structured failure envelope.
+  local probe_out
+  probe_out="$(python3 -c '
+import json, sys, os
+mcp_env = json.loads(sys.argv[1] or "{}")
+spec_env_map = json.loads(sys.argv[2] or "{}")
+live_uri = sys.argv[3]
+gw_url   = sys.argv[4]
+
+problems = []
+mongodb_uri = mcp_env.get("MONGODB_URI", "")
+mongodb_db  = mcp_env.get("MONGODB_DB", "")
+if not mongodb_uri:
+    problems.append("mongodb-mcp.MONGODB_URI is empty (Phase 6b update_mcp_runtime_mongodb_env did not run, or env wipe regression)")
+if not mongodb_db:
+    problems.append("mongodb-mcp.MONGODB_DB is empty")
+if live_uri and mongodb_uri:
+    # Compare authority only (scheme + user@host:port,host:port,...).
+    # Query params like retryWrites/w=majority are deploy-script defaults and
+    # legitimately differ between Terraform-emitted (PL) URIs and the API
+    # Phase 5c-normalized URI. The real env-wipe regression manifests as an
+    # empty or completely different authority, which this comparison catches.
+    import re
+    def authority(u):
+        return re.sub(r"\?.*$", "", u)
+    if authority(live_uri) != authority(mongodb_uri):
+        def san(u):
+            return re.sub(r"://[^@]+@", "://****:****@", u)
+        problems.append(f"mongodb-mcp.MONGODB_URI authority != .env.live (api={san(authority(live_uri))}, mcp={san(authority(mongodb_uri))})")
+
+for sid, env in spec_env_map.items():
+    if not env.get("AGENTCORE_GATEWAY_URL"):
+        problems.append(f"specialist[{sid}].AGENTCORE_GATEWAY_URL is empty")
+    elif gw_url and env.get("AGENTCORE_GATEWAY_URL") != gw_url:
+        problems.append(f"specialist[{sid}].AGENTCORE_GATEWAY_URL != current Gateway URL")
+
+if problems:
+    print("FAIL\t" + " | ".join(problems))
+else:
+    print("OK\tmongodb-mcp env complete; " + str(len(spec_env_map)) + " specialists verified")
+' "$mcp_env_json" "$spec_env_map" "$live_uri" "$gw_url" 2>/dev/null || echo 'FAIL	python parse error')"
+
+  local status="${probe_out%%	*}"
+  local detail="${probe_out#*	}"
+  if [[ "$status" == "OK" ]]; then
+    _pf_pass pf_check_mcp_runtime_env_complete "$detail"
+    return 0
+  fi
+  _pf_fail pf_check_mcp_runtime_env_complete \
+    --summary "AgentCore Runtime env vars incomplete (chat tool calls will return 0 results)" \
+    --shortcoming "config (runtime env)" \
+    --observed "$detail" \
+    --fix "Re-run Phase 6b: ./deploy/deploy-agents.sh --auto-approve (syncs specialist env + mongodb-mcp MONGODB_URI)" \
+    --fix "Or from deploy-project.sh Phase 6b: update_runtime_env_dynamic + update_mcp_runtime_mongodb_env" \
+    --hint "run:./deploy/deploy-agents.sh --auto-approve" \
+    --doc "docs/status/debugging.md#agentcore-runtime-env-wipe"
+}
+
+# pf:check: pf_check_privatelink_endpoint_available
+# pf:catches: "NETWORK_MODE=privatelink but the VPC endpoint is still pendingAcceptance / failed"
+pf_check_privatelink_endpoint_available() {
+  if [[ "${NETWORK_MODE:-}" != "privatelink" ]]; then
+    _pf_skip pf_check_privatelink_endpoint_available "NETWORK_MODE!=privatelink"
+    return 0
+  fi
+  local pl_id="${ATLAS_PRIVATELINK_ENDPOINT_ID:-}"
+  if [[ -z "$pl_id" ]]; then
+    _pf_skip pf_check_privatelink_endpoint_available "ATLAS_PRIVATELINK_ENDPOINT_ID not set"
+    return 0
+  fi
+  _pf_ensure_aws_auth || { _pf_skip pf_check_privatelink_endpoint_available "AWS auth not validated"; return 0; }
+  local region="${AWS_REGION:-us-east-1}"
+
+  # AWS side: VPC endpoint must be 'available'.
+  local aws_state
+  aws_state="$(aws ec2 describe-vpc-endpoints \
+    --region "$region" \
+    --vpc-endpoint-ids "$pl_id" \
+    --query 'VpcEndpoints[0].State' --output text 2>/dev/null || echo "")"
+
+  if [[ "$aws_state" != "available" ]]; then
+    _pf_fail pf_check_privatelink_endpoint_available \
+      --summary "AWS VPC endpoint ${pl_id} is '${aws_state:-missing}' (want 'available')" \
+      --shortcoming "config (network)" \
+      --observed "vpc-endpoint state=${aws_state:-missing}" \
+      --fix "Wait 1-3 minutes for AWS endpoint provisioning to complete and re-run" \
+      --fix "Or inspect: aws ec2 describe-vpc-endpoints --vpc-endpoint-ids ${pl_id} --region ${region}" \
+      --hint "run:aws ec2 describe-vpc-endpoints --vpc-endpoint-ids ${pl_id}" \
+      --doc "docs/deployment-preflight-checks.md#privatelink-endpoint-available"
+    return 0
+  fi
+
+  # Atlas side: endpoint service must be AVAILABLE for the same project + region.
+  local proj="${TF_VAR_atlas_project_id:-${TF_VAR_mongodb_atlas_project_id:-}}"
+  if [[ -n "$proj" ]]; then
+    local out status atlas_state
+    out="$(mktemp)"
+    status="$(_pf_atlas_api "$out" "/groups/${proj}/privateEndpoint/AWS/endpointService" 2>/dev/null || echo 000)"
+    if [[ "$status" =~ ^2 ]]; then
+      atlas_state="$(ATLAS_PL_AWS_ID="$pl_id" python3 -c '
+import json, sys, os
+want = os.environ.get("ATLAS_PL_AWS_ID", "")
+d = json.load(sys.stdin)
+items = d if isinstance(d, list) else d.get("results", [])
+for it in items:
+    eps = it.get("interfaceEndpoints", [])
+    if any(want in str(e) for e in eps):
+        print(it.get("status", ""))
+        sys.exit(0)
+print("")
+' < "$out" 2>/dev/null || echo '')"
+      rm -f "$out"
+      if [[ -n "$atlas_state" && "$atlas_state" != "AVAILABLE" ]]; then
+        _pf_fail pf_check_privatelink_endpoint_available \
+          --summary "Atlas PrivateLink endpoint service is '${atlas_state}' (want 'AVAILABLE')" \
+          --shortcoming "config (network)" \
+          --observed "atlas endpoint state=${atlas_state}, aws state=available" \
+          --fix "Wait 1-3 minutes for Atlas-side endpoint association and re-run" \
+          --hint "console:cloud.mongodb.com Project Settings -> Network Access -> Private Endpoint" \
+          --doc "docs/deployment-preflight-checks.md#privatelink-endpoint-available"
+        return 0
+      fi
+    else
+      rm -f "$out"
+    fi
+  fi
+
+  _pf_pass pf_check_privatelink_endpoint_available "AWS endpoint ${pl_id} = available"
+}
+
+# pf:check: pf_check_kb_ingestion_complete
+# pf:catches: "Bedrock KB ingestion job FAILED or empty — vector retrieval returns 0 hits"
+pf_check_kb_ingestion_complete() {
+  local kb_id="${BEDROCK_KB_ID:-}"
+  if [[ -z "$kb_id" ]]; then
+    _pf_skip pf_check_kb_ingestion_complete "BEDROCK_KB_ID not set (deploy without KB)"
+    return 0
+  fi
+  _pf_ensure_aws_auth || { _pf_skip pf_check_kb_ingestion_complete "AWS auth not validated"; return 0; }
+  local region="${AWS_REGION:-us-east-1}"
+
+  # Pick the first data source (deploys provision exactly one).
+  local ds_id
+  ds_id="$(aws bedrock-agent list-data-sources \
+    --region "$region" \
+    --knowledge-base-id "$kb_id" \
+    --query 'dataSourceSummaries[0].dataSourceId' \
+    --output text 2>/dev/null || echo '')"
+  if [[ -z "$ds_id" || "$ds_id" == "None" ]]; then
+    _pf_skip pf_check_kb_ingestion_complete "no data sources found for KB ${kb_id}"
+    return 0
+  fi
+
+  # Use the AWS CLI projection so we don't pipe through jq inside $().
+  local probe
+  probe="$(aws bedrock-agent list-ingestion-jobs \
+    --region "$region" \
+    --knowledge-base-id "$kb_id" \
+    --data-source-id "$ds_id" \
+    --sort-by 'attribute=STARTED_AT,order=DESCENDING' \
+    --max-results 1 \
+    --query 'ingestionJobSummaries[0].[status,statistics.numberOfNewDocumentsIndexed,statistics.numberOfModifiedDocumentsIndexed]' \
+    --output text 2>/dev/null || echo '')"
+
+  if [[ -z "$probe" ]]; then
+    _pf_skip pf_check_kb_ingestion_complete "no ingestion jobs found yet for ds=${ds_id}"
+    return 0
+  fi
+
+  # AWS CLI text output uses TAB delimiters; bash 3.2 read into array.
+  local status=""; local new_count=""; local mod_count=""
+  IFS=$'\t' read -r status new_count mod_count <<<"$probe"
+  new_count="${new_count:-0}"
+  mod_count="${mod_count:-0}"
+  [[ "$new_count" == "None" ]] && new_count=0
+  [[ "$mod_count" == "None" ]] && mod_count=0
+
+  if [[ "$status" != "COMPLETE" ]]; then
+    _pf_fail pf_check_kb_ingestion_complete \
+      --summary "KB ingestion job status='${status}' (want 'COMPLETE')" \
+      --shortcoming "config (data)" \
+      --observed "status=${status} new=${new_count} mod=${mod_count}" \
+      --fix "Inspect the job: aws bedrock-agent list-ingestion-jobs --knowledge-base-id ${kb_id} --data-source-id ${ds_id}" \
+      --fix "Re-run terraform apply on module bedrock-kb to retry the ingestion" \
+      --hint "run:aws bedrock-agent list-ingestion-jobs --knowledge-base-id ${kb_id} --data-source-id ${ds_id}" \
+      --doc "docs/deployment-preflight-checks.md#kb-ingestion-complete"
+    return 0
+  fi
+
+  local indexed=$(( new_count + mod_count ))
+  if (( indexed < 1 )); then
+    _pf_fail pf_check_kb_ingestion_complete \
+      --summary "KB ingestion COMPLETE but zero documents indexed" \
+      --shortcoming "config (data)" \
+      --observed "new=${new_count} mod=${mod_count}" \
+      --fix "Verify KB source bucket has docs: aws s3 ls s3://<bucket>/<prefix>" \
+      --fix "Re-trigger ingestion via terraform apply on module bedrock-kb" \
+      --doc "docs/deployment-preflight-checks.md#kb-ingestion-complete"
+    return 0
+  fi
+
+  _pf_pass pf_check_kb_ingestion_complete "ingestion COMPLETE (new=${new_count} mod=${mod_count})"
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -2469,7 +3230,7 @@ _pf_self_test() {
   local prof check missing=""
   for prof in orchestrator-privatelink orchestrator-peering network shared \
               project-pre-apply project-post-apply project-pre-env-sync \
-              agents api ui; do
+              local-post-apply agents api ui; do
     local arr_name _PF_TMP_PROFILE
     arr_name="$(_pf_profile_array_name "$prof")"
     [[ -z "$arr_name" ]] && continue
@@ -2571,14 +3332,13 @@ _pf_self_test() {
   # forward through any line-continuation block until a line ends without
   # a trailing `\`. If `--summary` does not appear in the joined block,
   # flag it. We deliberately skip the function definition line itself.
-  local _bad_fail
-  _bad_fail="$(python3 - "${BASH_SOURCE[0]}" <<'PY'
+  local _bad_fail _py_badfail
+  IFS= read -r -d '' _py_badfail <<'PY' || true
 import re, sys
 src = open(sys.argv[1], "r", encoding="utf-8").read().splitlines()
-# Skip the function definition line and any comment line.
 defn_re = re.compile(r"^\s*_pf_fail\s*\(\s*\)\s*\{")
-call_re = re.compile(r"^\s*_pf_fail\b\s+\S")  # call must be at start (after indent)
-splat_re = re.compile(r'"\$\{args\[@\]\}"')   # splat callers build args=(--summary ...) explicitly
+call_re = re.compile(r"^\s*_pf_fail\b\s+\S")
+splat_re = re.compile(r"\"\$\{args\[@\]\}\"")
 comment_re = re.compile(r"^\s*#")
 i = 0; n = len(src); bad = []
 while i < n:
@@ -2594,11 +3354,11 @@ while i < n:
         if splat_re.search(joined):
             i += 1; continue
         if "--summary" not in joined:
-            bad.append(f"{i+1-len(block)+1}: {block[0].strip()}")
+            bad.append("{}: {}".format(i + 1 - len(block) + 1, block[0].strip()))
     i += 1
 print("\n".join(bad[:5]))
 PY
-)"
+  _bad_fail="$(python3 -c "$_py_badfail" "${BASH_SOURCE[0]}")"
   if [[ -n "$_bad_fail" ]]; then
     echo "  ✗ _pf_fail call(s) missing --summary:"
     echo "$_bad_fail" | sed 's/^/      /'
@@ -2645,6 +3405,249 @@ PY
     fi
   fi
 
+  # Test 13: preflight_validate runner must deflect a check that returns
+  # rc=141 (SIGPIPE under set -o pipefail). Reproduces the deploy-shared.sh
+  # regression where `terraform version | head -1` inside command substitution
+  # killed the parent script with `set -euo pipefail` active. The runner now
+  # invokes each check via `if ! "$id"; then …`, so a non-zero return must
+  # surface as a `module bug (rc=141)` _pf_fail record — NOT a parent-script
+  # SIGKILL.
+  #
+  # We can't faithfully reproduce SIGPIPE inside the synth check because the
+  # `if ! "$id"; then` guard suspends `set -e` inside the function body too —
+  # so a SIGPIPE-induced 141 in an inner `v=$(…)` substitution silently
+  # captures an empty string rather than killing the function (which is the
+  # desired runtime behavior — see prong-1 helpers for the actual data fix).
+  # Instead we test the runner contract directly: a check that EXPLICITLY
+  # returns 141 must (a) not abort the parent script and (b) be recorded as
+  # a failure with the SIGPIPE-aware annotation.
+  local _runner_log=/tmp/pf-st13.out
+  ( set -euo pipefail
+    source "${BASH_SOURCE[0]}"
+    pf_check_synth_returns_141() {
+      return 141
+    }
+    PREFLIGHT_PROFILE_orchestrator_privatelink=(pf_check_synth_returns_141)
+    PREFLIGHT_QUIET=1 preflight_validate orchestrator-privatelink
+  ) >"$_runner_log" 2>&1
+  local _subshell_rc=$?
+  if (( _subshell_rc == 141 )); then
+    echo "  ✗ runner did NOT deflect rc=141 — parent died with SIGPIPE under pipefail (regression: bare \"\$id\" call returned)"
+    cat "$_runner_log" | sed 's/^/      /'
+    fail=1
+  elif ! grep -q 'pf_check_synth_returns_141' "$_runner_log"; then
+    echo "  ✗ runner did not even invoke the synth check"
+    cat "$_runner_log" | sed 's/^/      /'
+    fail=1
+  elif ! grep -q 'SIGPIPE under set -o pipefail' "$_runner_log"; then
+    echo "  ✗ runner survived but failed to annotate rc=141 with SIGPIPE-aware message"
+    cat "$_runner_log" | sed 's/^/      /'
+    fail=1
+  else
+    echo "  ✓ runner deflects rc=141 from a check (parent survived, cause logged with SIGPIPE annotation)"
+  fi
+  rm -f "$_runner_log"
+
+  # Test 14: SIGPIPE-safe capture helpers extract correct first line from a
+  # multi-line producer without crashing the caller under set -o pipefail.
+  # Lock-down for prong-1 of the deploy-shared.sh regression fix.
+  local _cap_rc=0 _cap_out=""
+  _cap_out="$(
+    set -euo pipefail
+    source "${BASH_SOURCE[0]}"
+    _producer() {
+      printf 'Terraform v1.13.4\non darwin_arm64\n+ provider hashicorp/aws v6.0.0\n'
+      # Make the producer keep writing to widen the SIGPIPE window
+      for i in $(seq 1 2000); do printf 'noise line %d\n' "$i"; done
+    }
+    first="$(_pf_capture_first_line _producer)"
+    printf 'first=%s' "$first"
+  )" || _cap_rc=$?
+  if (( _cap_rc != 0 )); then
+    echo "  ✗ _pf_capture_first_line returned rc=${_cap_rc} on multi-line producer (regression of prong-1 SIGPIPE fix)"
+    fail=1
+  elif [[ "$_cap_out" != "first=Terraform v1.13.4" ]]; then
+    echo "  ✗ _pf_capture_first_line returned wrong content (got: '$_cap_out')"
+    fail=1
+  else
+    echo "  ✓ _pf_capture_first_line survives heavy multi-line producer"
+  fi
+
+  # Test 15: static pattern guard — fail if any deploy-critical-path script
+  # contains a SIGPIPE-prone pipeline inside command substitution. The
+  # patterns we catch are all early-exit readers downstream of a producer:
+  # `| head -N`, `| sed Nq`, `| sed -n Np`, `| awk … exit`, `| grep -m N`,
+  # `| python … sys.exit`. Allow-list:
+  #   - the synth checks inside pf_check_shell_runtime_safe (intentional bug)
+  #   - the helper definitions (_pf_capture_first_line, _pf_capture_first_line_2)
+  #   - any line whose match is inside a `--fix`/`--observed`/`--summary`/
+  #     `--hint` envelope arg (documentation, not executable pipes)
+  #
+  # Scope: this module + `_deploy-diagnostics.sh` (sourced into every deploy
+  # script). If a new sibling helper joins the deploy-critical path, add it
+  # to the SCAN_FILES list below.
+  #
+  # This makes the original bug class un-mergeable: a new check (or any
+  # sourced helper) that uses `var="$(cmd | head -1 | …)"` inside its body
+  # fails the self-test and CI blocks the PR before anyone can hit the
+  # rc=141 deploy regression again.
+  if ! command -v python3 >/dev/null 2>&1; then
+    echo "  ⊘ Test 15 skipped (python3 not on PATH — pattern guard requires python3)"
+  else
+    local _t15_bad _t15_self_dir _t15_diag
+    _t15_self_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    _t15_diag="${_t15_self_dir}/_deploy-diagnostics.sh"
+    local -a _t15_files=("${BASH_SOURCE[0]}")
+    [[ -f "$_t15_diag" ]] && _t15_files+=("$_t15_diag")
+    local _py_t15
+    IFS= read -r -d '' _py_t15 <<'PY' || true
+import os, re, sys
+ALLOWED_FUNCS = {
+    "pf_check_shell_runtime_safe",
+    "_pf_synth_sigpipe_check",
+    "_pf_capture_first_line",
+    "_pf_capture_first_line_2",
+    "_pf_self_test",
+}
+func_re = re.compile(r"^\s*(?:function\s+)?(\w+)\s*\(\s*\)\s*\{")
+risky_downstream = (
+    r"head\s+-(?:n\s+)?[0-9]+"
+    r"|sed\s+(?:-n\s+)?[\"\x27]?[0-9]+[qp]"
+    r"|awk\s+[^|]*\bexit\b"
+    r"|grep\s+-m\s*[0-9]+"
+    r"|python3?\s+-c\s+[\"\x27][^\"\x27]*sys\.exit"
+)
+pipe_re = re.compile(r"\|\s*(?:" + risky_downstream + r")")
+envelope_re = re.compile(r"--(fix|observed|summary|hint)\b")
+bad = []
+for src_path in sys.argv[1:]:
+    rel = os.path.basename(src_path)
+    with open(src_path, "r", encoding="utf-8") as fh:
+        lines = fh.read().splitlines()
+    cur_func = None
+    depth = 0
+    for i, line in enumerate(lines, start=1):
+        stripped = line.lstrip()
+        if stripped.startswith("#"):
+            continue
+        m = func_re.match(line)
+        if m:
+            cur_func = m.group(1)
+            depth = line.count("{") - line.count("}")
+            continue
+        if cur_func is not None:
+            depth += line.count("{") - line.count("}")
+            if depth <= 0:
+                cur_func = None
+        if cur_func in ALLOWED_FUNCS:
+            continue
+        if envelope_re.search(line):
+            continue
+        if pipe_re.search(line):
+            snippet = stripped[:90]
+            bad.append("{}:{}: ({}) {}".format(rel, i, cur_func or "top-level", snippet))
+print("\n".join(bad[:10]))
+PY
+    _t15_bad="$(python3 -c "$_py_t15" "${_t15_files[@]}")"
+    if [[ -n "$_t15_bad" ]]; then
+      echo "  ✗ SIGPIPE-prone pipeline patterns found inside check functions:"
+      echo "$_t15_bad" | sed 's/^/      /'
+      echo "      → Use _pf_capture_first_line / _pf_capture_first_line_2 instead."
+      echo "      → See docs/deployment-preflight-checks.md#shell-runtime-safe"
+      fail=1
+    else
+      echo "  ✓ no SIGPIPE-prone pipeline patterns in check functions (head -N / sed Nq / awk exit / grep -m / python sys.exit)"
+    fi
+  fi
+
+  # Test 16: bash 3.2 compatibility — every shell file in deploy/scripts/ and
+  # deploy/ must parse with /bin/bash (macOS ships bash 3.2 as /bin/bash).
+  # Catches: heredocs nested inside $(...) (bash 3.2 cannot parse them
+  # reliably), $'...' inside other constructs, etc. The fix for the heredoc
+  # case is `IFS= read -r -d '' VAR <<'EOF' ... EOF` followed by
+  # `python3 -c "$VAR"` — see _pf_iam_passrole_allowed_for_deploy.
+  if [[ ! -x /bin/bash ]]; then
+    echo "  ⊘ Test 16 skipped (/bin/bash not present)"
+  else
+    local _t16_self_dir _t16_deploy_dir _t16_bad=""
+    _t16_self_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    _t16_deploy_dir="$(cd "${_t16_self_dir}/.." && pwd)"
+    local _t16_f _t16_out _t16_rc _t16_first
+    for _t16_f in "${_t16_self_dir}"/*.sh "${_t16_deploy_dir}"/*.sh; do
+      [[ -e "$_t16_f" ]] || continue
+      _t16_out="$(/bin/bash -n "$_t16_f" 2>&1)"
+      _t16_rc=$?
+      if (( _t16_rc != 0 )); then
+        _t16_first="${_t16_out%%$'\n'*}"
+        _t16_bad+="${_t16_f##*/deploy/}: ${_t16_first}"$'\n'
+      fi
+    done
+    if [[ -n "$_t16_bad" ]]; then
+      echo "  ✗ bash 3.2 (/bin/bash) cannot parse:"
+      echo "$_t16_bad" | sed 's/^/      /'
+      echo "      → Avoid heredocs (<<EOF) inside \$(...). Use:"
+      echo "          IFS= read -r -d '' VAR <<'EOF' ... EOF"
+      echo "          result=\"\$(python3 -c \"\$VAR\" args...)\""
+      fail=1
+    else
+      echo "  ✓ all deploy/*.sh + deploy/scripts/*.sh parse with /bin/bash 3.2"
+    fi
+  fi
+
+  # Test 17: _pf_resolve_mongodb_db canonical derivation.
+  #
+  # Regression guard for the "multiagent_${PROJECT_NAME}_${ENVIRONMENT}" drift
+  # that made pf_check_documents_have_embeddings query the wrong Atlas database
+  # and fail with "not authorized on multiagent_<project>_<env>".
+  #
+  # The canonical formula (matching .env.sample / deploy-project.sh /
+  # deploy-local.sh / destroy.sh) is: ${PROJECT_NAME//-/_}_${ENVIRONMENT}
+  local _t17_fail=0
+
+  # Case A: MONGODB_DB and ATLAS_DB_NAME both empty → derive from PROJECT_NAME
+  local _got_a
+  _got_a="$(PROJECT_NAME=mongodb-multiagent3 ENVIRONMENT=dev \
+    MONGODB_DB="" ATLAS_DB_NAME="" \
+    bash -c "source '${BASH_SOURCE[0]}' && _pf_resolve_mongodb_db")"
+  if [[ "$_got_a" != "mongodb_multiagent3_dev" ]]; then
+    echo "  ✗ _pf_resolve_mongodb_db derived wrong name (got='${_got_a}' want='mongodb_multiagent3_dev')"
+    _t17_fail=1
+  fi
+
+  # Case B: MONGODB_DB set → should be honoured as-is (after char scrub)
+  local _got_b
+  _got_b="$(MONGODB_DB=custom_db_prod ATLAS_DB_NAME="" PROJECT_NAME=x ENVIRONMENT=y \
+    bash -c "source '${BASH_SOURCE[0]}' && _pf_resolve_mongodb_db")"
+  if [[ "$_got_b" != "custom_db_prod" ]]; then
+    echo "  ✗ _pf_resolve_mongodb_db ignored MONGODB_DB (got='${_got_b}')"
+    _t17_fail=1
+  fi
+
+  # Case C: only ATLAS_DB_NAME set → should be honoured
+  local _got_c
+  _got_c="$(MONGODB_DB="" ATLAS_DB_NAME=atlas_name_dev PROJECT_NAME=x ENVIRONMENT=y \
+    bash -c "source '${BASH_SOURCE[0]}' && _pf_resolve_mongodb_db")"
+  if [[ "$_got_c" != "atlas_name_dev" ]]; then
+    echo "  ✗ _pf_resolve_mongodb_db ignored ATLAS_DB_NAME (got='${_got_c}')"
+    _t17_fail=1
+  fi
+
+  # Case D: the OLD wrong default must NOT appear for a standard project name
+  local _got_d
+  _got_d="$(PROJECT_NAME=mongodb-multiagent3 ENVIRONMENT=dev \
+    MONGODB_DB="" ATLAS_DB_NAME="" \
+    bash -c "source '${BASH_SOURCE[0]}' && _pf_resolve_mongodb_db")"
+  if [[ "$_got_d" == *"multiagent_mongodb"* ]]; then
+    echo "  ✗ _pf_resolve_mongodb_db still uses old wrong default ('${_got_d}')"
+    _t17_fail=1
+  fi
+
+  if (( _t17_fail == 0 )); then
+    echo "  ✓ _pf_resolve_mongodb_db canonical derivation (MONGODB_DB > ATLAS_DB_NAME > slug_env)"
+  else
+    fail=1
+  fi
+
   if (( fail == 0 )); then
     echo "[preflight self-test] PASSED"
     return 0
@@ -2659,7 +3662,8 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
     --self-test) _pf_self_test; exit $? ;;
     --list-profiles)
       for p in orchestrator-privatelink orchestrator-peering network shared \
-               project-pre-apply project-post-apply project-pre-env-sync agents api ui; do
+               project-pre-apply project-post-apply project-pre-env-sync \
+               local-post-apply agents api ui; do
         echo "$p"
       done
       exit 0 ;;

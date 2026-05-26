@@ -18,8 +18,15 @@
  *     content:         string
  *     timestamp:       ISO string
  *     embedding?:      number[] (1024-d Voyage / Bedrock Titan v2; absent
- *                                when no embedding provider is configured)
- *     embeddingModel?: string  ("voyage" | "bedrock:<modelId>" | ...)
+ *                                when no embedding provider is configured
+ *                                OR when the declared provider failed in
+ *                                strict mode — see `embeddingError`)
+ *     embeddingModel?: string  ("voyage-multimodal-3" | "amazon.titan-embed-text-v2:0" | ...)
+ *     embeddingError?: { code, message, ts } — set ONLY when the strict
+ *                       embedder returned `!ok`. The chat row is still
+ *                       persisted so the transcript stays complete; vector
+ *                       search will just miss this row until a backfill
+ *                       (db-seeding/reembed-mismatched.ts) re-embeds it.
  *     ts:              Date    (mirror of `timestamp` for recency decay /
  *                                Atlas filter scope)
  *   }
@@ -55,6 +62,18 @@ export type ChatMessageDoc = {
   ts: Date;
   embedding?: number[];
   embeddingModel?: string;
+  /**
+   * Strict-mode failure marker. Present iff the declared `EMBEDDINGS_PROVIDER`
+   * could not produce an embedding for this message — `embedding` and
+   * `embeddingModel` will be absent in that case. Operators / Trace Viewer /
+   * the backfill script (`db-seeding/reembed-mismatched.ts`) use this to
+   * locate rows that need re-embedding once the provider is healthy again.
+   */
+  embeddingError?: {
+    code: string;
+    message: string;
+    ts: Date;
+  };
 };
 
 export async function getChatMessagesCollection(): Promise<Collection<ChatMessageDoc> | null> {

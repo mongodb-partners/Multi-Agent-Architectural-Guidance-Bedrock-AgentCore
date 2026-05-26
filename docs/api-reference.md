@@ -45,7 +45,6 @@ Returns liveness + dependency state. Always public (auth bypass).
     "mongodb": "connected",
     "longTermMemory": "connected",
     "agentcore": "connected",
-    "mcpServer": "connected",
     "bedrockKnowledgeBase": "connected"
   }
 }
@@ -58,7 +57,7 @@ Each `dependencies.*` value is the result of a **live probe** (or `not_configure
 | `mongodb` | `connected` / `unreachable` / `not_configured` | Atlas ping via `MONGODB_URI` |
 | `longTermMemory` | `connected` / `unreachable` / `not_configured` / `no_agents` | Mongo reachable and ≥1 agent has `memory.longTerm: true` |
 | `agentcore` | `connected` / `inactive` / `unreachable` / `not_configured` | AgentCore Memory probe (`ListSessions` on a synthetic actor). `connected` includes the expected `ResourceNotFoundException` for the fake actor (API round-trip succeeded). `inactive` = `AGENTCORE_MEMORY_STORE_ID` is set but the store is not `ACTIVE` (provisioning or deleting). |
-| `mcpServer` | `connected` / `unreachable` | AgentCore Gateway MCP endpoint connect + `listTools` handshake (`AGENTCORE_GATEWAY_URL`; `MCP_SERVER_URL` local-dev only) |
+| `mcpServer` | `connected` / `unreachable` (optional) | Only present when the request includes a valid `Authorization: Bearer` JWT. Probes Gateway MCP via `listTools` (`AGENTCORE_GATEWAY_URL`). Omitted on unauthenticated `/health` because the Gateway requires JWT — use chat smoke or call `/health` with a Cognito token to probe MCP. |
 | `bedrockKnowledgeBase` | `connected` / `not_configured` / `unreachable` | `BEDROCK_KB_ID` set and a minimal Bedrock Agent Runtime `Retrieve` probe returns `{ status: "ok" }`. `unreachable` usually means IAM (`bedrock-agent-runtime:Retrieve` on the KB ARN) or KB not `ACTIVE` — check API logs for `[health] bedrock KB probe`. |
 
 Returns `503` with `status: degraded` when `mongodb` is `unreachable` only. Other dependencies may be `unreachable` or `inactive` while `status` stays `ok` (informational; does not fail liveness).
@@ -87,7 +86,7 @@ Accept: text/event-stream
 |---|---|---|
 | `message` | yes | The user's question |
 | `sessionId` | yes | Any string ≥ 1 char. The API pads it to ≥ 33 chars internally before invoking AgentCore (runtime session-id requirement). |
-| `agentId` | no | Default: in-API classifier picks the specialist (heuristic + Haiku fallback). Pass an explicit specialist id (e.g. `troubleshooting`) to bypass classification, or `orchestrator` to force the in-API classifier path even when an upstream client pinned a different agent. When `USE_ORCHESTRATOR_RUNTIME=1`, every request goes through the orchestrator runtime regardless of this field. |
+| `agentId` | no | Default: in-API classifier picks the specialist (heuristic + Haiku fallback). Pass an explicit specialist id (e.g. `troubleshooting`) to bypass classification, or `orchestrator` to force the in-API classifier path even when an upstream caller pinned a different agent. When `USE_ORCHESTRATOR_RUNTIME=1`, every request goes through the orchestrator runtime regardless of this field. |
 
 **Response:** `text/event-stream` with a sequence of named events.
 
@@ -331,7 +330,7 @@ Request body:
 
 The API writes the snapshot to an internal runtime config directory, switches `resolveConfigRoot()` to that snapshot, refreshes the specialist ARN override map, clears agent/config/classifier/template/skill caches, refreshes HTTP tools, and pre-warms agent templates.
 
-This endpoint is not intended for UI/client use.
+This endpoint is not intended for UI use.
 
 ---
 
@@ -410,7 +409,7 @@ Errors: `401 UNAUTHORIZED` for missing or malformed Authorization header; `401 I
 
 ## 13. Headers and middleware
 
-- `X-Request-Id` — generated per-request unless the client sends a valid inbound `X-Request-Id` (alphanumeric, `_`, `-`, 1–64 chars). Echoed on every response; use with support tickets.
+- `X-Request-Id` — generated per-request unless the caller sends a valid inbound `X-Request-Id` (alphanumeric, `_`, `-`, 1–64 chars). Echoed on every response; use with support tickets.
 - `X-Trace-Id` — W3C trace id (32 hex chars) for the HTTP server span on routes that run OpenTelemetry middleware (skipped for lightweight `GET`s such as `/health`, `/agents`, `/traces`, etc.). **Distinct** from the persisted product `traceId` in SSE `done` / MongoDB `traces` — both are useful: `X-Trace-Id` joins API access logs and CloudWatch journald streams; product `traceId` joins the Trace Viewer.
 - `traceparent` / `tracestate` — optional inbound W3C context; the API continues the trace when present. Outbound MCP and AgentCore calls inject `traceparent` when a span is active.
 - `Access-Control-Allow-Origin` — set per `CORS_ORIGINS` env var or `config/environment.yaml`. Exposed headers include `X-Request-Id`, `X-Trace-Id`, `traceparent`, `tracestate`.
@@ -436,10 +435,10 @@ Fetch a trace. Returns 404 when not found or the calling user doesn't own it
 | Mode | Behavior | Used by |
 |---|---|---|
 | `full` (default, back-compat) | Identity — full trace document. | `e2e-smoke/verify-trace-ui-shape.py`, external callers. |
-| `core` | Strips heavy debug payload fields into `{ _omittedForCoreMode: true, bytesAvailable: N, wasRedacted? }` sentinels; drops dev-only event types (`dev.environment`, `dev.byte_cap_hit`, `model.retry`, `agentcore.retry`, `model.text_delta_batch`, `latency.checkpoint`); removes dev-only top-level fields (`release`, `correlation`, `otel`, `spanTree`). | Streamlit Trace Viewer initial load. |
+| `core` | Strips heavy debug payload fields into `{ _omittedForCoreMode: true, bytesAvailable: N, wasRedacted? }` sentinels; drops dev-only event types (`dev.environment`, `dev.byte_cap_hit`, `model.retry`, `agentcore.retry`, `model.text_delta_batch`, `latency.checkpoint`); removes dev-only top-level fields (`release`, `correlation`, `otel`, `spanTree`). All `mongo.*` payload fields (query filter/pipeline/projection/sort, result sampleDocs, vector_search filter/queryVectorPreview/documentPreviews including nested fields) stay visible — the summary MongoDB dashboard renders them inline; `mongo.vector_search.documentPreviews` is independently capped to the top-3 entries. | Streamlit Trace Viewer initial load. |
 | `dev` | Identity, including dev-only fields. | Streamlit Trace Viewer "Developer details" on-demand fetch. |
 
-Every response sets `X-Trace-Include: core|dev|full` so the client can
+Every response sets `X-Trace-Include: core|dev|full` so the UI can
 assert the projection round-tripped. The UI `api_client.get_trace` raises if
 the header doesn't match the requested mode. The audit log channel records
 `[trace] fetch` with the `include` field for SOC2 review.

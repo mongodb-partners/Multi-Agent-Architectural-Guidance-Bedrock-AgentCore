@@ -28,8 +28,11 @@
 #   build_and_upload_code_artifact
 #   build_dynamic_env_base      → sets DYNAMIC_ENV_BASE
 #   update_runtime_env_dynamic
+#   update_mcp_runtime_mongodb_env
 #   verify_runtime_env_dynamic
 #   ensure_agent_config_refresh_token
+#   force_mcp_runtime_image_sync
+#   self_heal_failed_gateway_target
 
 # ─── Guard ────────────────────────────────────────────────────────────────────
 # Prevent double-sourcing.
@@ -382,7 +385,11 @@ env = {
   'BEDROCK_KB_ID':             os.environ.get('BEDROCK_KB_ID', ''),
   'AGENTCORE_MEMORY_STORE_ID': os.environ.get('AGENTCORE_MEMORY_STORE_ID', ''),
   'AGENTCORE_GATEWAY_URL':     os.environ.get('AGENTCORE_GATEWAY_URL', ''),
-  'EMBEDDING_MODEL_ID':        'amazon.titan-embed-text-v2:0',
+  # Strict-mode embeddings: only emit EMBEDDING_MODEL_ID when the bash side
+  # explicitly exports it (titan stacks). The Python `if v` filter at the
+  # bottom of this heredoc drops empty values, so voyage stacks never leak
+  # a Bedrock fallback model id into AgentCore runtimes.
+  'EMBEDDING_MODEL_ID':        os.environ.get('EMBEDDING_MODEL_ID', ''),
   'EMBEDDINGS_PROVIDER':       os.environ.get('EMBEDDINGS_PROVIDER', ''),
   'VOYAGE_SAGEMAKER_ENDPOINT': os.environ.get('VOYAGE_ENDPOINT', ''),
   'VOYAGE_OUTPUT_DIM':         '1024',
@@ -501,6 +508,94 @@ print(json.dumps(env))")
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
+# update_mcp_runtime_mongodb_env
+#
+# Terraform bakes a mode-aware MONGODB_URI into the mongodb-mcp container runtime
+# at apply time. Phase 5c then normalizes the API URI (retryWrites, PL flags).
+# This helper re-syncs the MCP runtime env to the same URI the API uses so
+# pf_check_mcp_runtime_env_complete and /health/deep see identical connection
+# strings. Preserves all other runtime env vars and container config.
+#
+# Args:
+#   $1 runtime_id   mongodb-mcp AgentCore runtime id
+#   $2 mongodb_uri   same MONGODB_URI written to .env.live (post Phase 5c)
+#   $3 mongodb_db    ATLAS_DB_NAME
+# ══════════════════════════════════════════════════════════════════════════════
+update_mcp_runtime_mongodb_env() {
+  local runtime_id="$1"
+  local mongodb_uri="$2"
+  local mongodb_db="$3"
+
+  if [[ -z "$runtime_id" || "$runtime_id" == "None" ]]; then
+    _ac_warn "update_mcp_runtime_mongodb_env: empty runtime_id — skipping"
+    return 0
+  fi
+  [[ -n "$mongodb_uri" ]] || _ac_err "update_mcp_runtime_mongodb_env: empty mongodb_uri"
+  [[ -n "$mongodb_db" ]] || _ac_err "update_mcp_runtime_mongodb_env: empty mongodb_db"
+
+  local cfg_json
+  cfg_json=$(aws bedrock-agentcore-control get-agent-runtime \
+    --region "$AWS_REGION" \
+    --agent-runtime-id "$runtime_id" \
+    --output json 2>/dev/null || echo "")
+  if [[ -z "$cfg_json" ]]; then
+    _ac_err "update_mcp_runtime_mongodb_env: get-agent-runtime returned empty for ${runtime_id}"
+  fi
+
+  local update_args_file update_err
+  update_args_file=$(mktemp -t mcp-mongo-env.XXXXXX.json)
+  CFG_JSON="$cfg_json" \
+  RUNTIME_ID="$runtime_id" \
+  MONGO_URI="$mongodb_uri" \
+  MONGO_DB="$mongodb_db" \
+  python3 - <<'PY' > "$update_args_file"
+import json, os
+
+cfg = json.loads(os.environ["CFG_JSON"])
+env = dict(cfg.get("environmentVariables") or {})
+env["MONGODB_URI"] = os.environ["MONGO_URI"]
+env["MONGODB_DB"] = os.environ["MONGO_DB"]
+out = {
+    "agentRuntimeId": os.environ["RUNTIME_ID"],
+    "roleArn": cfg["roleArn"],
+    "agentRuntimeArtifact": cfg["agentRuntimeArtifact"],
+    "networkConfiguration": cfg.get("networkConfiguration") or {"networkMode": "PUBLIC"},
+    "protocolConfiguration": cfg.get("protocolConfiguration") or {"serverProtocol": "MCP"},
+    "environmentVariables": env,
+}
+for key in ("lifecycleConfiguration", "description", "authorizerConfiguration"):
+    if cfg.get(key) is not None:
+        out[key] = cfg[key]
+print(json.dumps(out))
+PY
+
+  if ! update_err=$(aws bedrock-agentcore-control update-agent-runtime \
+    --region "$AWS_REGION" \
+    --cli-input-json "file://${update_args_file}" \
+    --output json 2>&1); then
+    rm -f "$update_args_file"
+    echo "$update_err" >&2
+    _ac_err "mongodb-mcp runtime ${runtime_id}: update-agent-runtime (MONGODB_URI) failed"
+  fi
+  rm -f "$update_args_file"
+  _ac_ok "mongodb-mcp runtime env synced (MONGODB_URI + MONGODB_DB)"
+
+  local runtime_status attempt
+  for attempt in $(seq 1 36); do
+    runtime_status=$(aws bedrock-agentcore-control get-agent-runtime \
+      --region "$AWS_REGION" \
+      --agent-runtime-id "$runtime_id" \
+      --query "status" --output text 2>/dev/null || echo "UNKNOWN")
+    if [[ "$runtime_status" == "READY" ]]; then
+      _ac_ok "mongodb-mcp runtime ${runtime_id}: READY after env sync (attempt ${attempt})"
+      return 0
+    fi
+    [[ $attempt -eq 36 ]] && _ac_warn "mongodb-mcp runtime ${runtime_id}: still ${runtime_status} after env sync — continuing"
+    sleep 5
+  done
+}
+
+# ══════════════════════════════════════════════════════════════════════════════
 # force_mcp_runtime_image_sync
 #
 # Container-mode AgentCore runtimes are wired to `<repo>:latest` in Terraform.
@@ -533,6 +628,12 @@ print(json.dumps(env))")
 #   $4 gateway_id          gateway id whose target points at this runtime
 #                          (pass "" to skip the gateway-target refresh step)
 #   $5 gateway_target_name e.g. "mongodb-mcp" (only used when $4 is set)
+#
+# Related helper: `self_heal_failed_gateway_target` (below) is the right tool
+# for the *post-apply smoke phase* when a target is already FAILED — it
+# recreates the target inline via AWS CLI (no terraform apply available),
+# whereas this helper deletes + relies on a subsequent terraform apply to
+# recreate. The two helpers intentionally do not chain.
 # ══════════════════════════════════════════════════════════════════════════════
 force_mcp_runtime_image_sync() {
   local runtime_id="$1"
@@ -686,6 +787,149 @@ PY
       && _ac_log "Cleared null_resource.mcp_server_gateway_target from TF state" \
       || true
   fi
+}
+
+# ══════════════════════════════════════════════════════════════════════════════
+# self_heal_failed_gateway_target <gateway_id> <target_name> <mcp_endpoint>
+#
+# Recovers an AgentCore Gateway target that is stuck in status=FAILED — the
+# classic "target was created before the MCP runtime was warm" race that the
+# Terraform null_resource only fixes when one of its triggers changes. This
+# helper mirrors the null_resource's delete+recreate path but runs from the
+# deploy script's post-apply smoke phase, so a single re-probe inside the same
+# deploy heals the gateway instead of forcing the operator into a second
+# `deploy-full-with-privatelink.sh` run.
+#
+# Return codes (caller chooses how to react):
+#   0  Target was FAILED and was successfully deleted + recreated to READY.
+#   2  Target is healthy (READY/ACTIVE) — heal is not the right rescue, the
+#      probe is failing for a different reason.
+#   3  Target is mid-flight (CREATING/UPDATING/DELETING) — caller should wait
+#      and retry instead of triggering another delete.
+#   1  Lookup/delete/recreate failed, or target never reached READY.
+#
+# Arguments are required; nothing is read from globals so this is safe to call
+# from any phase that has loaded the relevant Terraform outputs.
+#
+# Related helper: `force_mcp_runtime_image_sync` (above) handles the *image
+# refresh* case (new container pushed → bump runtime version → delete target
+# so the next `terraform apply` recreates it). Use that helper before a TF
+# apply step is available, and use this one after the last TF apply when the
+# only recovery path is direct AWS CLI calls.
+# ══════════════════════════════════════════════════════════════════════════════
+self_heal_failed_gateway_target() {
+  local gateway_id="$1"
+  local target_name="$2"
+  local mcp_endpoint="$3"
+  local region="${AWS_REGION:-us-east-1}"
+
+  if [[ -z "$gateway_id" || -z "$target_name" || -z "$mcp_endpoint" ]]; then
+    _ac_warn "self_heal_failed_gateway_target: missing argument (gateway_id='${gateway_id}' target_name='${target_name}' endpoint set=${mcp_endpoint:+yes})"
+    return 1
+  fi
+
+  local existing existing_id existing_status
+  existing=$(aws bedrock-agentcore-control list-gateway-targets \
+    --gateway-identifier "$gateway_id" \
+    --region "$region" \
+    --query "items[?name=='${target_name}'] | [0]" \
+    --output json 2>/dev/null || echo null)
+  if [[ -z "$existing" || "$existing" == "null" ]]; then
+    _ac_warn "self_heal_failed_gateway_target: no target named '${target_name}' on gateway ${gateway_id} — nothing to heal"
+    return 1
+  fi
+  existing_id=$(echo "$existing" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("targetId",""))' 2>/dev/null || echo "")
+  existing_status=$(echo "$existing" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("status",""))' 2>/dev/null || echo "")
+
+  case "$existing_status" in
+    READY|ACTIVE)
+      _ac_log "self-heal: target '${target_name}' (${existing_id}) is ${existing_status} — heal not applicable"
+      return 2
+      ;;
+    CREATING|UPDATING|DELETING)
+      _ac_log "self-heal: target '${target_name}' (${existing_id}) is ${existing_status} — caller should wait"
+      return 3
+      ;;
+    FAILED)
+      : # fall through to heal
+      ;;
+    *)
+      _ac_warn "self-heal: target '${target_name}' (${existing_id}) has unexpected status '${existing_status}' — refusing to delete"
+      return 1
+      ;;
+  esac
+
+  local reason
+  reason=$(aws bedrock-agentcore-control get-gateway-target \
+    --gateway-identifier "$gateway_id" --region "$region" --target-id "$existing_id" \
+    --query 'statusReasons' --output text 2>/dev/null || true)
+  _ac_log "self-heal: target '${target_name}' (${existing_id}) is FAILED — deleting and recreating"
+  _ac_log "self-heal:   statusReasons: ${reason}"
+
+  if ! aws bedrock-agentcore-control delete-gateway-target \
+       --gateway-identifier "$gateway_id" --region "$region" --target-id "$existing_id" \
+       --output text >/dev/null 2>&1; then
+    _ac_warn "self-heal: delete-gateway-target failed for ${existing_id}"
+    return 1
+  fi
+
+  local _ still
+  for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do
+    still=$(aws bedrock-agentcore-control list-gateway-targets \
+      --gateway-identifier "$gateway_id" --region "$region" \
+      --query "items[?targetId=='${existing_id}'] | length(@)" \
+      --output text 2>/dev/null || echo 0)
+    if [[ "$still" == "0" ]]; then break; fi
+    sleep 5
+  done
+  if [[ "$still" != "0" ]]; then
+    _ac_warn "self-heal: target ${existing_id} did not disappear within 60s — aborting recreate"
+    return 1
+  fi
+
+  _ac_log "self-heal: recreating target '${target_name}' on gateway ${gateway_id}"
+  if ! aws bedrock-agentcore-control create-gateway-target \
+       --region "$region" \
+       --gateway-identifier "$gateway_id" \
+       --name "$target_name" \
+       --description "MongoDB MCP tools (AgentCore Runtime mcp-runtimes/mongodb-mcp)" \
+       --target-configuration "{\"mcp\":{\"mcpServer\":{\"endpoint\":\"${mcp_endpoint}\"}}}" \
+       --credential-provider-configurations \
+         "[{\"credentialProviderType\":\"GATEWAY_IAM_ROLE\",\"credentialProvider\":{\"iamCredentialProvider\":{\"service\":\"bedrock-agentcore\",\"region\":\"${region}\"}}}]" \
+       --output json >/dev/null 2>&1; then
+    _ac_warn "self-heal: create-gateway-target failed for '${target_name}'"
+    return 1
+  fi
+
+  local new_status attempt
+  for attempt in $(seq 1 36); do
+    new_status=$(aws bedrock-agentcore-control list-gateway-targets \
+      --gateway-identifier "$gateway_id" --region "$region" \
+      --query "items[?name=='${target_name}'].status | [0]" \
+      --output text 2>/dev/null || echo "")
+    case "$new_status" in
+      READY|ACTIVE)
+        _ac_ok "self-heal: target '${target_name}' is ${new_status} after ${attempt} poll(s) — gateway healed"
+        return 0
+        ;;
+      FAILED)
+        local new_id new_reason
+        new_id=$(aws bedrock-agentcore-control list-gateway-targets \
+          --gateway-identifier "$gateway_id" --region "$region" \
+          --query "items[?name=='${target_name}'].targetId | [0]" \
+          --output text 2>/dev/null || echo "")
+        new_reason=$(aws bedrock-agentcore-control get-gateway-target \
+          --gateway-identifier "$gateway_id" --region "$region" --target-id "$new_id" \
+          --query 'statusReasons' --output text 2>/dev/null || true)
+        _ac_warn "self-heal: recreated target ${new_id} is also FAILED — root cause is NOT a stale gateway"
+        _ac_warn "self-heal:   statusReasons: ${new_reason}"
+        return 1
+        ;;
+    esac
+    sleep 5
+  done
+  _ac_warn "self-heal: target '${target_name}' did not reach READY within 180s (last status: ${new_status:-?})"
+  return 1
 }
 
 # ══════════════════════════════════════════════════════════════════════════════

@@ -16,7 +16,7 @@ A **configuration-driven multi-agent reference** on **AWS Bedrock** (via [Strand
 
 **Connectivity modes** (mutually exclusive per account+region): `NETWORK_MODE=privatelink` (default) or `NETWORK_MODE=peering`. Switching requires destroy + redeploy.
 
-**Handover:** [`docs/README.md`](docs/README.md) — doc map, first-day checklist, reading orders.
+**Getting started:** [`docs/README.md`](docs/README.md) — doc map, first-day checklist, reading orders.
 
 **Debugging:** [`docs/status/debugging.md`](docs/status/debugging.md) — EC2 access, trace-driven debug, common failures, validation scripts, **persistent pitfalls**. When a non-obvious regression recurs more than twice (or is a severe guardrail like hung CI / infinite Strands loop), add an entry to **Known persistent pitfalls** in the same PR as the fix.
 
@@ -48,7 +48,7 @@ Edit `.env` before any deploy. Minimum fields (see [`.env.sample`](.env.sample) 
 | AWS auth | `AUTH_MODE`, then either IAM keys or STS/`AWS_PROFILE` (see [`deploy/iam/README.md`](deploy/iam/README.md)) |
 | Region + identity | `AWS_REGION`, `ENVIRONMENT`, `PROJECT_NAME`, `SHARED_VPC_NAME` |
 | Atlas | `MONGODB_ATLAS_PUBLIC_KEY`, `MONGODB_ATLAS_PRIVATE_KEY`, `TF_VAR_mongodb_atlas_org_id`, `TF_VAR_mongodb_atlas_project_id`, `TF_VAR_atlas_db_password` |
-| Embeddings | `EMBEDDINGS_PROVIDER=titan` is simplest for a first deploy (no Voyage Marketplace). [`.env.sample`](.env.sample) defaults to `voyage` — change it if you are not subscribed to the Voyage SageMaker listing. Deploy **refuses** to run if `EMBEDDINGS_PROVIDER` is unset (`deploy-project.sh`). |
+| Embeddings | `EMBEDDINGS_PROVIDER` is **mandatory** in every environment (deployed and local). [`.env.sample`](.env.sample) defaults to `titan` (simplest first-deploy path — no Voyage Marketplace required). Switch to `voyage` for Voyage multimodal embeddings. Strict — no implicit default, no cross-provider fallback at runtime. Both `assertEmbeddingsProvider()` (API boot) and `deploy-project.sh` refuse to run if it's unset / unrecognised. |
 
 Then:
 
@@ -76,7 +76,8 @@ Full EC2 deploy (~30–45 min). Provisions Cognito, AgentCore runtimes, EC2, Atl
 ```bash
 source .env
 ./deploy/deploy-full-with-privatelink.sh --auto-approve
-source .env && python3 e2e-smoke/post-deploy-smoke.py
+# Full post-deploy smoke runs in deploy-project.sh Phase 11 (use --skip-smoke to skip).
+# Re-run manually: source .env && python3 e2e-smoke/post-deploy-smoke.py
 ```
 
 When the script finishes, open the **UI URL** it prints (Streamlit on EC2, port 8501). Sign in with the Cognito test user from the deploy output.
@@ -132,7 +133,7 @@ Deploy scripts write runtime ARNs, Cognito JWKS, and memory store IDs into `.env
 | Path | Role |
 |---|---|
 | `api/` | Bun + TypeScript + Hono HTTP API (SSE chat, sessions, agents/skills metadata, JWT/JWKS); [`Dockerfile`](api/Dockerfile) (build context = **repo root**). Also bundles `agent-runtime-code.ts` for AgentCore **code-mode** runtimes. |
-| `ui/` | Streamlit chat client (`app.py` + `pages/1_Sessions.py`, `pages/2_Trace_Viewer.py`); [`Dockerfile`](ui/Dockerfile) (context = **`ui/`**) |
+| `ui/` | Streamlit chat UI (`app.py` + `pages/1_Sessions.py`, `pages/2_Trace_Viewer.py`); [`Dockerfile`](ui/Dockerfile) (context = **`ui/`**) |
 | `mcp-runtimes/mongodb-mcp/` | MongoDB MCP server as AgentCore Runtime (container, ARM64). Streamable HTTP `0.0.0.0:8000/mcp`. Tools: `mongodb_query`, `mongodb_vector_search`, `mongodb_aggregate`. |
 | `config/agents/` | `.agent.md` — persona YAML frontmatter + markdown body (4 shipped: orchestrator + 3 specialists) |
 | `config/skills/` | `SKILL.md` + optional `references/`, `scripts/`, `http-tools.json` |
@@ -153,7 +154,7 @@ Deploy scripts write runtime ARNs, Cognito JWKS, and memory store IDs into `.env
 | `compose.yaml` | Docker Compose for API + Streamlit (requires JWKS + AgentCore ARNs in `.env`) |
 | `Makefile` | `make docker-up`, `docker-build`, `docker-down`, `docker-logs` |
 | `.dockerignore` | Root ignore rules for **`api/Dockerfile`** builds |
-| `docs/` | Canonical handover pack — start at [`docs/README.md`](docs/README.md) |
+| `docs/` | Canonical getting started pack — start at [`docs/README.md`](docs/README.md) |
 
 The **implemented** layout is **`api/` + `ui/` + `mcp-runtimes/` + `deploy/` + `config/`**. There is no `apps/` / `packages/` workspace split. If you add a top-level directory, register it here.
 
@@ -221,7 +222,7 @@ cd ui && pip install -r requirements.txt && python -m pytest tests/ -v
 cd e2e && bun install && bunx playwright install chromium
 API_URL=http://localhost:3000 bun run test
 
-# Post-deploy live AWS smoke (after full orchestrator)
+# Post-deploy live AWS smoke (auto in deploy-project.sh Phase 11; manual re-run):
 source .env && python3 e2e-smoke/post-deploy-smoke.py
 
 # Memory recall diagnostic (seven scenarios, hypothesis labels H1–H7)
@@ -351,7 +352,7 @@ docker compose up --build    # needs .env with JWKS + AgentCore ARNs
 
 ### Short-term memory
 
-**Production (SoW):** deploy scripts set `SHORT_TERM_MEMORY_BACKEND=agentcore`. When `userId` is known, conversation turns are read/written via **AgentCore Memory Store** (`api/src/lib/short-term-memory.ts`, `AGENTCORE_MEMORY_STORE_ID`). If `SHORT_TERM_MEMORY_BACKEND=agentcore` but the memory store ID is missing, the API **refuses to boot**.
+**Production:** deploy scripts set `SHORT_TERM_MEMORY_BACKEND=agentcore`. When `userId` is known, conversation turns are read/written via **AgentCore Memory Store** (`api/src/lib/short-term-memory.ts`, `AGENTCORE_MEMORY_STORE_ID`). If `SHORT_TERM_MEMORY_BACKEND=agentcore` but the memory store ID is missing, the API **refuses to boot**.
 
 **Mirrors and fallback:**
 
@@ -402,6 +403,8 @@ Full catalog: [`docs/reference/env-vars.md`](docs/reference/env-vars.md).
 4. On success: `writeLongTermMemory(...)` — LLM fact extraction → embed → `bulkWrite` upsert on `{ userId, factHash }`
 5. Trace re-persisted after LTM microtask so `memory.long_term_write` / `memory.long_term_skip` land in stored traces (UI: `ui/lib/inline_summary.py`)
 
+**Strict-mode embeddings (no silent provider fallback).** `EMBEDDINGS_PROVIDER` (mandatory at API boot) decides which backend `embed-query.ts` calls — `voyage` runs Voyage only, `titan` runs Bedrock Titan only. When the declared provider fails, write paths still persist the row (transcript, lexical search, audit stay complete) but with `embedding` / `embeddingModel` omitted: chat-message mirror also adds an `embeddingError: { code, message, ts }` marker and emits a `chat.mirror.embedding_failed` trace event; LTM writes add `embedding.skipped` + `embedding.skipReason` fields to the existing `memory.long_term_write` event. Operators recover via [`db-seeding/reembed-mismatched.ts`](db-seeding/reembed-mismatched.ts) (`--apply` to write). See [`docs/status/debugging.md`](docs/status/debugging.md) § "Known persistent pitfalls".
+
 **Collections:**
 
 - `agent_memory_facts`: `{ userId, agentId, fact, source, ts, factHash, embedding?, embeddingModel? }`
@@ -443,7 +446,7 @@ Full catalog: [`docs/reference/env-vars.md`](docs/reference/env-vars.md).
 
 | Doc | Use when |
 |---|---|
-| [`docs/README.md`](docs/README.md) | Client handover — first-day checklist, reading orders |
+| [`docs/README.md`](docs/README.md) | Getting started — first-day checklist, reading orders |
 | [`docs/status/debugging.md`](docs/status/debugging.md) | Developer playbook, persistent pitfalls, validation scripts |
 | [`docs/architecture.md`](docs/architecture.md) | System design, 5-runtime topology, request flow |
 | [`docs/deployment-guide.md`](docs/deployment-guide.md) | Deploy (PrivateLink + VPC peering), CI/CD, teardown |

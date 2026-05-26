@@ -116,7 +116,7 @@ ECR repositories for the API + UI images.
 - **Used by**: `envs/ec2`.
 
 ### `cognito`
-User pool + app client + domain + test user for the Streamlit UI. Emits the JWKS URI consumed by the API as `AUTH_JWKS_URI`.
+User pool + app + domain + test user for the Streamlit UI. Emits the JWKS URI consumed by the API as `AUTH_JWKS_URI`.
 - **Inputs**: `project_name`, `environment`, `aws_region`.
 - **Outputs**: `user_pool_id`, `user_pool_arn`, `user_pool_client_id`, `user_pool_endpoint`, `user_pool_domain`, `jwks_uri`.
 - **Used by**: `envs/ec2`.
@@ -126,7 +126,7 @@ User pool + app client + domain + test user for the Streamlit UI. Emits the JWKS
 ## 6. Voyage embeddings
 
 ### `voyage-sagemaker`
-SageMaker real-time endpoint hosting the Voyage Marketplace model (`voyage-multimodal-3` on `ml.g6.xlarge` per SoW). Endpoint name is written to `.env.live` as `VOYAGE_SAGEMAKER_ENDPOINT`.
+SageMaker real-time endpoint hosting the Voyage Marketplace model (`voyage-multimodal-3` on `ml.g6.xlarge` by default). Endpoint name is written to `.env.live` as `VOYAGE_SAGEMAKER_ENDPOINT`.
 - **Inputs**: `aws_region`, `environment`, `voyage_model_package_arn`, `endpoint_name_suffix`, `instance_type` (default `ml.g6.xlarge`), `instance_count`.
 - **Outputs**: `endpoint_name`, `endpoint_arn`, `execution_role_arn`.
 - **Used by**: `envs/shared`.

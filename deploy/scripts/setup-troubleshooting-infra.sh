@@ -236,27 +236,28 @@ MONGODB_DB="$MONGODB_DB" \
 EMBEDDING_DIMENSIONS="$EMBEDDING_DIMENSIONS" \
   "$BUN_CMD" db-seeding/seed-all.ts
 
-info "Running seed-embeddings.ts (Bedrock Titan embeddings for vector search)..."
-# seed-embeddings.ts uses @aws-sdk which bun 1.x cannot run (self-referencing
-# subpath import in @smithy/core).  NODE_PATH doesn't work for ESM in Node 22+.
-# Solution: create a self-contained temp workspace, install only the two needed
-# packages there, copy the two source files, and run with node --experimental-strip-types.
-EMBED_TMP="$(mktemp -d)"
-cp "$REPO_ROOT/db-seeding/seed-embeddings.ts" "$EMBED_TMP/"
-cp "$REPO_ROOT/db-seeding/connect.ts"         "$EMBED_TMP/"
-cat > "$EMBED_TMP/package.json" <<'PKGJSON'
-{"type":"module","dependencies":{"@aws-sdk/client-bedrock-runtime":"^3.0.0","mongodb":"^6.0.0"}}
-PKGJSON
-info "  Installing embed dependencies (one-time, ~10s)..."
-npm install --prefix "$EMBED_TMP" --quiet --no-audit --no-fund 2>/dev/null
-cd "$EMBED_TMP"
-MONGODB_URI="$MONGODB_URI" \
-MONGODB_DB="$MONGODB_DB" \
-EMBEDDING_MODEL_ID="$EMBED_MODEL_ID" \
-AWS_REGION="$AWS_REGION" \
-  node --experimental-strip-types --no-warnings seed-embeddings.ts
-cd "$REPO_ROOT"
-rm -rf "$EMBED_TMP"
+info "Running seed-embeddings.ts via shared helper..."
+# Migrated from the legacy temp-workspace + node --experimental-strip-types
+# approach to the shared run_embedding_seed helper. The helper:
+#   - waits for Voyage SageMaker InService when EMBEDDINGS_PROVIDER=voyage
+#   - auto-detects REWIRE on provider/dim drift (SSM + in-Mongo fingerprint)
+#   - exits non-zero on incomplete results (no warn-only fallback)
+#   - never touches Bedrock KB-managed chunks
+# shellcheck source=deploy/scripts/_mongo-connect.sh
+source "$SCRIPT_DIR/_mongo-connect.sh"
+# shellcheck source=deploy/scripts/_seed-embeddings.sh
+source "$SCRIPT_DIR/_seed-embeddings.sh"
+
+# Provider selection: setup-troubleshooting-infra.sh historically forced Titan,
+# but the Voyage path expects EMBEDDINGS_PROVIDER from the operator's env. Honor
+# whatever was passed; only default when unset.
+export EMBEDDINGS_PROVIDER="${EMBEDDINGS_PROVIDER:-titan}"
+export EMBEDDING_MODEL_ID="${EMBEDDING_MODEL_ID:-$EMBED_MODEL_ID}"
+export EMBEDDING_DIMENSIONS="$EMBEDDING_DIMENSIONS"
+export AWS_REGION="$AWS_REGION"
+
+run_embedding_seed "$MONGODB_DB" "$MONGODB_URI" \
+  || die "Embedding seed failed — see [embed-seed] envelope above"
 
 success "MongoDB seeding complete"
 
@@ -842,6 +843,10 @@ cat > "$ENV_FILE" << ENVEOF
 export MONGODB_URI="${MONGODB_URI}"
 export MONGODB_DB="${MONGODB_DB}"
 export BEDROCK_KB_ID="${BEDROCK_KB_ID}"
+# Strict-mode embeddings — EMBEDDINGS_PROVIDER must be set explicitly so the
+# API boot guard accepts this .env.live. Troubleshooting infra is Titan-only
+# (no Voyage SageMaker provisioned).
+export EMBEDDINGS_PROVIDER="titan"
 export EMBEDDING_MODEL_ID="${EMBED_MODEL_ID}"
 export EMBEDDING_DIMENSIONS="${EMBEDDING_DIMENSIONS}"
 export AWS_REGION="${AWS_REGION}"

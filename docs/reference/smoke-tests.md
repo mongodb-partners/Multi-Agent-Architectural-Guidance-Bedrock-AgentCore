@@ -15,17 +15,18 @@ Most scripts also work with the Cognito test user provisioned by `modules/cognit
 
 ## 1. Post-deploy smoke (`post-deploy-smoke.py`)
 
-The canonical end-to-end gate after `./deploy/deploy-full-with-privatelink.sh` or `./deploy/deploy-full-with-vpc-peering.sh`.
+The canonical end-to-end gate after `./deploy/deploy-full-with-privatelink.sh` or `./deploy/deploy-full-with-vpc-peering.sh`. **`deploy-project.sh` Phase 11 runs this automatically** after writing `deploy-manifest.json` (unless `--skip-smoke`). Phases 9a–9b still run the faster deterministic `backend-smoke.py` gate first.
 
 ```bash
-python3 e2e-smoke/post-deploy-smoke.py
+# Manual re-run (same checks as deploy Phase 11):
+source .env && python3 e2e-smoke/post-deploy-smoke.py
 ```
 
 Checks:
 
 - `/health` for MongoDB, long-term memory, AgentCore Memory, MCP runtime (via Gateway), and (when `bedrock_kb_id` is in the manifest) Bedrock KB retrieve. `mcpServer=unreachable` is downgraded to a warning because the API only opens the Gateway connection lazily on the first JWT-scoped chat turn (see `docs/status/debugging.md` "MongoDB MCP prewarm singleton race").
 - `/agents` metadata against the four configured agents.
-- `deploy-manifest.json` aligns with the env (`embeddings_provider`, Voyage Marketplace ARN, SoW model).
+- `deploy-manifest.json` aligns with the env (`embeddings_provider`, Voyage Marketplace ARN, default model).
 - SageMaker endpoint `InService` when `EMBEDDINGS_PROVIDER=voyage`.
 - Terraform outputs for Voyage endpoint + Bedrock KB connectivity.
 - Bedrock KB in `ACTIVE` state with the correct Atlas endpoint service.
@@ -186,7 +187,7 @@ TOKEN=$(python3 e2e-smoke/get_token.py)
 curl -H "Authorization: Bearer $TOKEN" "$API_URL/health"
 ```
 
-Reads Cognito client id + creds from `.env.live` / env overrides. Convenient when scripting one-off API checks from a laptop.
+Reads Cognito app id + creds from `.env.live` / env overrides. Convenient when scripting one-off API checks from a laptop.
 
 ---
 

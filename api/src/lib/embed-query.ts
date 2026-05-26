@@ -1,22 +1,29 @@
 /**
- * Query-time text → embedding for `mongodb_vector_search`.
+ * Text → embedding for `mongodb_vector_search` and write-side indexing.
+ *
+ * Strict provider selection — `EMBEDDINGS_PROVIDER` (in `.env`) is the single
+ * source of truth and is mandatory. There is **no cross-provider fallback**
+ * under any circumstance:
+ *
+ *   1. `voyage` — Voyage AI on SageMaker via `VOYAGE_SAGEMAKER_ENDPOINT`.
+ *      If Voyage is unconfigured, throws, or returns an unrecognized shape,
+ *      the function returns `{ ok: false, code: "voyage_strict_failed" }`.
+ *      Bedrock is **never** called.
+ *   2. `titan` — Bedrock Titan / Cohere via `EMBEDDING_MODEL_ID`. On any
+ *      failure returns `{ ok: false, code: "titan_strict_failed" }`. Voyage
+ *      is **never** called.
+ *   3. anything else (including unset / empty) — returns
+ *      `{ ok: false, code: "no_provider_configured" }`. There is no legacy
+ *      soft-fallback branch.
  *
  * Sits between the LLM (which passes natural-language `queryText`) and the
- * MongoDB MCP Lambda (which only accepts a pre-computed `queryVector`). The
- * wrapper in `api/src/adapters/mongodb-mcp-client.ts` calls this once per
- * vector search call to produce the `queryVector` it forwards to the gateway.
+ * MongoDB MCP gateway (which only accepts a pre-computed `queryVector`). The
+ * wrapper in `api/src/adapters/mongodb-mcp-client.ts` calls `embedQueryText`
+ * once per vector search call to produce the `queryVector` it forwards.
  *
- * Provider order:
- *   1. Voyage AI on SageMaker — when `VOYAGE_SAGEMAKER_ENDPOINT` is set
- *      (`voyageGenerateEmbedding(text, endpoint, "query")`). Default in EC2
- *      mode; matches the embeddings produced by `db-seeding/seed-embeddings.ts`.
- *   2. Bedrock Titan / Cohere — when `EMBEDDING_MODEL_ID` is set. Used as the
- *      fallback when Voyage is unconfigured or transiently fails.
- *
- * If neither provider is configured / both fail we return a structured error
- * instead of throwing so the wrapper can pass it back to the LLM as a
- * tool-result error block (the model can then fall back to `mongodb_query`
- * keyword search rather than crashing the turn).
+ * Errors are returned as structured `EmbedResult` values rather than thrown,
+ * so the wrapper can pass them back to the LLM as a tool-result error block
+ * (the model can then fall back to keyword search via `mongodb_query`).
  *
  * The vector dimensions must match the Atlas Vector Search index for the
  * collection (see `db-seeding/seed-indexes.ts` — both indexes are 1024-d by
@@ -38,8 +45,12 @@ export type EmbedResult =
 
 export type EmbedErrorCode =
   | "no_provider_configured"
-  | "voyage_failed_no_fallback"
-  | "bedrock_failed";
+  | "voyage_strict_failed"
+  | "titan_strict_failed"
+  | "embed_threw";
+
+/** Default Voyage model name when SageMaker omits the `model` field in the response. */
+const VOYAGE_MODEL_FALLBACK = "voyage-multimodal-3";
 
 /**
  * Run the configured embedding provider against `text`.
@@ -48,23 +59,28 @@ export type EmbedErrorCode =
  * `no_provider_configured`-style error so the LLM sees a clean tool error
  * rather than an opaque downstream failure.
  *
- * Voyage soft-fails (caught + logged) and we proceed to Bedrock if
- * `EMBEDDING_MODEL_ID` is set. Bedrock failure is hard and surfaces as an
- * error to the caller.
+ * In strict-voyage mode, any Voyage failure is hard — Bedrock is never tried.
+ * In strict-titan mode, any Bedrock failure is hard — Voyage is never tried.
  */
 export async function embedQueryText(text: string, abortSignal?: AbortSignal): Promise<EmbedResult> {
   return embedWithInputType(text, "query", abortSignal);
 }
 
 /**
- * Write-side embedder. Same provider order as `embedQueryText` (Voyage primary,
- * Bedrock fallback) but passes `input_type: "document"` to Voyage so the
- * resulting vectors land in the same semantic space as the offline seed
- * pipeline (see `db-seeding/seed-embeddings.ts`). Use this for indexing/save
- * paths — facts, chat messages — and `embedQueryText` for query-time embedding.
+ * Write-side embedder. Same provider rules as `embedQueryText` but passes
+ * `input_type: "document"` to Voyage so the resulting vectors land in the
+ * same semantic space as the offline seed pipeline (see
+ * `db-seeding/seed-embeddings.ts`). Use this for indexing/save paths —
+ * facts, chat messages — and `embedQueryText` for query-time embedding.
  */
 export async function embedDocumentText(text: string, abortSignal?: AbortSignal): Promise<EmbedResult> {
   return embedWithInputType(text, "document", abortSignal);
+}
+
+function declaredProvider(): "voyage" | "titan" | "" {
+  const raw = (process.env.EMBEDDINGS_PROVIDER ?? "").trim().toLowerCase();
+  if (raw === "voyage" || raw === "titan") return raw;
+  return "";
 }
 
 async function embedWithInputType(
@@ -81,59 +97,91 @@ async function embedWithInputType(
     };
   }
 
-  const bedrockModelId = process.env.EMBEDDING_MODEL_ID?.trim();
+  const provider = declaredProvider();
 
-  if (isVoyageConfigured()) {
-    try {
-      const r = await voyageGenerateEmbedding(trimmed, getVoyageEndpoint(), inputType, abortSignal);
-      const v = extractEmbedding(r);
-      if (v) {
-        return { ok: true, source: "voyage", modelId: v.modelId ?? "voyage", vector: v.embedding };
-      }
-      logger.warn("[embed-query] voyage returned unrecognized shape, falling back", {
-        sample: previewJson(r),
-        inputType,
-      });
-    } catch (err) {
-      logger.warn("[embed-query] voyage call threw, falling back", {
-        error: err instanceof Error ? err.message : String(err),
-        inputType,
-      });
-    }
-    if (!bedrockModelId) {
-      return {
-        ok: false,
-        code: "voyage_failed_no_fallback",
-        message:
-          "Voyage embedding failed and EMBEDDING_MODEL_ID is not set for Bedrock fallback",
-      };
-    }
+  if (provider === "voyage") {
+    return embedVoyageStrict(trimmed, inputType, abortSignal);
+  }
+  if (provider === "titan") {
+    return embedTitanStrict(trimmed, abortSignal);
   }
 
+  return {
+    ok: false,
+    code: "no_provider_configured",
+    message:
+      "EMBEDDINGS_PROVIDER must be set to 'voyage' or 'titan'. Strict mode — no implicit default, no cross-provider fallback.",
+  };
+}
+
+async function embedVoyageStrict(
+  text: string,
+  inputType: "query" | "document",
+  abortSignal?: AbortSignal,
+): Promise<EmbedResult> {
+  if (!isVoyageConfigured()) {
+    return {
+      ok: false,
+      code: "voyage_strict_failed",
+      message:
+        "EMBEDDINGS_PROVIDER=voyage but VOYAGE_SAGEMAKER_ENDPOINT is empty. Refusing to fall back to Bedrock.",
+    };
+  }
+  try {
+    const r = await voyageGenerateEmbedding(text, getVoyageEndpoint(), inputType, abortSignal);
+    const v = extractEmbedding(r);
+    if (v) {
+      const modelId =
+        v.modelId ?? process.env.VOYAGE_MODEL_NAME?.trim() ?? VOYAGE_MODEL_FALLBACK;
+      return { ok: true, source: "voyage", modelId, vector: v.embedding };
+    }
+    logger.warn("[embed-query] voyage returned unrecognized shape (strict mode — no fallback)", {
+      sample: previewJson(r),
+      inputType,
+    });
+    return {
+      ok: false,
+      code: "voyage_strict_failed",
+      message: `Voyage returned unrecognized embedding shape: ${previewJson(r)}`,
+    };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    logger.warn("[embed-query] voyage call threw (strict mode — no fallback)", {
+      error: message,
+      inputType,
+    });
+    return { ok: false, code: "voyage_strict_failed", message };
+  }
+}
+
+async function embedTitanStrict(
+  text: string,
+  abortSignal?: AbortSignal,
+): Promise<EmbedResult> {
+  const bedrockModelId = process.env.EMBEDDING_MODEL_ID?.trim();
   if (!bedrockModelId) {
     return {
       ok: false,
-      code: "no_provider_configured",
+      code: "titan_strict_failed",
       message:
-        "No embedding provider configured. Set VOYAGE_SAGEMAKER_ENDPOINT or EMBEDDING_MODEL_ID.",
+        "EMBEDDINGS_PROVIDER=titan but EMBEDDING_MODEL_ID is empty. Refusing to fall back to Voyage.",
     };
   }
-
   try {
-    const r = await bedrockGenerateEmbedding(trimmed, bedrockModelId, abortSignal);
+    const r = await bedrockGenerateEmbedding(text, bedrockModelId, abortSignal);
     const v = extractEmbedding(r);
     if (v) {
       return { ok: true, source: "bedrock", modelId: v.modelId ?? bedrockModelId, vector: v.embedding };
     }
     return {
       ok: false,
-      code: "bedrock_failed",
+      code: "titan_strict_failed",
       message: `Bedrock returned unrecognized embedding shape: ${previewJson(r)}`,
     };
   } catch (err) {
     return {
       ok: false,
-      code: "bedrock_failed",
+      code: "titan_strict_failed",
       message: err instanceof Error ? err.message : String(err),
     };
   }

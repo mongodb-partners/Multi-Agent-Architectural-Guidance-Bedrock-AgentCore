@@ -5,7 +5,7 @@
  *  - The caller's JWT `sub` must exactly match `trace.userId`. Traces with no
  *    `userId` are denied (returned as 404) to any caller — the same treatment as
  *    a foreign-owned trace.  This closes the legacy-unscoped bypass and enforces
- *    the SOW requirement that jwt.sub is the sole tenant key everywhere.
+ *    the security requirement that jwt.sub is the sole tenant key everywhere.
  *
  * Endpoints:
  *  - `GET /traces/:traceId`        — fetch a complete trace document.

@@ -2,8 +2,6 @@
 
 A **configuration-driven multi-agent reference architecture** on **AWS Bedrock** (Strands Agents TypeScript SDK), **MongoDB Atlas**, and **JWT-secured** HTTP APIs. Add specialists by editing markdown config — no code changes needed.
 
-> **Start here for handover:** [`docs/README.md`](docs/README.md) is the single handover entry point — first-day checklist, reading orders, doc map, authoritative source files.
-
 ---
 
 ## What this is
@@ -45,7 +43,7 @@ source .env
 aws sts get-caller-identity
 ```
 
-Full env catalog: [`.env.sample`](.env.sample) and [`docs/reference/env-vars.md`](docs/reference/env-vars.md). Role-based handover: [`docs/README.md`](docs/README.md).
+Full env catalog: [`.env.sample`](.env.sample) and [`docs/reference/env-vars.md`](docs/reference/env-vars.md). Role-based getting started: [`docs/README.md`](docs/README.md).
 
 ---
 
@@ -129,6 +127,7 @@ source .env
 ./deploy/deploy-full-with-privatelink.sh --auto-approve --skip-docker
 ./deploy/deploy-full-with-privatelink.sh --auto-approve --skip-network
 ./deploy/deploy-full-with-privatelink.sh --auto-approve --skip-shared
+./deploy/deploy-full-with-privatelink.sh --auto-approve --skip-smoke
 ./deploy/deploy-full-with-privatelink.sh --env-file /path/to/.env
 ```
 
@@ -141,6 +140,8 @@ source .env
 | `--env-file PATH` | Alternate credentials file |
 
 **After deploy:**
+
+Full post-deploy smoke runs automatically at the end of `deploy-project.sh` (Phase 11). To re-run manually:
 
 ```bash
 source .env && python3 e2e-smoke/post-deploy-smoke.py
@@ -204,7 +205,7 @@ Full runbook: [`docs/deployment-guide.md`](docs/deployment-guide.md). Script ref
 
 | Document | What it covers |
 |---|---|
-| [`docs/README.md`](docs/README.md) | **Handover entry** — checklist, reading orders |
+| [`docs/README.md`](docs/README.md) | **Getting started** — checklist, reading orders |
 | [`docs/agent-authoring-guide.md`](docs/agent-authoring-guide.md) | `.agent.md` schema |
 | [`docs/skills-authoring-guide.md`](docs/skills-authoring-guide.md) | `SKILL.md`, scripts, http-tools |
 | [`docs/configuration-guide.md`](docs/configuration-guide.md) | `config/` folder — agent + skill schema |
@@ -220,6 +221,9 @@ More (architecture, API, memory, observability, debugging): see the full table i
 ## For developers working on this project
 
 The sections below apply when you are **changing framework code**, running the API/UI on a laptop, or debugging infrastructure — not for the typical “configure agents and deploy” workflow above.
+
+> **Start here for getting started:** [`docs/README.md`](docs/README.md) is the single getting started entry point — first-day checklist, doc map, authoritative source files.
+
 
 ### Run API and UI locally
 
@@ -280,7 +284,7 @@ deploy/          — Terraform + deploy scripts
 db-seeding/      — Atlas demo data + indexes
 e2e/             — Playwright (live API)
 e2e-smoke/       — Post-deploy AWS smoke
-docs/            — Handover pack
+docs/            — Getting started pack
 ```
 
 Rationale: [`PROJECT_STRUCTURE.md`](PROJECT_STRUCTURE.md). Contributor conventions: [`AGENTS.md`](AGENTS.md).

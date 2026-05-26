@@ -243,4 +243,10 @@ describe("health-status", () => {
     const body = await buildHealthPayload();
     expect(body.dependencies.bedrockKnowledgeBase).toBe("connected");
   });
+
+  test("buildHealthPayload omits mcpServer without a gateway JWT", async () => {
+    delete process.env.MONGODB_URI;
+    const body = await buildHealthPayload();
+    expect(body.dependencies).not.toHaveProperty("mcpServer");
+  });
 });

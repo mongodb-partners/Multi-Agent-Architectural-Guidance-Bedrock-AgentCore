@@ -5,7 +5,8 @@ This script is intentionally outside the unit/integration test tree. It talks
 to the already-deployed API, Cognito, SageMaker, Bedrock KB, and Terraform
 outputs produced by deploy/scripts/deploy-project.sh.
 
-Run from the repository root after deployment:
+Run from the repository root after deployment (also invoked automatically by
+deploy-project.sh Phase 11 unless --skip-smoke):
 
     python3 e2e-smoke/post-deploy-smoke.py
 
@@ -127,16 +128,10 @@ def check_health(api_url: str, resources: dict[str, Any]) -> None:
     /health smoke. We mirror deploy-project.sh Phase 9a2's contract:
     - mongodb + agentcore: HARD-REQUIRE 'connected'.
     - bedrockKnowledgeBase: HARD-REQUIRE 'connected' when KB id is provisioned.
-    - mcpServer: WARN ONLY when not 'connected'. The MCP runtime is an
-      AgentCore Runtime that can be scaled to zero between deploys; its first
-      probe after an idle period frequently times out on cold start (MCP client
-      timeout 60s > API health probe timeout 2.5s, so `/health` reports
-      'unreachable' even though invocations from chat will eventually succeed
-      once the container warms). Real MCP regressions are caught downstream by
-      `check_agentcore_runtime_env` (env wiring) + the per-agent chat checks
-      (vector_search / aggregate trace events). Failing here would force every
-      operator to run smoke twice. Matches the warning behaviour at
-      deploy/scripts/deploy-project.sh:1510-1512.
+    - mcpServer: omitted on unauthenticated GET /health (Gateway MCP requires
+      JWT). When present (optional Bearer on /health), WARN ONLY if not
+      'connected'. Real MCP regressions are caught by runtime env wiring +
+      per-agent chat checks.
     """
     log("\n== Health ==")
     health = load_json_url(f"{api_url}/health")
@@ -146,10 +141,14 @@ def check_health(api_url: str, resources: dict[str, Any]) -> None:
     for dep in ("mongodb", "agentcore"):
         require(deps.get(dep) == "connected", f"/health dependency {dep} is {deps.get(dep)!r}")
     mcp_status = deps.get("mcpServer")
-    if mcp_status != "connected":
+    if mcp_status is None:
+        log(
+            "  note: mcpServer omitted from /health (unauthenticated probe); "
+            "MCP is validated by chat checks below."
+        )
+    elif mcp_status != "connected":
         log(
             f"  warning: /health dependency mcpServer is {mcp_status!r}; "
-            "MongoDB MCP runtime likely cold-starting. Downstream env-wiring + "
             "chat checks will catch real MCP regressions."
         )
     if resources.get("bedrock_kb_id"):
@@ -184,7 +183,7 @@ def check_embedding_manifest_and_sagemaker(resources: dict[str, Any]) -> None:
     log("\n== Embedding provider ==")
     provider = resources.get("embeddings_provider")
     model = resources.get("embeddings_model")
-    aligned = resources.get("embeddings_sow_aligned")
+    aligned = resources.get("embeddings_voyage_multimodal")
     endpoint = resources.get("voyage_sagemaker_endpoint")
     region = resources.get("aws_region")
     log(
@@ -192,7 +191,7 @@ def check_embedding_manifest_and_sagemaker(resources: dict[str, Any]) -> None:
             {
                 "provider": provider,
                 "model": model,
-                "sow_aligned": aligned,
+                "voyage_multimodal": aligned,
                 "endpoint": endpoint,
             },
             sort_keys=True,
@@ -208,7 +207,7 @@ def check_embedding_manifest_and_sagemaker(resources: dict[str, Any]) -> None:
         if aligned is True:
             require(
                 re.match(r"^voyage-multimo(?:dal|del)-3($|-)", model),
-                f"embeddings_sow_aligned=true but model is not voyage-multimodal-3 family: {model!r}",
+                f"embeddings_voyage_multimodal=true but model is not voyage-multimodal-3 family: {model!r}",
             )
         require(endpoint, "voyage provider requires voyage_sagemaker_endpoint")
         status = run(
@@ -230,7 +229,7 @@ def check_embedding_manifest_and_sagemaker(resources: dict[str, Any]) -> None:
         log(f"sagemaker_endpoint_status={status}")
         require(status == "InService", f"Voyage SageMaker endpoint is not InService: {status}")
     else:
-        require(aligned is False, "titan provider must be marked embeddings_sow_aligned=false")
+        require(aligned is False, "titan provider must be marked embeddings_voyage_multimodal=false")
         require(model == "amazon.titan-embed-text-v2:0", f"unexpected titan model: {model!r}")
         require(not endpoint, "titan provider should not publish a Voyage endpoint")
 
@@ -1118,6 +1117,342 @@ def check_cloudwatch_join(resources: dict[str, Any], api_url: str, token: str) -
         )
 
 
+def _load_env_live_uri() -> str:
+    """Read MONGODB_URI_PUBLIC (preferred) or MONGODB_URI from .env.live so the
+    laptop-side checks can reach Atlas. PrivateLink-resolved hostnames in
+    MONGODB_URI are only reachable from inside the VPC; MONGODB_URI_PUBLIC is
+    the public-SRV form that the laptop can use."""
+    env_live = ROOT / ".env.live"
+    if not env_live.exists():
+        return ""
+    uri = ""
+    fallback = ""
+    for line in env_live.read_text().splitlines():
+        if line.startswith("MONGODB_URI_PUBLIC="):
+            uri = line.split("=", 1)[1].strip().strip('"')
+        elif line.startswith("MONGODB_URI="):
+            fallback = line.split("=", 1)[1].strip().strip('"')
+    return uri or fallback
+
+
+def _bun_probe_mongo(uri: str, db: str, script: str) -> str:
+    """Run `bun -e` with MONGO_URI / MONGO_DB / SCRIPT in env and return stdout.
+    Bun is preferred over pymongo so we don't need an optional Python dep."""
+    bun = subprocess.run(
+        ["bun", "-e", script],
+        env={**os.environ, "MONGO_URI": uri, "MONGO_DB": db},
+        text=True,
+        capture_output=True,
+        timeout=60,
+    )
+    return (bun.stdout or "").strip()
+
+
+def check_mongo_runtime_reachable(resources: dict[str, Any]) -> None:
+    """Verify the running API container on EC2 can reach Mongo via its
+    configured `MONGODB_URI`. Catches the PrivateLink-DNS-only failure mode
+    where laptop-side probes succeed (via public SRV) but EC2 cannot resolve
+    PrivateLink hostnames at runtime — deploys succeed but chat is broken.
+
+    Implementation: AWS SSM send-command runs a one-liner inside the
+    multiagent-api container that calls `db.command({ping:1})`.
+    """
+    log("\n== EC2-side Mongo reachability ==")
+    if os.environ.get("SKIP_MONGO_RUNTIME_CHECK") == "1":
+        log("skipped via SKIP_MONGO_RUNTIME_CHECK=1")
+        return
+    instance_id = str(resources.get("ec2_instance_id") or "").strip()
+    region = str(resources.get("aws_region") or os.environ.get("AWS_REGION") or "us-east-1")
+    if not instance_id:
+        log("ec2_instance_id missing in manifest — skipping runtime Mongo probe")
+        return
+
+    # Run inside the multiagent-api container so we use the same MONGODB_URI
+    # the API sees (which differs from the laptop's MONGODB_URI_PUBLIC under
+    # PrivateLink/peering modes).
+    cmd = (
+        "docker exec multiagent-api bun -e '"
+        "import { MongoClient } from \"mongodb\";"
+        "const uri = process.env.MONGODB_URI;"
+        "const db  = process.env.MONGODB_DB;"
+        "const c   = new MongoClient(uri, { appName: \"post-deploy-runtime-probe\", serverSelectionTimeoutMS: 5000 });"
+        "try { await c.connect(); await c.db(db).command({ ping: 1 }); process.stdout.write(\"OK\"); }"
+        "catch (e) { process.stdout.write(\"ERR \" + (e && e.message ? e.message : String(e))); }"
+        "finally { try { await c.close(); } catch (_) {} }"
+        "'"
+    )
+
+    try:
+        send_out = run(
+            [
+                "aws", "ssm", "send-command",
+                "--region", region,
+                "--instance-ids", instance_id,
+                "--document-name", "AWS-RunShellScript",
+                "--parameters", json.dumps({"commands": [cmd]}),
+                "--query", "Command.CommandId",
+                "--output", "text",
+            ],
+            timeout=30,
+        )
+    except SmokeFailure as exc:
+        log(f"ssm send-command failed (skipping): {exc}")
+        return
+    cmd_id = send_out.strip()
+
+    # Poll for completion.
+    final_status = ""
+    output = ""
+    deadline = time.time() + 60
+    while time.time() < deadline:
+        try:
+            raw = run(
+                [
+                    "aws", "ssm", "get-command-invocation",
+                    "--region", region,
+                    "--command-id", cmd_id,
+                    "--instance-id", instance_id,
+                    "--output", "json",
+                ],
+                timeout=15,
+            )
+        except SmokeFailure:
+            time.sleep(2)
+            continue
+        try:
+            doc = json.loads(raw)
+        except json.JSONDecodeError:
+            time.sleep(2)
+            continue
+        final_status = (doc.get("Status") or "").strip()
+        output = (doc.get("StandardOutputContent") or "").strip()
+        if final_status in ("Success", "Failed", "Cancelled", "TimedOut"):
+            break
+        time.sleep(2)
+
+    log(f"ssm_status={final_status} output={output[:200]!r}")
+    require(
+        final_status == "Success" and output.startswith("OK"),
+        f"EC2-side Mongo probe failed (status={final_status} output={output[:300]!r})",
+    )
+    log("PASS EC2-side Mongo reachability")
+
+
+def check_seeded_corpus_embeddings(resources: dict[str, Any]) -> None:
+    """Verify products + seeder-owned troubleshooting_docs rows all carry
+    `embedding` (correct dim) and `embeddingModel` (matches provider). Catches
+    the silent embedding-seed regression that the original "embeddings not in
+    DB" report exposed."""
+    log("\n== Seeded corpus embeddings ==")
+    if os.environ.get("SKIP_CORPUS_EMBEDDING_CHECK") == "1":
+        log("skipped via SKIP_CORPUS_EMBEDDING_CHECK=1")
+        return
+    uri = _load_env_live_uri()
+    if not uri:
+        log("no MONGODB_URI / MONGODB_URI_PUBLIC in .env.live — skipping corpus embedding check")
+        return
+    provider = str(resources.get("embeddings_provider") or "").strip()
+    expected_prefix = "voyage:" if provider == "voyage" else "bedrock:"
+    expected_dim_raw = os.environ.get("EMBEDDING_DIMENSIONS") or "1024"
+    try:
+        expected_dim = int(expected_dim_raw)
+    except ValueError:
+        expected_dim = 1024
+    # Derive DB name from manifest (same convention as deploy-project.sh).
+    db = str(resources.get("mongodb_db") or "").strip()
+    if not db:
+        project = str(resources.get("project_name") or os.environ.get("PROJECT_NAME") or "multiagent")
+        env = str(resources.get("environment") or os.environ.get("ENVIRONMENT") or "dev")
+        slug = re.sub(r"[^a-zA-Z0-9_]", "_", project)
+        db = f"{slug}_{env}"
+    script = (
+        "import { MongoClient } from 'mongodb';"
+        "const uri = process.env.MONGO_URI; const db = process.env.MONGO_DB;"
+        "const c = new MongoClient(uri, { appName: 'post-deploy-corpus-check', serverSelectionTimeoutMS: 8000 });"
+        "try { await c.connect();"
+        "  const out = {};"
+        "  for (const { name, filter } of ["
+        "    { name: 'products', filter: {} },"
+        "    { name: 'troubleshooting_docs', filter: { bedrock_text_chunk: { $exists: false }, bedrock_metadata: { $exists: false } } },"
+        "  ]) {"
+        "    const coll = c.db(db).collection(name);"
+        "    const total = await coll.countDocuments(filter);"
+        "    const withEmb = await coll.countDocuments({ ...filter, embedding: { $exists: true, $type: 'array' } });"
+        "    const sample = withEmb > 0"
+        "      ? await coll.findOne({ ...filter, embedding: { $exists: true, $type: 'array' } }, { projection: { embedding: 1, embeddingModel: 1 } })"
+        "      : null;"
+        "    out[name] = {"
+        "      total, withEmb,"
+        "      dim: sample && Array.isArray(sample.embedding) ? sample.embedding.length : null,"
+        "      model: sample ? (sample.embeddingModel || null) : null,"
+        "    };"
+        "  }"
+        "  process.stdout.write(JSON.stringify(out));"
+        "} catch (e) { process.stdout.write(JSON.stringify({ error: String(e && e.message ? e.message : e) })); }"
+        "finally { try { await c.close(); } catch (_) {} }"
+    )
+    out = _bun_probe_mongo(uri, db, script)
+    try:
+        result = json.loads(out or "{}")
+    except json.JSONDecodeError:
+        raise SmokeFailure(f"corpus probe returned non-JSON output: {out[:200]!r}")
+    if result.get("error"):
+        raise SmokeFailure(f"corpus probe error: {result['error']}")
+    log(json.dumps(result, sort_keys=True))
+    for name, stats in result.items():
+        total = int(stats.get("total") or 0)
+        require(total > 0, f"{name}: 0 seeder-owned rows (collection unseeded?)")
+        with_emb = int(stats.get("withEmb") or 0)
+        require(with_emb == total, f"{name}: {total - with_emb}/{total} rows missing embedding")
+        dim = stats.get("dim")
+        require(
+            isinstance(dim, int) and dim == expected_dim,
+            f"{name}: sample embedding.length={dim} (want {expected_dim})",
+        )
+        model = stats.get("model") or ""
+        require(
+            isinstance(model, str) and model.startswith(expected_prefix),
+            f"{name}: embeddingModel={model!r} does not start with {expected_prefix!r}",
+        )
+    log("PASS seeded corpus embeddings (both collections, dim + provider tag verified)")
+
+
+def check_long_term_memory_embeddings(
+    resources: dict[str, Any],
+    api_url: str,
+    token: str,
+) -> None:
+    """Verify that LTM writes (`agent_memory_facts`) and chat mirror
+    (`chat_messages`) carry `embedding` + matching `embeddingModel`.
+    Catches the silent runtime embedding skip that the diagnostic harness
+    found in long-term-memory.ts / session-store.ts.
+
+    Design note — unique plant per run:
+    The `check_long_term_memory_recall` test plants HELIOTROPE-LANTERN via the
+    orchestrator, which routes to order-management. That agent deflects mnemonic
+    storage, so the LTM extractor returns factCount=0 and no new row is written.
+    After the first ever smoke run those facts are also duplicates anyway.
+
+    To guarantee a fresh `agent_memory_facts` row with an embedding on every
+    run, this check plants a timestamped preference via `product-recommendation`
+    directly. That agent confirms user preferences, which the extractor does
+    extract. The unique run-ID in the fact prevents deduplication collisions
+    across runs. The check then queries for that specific token in MongoDB.
+    """
+    log("\n== LTM Mongo-side embedding writes ==")
+    if os.environ.get("SKIP_CORPUS_EMBEDDING_CHECK") == "1" or os.environ.get("SKIP_LTM_CHECK") == "1":
+        log("skipped via SKIP_CORPUS_EMBEDDING_CHECK=1 or SKIP_LTM_CHECK=1")
+        return
+    uri = _load_env_live_uri()
+    if not uri:
+        log("no MONGODB_URI / MONGODB_URI_PUBLIC in .env.live — skipping LTM embedding check")
+        return
+    provider = str(resources.get("embeddings_provider") or "").strip()
+    # Strict-mode-aware prefix matching. Two storage shapes co-exist in MongoDB:
+    #   1. Seeder format (`db-seeding/seed-embeddings.ts`): "voyage:<endpoint>"
+    #      e.g. "voyage:voyage-multimodal-3-dev", or "bedrock:<model-id>"
+    #      e.g. "bedrock:amazon.titan-embed-text-v2:0".
+    #   2. Runtime API format (`embed-query.ts`, strict-mode): the raw model
+    #      name returned by the provider — e.g. "voyage-multimodal-3" (no
+    #      colon) for Voyage, "amazon.titan-embed-text-v2:0" for Titan.
+    # The runtime LTM / chat-mirror writes use shape 2. We accept either —
+    # what we're guarding against is silent cross-provider leakage (e.g. a
+    # Titan modelId showing up under EMBEDDINGS_PROVIDER=voyage).
+    if provider == "voyage":
+        expected_prefixes = ("voyage",)
+    else:
+        expected_prefixes = ("bedrock:", "amazon.titan-embed", "cohere.embed")
+    db = str(resources.get("mongodb_db") or "").strip()
+    if not db:
+        project = str(resources.get("project_name") or os.environ.get("PROJECT_NAME") or "multiagent")
+        env = str(resources.get("environment") or os.environ.get("ENVIRONMENT") or "dev")
+        slug = re.sub(r"[^a-zA-Z0-9_]", "_", project)
+        db = f"{slug}_{env}"
+
+    # Plant a uniquely-keyed preference via product-recommendation so the LTM
+    # extractor always has a genuinely-new fact to store and embed.
+    run_id = int(time.time() * 1000)
+    unique_token = f"SMOKE-EMB-{run_id}"
+    plant_msg = (
+        f"For my product profile: I only buy items tagged {unique_token}. "
+        "Please remember this as a permanent filter preference."
+    )
+    plant_session = f"smoke-emb-plant-{run_id}"
+    log(f"planting unique embedding-check fact: {unique_token!r}")
+    try:
+        body, _ = post_chat(api_url, token, "product-recommendation", plant_msg, session_id=plant_session)
+        _plant_text, plant_events, _plant_traces, _plant_handoffs, plant_errors = parse_sse(body)
+        if "done" not in plant_events or plant_errors:
+            log(f"  ⚠ embedding-check plant turn had issues (events={plant_events} errors={plant_errors[:1]}); proceeding")
+    except Exception as exc:
+        log(f"  ⚠ embedding-check plant failed: {exc}; proceeding")
+    # Allow async fact extraction + embedding microtask to complete.
+    time.sleep(12)
+
+    # Verify embeddings in both collections:
+    #
+    # agent_memory_facts: look for the unique token just planted above (last 5
+    #   min window). Using a unique run-ID token guarantees we're seeing a write
+    #   from THIS run, not a stale row from a previous run. `ts` is a BSON Date.
+    #
+    # chat_messages: look for any row with embedding in the last 1h. `timestamp`
+    #   is stored as an ISO-8601 string — comparing a BSON Date against a string
+    #   always returns zero matches in MongoDB (different BSON types), so we use
+    #   the ISO string form. `ts` is the BSON Date field; we use `timestamp` to
+    #   match the declared sort/filter field for that collection.
+    five_min_ago_ms = int((time.time() - 300) * 1000)
+    one_hour_ago_ms = int((time.time() - 3600) * 1000)
+    script = (
+        "import { MongoClient } from 'mongodb';"
+        "const uri = process.env.MONGO_URI; const db = process.env.MONGO_DB;"
+        f"const sinceFacts = new Date({five_min_ago_ms});"
+        f"const sinceMsgs = new Date({one_hour_ago_ms}).toISOString();"
+        f"const uniqueToken = {unique_token!r};"
+        "const c = new MongoClient(uri, { appName: 'post-deploy-ltm-check', serverSelectionTimeoutMS: 8000 });"
+        "try { await c.connect();"
+        "  const d = c.db(db);"
+        # agent_memory_facts: match the unique token planted above + has embedding
+        "  const afSample = await d.collection('agent_memory_facts').findOne("
+        "    { ts: { $gte: sinceFacts }, fact: { $regex: uniqueToken }, embedding: { $exists: true, $type: 'array' } },"
+        "    { projection: { embedding: 1, embeddingModel: 1 } });"
+        # chat_messages: any embedded row in the last 1h (timestamp is a string)
+        "  const cmSample = await d.collection('chat_messages').findOne("
+        "    { timestamp: { $gte: sinceMsgs }, embedding: { $exists: true, $type: 'array' } },"
+        "    { projection: { embedding: 1, embeddingModel: 1 } });"
+        "  process.stdout.write(JSON.stringify({"
+        "    agent_memory_facts: { withEmbeddingExists: Boolean(afSample), model: afSample ? (afSample.embeddingModel||null) : null, dim: afSample && Array.isArray(afSample.embedding) ? afSample.embedding.length : null },"
+        "    chat_messages:      { withEmbeddingExists: Boolean(cmSample), model: cmSample ? (cmSample.embeddingModel||null) : null, dim: cmSample && Array.isArray(cmSample.embedding) ? cmSample.embedding.length : null },"
+        "  }));"
+        "} catch (e) { process.stdout.write(JSON.stringify({ error: String(e && e.message ? e.message : e) })); }"
+        "finally { try { await c.close(); } catch (_) {} }"
+    )
+    out = _bun_probe_mongo(uri, db, script)
+    try:
+        result = json.loads(out or "{}")
+    except json.JSONDecodeError:
+        raise SmokeFailure(f"LTM probe returned non-JSON output: {out[:200]!r}")
+    if result.get("error"):
+        raise SmokeFailure(f"LTM probe error: {result['error']}")
+    log(json.dumps(result, sort_keys=True))
+    for name in ("agent_memory_facts", "chat_messages"):
+        stats = result.get(name) or {}
+        if name == "agent_memory_facts":
+            details = f"(looked for fact containing {unique_token!r} written in last 5 min)"
+        else:
+            details = "(looked for any row written in last 1h)"
+        require(
+            stats.get("withEmbeddingExists") is True,
+            f"{name}: no row with embedding {details} — runtime embedding writes failing silently?",
+        )
+        model = stats.get("model") or ""
+        require(
+            isinstance(model, str)
+            and any(model.startswith(p) for p in expected_prefixes),
+            f"{name}: latest row embeddingModel={model!r} does not start with any of {expected_prefixes!r}",
+        )
+    log("PASS LTM Mongo-side embedding writes")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -1151,8 +1486,14 @@ def main() -> int:
     # reach Gateway, which the chat check would only catch after retries on
     # each agent.
     check_agentcore_runtime_env(resources)
+    # EC2-side Mongo connectivity (catches PrivateLink-DNS-only failures that
+    # pass laptop probes but fail at runtime). Runs BEFORE corpus + LTM checks
+    # so the operator sees the right diagnosis first.
+    check_mongo_runtime_reachable(resources)
+    check_seeded_corpus_embeddings(resources)
     check_all_agents(api_url, token)
     check_long_term_memory_recall(api_url, token)
+    check_long_term_memory_embeddings(resources, api_url, token)
     check_cloudwatch_join(resources, api_url, token)
 
     log("\nALL_POST_DEPLOY_SMOKE_CHECKS_PASSED")

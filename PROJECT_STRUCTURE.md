@@ -2,7 +2,7 @@
 
 A per-folder map of the repository as it ships today. Each entry explains **what it is** and **why it exists** so a new owner can navigate without having to grep for the canonical source.
 
-> Companion: [`docs/README.md`](docs/README.md) — handover entry point, reading orders.
+> Companion: [`docs/README.md`](docs/README.md) — getting started entry point, reading orders.
 
 ---
 
@@ -11,7 +11,7 @@ A per-folder map of the repository as it ships today. Each entry explains **what
 ```
 .
 ├── api/                    Bun + Hono API + shared AgentCore Runtime bundle
-├── ui/                     Streamlit chat client (Chat + Sessions + Trace Viewer)
+├── ui/                     Streamlit chat UI (Chat + Sessions + Trace Viewer)
 ├── mcp-runtimes/
 │   └── mongodb-mcp/        MongoDB MCP server as an AgentCore Runtime (ARM64 container)
 ├── config/
@@ -24,13 +24,13 @@ A per-folder map of the repository as it ships today. Each entry explains **what
 ├── deploy/                 All deploy assets — Terraform, scripts, IAM
 ├── e2e/                    Playwright API smoke specs
 ├── e2e-smoke/              Python live-AWS smoke + memory recall diagnostic
-├── docs/                   Canonical handover pack (read docs/README.md first)
+├── docs/                   Canonical getting started pack (read docs/README.md first)
 ├── .github/workflows/      ci.yml + deploy.yml
 ├── compose.yaml            Local docker-compose for API + UI
 ├── Makefile                docker-up / docker-build / docker-down / docker-logs shortcuts
 ├── .env.sample             Every env var, commented (copy to .env)
 ├── .env.docker.example     Docker-compose overrides
-├── README.md               Project overview (points at docs/README.md for handover)
+├── README.md               Project overview (points at docs/README.md for getting started)
 ├── AGENTS.md               Contributor conventions (AI + human)
 └── PROJECT_STRUCTURE.md    This file
 ```
@@ -80,7 +80,7 @@ See [`api/README.md`](api/README.md) for the validation-script catalog.
 
 ---
 
-## `ui/` — Streamlit chat client
+## `ui/` — Streamlit chat UI
 
 ```
 ui/
@@ -89,7 +89,7 @@ ui/
 │   ├── 1_Sessions.py             Past sessions (filtered by JWT sub)
 │   └── 2_Trace_Viewer.py         Debug-grade Trace Viewer (?include=core|dev|full)
 ├── lib/
-│   ├── api_client.py             Typed HTTP client (SSE chat, sessions, agents, traces)
+│   ├── api_client.py             Typed HTTP API wrapper (SSE chat, sessions, agents, traces)
 │   ├── cognito_gate.py           Hosted-UI redirect / embedded login / STREAMLIT_AUTH_DISABLED
 │   ├── chat_panel.py             Main chat flow + suggested prompts + sidebar
 │   ├── inline_summary.py         Per-turn inline card (skills, vector search previews, LTM toast)
@@ -126,7 +126,7 @@ mcp-runtimes/mongodb-mcp/
 └── README.md
 ```
 
-`api/src/adapters/mongodb-mcp-client.ts` is the API-side client.
+`api/src/adapters/mongodb-mcp-client.ts` is the API-side MCP client.
 
 ---
 
@@ -216,7 +216,7 @@ deploy/
 │   │   ├── bedrock-kb-peering/               NLB to discovered Atlas peering IPs for KB ingestion (peering mode, EXPERIMENTAL)
 │   │   ├── ec2/                              EC2 instance profile + user-data (SSM-only, no SSH)
 │   │   ├── ecr/                              Private ECR repos for API + UI + MCP images
-│   │   ├── cognito/                          User Pool + App Client (Cognito hosted UI + JWKS)
+│   │   ├── cognito/                          User Pool + App (Cognito) (Cognito hosted UI + JWKS)
 │   │   ├── agentcore-memory/                 AgentCore Memory Store
 │   │   ├── agentcore-gateway/                AgentCore Gateway + mcp_server target → MongoDB MCP runtime
 │   │   ├── agentcore-agent-runtime/          AgentCore Runtime (5 runtimes — 4 chat code-mode + 1 MCP container-mode)
@@ -255,7 +255,7 @@ Companion: [`docs/reference/smoke-tests.md`](docs/reference/smoke-tests.md).
 
 ```
 docs/
-├── README.md                          ← CLIENT HANDOVER ENTRY POINT
+├── README.md                          ← GETTING STARTED ENTRY POINT
 ├── architecture.md
 ├── deployment-guide.md                ← deploy + CI/CD + teardown
 ├── configuration-guide.md             ← config/ folder (agents, skills, yaml)
@@ -270,7 +270,7 @@ docs/
 ├── logging-architecture.md
 ├── observability-runbook.md
 ├── trace-ui-system-overview.md
-├── trace-viewer-client-guide.md
+├── trace-viewer-guide.md
 ├── trace-viewer-developer-guide.md
 ├── agentcore-runtime-design.md
 ├── status/

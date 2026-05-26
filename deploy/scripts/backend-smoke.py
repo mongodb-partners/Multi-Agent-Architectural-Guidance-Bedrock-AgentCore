@@ -5,7 +5,15 @@ This validates the live /chat path rather than just transport health:
 - SSE emits token/handoff/done without error events.
 - AgentCore runtime telemetry is present.
 - MongoDB MCP tool counters are non-zero.
-- The response includes seeded ORD-2002 order fields.
+- The response includes seeded ORD-1005 order fields.
+
+The smoke prompt MUST query an order that belongs to the authenticated
+COGNITO_SMOKE_USER_EMAIL (defaults to alex@example.com). The order-management
+specialist enforces a per-user authorization guardrail and will refuse to
+look up another customer's order, returning a polite refusal without ever
+calling `mongodb_query`. That refusal is correct app behaviour, not a bug,
+so the fixture is pinned to alex's own ORD-1005 (Pro Gadget @ $89.99,
+tracking TRK-9005-US). See seed-orders.ts for the full owner→order map.
 """
 
 import argparse
@@ -74,19 +82,28 @@ def check_sse(body: str) -> tuple[bool, bool, bool]:
 
 
 def has_order_data(body: str) -> bool:
-    # The seeded dataset for ORD-2002 always contains at least one of these.
-    return any(needle in body for needle in ("TRK-2002-US", "Pro Gadget", "89.99"))
+    # The seeded dataset for ORD-1005 (alex's Pro Gadget order) always contains
+    # at least one of these. We also keep ORD-2002's tracking number in the
+    # needle set so a legacy / overridden COGNITO_SMOKE_USER_EMAIL=casey@...
+    # run still satisfies the assertion.
+    return any(
+        needle in body
+        for needle in ("TRK-9005-US", "TRK-2002-US", "Pro Gadget", "89.99")
+    )
 
 
 def validate_chat_smoke(api: str, session_id: str, id_token: str) -> None:
     last_err = "SSE smoke validation failed: unknown"
     for attempt in range(1, 4):
         first = post_chat(api, session_id, id_token, "I need help tracking an order.")
+        # The order MUST belong to the authenticated COGNITO_SMOKE_USER_EMAIL
+        # (default alex@example.com). The order-management specialist refuses
+        # cross-account lookups by design — see backend-smoke.py module docstring.
         second = post_chat(
             api,
             session_id,
             id_token,
-            "Order ORD-2002 for casey@example.com. What is the tracking number and status?",
+            "Order ORD-1005 for alex@example.com. What is the tracking number and status?",
         )
 
         first_has_token, _, first_has_done = check_sse(first)
@@ -134,8 +151,8 @@ def validate_chat_smoke(api: str, session_id: str, id_token: str) -> None:
                 )
             elif not has_order_data(second):
                 last_err = (
-                    "SSE smoke validation failed: response for ORD-2002 lacks any seeded "
-                    "order field (TRK-2002-US / Pro Gadget / 89.99). The MCP tool path is "
+                    "SSE smoke validation failed: response for ORD-1005 lacks any seeded "
+                    "order field (TRK-9005-US / Pro Gadget / 89.99). The MCP tool path is "
                     "almost certainly broken - check AgentCore Runtime logs for "
                     "'no MCP tools loaded' and Lambda logs for 'Unrecognized event shape'."
                 )

@@ -53,6 +53,12 @@ err()  { echo "  [local] ✗ $*" >&2; exit 1; }
 sep()  { echo "────────────────────────────────────────────────"; }
 warn() { echo "  [local] ⚠ $*"; }
 
+# Shared helpers — used by Phase 7 (seed) and the post-apply preflight gate.
+# shellcheck source=deploy/scripts/_mongo-connect.sh
+source "$SCRIPT_DIR/_mongo-connect.sh"
+# shellcheck source=deploy/scripts/_seed-embeddings.sh
+source "$SCRIPT_DIR/_seed-embeddings.sh"
+
 # Wrap `terraform apply` with retry-on-transient-Atlas-API-error. The MongoDB
 # Atlas control plane (cloud.mongodb.com) occasionally returns i/o timeouts
 # or connection-resets that vanish on the next call. We retry the apply up to
@@ -315,7 +321,10 @@ export MONGODB_ALLOW_WRITE=true
 export BEDROCK_KB_ID="${BEDROCK_KB_ID}"
 export AWS_REGION="${AWS_REGION}"
 
-# Embedding: Titan (local mode — VOYAGE_SAGEMAKER_ENDPOINT intentionally not set)
+# Embedding: Titan (local mode — VOYAGE_SAGEMAKER_ENDPOINT intentionally not
+# set). Strict mode requires EMBEDDINGS_PROVIDER to be set explicitly — empty
+# values now throw at API boot. See `api/src/lib/assert-embeddings-provider.ts`.
+export EMBEDDINGS_PROVIDER="titan"
 export EMBEDDING_MODEL_ID="amazon.titan-embed-text-v2:0"
 
 # Tool hosting: production-style — every Mongo tool call is served by the
@@ -353,18 +362,36 @@ else
   export MONGODB_URI="$MONGODB_URI"
   export MONGODB_DB="$ATLAS_DB_NAME"
   export AWS_REGION="$AWS_REGION"
-  export EMBEDDING_MODEL_ID="amazon.titan-embed-text-v2:0"
   export PATH="$HOME/.bun/bin:$PATH"
+
+  # deploy-local.sh defaults to the Bedrock Titan provider — the laptop path
+  # does NOT provision the Voyage SageMaker endpoint. Operators who want
+  # voyage on the local path must run deploy-shared.sh first.
+  export EMBEDDINGS_PROVIDER="${EMBEDDINGS_PROVIDER:-titan}"
+  export EMBEDDING_MODEL_ID="${EMBEDDING_MODEL_ID:-amazon.titan-embed-text-v2:0}"
+  export EMBEDDING_DIMENSIONS="${EMBEDDING_DIMENSIONS:-1024}"
 
   log "Seeding collections (customers, products, orders, troubleshooting, indexes)..."
   bun db-seeding/seed-all.ts \
-    && ok "Collections seeded" \
-    || warn "Seed-all failed — check logs. Re-run: bun db-seeding/seed-all.ts"
+    || err "seed-all failed — re-run: bun db-seeding/seed-all.ts"
+  ok "Collections seeded"
 
-  log "Generating Titan embeddings (requires AWS Bedrock access)..."
-  bun db-seeding/seed-embeddings.ts \
-    && ok "Embeddings generated" \
-    || warn "Embedding generation failed — run manually: bun db-seeding/seed-embeddings.ts"
+  log "Reconciling vector + BM25 indexes..."
+  WAIT_FOR_ATLAS_SEARCH_INDEXES=1 bun db-seeding/seed-indexes.ts \
+    || err "seed-indexes failed"
+  ok "Indexes reconciled"
+
+  log "Generating embeddings (provider=${EMBEDDINGS_PROVIDER})..."
+  run_embedding_seed "$ATLAS_DB_NAME" "$MONGODB_URI" \
+    || err "Embedding seed failed — see [embed-seed] envelope above"
+  ok "Embeddings generated"
+
+  # Post-apply preflight gate: same embedding + index + KB checks as production,
+  # minus the AgentCore-runtime-specific ones (no runtime, no Gateway here).
+  # shellcheck source=deploy/scripts/_preflight-checks.sh
+  source "$SCRIPT_DIR/_preflight-checks.sh"
+  preflight_validate local-post-apply \
+    || err "local-post-apply preflight failed — see envelope above"
 fi
 
 # ══════════════════════════════════════════════════════════════════════════════
