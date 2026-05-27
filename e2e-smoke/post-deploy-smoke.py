@@ -635,17 +635,31 @@ def poll_trace_event_types(
 
 
 def _read_env_live(path: Path) -> dict[str, str]:
-    """Parse a KEY=VALUE .env file (no `export`, no quoting). Returns {} when
-    the file is missing so older deploys without .env.live don't hard-fail."""
-    if not path.exists():
+    """Parse a KEY=VALUE .env file. Prefers `.env.docker` (canonical, zero
+    escape semantics — written by `deploy/scripts/_env-live.sh`) when both
+    siblings exist at the same directory; falls back to the given path so
+    legacy callers still work.
+
+    Strips one optional layer of surrounding single/double quotes from each
+    value so the bash-source-safe `.env.live` (`KEY="value"`) yields the
+    same value as the unquoted `.env.docker` (`KEY=value`). Returns {} when
+    the file is missing so older deploys without these files don't hard-fail.
+    """
+    candidate = path.parent / ".env.docker"
+    target = candidate if candidate.exists() else path
+    if not target.exists():
         return {}
     out: dict[str, str] = {}
-    for raw in path.read_text().splitlines():
+    for raw in target.read_text().splitlines():
         line = raw.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
         key, _, value = line.partition("=")
-        out[key.strip()] = value.strip()
+        key = key.strip()
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
+            value = value[1:-1]
+        out[key] = value
     return out
 
 
@@ -1017,55 +1031,52 @@ def check_cloudwatch_join(resources: dict[str, Any], api_url: str, token: str) -
             "journald → CW agent may be lagging or agent unhealthy."
         )
 
-    # AgentCore-managed log groups land under /aws/bedrock-agentcore/runtimes/<id>/.
-    # The account commonly accumulates legacy groups from prior deployments, so
-    # we scope the discovery prefix to the *current* deployment's project slug
-    # derived from the API log group (e.g. `/mongodb-multiagent3/dev/api` ->
-    # project_slug `mongodb_multiagent3`). Without this, alphabetic sort can hide
-    # the current runtimes behind legacy groups when AWS caps the page size.
-    project_slug: str | None = None
-    parts = api_group.strip("/").split("/")
-    if parts:
-        project_slug = parts[0].replace("-", "_")
-    if project_slug:
-        agentcore_prefix = f"/aws/bedrock-agentcore/runtimes/{project_slug}_"
-    else:
-        agentcore_prefix = "/aws/bedrock-agentcore/runtimes/"
-    try:
-        groups_raw = run(
-            [
-                "aws",
-                "logs",
-                "describe-log-groups",
-                "--region",
-                region,
-                "--log-group-name-prefix",
-                agentcore_prefix,
-                "--output",
-                "json",
-            ],
-            timeout=30,
+    # AgentCore Runtime application logs flow through the vended-logs delivery
+    # pipeline that modules/cloudwatch-genai configures (DeliverySource ->
+    # DeliveryDestination -> CWL group). The auto-provisioned
+    # `/aws/bedrock-agentcore/runtimes/<id>-DEFAULT` group is a RED HERRING:
+    # it carries only the empty `otel-rt-logs` stream unless the application
+    # ships OTLP logs to the in-container ADOT sidecar (which the Node.js
+    # runtime here does not). So we discover log groups via the vended-logs
+    # prefix instead, scoped to the orchestrator + specialists + mongodb-mcp
+    # ARNs we already loaded from `.env.docker`. This both (a) eliminates the
+    # `multiagent_` vs `mongodb_multiagent3_` project-slug mismatch the old
+    # prefix derivation suffered from and (b) limits the scan to the runtimes
+    # this deploy *actually owns* — no legacy-deployment cross-talk.
+    env = _read_env_live(ROOT / ".env.live")
+    # `_env-live.sh` writes specialist ARNs as AGENTCORE_<UPPER>_ARN (no
+    # "_RUNTIME_" infix), one per specialist discovered in config/agents/.
+    # Discover them dynamically so adding a new specialist doesn't need a
+    # corresponding tweak here.
+    specialist_arns = [
+        v
+        for k, v in env.items()
+        if k.startswith("AGENTCORE_")
+        and k.endswith("_ARN")
+        and k not in ("AGENTCORE_ORCHESTRATOR_ARN",)
+        and v
+    ]
+    runtime_arns = [
+        arn
+        for arn in (
+            env.get("AGENTCORE_ORCHESTRATOR_ARN"),
+            env.get("MONGODB_MCP_RUNTIME_ARN"),
+            *specialist_arns,
         )
-    except SmokeFailure as exc:
-        log(f"AgentCore log-group discovery skipped: {exc}")
-        return
-
-    try:
-        agentcore_groups = [
-            str(g.get("logGroupName") or "")
-            for g in (json.loads(groups_raw).get("logGroups") or [])
-            if g.get("logGroupName")
-        ]
-    except json.JSONDecodeError:
-        agentcore_groups = []
+        if arn
+    ]
+    runtime_ids = [arn.rsplit("/", 1)[-1] for arn in runtime_arns if "/" in arn]
+    agentcore_groups = [
+        f"/aws/vendedlogs/bedrock-agentcore/runtime/APPLICATION_LOGS/{rid}"
+        for rid in runtime_ids
+    ]
 
     if not agentcore_groups:
         log(
-            f"WARN: no AgentCore log groups under {agentcore_prefix!r} — "
-            "AgentCore trace join skipped."
+            "WARN: no AgentCore runtime ARNs in env — AgentCore trace join skipped."
         )
         return
-    log(f"agentcore_log_groups_scanned={len(agentcore_groups)} (prefix={agentcore_prefix})")
+    log(f"agentcore_log_groups_scanned={len(agentcore_groups)} (vended-logs)")
 
     # AgentCore-managed log delivery to CloudWatch can lag 30-90 s on cold
     # runtimes. Poll for up to ~120 s before giving up.
@@ -1115,6 +1126,30 @@ def check_cloudwatch_join(resources: dict[str, Any], api_url: str, token: str) -
             f"WARN: 0 AgentCore-runtime log events with trace_id={x_trace} across "
             f"{len(agentcore_groups)} group(s) — verify _trace propagation in adapters/agentcore-runtime.ts."
         )
+
+
+def _voyage_dims_from_ssot() -> int | None:
+    """Shell out to api/scripts/voyage-print.ts to pull the canonical embedding
+    dimension. Returns None when bun is missing or the script can't be located
+    — caller falls back to a sane default. Never reads EMBEDDING_DIMENSIONS
+    from the environment (that env var is no longer a source of truth)."""
+    import shutil
+
+    bun = shutil.which("bun")
+    if not bun:
+        return None
+    candidates = [
+        ROOT / "api" / "scripts" / "voyage-print.ts",
+        Path("/opt/multiagent/api/scripts/voyage-print.ts"),
+    ]
+    script = next((p for p in candidates if p.exists()), None)
+    if script is None:
+        return None
+    try:
+        out = subprocess.check_output([bun, str(script), "dims"], text=True, timeout=10)
+        return int(out.strip())
+    except Exception:
+        return None
 
 
 def _load_env_live_uri() -> str:
@@ -1253,11 +1288,11 @@ def check_seeded_corpus_embeddings(resources: dict[str, Any]) -> None:
         return
     provider = str(resources.get("embeddings_provider") or "").strip()
     expected_prefix = "voyage:" if provider == "voyage" else "bedrock:"
-    expected_dim_raw = os.environ.get("EMBEDDING_DIMENSIONS") or "1024"
-    try:
-        expected_dim = int(expected_dim_raw)
-    except ValueError:
-        expected_dim = 1024
+    # Expected dim comes from the Voyage TS SSOT via voyage-print.ts (never
+    # from an env var — that's the whole point of the SSOT migration). On the
+    # rare host where bun is missing we fall back to 1024 to keep the smoke
+    # diagnostic informative.
+    expected_dim = _voyage_dims_from_ssot() or 1024
     # Derive DB name from manifest (same convention as deploy-project.sh).
     db = str(resources.get("mongodb_db") or "").strip()
     if not db:

@@ -6,26 +6,23 @@ chat_messages vector index with the same userId filter the retriever uses
 in production. Prints the top-20 rows with content excerpts so we can see
 exactly where C's plant lands.
 
-Envelope contract: this probe MUST build the exact same request body as
-`buildVoyageRequestBody` in api/src/adapters/voyage-embedding.ts. The
-historical body here was `{"inputs": [<text>]}` which matches NEITHER the
-legacy `{"input": [<text>], ...}` nor the multimodal
-`{"inputs": [{"content": [{"type": "text", "text": "<text>"}]}], ...}`
-envelope — so any operator running this script to diagnose a recall miss
-got a confusing 400 instead of an answer. Fix lives in this file alongside
-the preflight smoke check and the api adapter.
+Envelope contract: this probe shells out to `api/scripts/voyage-print.ts body`
+so the request body is byte-for-byte identical to what
+`buildVoyageRequestBody` in api/src/adapters/voyage-embedding.ts produces.
+We never hand-roll the multimodal envelope in Python — that's the SSOT
+guarantee enforced by `api/tests/unit/voyage-ssot-guard.test.ts`.
 
 ENV inputs:
   HARNESS_USER_ID         e.g. e4987498-70b1-704e-a558-0aa201bf95b1
   QUERY_TEXT              the recall query string to embed + search
   NEEDLE                  the codename to highlight in results (optional)
-  VOYAGE_REQUEST_FORMAT   (from .env.live) — 'multimodal' (default) or 'legacy'
-  VOYAGE_OUTPUT_DIM       (from .env.live, legacy only) — defaults to 1024
 """
 from __future__ import annotations
 
 import json
 import os
+import shutil
+import subprocess
 import sys
 
 try:
@@ -37,6 +34,40 @@ except ImportError as exc:
 
 
 ENV_FILE = "/opt/multiagent/.env.live"
+
+# Locations where api/scripts/voyage-print.ts may live, in priority order.
+# Production EC2 unpacks the repo at /opt/multiagent; local runs use cwd.
+_VOYAGE_PRINT_CANDIDATES = (
+    "/opt/multiagent/api/scripts/voyage-print.ts",
+    os.path.join(os.path.dirname(__file__), "..", "api", "scripts", "voyage-print.ts"),
+)
+
+
+def _voyage_canonical_body(text: str, input_type: str = "query") -> dict:
+    """Shell out to voyage-print.ts to build the canonical multimodal body.
+
+    Returns the dict (not the raw JSON string) so the caller can pass it to
+    json.dumps for the SageMaker invoke call.
+    """
+    bun = shutil.which("bun")
+    if not bun:
+        raise RuntimeError(
+            "bun not on PATH — required to build the canonical Voyage body. "
+            "Install bun or run this probe on an EC2 host where bun is present."
+        )
+    script = next((p for p in _VOYAGE_PRINT_CANDIDATES if os.path.exists(p)), None)
+    if script is None:
+        raise RuntimeError(
+            "voyage-print.ts not found in any of: " + ", ".join(_VOYAGE_PRINT_CANDIDATES)
+        )
+    truncated = (text or "")[:32_000]
+    proc = subprocess.run(
+        [bun, script, "body", truncated, input_type],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return json.loads(proc.stdout)
 
 
 def parse_env(path: str) -> dict[str, str]:
@@ -77,29 +108,14 @@ def main() -> int:
         print(json.dumps({"error": "MONGODB_URI / HARNESS_USER_ID / QUERY_TEXT required"}))
         return 1
 
-    # Embed via SageMaker (Voyage) — body MUST match buildVoyageRequestBody
-    # in api/src/adapters/voyage-embedding.ts. See module docstring.
-    voyage_format = (env.get("VOYAGE_REQUEST_FORMAT") or "multimodal").strip().lower()
-    if voyage_format != "legacy":
-        voyage_format = "multimodal"
-    truncated = (query_text or "")[:32_000]
-    if voyage_format == "legacy":
-        try:
-            output_dim = int(env.get("VOYAGE_OUTPUT_DIM") or "1024")
-        except ValueError:
-            output_dim = 1024
-        request_body = {
-            "input": [truncated],
-            "input_type": "query",
-            "output_dimension": output_dim,
-        }
-    else:
-        request_body = {
-            "inputs": [{"content": [{"type": "text", "text": truncated}]}],
-            "input_type": "query",
-            "truncation": True,
-            "output_encoding": None,
-        }
+    # Embed via SageMaker (Voyage) — body is produced by the TS SSOT
+    # (api/scripts/voyage-print.ts → buildVoyageRequestBody). No legacy
+    # branch: this stack only supports voyage-multimodal-3/3.5.
+    try:
+        request_body = _voyage_canonical_body(query_text, "query")
+    except Exception as exc:
+        print(json.dumps({"error": f"voyage_canonical_body failed: {exc}"}))
+        return 1
 
     sm = boto3.client("sagemaker-runtime", region_name=region)
     try:
@@ -113,10 +129,13 @@ def main() -> int:
         msg = str(exc)
         hint = ""
         if "Field required" in msg and ("input" in msg or "inputs" in msg):
-            if voyage_format == "multimodal":
-                hint = " — endpoint rejected the multimodal envelope; the deployed model package is probably text-only. Flip VOYAGE_REQUEST_FORMAT=legacy in .env.live or re-deploy with the correct Marketplace model."
-            else:
-                hint = " — endpoint rejected the legacy envelope; the deployed model package is multimodal. Flip VOYAGE_REQUEST_FORMAT=multimodal in .env.live or re-deploy with the correct Marketplace model."
+            hint = (
+                " — endpoint rejected the multimodal envelope; the deployed "
+                "model package is text-only. This stack only supports "
+                "voyage-multimodal-3 / voyage-multimodal-3.5. Re-run "
+                "./deploy/scripts/setup-voyage-marketplace.sh --model "
+                "voyage-multimodal-3 then ./deploy/scripts/deploy-shared.sh."
+            )
         print(json.dumps({"error": f"invoke_endpoint failed: {msg}{hint}"}))
         return 1
 

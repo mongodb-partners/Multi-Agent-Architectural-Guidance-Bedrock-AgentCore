@@ -259,7 +259,59 @@ resource "null_resource" "mcp_server_gateway_target" {
       GW="${aws_bedrockagentcore_gateway.this.gateway_id}"
       NAME="${local.target_name}"
       ENDPOINT="${var.mcp_server_endpoint}"
+      RUNTIME_ARN="${var.mcp_server_runtime_arn}"
       REGION="${var.aws_region}"
+
+      # Pre-warm the AgentCore Runtime MCP container before creating the gateway
+      # target. AgentCore Runtime status=READY ≠ "warm container in pool". When
+      # the target is first created the gateway probes via MCP `tools/list`; if
+      # no container is warm, AgentCore cold-starts one (~20-40s) while the
+      # gateway's probe times out in ~10s, landing the target in FAILED with
+      # "Unable to connect to the MCP server". A handful of direct
+      # invoke-agent-runtime calls populates the pool with containers that
+      # respond inside the probe window. See docs/status/debugging.md
+      # "AgentCore Gateway target FAILED with cold-start race".
+      # Skip with MCP_RUNTIME_WARMUP=0 (incident-response only).
+      _warm_mcp_runtime() {
+        if [[ "$${MCP_RUNTIME_WARMUP:-1}" != "1" ]]; then
+          echo "  [agentcore-gateway] MCP_RUNTIME_WARMUP=0 — skipping pre-warmup"
+          return 0
+        fi
+        if [[ -z "$RUNTIME_ARN" || "$RUNTIME_ARN" == "None" ]]; then
+          echo "  [agentcore-gateway] empty mcp_server_runtime_arn — skipping pre-warmup"
+          return 0
+        fi
+        echo "  [agentcore-gateway] pre-warming MCP runtime $${RUNTIME_ARN##*/} (3 invocations) to avoid gateway probe cold-start"
+        local i tmp status
+        local success=0
+        for i in 1 2 3; do
+          tmp=$(mktemp -t mcp-tf-warmup.XXXXXX.bin)
+          status=$(aws bedrock-agentcore invoke-agent-runtime \
+            --region "$REGION" \
+            --agent-runtime-arn "$RUNTIME_ARN" \
+            --qualifier DEFAULT \
+            --mcp-session-id "tf-warmup-$i-$(date +%s)-$$" \
+            --mcp-protocol-version "2025-06-18" \
+            --content-type "application/json" \
+            --accept "application/json, text/event-stream" \
+            --payload '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"tf-warmup","version":"1.0"}}}' \
+            --cli-binary-format raw-in-base64-out \
+            "$tmp" 2>/dev/null \
+            | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("statusCode",""))' 2>/dev/null || echo "error")
+          rm -f "$tmp"
+          if [[ "$status" == "200" ]]; then
+            success=$((success + 1))
+            echo "  [agentcore-gateway]   warmup $i/3: statusCode=200"
+          else
+            echo "  [agentcore-gateway]   warmup $i/3: statusCode=$${status:-?} (non-fatal)"
+          fi
+        done
+        if (( success > 0 )); then
+          echo "  [agentcore-gateway] ✓ warmup: $success/3 succeeded — runtime pool warm for ~15min"
+        else
+          echo "  [agentcore-gateway] ⚠ warmup: 0/3 succeeded — gateway probe may still hit cold-start race"
+        fi
+      }
 
       # Idempotency: if a target with this name already exists, only skip when it
       # is actively healthy. A target stuck in CREATING/UPDATING is still settling,
@@ -311,6 +363,10 @@ resource "null_resource" "mcp_server_gateway_target" {
             ;;
         esac
       fi
+
+      # Warm the runtime container pool before creating the target so the
+      # gateway's tools/list probe doesn't time out on cold start.
+      _warm_mcp_runtime
 
       echo "[agentcore-gateway] Creating MCP server target '$NAME' on gateway $GW …"
       aws bedrock-agentcore-control create-gateway-target \

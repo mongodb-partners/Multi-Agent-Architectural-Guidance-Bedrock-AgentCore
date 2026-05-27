@@ -52,6 +52,14 @@ if [[ -z "${REPO_ROOT:-}" ]]; then
 fi
 export REPO_ROOT
 
+# Voyage SSOT bridge — provides voyage_embedding_dims / voyage_canonical_body /
+# voyage_supported_models / voyage_assert_multimodal_or_die. All checks that
+# previously read the now-removed format/dim env vars (deleted in the
+# multimodal-only migration) or hand-rolled request bodies must now route
+# through these helpers. See docs/reference/voyage.md.
+# shellcheck source=deploy/scripts/_voyage-config.sh
+source "${REPO_ROOT}/deploy/scripts/_voyage-config.sh"
+
 # ──────────────────────────────────────────────────────────────────────────────
 # State (reset at the top of each preflight_validate call)
 # ──────────────────────────────────────────────────────────────────────────────
@@ -345,7 +353,7 @@ PREFLIGHT_PROFILE_shared=(
 
 # Post-apply profile for deploy-shared.sh — runs AFTER terraform apply has
 # provisioned the SageMaker endpoint. Confirms the live endpoint accepts the
-# configured VOYAGE_REQUEST_FORMAT envelope before handing off to
+# canonical multimodal envelope (voyage_canonical_body) before handing off to
 # deploy-project.sh (which will Phase-11 seed embeddings against it).
 PREFLIGHT_PROFILE_shared_post_apply=(
   pf_check_voyage_endpoint_live_smoke
@@ -2327,28 +2335,19 @@ pf_check_voyage_marketplace_subscribed() {
 # pf:source:  field-reported (voyage-multimodal-3-dev endpoint silently served a
 #             text-only voyage-3* package; seed-embeddings hit 400s on every row).
 #
-# The Voyage AWS Marketplace listings split into TWO request-envelope families
-# (see https://github.com/voyage-ai/voyageai-aws/blob/main/deploy_voyage_model_package_sagemaker.ipynb):
-#
-#   multimodal — voyage-multimodal-3, voyage-multimodal-3.5
-#                request body:  { "inputs": [{ "content": [...] }], "input_type": ..., "truncation": true, "output_encoding": null }
-#                ARN resource-id tail starts with `voyage-multimodal-3-v1-` or `voyage-multimodal-3-5-v1-`.
-#
-#   legacy/text — voyage-3, voyage-3-lite, voyage-3-large, voyage-3-5-lite,
-#                 voyage-4, voyage-4-lite, voyage-4-large, voyage-code-3, …
-#                request body:  { "input": [...], "input_type": ..., "truncation": "true" }
-#                ARN resource-id tail does NOT contain `multimodal`.
-#
-# We assert that VOYAGE_MARKETPLACE_MODEL + VOYAGE_REQUEST_FORMAT + ARN family
-# all agree. Fails loudly with the corrective `.env` edits the caller actually
-# needs, instead of letting them discover it ~6 min after `terraform apply`.
+# Multimodal-only: voyage-multimodal-3 / voyage-multimodal-3.5 are the only
+# supported Voyage listings. The bash SSOT (`voyage_assert_multimodal_or_die`
+# + `voyage_supported_models`, sourced from `_voyage-config.sh`) is the single
+# place where the supported list lives. This check asserts that both the
+# declared marketplace model AND the resource-id baked into the ARN line up
+# with that list. Catches the "subscribed to voyage-3-5-lite by mistake"
+# failure mode at preflight time, ~6 min before Terraform would discover it.
 pf_check_voyage_marketplace_model_matches_arn() {
   if [[ "${EMBEDDINGS_PROVIDER:-}" != "voyage" ]]; then
     _pf_skip pf_check_voyage_marketplace_model_matches_arn "EMBEDDINGS_PROVIDER!=voyage"
     return 0
   fi
   local model_decl="${VOYAGE_MARKETPLACE_MODEL:-}"
-  local fmt_decl="${VOYAGE_REQUEST_FORMAT:-multimodal}"
   local arn="${VOYAGE_MODEL_PACKAGE_ARN:-}"
   if [[ -z "$arn" ]]; then
     _pf_skip pf_check_voyage_marketplace_model_matches_arn \
@@ -2360,8 +2359,23 @@ pf_check_voyage_marketplace_model_matches_arn() {
       --summary "VOYAGE_MARKETPLACE_MODEL is unset but VOYAGE_MODEL_PACKAGE_ARN is set" \
       --shortcoming "config" \
       --observed "VOYAGE_MARKETPLACE_MODEL='' VOYAGE_MODEL_PACKAGE_ARN='${arn}'" \
-      --fix "Set VOYAGE_MARKETPLACE_MODEL in .env to the model name (voyage-multimodal-3, voyage-multimodal-3.5, voyage-3-5-lite, voyage-3, voyage-4, ...) you actually subscribed to" \
-      --fix "Easiest: re-run ./deploy/scripts/setup-voyage-marketplace.sh --model <model> — it rewrites VOYAGE_MARKETPLACE_MODEL + VOYAGE_REQUEST_FORMAT + TF_VAR_voyage_endpoint_name_suffix consistently" \
+      --fix "Set VOYAGE_MARKETPLACE_MODEL in .env to voyage-multimodal-3 or voyage-multimodal-3.5 (this stack only supports multimodal listings)" \
+      --fix "Easiest: re-run ./deploy/scripts/setup-voyage-marketplace.sh --model voyage-multimodal-3 — it rewrites VOYAGE_MARKETPLACE_MODEL + TF_VAR_voyage_endpoint_name_suffix consistently" \
+      --hint "edit:.env:VOYAGE_MARKETPLACE_MODEL" \
+      --hint "run:./deploy/scripts/setup-voyage-marketplace.sh" \
+      --doc "docs/deployment-preflight-checks.md#voyage-marketplace-model-matches-arn"
+    return 0
+  fi
+
+  # SSOT gate: refuse anything not in `voyage_supported_models`.
+  if ! voyage_assert_multimodal_or_die "$model_decl" >/dev/null 2>&1; then
+    local supported
+    supported="$(voyage_supported_models | tr '\n' ' ')"
+    _pf_fail pf_check_voyage_marketplace_model_matches_arn \
+      --summary "VOYAGE_MARKETPLACE_MODEL='${model_decl}' is not a supported multimodal Voyage listing" \
+      --shortcoming "config" \
+      --observed "supported (from voyage_supported_models): ${supported}" \
+      --fix "Re-run ./deploy/scripts/setup-voyage-marketplace.sh --model voyage-multimodal-3 (or voyage-multimodal-3.5)" \
       --hint "edit:.env:VOYAGE_MARKETPLACE_MODEL" \
       --hint "run:./deploy/scripts/setup-voyage-marketplace.sh" \
       --doc "docs/deployment-preflight-checks.md#voyage-marketplace-model-matches-arn"
@@ -2373,102 +2387,36 @@ pf_check_voyage_marketplace_model_matches_arn() {
   # but on some listings the path is flat (no <group>/) — strip both forms.
   local resource_id="${arn##*/}"
 
-  # Classify the subscribed package by its resource-id tail. The Voyage AWS
-  # repo's model_arn_resource_id table is the source of truth:
-  #   "voyage-multimodal-3":   "voyage-multimodal-3-v1-0-3b30a5c60eea3f6e9d91efd1fde1df07"
-  #   "voyage-multimodal-3.5": "voyage-multimodal-3-5-v1-28013f9c1fac3211bb9b6ead1b00531e"
-  #   "voyage-3":              "voyage-3-008e58ecc01b306b82d088dcb115a8a2"
-  #   "voyage-3-lite":         "voyage-3-lite-4f6d6fd00bab304e89341742ec1728d4"
-  #   "voyage-3-large":        "voyage-3-large-v1-906b498ebfaf36af87de6a73f60ecad8"
-  #   "voyage-4":              "voyage-4-v2-6b74695ad99635b8a2aefb616dd663ae"  (etc.)
-  #
-  # The reliable family classifier is presence of "multimodal" anywhere in the
-  # resource id. Two known spelling variants must be accepted:
+  # Tolerate the three known Voyage spelling variants for "multimodal" in the
+  # resource-id tail:
   #   - `multimodal` — canonical (voyage-multimodal-3-v1-…)
   #   - `multimodel` — AWS Marketplace package-group typo. setup-voyage-marketplace.sh
-  #                    explicitly probes the `voyage-multimodel-3-updated` group;
-  #                    see docs/reference/env-vars.md + docs/advanced/deploy-tweak-guide.md.
+  #                    explicitly probes the `voyage-multimodel-3-updated` group.
   #   - `miltimodal` — voyageai-aws repo's `model_arn_resource_id` table typo for 3.5.
-  # Match all three so we don't false-negative a legitimate multimodal subscription.
-  local arn_family="text"
   local _rid_lower
   _rid_lower="$(printf '%s' "$resource_id" | tr '[:upper:]' '[:lower:]')"
   case "$_rid_lower" in
-    *multimodal*|*multimodel*|*miltimodal*) arn_family="multimodal" ;;
-  esac
-
-  local model_lower
-  model_lower="$(printf '%s' "$model_decl" | tr '[:upper:]' '[:lower:]')"
-  local model_family="text"
-  case "$model_lower" in
-    voyage-multimodal-*) model_family="multimodal" ;;
-  esac
-
-  local fmt_lower
-  fmt_lower="$(printf '%s' "$fmt_decl" | tr '[:upper:]' '[:lower:]')"
-  case "$fmt_lower" in
-    multimodal|legacy) ;;
+    *multimodal*|*multimodel*|*miltimodal*) ;;
     *)
       _pf_fail pf_check_voyage_marketplace_model_matches_arn \
-        --summary "VOYAGE_REQUEST_FORMAT='${fmt_decl}' is not recognised" \
+        --summary "VOYAGE_MODEL_PACKAGE_ARN resource-id '${resource_id}' is not a multimodal listing" \
         --shortcoming "config" \
-        --observed "VOYAGE_REQUEST_FORMAT must be 'multimodal' (voyage-multimodal-3*) or 'legacy' (voyage-3*/voyage-4*); got '${fmt_decl}'" \
-        --fix "Set VOYAGE_REQUEST_FORMAT=multimodal in .env when VOYAGE_MARKETPLACE_MODEL starts with voyage-multimodal-" \
-        --fix "Set VOYAGE_REQUEST_FORMAT=legacy in .env for every other Voyage text model (voyage-3*, voyage-4*, voyage-code-*, …)" \
-        --hint "edit:.env:VOYAGE_REQUEST_FORMAT" \
+        --observed "ARN does not contain 'multimodal' (or known spelling variants); this stack only supports multimodal Voyage models" \
+        --fix "Re-run ./deploy/scripts/setup-voyage-marketplace.sh --model voyage-multimodal-3 (subscribe at https://aws.amazon.com/marketplace/pp/prodview-hrid2zxusacxy)" \
+        --hint "run:./deploy/scripts/setup-voyage-marketplace.sh" \
         --doc "docs/deployment-preflight-checks.md#voyage-marketplace-model-matches-arn"
       return 0
       ;;
   esac
 
-  # Cross-check: marketplace model name, ARN family, and request format must
-  # all line up on the same family. Two failure modes covered:
-  #   1. text marketplace-model with multimodal request envelope  → 400 at runtime
-  #   2. multimodal marketplace-model with legacy request envelope → 400 at runtime
-  if [[ "$model_family" != "$arn_family" ]]; then
-    _pf_fail pf_check_voyage_marketplace_model_matches_arn \
-      --summary "VOYAGE_MARKETPLACE_MODEL='${model_decl}' (${model_family}) does not match VOYAGE_MODEL_PACKAGE_ARN family (${arn_family})" \
-      --shortcoming "config" \
-      --observed "VOYAGE_MARKETPLACE_MODEL='${model_decl}' implies '${model_family}', but ARN resource-id '${resource_id}' implies '${arn_family}'" \
-      --fix "If you intended voyage-multimodal-3: re-run ./deploy/scripts/setup-voyage-marketplace.sh --model voyage-multimodal-3 (this requires subscribing to the multimodal listing at https://aws.amazon.com/marketplace/pp/prodview-hrid2zxusacxy)" \
-      --fix "If you intended a text-only model (voyage-3-5-lite, voyage-3, voyage-4, …): set VOYAGE_MARKETPLACE_MODEL + TF_VAR_voyage_endpoint_name_suffix to that model name AND set VOYAGE_REQUEST_FORMAT=legacy" \
-      --fix "Note: VOYAGE_MODEL_PACKAGE_ARN is the source of truth — the endpoint name suffix is just a label and does NOT change which model runs" \
-      --hint "edit:.env:VOYAGE_MARKETPLACE_MODEL" \
-      --hint "edit:.env:VOYAGE_REQUEST_FORMAT" \
-      --hint "run:./deploy/scripts/setup-voyage-marketplace.sh" \
-      --doc "docs/deployment-preflight-checks.md#voyage-marketplace-model-matches-arn"
-    return 0
-  fi
-
-  if [[ "$model_family" == "multimodal" && "$fmt_lower" != "multimodal" ]]; then
-    _pf_fail pf_check_voyage_marketplace_model_matches_arn \
-      --summary "VOYAGE_MARKETPLACE_MODEL='${model_decl}' is multimodal but VOYAGE_REQUEST_FORMAT='${fmt_decl}' is not 'multimodal'" \
-      --shortcoming "config" \
-      --observed "voyage-multimodal-3* endpoints require the multimodal envelope: {\"inputs\":[{\"content\":[...]}], \"input_type\":..., \"truncation\":true, \"output_encoding\":null}" \
-      --fix "Set VOYAGE_REQUEST_FORMAT=multimodal in .env" \
-      --hint "edit:.env:VOYAGE_REQUEST_FORMAT" \
-      --doc "docs/deployment-preflight-checks.md#voyage-marketplace-model-matches-arn"
-    return 0
-  fi
-
-  if [[ "$model_family" == "text" && "$fmt_lower" != "legacy" ]]; then
-    _pf_fail pf_check_voyage_marketplace_model_matches_arn \
-      --summary "VOYAGE_MARKETPLACE_MODEL='${model_decl}' is text-only but VOYAGE_REQUEST_FORMAT='${fmt_decl}' is not 'legacy'" \
-      --shortcoming "config" \
-      --observed "voyage-3*/voyage-4* endpoints require the text envelope: {\"input\":[...], \"input_type\":..., \"truncation\":\"true\"} — they 400 with 'input field required' if 'inputs' is sent" \
-      --fix "Set VOYAGE_REQUEST_FORMAT=legacy in .env" \
-      --hint "edit:.env:VOYAGE_REQUEST_FORMAT" \
-      --doc "docs/deployment-preflight-checks.md#voyage-marketplace-model-matches-arn"
-    return 0
-  fi
-
   _pf_pass pf_check_voyage_marketplace_model_matches_arn \
-    "model=${model_decl} family=${model_family} format=${fmt_decl} (ARN resource-id=${resource_id})"
+    "model=${model_decl} (multimodal-only; ARN resource-id=${resource_id})"
 }
 
 # pf:check: pf_check_voyage_endpoint_live_smoke
 # pf:catches: "Voyage SageMaker endpoint provisioned but its request schema
-#              does not accept the configured VOYAGE_REQUEST_FORMAT envelope.
+#              does not accept the canonical multimodal envelope produced by
+#              api/src/adapters/voyage-embedding.ts → buildVoyageRequestBody.
 #              Without this check, db-seeding/seed-embeddings.ts is the first
 #              place to discover the mismatch — by then Phase 11 of
 #              deploy-project.sh has already burned several minutes."
@@ -2476,11 +2424,11 @@ pf_check_voyage_marketplace_model_matches_arn() {
 #             voyage-multimodal-3-dev endpoint name).
 #
 # Sends a single tiny invoke against the live SageMaker endpoint using EXACTLY
-# the body shape that api/src/adapters/voyage-embedding.ts and
-# db-seeding/seed-embeddings.ts build (gated by VOYAGE_REQUEST_FORMAT). On a
-# 4xx we surface the endpoint's own error message inline so the operator can
-# tell at a glance whether the mismatch is "endpoint wants input/, we sent
-# inputs/" or the reverse.
+# the body shape produced by the bash SSOT `voyage_canonical_body` (which
+# itself shells out to api/scripts/voyage-print.ts body — i.e. the TS adapter
+# is the ultimate source). On a 4xx we surface the endpoint's own error
+# message inline so the operator can tell at a glance that the deployed
+# package is text-only and they need to re-subscribe to a multimodal listing.
 #
 # Auto-skipped when:
 #   - EMBEDDINGS_PROVIDER != voyage
@@ -2509,19 +2457,13 @@ pf_check_voyage_endpoint_live_smoke() {
   fi
 
   local region="${AWS_REGION:-us-east-1}"
-  local fmt
-  fmt="$(printf '%s' "${VOYAGE_REQUEST_FORMAT:-multimodal}" | tr '[:upper:]' '[:lower:]')"
-  [[ "$fmt" != "legacy" ]] && fmt="multimodal"
 
-  # Build request body matching buildVoyageRequestBody(text, "document", fmt)
-  # in api/src/adapters/voyage-embedding.ts. Kept identical so any future
-  # schema drift in the runtime adapter is mirrored here.
+  # Single canonical envelope sourced from the SSOT (api/scripts/voyage-print.ts
+  # body → buildVoyageRequestBody). Any drift in the TS adapter is mirrored
+  # here automatically, so we never have to hand-roll the body in bash.
   local body
-  if [[ "$fmt" == "legacy" ]]; then
-    body='{"input":["preflight ping"],"input_type":"document","output_dimension":1024}'
-  else
-    body='{"inputs":[{"content":[{"type":"text","text":"preflight ping"}]}],"input_type":"document","truncation":true,"output_encoding":null}'
-  fi
+  body="$(voyage_canonical_body "preflight ping" document)" \
+    || { _pf_skip pf_check_voyage_endpoint_live_smoke "voyage_canonical_body unavailable (bun missing?)"; return 0; }
 
   local tmp_out tmp_err
   tmp_out="$(mktemp -t pf-voyage-smoke-out.XXXXXX)"
@@ -2543,29 +2485,23 @@ pf_check_voyage_endpoint_live_smoke() {
   if (( rc != 0 )); then
     local first_err
     first_err="$(_pf_capture_first_line printf '%s\n' "$(cat "$tmp_err")")"
-    # Detect the canonical "wrong envelope" failure shapes so the operator
+    # Detect the canonical "wrong envelope" failure shape so the operator
     # gets a definitive next-step instead of a generic "endpoint 400" message.
     local schema_diag=""
     if grep -q "input" "$tmp_err" 2>/dev/null && grep -q "Field required" "$tmp_err" 2>/dev/null; then
-      if [[ "$fmt" == "multimodal" ]]; then
-        schema_diag="endpoint rejected the multimodal envelope (sent 'inputs', expected 'input'). The deployed model package is text-only despite the endpoint name."
-      else
-        schema_diag="endpoint rejected the legacy envelope (sent 'input', expected 'inputs'). The deployed model package is multimodal."
-      fi
+      schema_diag="endpoint rejected the multimodal envelope (sent 'inputs', expected 'input'). The deployed model package is text-only — this stack only supports multimodal Voyage listings."
     fi
     rm -f "$tmp_out" "$tmp_err"
     # Naming note: the variable MUST be named `args` to match the self-test's
     # allow-list pattern (`"${args[@]}"`) for "splatted _pf_fail call sites".
     local -a args=(
-      --summary "Voyage SageMaker endpoint '${endpoint}' rejected a ${fmt} probe in ${region}"
+      --summary "Voyage SageMaker endpoint '${endpoint}' rejected the canonical multimodal probe in ${region}"
       --shortcoming "config"
       --observed "aws sagemaker-runtime invoke-endpoint → ${first_err:-rc=$rc}${schema_diag:+ — ${schema_diag}}"
-      --fix "Run pf_check_voyage_marketplace_model_matches_arn first — if it passed, your ARN family and request format match each other but disagree with what is actually deployed"
+      --fix "Run pf_check_voyage_marketplace_model_matches_arn first — if it passed, the ARN says multimodal but the deployed package may be text-only"
       --fix "Verify what package is behind the endpoint: aws sagemaker describe-endpoint --endpoint-name ${endpoint} --query 'EndpointConfigName' → describe-endpoint-config → describe-model → PrimaryContainer.ModelPackageName"
-      --fix "If the deployed model is wrong: re-run ./deploy/scripts/setup-voyage-marketplace.sh --model <correct-model> then ./deploy/scripts/deploy-shared.sh (Terraform will replace the SageMaker model + endpoint config)"
-      --fix "If the deployed model is right but envelope is wrong: flip VOYAGE_REQUEST_FORMAT in .env (multimodal ↔ legacy), then ./deploy/deploy-api.sh && ./deploy/deploy-agents.sh --auto-approve"
+      --fix "Re-run ./deploy/scripts/setup-voyage-marketplace.sh --model voyage-multimodal-3 then ./deploy/scripts/deploy-shared.sh (Terraform will replace the SageMaker model + endpoint config)"
       --hint "run:./deploy/scripts/setup-voyage-marketplace.sh"
-      --hint "edit:.env:VOYAGE_REQUEST_FORMAT"
       --doc "docs/deployment-preflight-checks.md#voyage-endpoint-live-smoke"
     )
     _pf_fail pf_check_voyage_endpoint_live_smoke "${args[@]}"
@@ -2598,8 +2534,20 @@ PY
   case "$probe" in
     ok:*)
       local dim="${probe#ok:}"
+      local expected_dim
+      expected_dim="$(voyage_embedding_dims)"
+      if [[ "$dim" != "$expected_dim" ]]; then
+        _pf_fail pf_check_voyage_endpoint_live_smoke \
+          --summary "Voyage SageMaker endpoint '${endpoint}' returned dim=${dim}, expected ${expected_dim}" \
+          --shortcoming "config" \
+          --observed "VOYAGE_EMBEDDING_DIMS=${expected_dim} (api/src/adapters/voyage-embedding.ts) does not match endpoint output" \
+          --fix "Confirm the subscribed model is voyage-multimodal-3 or voyage-multimodal-3.5 (both emit 1024-d)" \
+          --fix "Re-run ./deploy/scripts/setup-voyage-marketplace.sh --model voyage-multimodal-3" \
+          --doc "docs/deployment-preflight-checks.md#voyage-endpoint-live-smoke"
+        return 0
+      fi
       _pf_pass pf_check_voyage_endpoint_live_smoke \
-        "endpoint=${endpoint} fmt=${fmt} dim=${dim}"
+        "endpoint=${endpoint} dim=${dim} (multimodal canonical body)"
       return 0
       ;;
     *)
@@ -2645,7 +2593,7 @@ pf_check_sagemaker_endpoint_quota() {
   applied="$(aws service-quotas list-service-quotas \
     --region "$region" \
     --service-code sagemaker \
-    --query "Quotas[?QuotaName=='${quota_name}'].Value | [0]" \
+    --query "Quotas[?QuotaName=='${quota_name}'].Value" \
     --output text 2>/dev/null || echo None)"
 
   if [[ -n "$applied" && "$applied" != "None" && "$applied" != "null" ]]; then
@@ -2657,7 +2605,7 @@ pf_check_sagemaker_endpoint_quota() {
     default_value="$(aws service-quotas list-aws-default-service-quotas \
       --region "$region" \
       --service-code sagemaker \
-      --query "Quotas[?QuotaName=='${quota_name}'].Value | [0]" \
+      --query "Quotas[?QuotaName=='${quota_name}'].Value" \
       --output text 2>/dev/null || echo None)"
     if [[ -z "$default_value" || "$default_value" == "None" || "$default_value" == "null" ]]; then
       # Could mean: invalid instance type, Service Quotas API denied (rare —
@@ -2688,7 +2636,7 @@ pf_check_sagemaker_endpoint_quota() {
       --fix "Search for '${quota_name}' → Request quota increase → set new value to ${need} (or higher) → submit" \
       --fix "Approval is usually 0–60 min on accounts with payment history; up to 24 h on brand-new accounts (you'll get a Service Quotas email when granted)" \
       --fix "Alternative — skip Voyage entirely: set EMBEDDINGS_PROVIDER=titan in .env (Bedrock Titan does not need SageMaker)" \
-      --fix "Verify post-grant: aws service-quotas list-service-quotas --region ${region} --service-code sagemaker --query \"Quotas[?QuotaName=='${quota_name}'].Value | [0]\" --output text" \
+      --fix "Verify post-grant: aws service-quotas list-service-quotas --region ${region} --service-code sagemaker --query \"Quotas[?QuotaName=='${quota_name}'].Value\" --output text" \
       --hint "console:https://${region}.console.aws.amazon.com/servicequotas/home/services/sagemaker/quotas" \
       --hint "edit:.env:EMBEDDINGS_PROVIDER=titan" \
       --doc "docs/deployment-preflight-checks.md#sagemaker-endpoint-quota"
@@ -3016,7 +2964,7 @@ _pf_resolve_mongodb_db() {
 # never overwrite them).
 #
 # Per row, asserts:
-#   - embedding exists, is an array, length == EMBEDDING_DIMENSIONS
+#   - embedding exists, is an array, length == voyage_embedding_dims (SSOT)
 #   - embeddingModel matches the expected provider tag for EMBEDDINGS_PROVIDER
 #
 # Uses `bun` (already on PATH at this phase). NEVER pipes the bun output
@@ -3043,7 +2991,8 @@ pf_check_documents_have_embeddings() {
   local uri="${MONGODB_URI_PUBLIC:-${MONGODB_URI:-}}"
   local db
   db="$(_pf_resolve_mongodb_db)"
-  local expected_dim="${EMBEDDING_DIMENSIONS:-1024}"
+  local expected_dim
+  expected_dim="$(voyage_embedding_dims)"
   local provider="${EMBEDDINGS_PROVIDER:-titan}"
   local expected_model_prefix
   case "$provider" in
@@ -3998,60 +3947,37 @@ PY
   local _mm_typo_i_arn="arn:aws:sagemaker:us-east-1:865070037744:model-package/voyage-miltimodal-3.5/voyage-miltimodal-3-5-v1-aaaa"
   local _txt_arn="arn:aws:sagemaker:us-east-1:865070037744:model-package/voyage-3-5-lite-aaaaaaaaaaaaaa"
 
-  # Aligned configurations — must PASS.
+  # Aligned multimodal configurations — must PASS. This stack only supports
+  # voyage-multimodal-3 / voyage-multimodal-3.5.
   _pf_t18_run "aligned multimodal-3"           pass \
     EMBEDDINGS_PROVIDER=voyage \
     VOYAGE_MARKETPLACE_MODEL=voyage-multimodal-3 \
-    VOYAGE_REQUEST_FORMAT=multimodal \
     VOYAGE_MODEL_PACKAGE_ARN="$_mm_arn"
 
-  _pf_t18_run "aligned text/legacy"            pass \
+  _pf_t18_run "aligned multimodal-3.5"         pass \
     EMBEDDINGS_PROVIDER=voyage \
-    VOYAGE_MARKETPLACE_MODEL=voyage-3-5-lite \
-    VOYAGE_REQUEST_FORMAT=legacy \
-    VOYAGE_MODEL_PACKAGE_ARN="$_txt_arn"
+    VOYAGE_MARKETPLACE_MODEL=voyage-multimodal-3.5 \
+    VOYAGE_MODEL_PACKAGE_ARN="$_mm_typo_i_arn"
 
   _pf_t18_run "marketplace-group typo 'multimodel'" pass \
     EMBEDDINGS_PROVIDER=voyage \
     VOYAGE_MARKETPLACE_MODEL=voyage-multimodal-3 \
-    VOYAGE_REQUEST_FORMAT=multimodal \
     VOYAGE_MODEL_PACKAGE_ARN="$_mm_typo_e_arn"
 
-  _pf_t18_run "voyageai-aws table typo 'miltimodal'" pass \
+  # FIELD BUG: declared model is unsupported text-only listing — must FAIL.
+  _pf_t18_run "unsupported text model"         fail \
     EMBEDDINGS_PROVIDER=voyage \
-    VOYAGE_MARKETPLACE_MODEL=voyage-multimodal-3.5 \
-    VOYAGE_REQUEST_FORMAT=multimodal \
-    VOYAGE_MODEL_PACKAGE_ARN="$_mm_typo_i_arn"
+    VOYAGE_MARKETPLACE_MODEL=voyage-3-5-lite \
+    VOYAGE_MODEL_PACKAGE_ARN="$_txt_arn"
 
-  # Field bug — model claims multimodal, ARN is text-only — must FAIL.
+  # FIELD BUG: declared model is multimodal but ARN is text-only — must FAIL.
   _pf_t18_run "FIELD BUG: model=multimodal ARN=text"  fail \
     EMBEDDINGS_PROVIDER=voyage \
     VOYAGE_MARKETPLACE_MODEL=voyage-multimodal-3 \
-    VOYAGE_REQUEST_FORMAT=multimodal \
     VOYAGE_MODEL_PACKAGE_ARN="$_txt_arn"
-
-  # Format mismatches — both directions must FAIL.
-  _pf_t18_run "multimodal pair but format=legacy" fail \
-    EMBEDDINGS_PROVIDER=voyage \
-    VOYAGE_MARKETPLACE_MODEL=voyage-multimodal-3 \
-    VOYAGE_REQUEST_FORMAT=legacy \
-    VOYAGE_MODEL_PACKAGE_ARN="$_mm_arn"
-
-  _pf_t18_run "text pair but format=multimodal"  fail \
-    EMBEDDINGS_PROVIDER=voyage \
-    VOYAGE_MARKETPLACE_MODEL=voyage-3-5-lite \
-    VOYAGE_REQUEST_FORMAT=multimodal \
-    VOYAGE_MODEL_PACKAGE_ARN="$_txt_arn"
-
-  _pf_t18_run "typo in VOYAGE_REQUEST_FORMAT"    fail \
-    EMBEDDINGS_PROVIDER=voyage \
-    VOYAGE_MARKETPLACE_MODEL=voyage-multimodal-3 \
-    VOYAGE_REQUEST_FORMAT=multimode \
-    VOYAGE_MODEL_PACKAGE_ARN="$_mm_arn"
 
   _pf_t18_run "model unset but ARN set"          fail \
     EMBEDDINGS_PROVIDER=voyage \
-    VOYAGE_REQUEST_FORMAT=multimodal \
     VOYAGE_MODEL_PACKAGE_ARN="$_mm_arn"
 
   # Skip paths.
@@ -4064,7 +3990,54 @@ PY
 
   unset -f _pf_t18_run
   if (( _t18_fail == 0 )); then
-    echo "  ✓ pf_check_voyage_marketplace_model_matches_arn classifier locked down (11 scenarios: multimodal + text-only + 2 Marketplace typos + 5 mismatches + 2 skip paths)"
+    echo "  ✓ pf_check_voyage_marketplace_model_matches_arn classifier locked down (8 scenarios: multimodal-3 + multimodal-3.5 + Marketplace typo + unsupported text + FIELD-BUG ARN/model mismatch + model unset + 2 skip paths)"
+  else
+    fail=1
+  fi
+
+  # ── Bash-side companion to api/tests/unit/voyage-ssot-guard.test.ts ────────
+  # Three grep-style assertions on the deploy tree. The TS guard test covers
+  # the same surface and is the authoritative source; this bash mirror runs
+  # without bun so deploy-host CI without a Bun install still catches drift.
+  local _ssot_fail=0
+  local _ssot_repo
+  _ssot_repo="$(cd "${BASH_SOURCE%/*}/../.." && pwd)"
+  local _bad
+
+  # (a) No `VOYAGE_REQUEST_FORMAT` / `VOYAGE_OUTPUT_DIM` reads anywhere in deploy/.
+  _bad="$(grep -rln -E 'VOYAGE_REQUEST_FORMAT|VOYAGE_OUTPUT_DIM' "${_ssot_repo}/deploy" 2>/dev/null \
+    | grep -v '_preflight-checks.sh' || true)"
+  if [[ -n "$_bad" ]]; then
+    echo "  ✗ pf_check_voyage_ssot_only_source: stale Voyage env refs in:"
+    printf '      %s\n' $_bad
+    _ssot_fail=1
+  fi
+
+  # (b) No hand-rolled multimodal body literal in deploy/ outside the bash SSOT.
+  _bad="$(grep -rln -E '"inputs":\[?\{?\"content\"' "${_ssot_repo}/deploy" 2>/dev/null \
+    | grep -v '_voyage-config.sh' \
+    | grep -v '_preflight-checks.sh' || true)"
+  if [[ -n "$_bad" ]]; then
+    echo "  ✗ pf_check_voyage_ssot_only_source: hand-rolled Voyage body literal in:"
+    printf '      %s\n' $_bad
+    _ssot_fail=1
+  fi
+
+  # (c) No hand-rolled EMBEDDING_DIMENSIONS literal/fallback in deploy/ shell scripts.
+  #     The two Terraform main.tf literals are pinned by the TS guard test, not here.
+  #     Exclude this file (it contains the grep pattern as a string literal, not real code).
+  _bad="$(grep -rln -E 'EMBEDDING_DIMENSIONS=1024|\$\{EMBEDDING_DIMENSIONS:-1024\}' \
+    "${_ssot_repo}/deploy" 2>/dev/null \
+    | grep -v '\.tf$' \
+    | grep -v '_preflight-checks.sh' || true)"
+  if [[ -n "$_bad" ]]; then
+    echo "  ✗ pf_check_voyage_ssot_only_source: hand-rolled embedding dim in:"
+    printf '      %s\n' $_bad
+    _ssot_fail=1
+  fi
+
+  if (( _ssot_fail == 0 )); then
+    echo "  ✓ pf_check_voyage_ssot_only_source: no stale Voyage env refs / body literals / dim literals in deploy/"
   else
     fail=1
   fi

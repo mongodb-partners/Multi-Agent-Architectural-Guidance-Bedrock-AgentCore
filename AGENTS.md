@@ -172,7 +172,7 @@ After a **full EC2 deploy** (see [Step 4](#step-4--deploy-and-run)):
 
 ```bash
 source .env
-source .env.live
+source .env.live   # bash-source-safe variant emitted by deploy/scripts/_env-live.sh
 
 export PATH="$HOME/.bun/bin:$PATH"
 
@@ -195,6 +195,13 @@ cd api && bun run dev
 ```
 
 Every protected route requires a **valid Cognito Bearer JWT** verified against `AUTH_JWKS_URI`. There is no `REQUIRE_AUTH=false` bypass.
+
+> **About the two env files.** The deploy scripts emit a *pair* of files at the repo root and ship both to `/opt/multiagent/` on EC2:
+>
+> - **`.env.docker`** — plain `KEY=VALUE`, no quotes. Consumed by `docker run --env-file` from `multiagent-{api,ui}.service` (Docker's `--env-file` parser treats quotes as literal characters in the value, so the file MUST be unquoted).
+> - **`.env.live`** — bash-source-safe `KEY="value"` with backslash/quote/dollar/backtick escapes. Always safe to `source` directly. This is the one you use for laptop dev.
+>
+> Both files are written from the same canonical schema by [`deploy/scripts/_env-live.sh`](deploy/scripts/_env-live.sh) — never hand-edit one without the other.
 
 **Agent/skill config changes:** the API rescans `config/agents/` on disk (mtime cache), but specialist **behavior inside AgentCore** requires `./deploy/deploy-agents.sh --auto-approve` to rebuild the code artifact and update runtimes.
 
@@ -345,6 +352,12 @@ docker compose up --build    # needs .env with JWKS + AgentCore ARNs
 8. **Use `logger` (not `console.log`) for new diagnostic output** in `api/src/`. Import from `./logger.ts` (or `../lib/logger.ts`). `console.log` / `console.error` in tests and Streamlit (`ui/`) are fine. For **new Streamlit-side diagnostics**, prefer `ui/lib/log.py` (`log.info` / `warn` / `error` / `debug`) so support can grep JSON in process logs the same way as the API.
 9. **Any new deploy script that needs AWS credentials** must `source "$SCRIPT_DIR/_aws-auth.sh"` (or `"$SCRIPT_DIR/scripts/_aws-auth.sh"` if you live in `deploy/`) and call `validate_aws_auth || err "..."`. Don't reimplement the `AWS_ACCESS_KEY_ID`/`AWS_PROFILE` check or call `aws sts get-caller-identity` directly for the `ACCOUNT_ID` capture — read `AWS_AUTH_ACCOUNT_ID` from the validator's exports instead. See [`deploy/iam/README.md`](deploy/iam/README.md) § 4.
 10. **Any new deploy script that mutates AWS / Atlas state** must also `source "$SCRIPT_DIR/_preflight-checks.sh"` and call `preflight_validate <profile>` immediately after AWS auth. Add the new checks to the appropriate `PREFLIGHT_PROFILE_*` array in [`deploy/scripts/_preflight-checks.sh`](deploy/scripts/_preflight-checks.sh) and document them in [`docs/deployment-preflight-checks.md`](docs/deployment-preflight-checks.md). Do **not** delete or refactor the existing inline guards — preflight runs **in addition** to them. Verify with `bash deploy/scripts/_preflight-checks.sh --self-test` before merging.
+11. **Voyage AI knowledge lives in the SSOT — never hand-roll it elsewhere.** All Voyage configuration, the multimodal request envelope, the embedding dimension, the supported-model list, and the env-var reads must come from exactly one of three files:
+    - TS SSOT: [`api/src/adapters/voyage-embedding.ts`](api/src/adapters/voyage-embedding.ts) (`SUPPORTED_VOYAGE_MODELS`, `VOYAGE_EMBEDDING_DIMS`, `buildVoyageRequestBody`, `textToMultimodal`, `multimodalItemSchema`, env getters / assertions, `voyageGenerateEmbedding(s)`).
+    - CLI bridge: [`api/scripts/voyage-print.ts`](api/scripts/voyage-print.ts) (`bun api/scripts/voyage-print.ts body|models|dims`).
+    - Bash SSOT: [`deploy/scripts/_voyage-config.sh`](deploy/scripts/_voyage-config.sh) (`voyage_canonical_body`, `voyage_supported_models`, `voyage_embedding_dims`, `voyage_assert_multimodal_or_die`).
+
+    Bash, Python, and Terraform consumers MUST shell out to `voyage-print.ts` or source `_voyage-config.sh` — never copy the body literal, the dim, the model list, or read `process.env.VOYAGE_*` directly. The architecture guard tests `api/tests/unit/voyage-ssot-guard.test.ts` (TS) and `pf_check_voyage_ssot_only_source` (bash, in `_preflight-checks.sh --self-test`) fail CI on any leak. When you change the request envelope, the supported model list, or the embedding dim, run `bun run test --bail -- voyage-ssot-guard` and update [`docs/reference/voyage.md`](docs/reference/voyage.md) in the same PR. Multimodal is the only supported Voyage path; text-only Voyage listings (`voyage-3*`, `voyage-4*`, `voyage-code-*`, …) are refused at preflight.
 
 ---
 

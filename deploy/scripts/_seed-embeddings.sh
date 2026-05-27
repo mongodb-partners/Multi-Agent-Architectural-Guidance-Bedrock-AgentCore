@@ -10,11 +10,11 @@
 #   1. Provider env mapping: read EMBEDDINGS_PROVIDER (`voyage` / `titan`) and
 #      export the script-native env vars the TS script reads
 #      (VOYAGE_SAGEMAKER_ENDPOINT / EMBEDDING_MODEL_ID).
-#   2. Multi-signal REWIRE auto-detect:
+#   2. Multi-signal REWIRE auto-detect (dim comes from voyage_embedding_dims():
 #        a. SSM dim parameter `/${SHARED_VPC_NAME}/${region}/embeddings/dim`
-#           ≠ current EMBEDDING_DIMENSIONS.
+#           ≠ current VOYAGE_EMBEDDING_DIMS.
 #        b. In-Mongo dimension fingerprint: sample one seeder-owned doc and
-#           check embedding.length vs current EMBEDDING_DIMENSIONS.
+#           check embedding.length vs current VOYAGE_EMBEDDING_DIMS.
 #        c. In-Mongo provider fingerprint: sample one seeder-owned doc and
 #           check embeddingModel substring vs current EMBEDDINGS_PROVIDER.
 #   3. SageMaker InService polling wait (when EMBEDDINGS_PROVIDER=voyage).
@@ -28,6 +28,13 @@
 if [[ -n "${_SEED_EMBEDDINGS_SH_SOURCED:-}" ]]; then
   return 0
 fi
+
+# Voyage SSOT bridge — provides voyage_embedding_dims() so we never hand-roll
+# the dim literal in this file (catches drift if the TS SSOT changes).
+_SE_HELPER_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=deploy/scripts/_voyage-config.sh
+source "$_SE_HELPER_DIR/_voyage-config.sh"
+
 _SEED_EMBEDDINGS_SH_SOURCED=1
 
 # Ensure connect helper is available (idempotent if already sourced).
@@ -93,7 +100,8 @@ _se_emit_failure_metric() {
 _se_should_rewire() {
   local mongo_uri="$1"
   local db_name="$2"
-  local current_dim="${EMBEDDING_DIMENSIONS:-1024}"
+  local current_dim
+  current_dim="$(voyage_embedding_dims)"
   local provider="${EMBEDDINGS_PROVIDER:-titan}"
   local region="${AWS_REGION:-us-east-1}"
   local svn="${SHARED_VPC_NAME:-shared-network}"
@@ -102,7 +110,7 @@ _se_should_rewire() {
   local stored_dim
   stored_dim="$(aws ssm get-parameter --region "$region" --name "/${svn}/${region}/embeddings/dim" --query 'Parameter.Value' --output text 2>/dev/null || echo "")"
   if [[ -n "$stored_dim" && "$stored_dim" != "None" && "$stored_dim" != "$current_dim" ]]; then
-    _se_warn "REWIRE signal: SSM dim=${stored_dim} ≠ current EMBEDDING_DIMENSIONS=${current_dim}" >&2
+    _se_warn "REWIRE signal: SSM dim=${stored_dim} ≠ current VOYAGE_EMBEDDING_DIMS=${current_dim}" >&2
     echo "yes"
     return 0
   fi
@@ -261,7 +269,8 @@ run_embedding_seed() {
   # Post-success: write the SSM dim so future deploys can compare authoritatively.
   local region="${AWS_REGION:-us-east-1}"
   local svn="${SHARED_VPC_NAME:-shared-network}"
-  local cur_dim="${EMBEDDING_DIMENSIONS:-1024}"
+  local cur_dim
+  cur_dim="$(voyage_embedding_dims)"
   aws ssm put-parameter --region "$region" \
     --name "/${svn}/${region}/embeddings/dim" \
     --value "$cur_dim" \

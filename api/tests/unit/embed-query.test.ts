@@ -5,8 +5,12 @@
  *   - EMBEDDINGS_PROVIDER=voyage  + voyage OK   → voyage modelId, bedrock NEVER called
  *   - EMBEDDINGS_PROVIDER=voyage  + voyage fail → voyage_strict_failed, bedrock NEVER called
  *   - EMBEDDINGS_PROVIDER=titan   + bedrock OK  → bedrock modelId, voyage NEVER called
- *   - EMBEDDINGS_PROVIDER=titan   + bedrock fail → titan_strict_failed, voyage NEVER called
+ *   - EMBEDDINGS_PROVIDER=titan   + image input → titan_no_multimodal, neither called
  *   - EMBEDDINGS_PROVIDER unset/unknown → no_provider_configured, neither called
+ *
+ * Overload contract: `embedQueryText` / `embedDocumentText` accept either
+ * a plain `string` (auto-wrapped via `textToMultimodal`) or a
+ * `MultimodalItem` from a caller that needs image segments.
  */
 
 import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
@@ -16,8 +20,9 @@ const realBedrockRetrieval = await import("../../src/adapters/bedrock-retrieval.
 
 let voyageCalls = 0;
 let bedrockCalls = 0;
+let lastVoyageItem: unknown = null;
 let voyageImpl: (
-  text: string,
+  item: unknown,
   endpoint: string,
   inputType?: "query" | "document",
   abortSignal?: AbortSignal,
@@ -30,10 +35,11 @@ let bedrockImpl: (text: string, modelId: string, abortSignal?: AbortSignal) => P
 
 mock.module("../../src/adapters/voyage-embedding.ts", () => ({
   ...realVoyage,
-  voyageGenerateEmbedding: (...args: Parameters<typeof realVoyage.voyageGenerateEmbedding>) => {
+  voyageGenerateEmbedding: ((item: unknown, endpoint: string, inputType?: "query" | "document", abortSignal?: AbortSignal) => {
     voyageCalls += 1;
-    return voyageImpl(...args);
-  },
+    lastVoyageItem = item;
+    return voyageImpl(item, endpoint, inputType, abortSignal);
+  }) as typeof realVoyage.voyageGenerateEmbedding,
   isVoyageConfigured: () => Boolean(process.env.VOYAGE_SAGEMAKER_ENDPOINT?.trim()),
   getVoyageEndpoint: () => process.env.VOYAGE_SAGEMAKER_ENDPOINT?.trim() ?? "",
 }));
@@ -46,12 +52,13 @@ mock.module("../../src/adapters/bedrock-retrieval.ts", () => ({
   },
 }));
 
-const { embedQueryText, previewVector } = await import("../../src/lib/embed-query.ts");
+const { embedQueryText, embedDocumentText, previewVector } = await import("../../src/lib/embed-query.ts");
 
 describe("embedQueryText — strict-mode provider selection", () => {
   beforeEach(() => {
     voyageCalls = 0;
     bedrockCalls = 0;
+    lastVoyageItem = null;
     voyageImpl = async () => ({ status: "ok", embedding: [0.1, 0.2, 0.3, 0.4], model: "voyage-multimodal-3" });
     bedrockImpl = async () => ({
       status: "ok",
@@ -62,6 +69,7 @@ describe("embedQueryText — strict-mode provider selection", () => {
     delete process.env.VOYAGE_SAGEMAKER_ENDPOINT;
     delete process.env.EMBEDDING_MODEL_ID;
     delete process.env.VOYAGE_MODEL_NAME;
+    delete process.env.VOYAGE_MARKETPLACE_MODEL;
   });
 
   afterEach(() => {
@@ -69,6 +77,7 @@ describe("embedQueryText — strict-mode provider selection", () => {
     delete process.env.VOYAGE_SAGEMAKER_ENDPOINT;
     delete process.env.EMBEDDING_MODEL_ID;
     delete process.env.VOYAGE_MODEL_NAME;
+    delete process.env.VOYAGE_MARKETPLACE_MODEL;
   });
 
   // -----------------------------------------------------------------
@@ -78,7 +87,6 @@ describe("embedQueryText — strict-mode provider selection", () => {
   test("voyage mode: returns voyage vector, NEVER calls bedrock", async () => {
     process.env.EMBEDDINGS_PROVIDER = "voyage";
     process.env.VOYAGE_SAGEMAKER_ENDPOINT = "voyage-endpoint";
-    // Bedrock is also "configured" — strict mode must still ignore it.
     process.env.EMBEDDING_MODEL_ID = "amazon.titan-embed-text-v2:0";
     voyageImpl = async () => ({ status: "ok", embedding: [1, 2, 3, 4], model: "voyage-multimodal-3" });
 
@@ -91,7 +99,9 @@ describe("embedQueryText — strict-mode provider selection", () => {
       expect(r.vector).toEqual([1, 2, 3, 4]);
     }
     expect(voyageCalls).toBe(1);
-    expect(bedrockCalls).toBe(0); // strict-mode invariant
+    expect(bedrockCalls).toBe(0);
+    // string was auto-wrapped to MultimodalItem before crossing the adapter boundary.
+    expect(lastVoyageItem).toEqual([{ type: "text", text: "hello world" }]);
   });
 
   test("voyage mode: voyage throws → voyage_strict_failed, bedrock NEVER called", async () => {
@@ -109,7 +119,7 @@ describe("embedQueryText — strict-mode provider selection", () => {
       expect(r.code).toBe("voyage_strict_failed");
       expect(r.message).toMatch(/SageMaker 503/);
     }
-    expect(bedrockCalls).toBe(0); // strict-mode invariant
+    expect(bedrockCalls).toBe(0);
   });
 
   test("voyage mode: voyage returns unrecognized shape → voyage_strict_failed", async () => {
@@ -144,12 +154,31 @@ describe("embedQueryText — strict-mode provider selection", () => {
 
     const r1 = await embedQueryText("hello");
     expect(r1.ok).toBe(true);
-    if (r1.ok) expect(r1.modelId).toBe("voyage-multimodal-3"); // hard-coded default
+    if (r1.ok) expect(r1.modelId).toBe("voyage-multimodal-3");
 
-    process.env.VOYAGE_MODEL_NAME = "voyage-3.5-lite";
+    process.env.VOYAGE_MARKETPLACE_MODEL = "voyage-multimodal-3.5";
     const r2 = await embedQueryText("hello");
     expect(r2.ok).toBe(true);
-    if (r2.ok) expect(r2.modelId).toBe("voyage-3.5-lite");
+    if (r2.ok) expect(r2.modelId).toBe("voyage-multimodal-3.5");
+  });
+
+  // -----------------------------------------------------------------
+  // string | MultimodalItem overload
+  // -----------------------------------------------------------------
+
+  test("voyage mode: MultimodalItem with image_url is forwarded unchanged", async () => {
+    process.env.EMBEDDINGS_PROVIDER = "voyage";
+    process.env.VOYAGE_SAGEMAKER_ENDPOINT = "voyage-endpoint";
+    voyageImpl = async () => ({ status: "ok", embedding: [1, 2], model: "voyage-multimodal-3" });
+
+    const item = [
+      { type: "text", text: "describe" },
+      { type: "image_url", image_url: "https://example.com/x.jpg" },
+    ] as const;
+    const r = await embedDocumentText(item as never);
+
+    expect(r.ok).toBe(true);
+    expect(lastVoyageItem).toEqual(item as unknown as Record<string, unknown>[]);
   });
 
   // -----------------------------------------------------------------
@@ -159,7 +188,6 @@ describe("embedQueryText — strict-mode provider selection", () => {
   test("titan mode: returns bedrock vector, NEVER calls voyage", async () => {
     process.env.EMBEDDINGS_PROVIDER = "titan";
     process.env.EMBEDDING_MODEL_ID = "amazon.titan-embed-text-v2:0";
-    // Voyage is also "configured" — strict mode must still ignore it.
     process.env.VOYAGE_SAGEMAKER_ENDPOINT = "voyage-endpoint";
 
     const r = await embedQueryText("hello");
@@ -169,8 +197,24 @@ describe("embedQueryText — strict-mode provider selection", () => {
       expect(r.source).toBe("bedrock");
       expect(r.modelId).toBe("amazon.titan-embed-text-v2:0");
     }
-    expect(voyageCalls).toBe(0); // strict-mode invariant
+    expect(voyageCalls).toBe(0);
     expect(bedrockCalls).toBe(1);
+  });
+
+  test("titan + image segment → titan_no_multimodal (NEITHER provider called)", async () => {
+    process.env.EMBEDDINGS_PROVIDER = "titan";
+    process.env.EMBEDDING_MODEL_ID = "amazon.titan-embed-text-v2:0";
+    process.env.VOYAGE_SAGEMAKER_ENDPOINT = "voyage-endpoint";
+
+    const r = await embedQueryText([
+      { type: "text", text: "describe" },
+      { type: "image_url", image_url: "https://example.com/x.jpg" },
+    ]);
+
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.code).toBe("titan_no_multimodal");
+    expect(voyageCalls).toBe(0);
+    expect(bedrockCalls).toBe(0);
   });
 
   test("titan mode: bedrock returns error envelope → titan_strict_failed", async () => {
@@ -260,7 +304,6 @@ describe("previewVector", () => {
     expect(p.length).toBe(1024);
     expect(p.head).toHaveLength(4);
     expect(p.tail).toHaveLength(4);
-    // Last value before rounding: 1023/1024 = 0.99902343…
     expect(p.tail[3]).toBeCloseTo(0.999023, 5);
   });
 

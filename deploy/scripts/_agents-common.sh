@@ -18,7 +18,7 @@
 # Optional (needed only by update_runtime_env_dynamic):
 #   MONGODB_URI, ATLAS_DB_NAME, BEDROCK_KB_ID, AGENTCORE_MEMORY_STORE_ID,
 #   AGENTCORE_GATEWAY_URL,
-#   VOYAGE_ENDPOINT, EMBEDDINGS_PROVIDER, VOYAGE_REQUEST_FORMAT
+#   VOYAGE_ENDPOINT, EMBEDDINGS_PROVIDER
 #
 # Functions exported by this file:
 #   apply_with_retry <plan_file> [terraform plan args...]
@@ -33,6 +33,7 @@
 #   ensure_agent_config_refresh_token
 #   force_mcp_runtime_image_sync
 #   self_heal_failed_gateway_target
+#   warm_mcp_runtime
 
 # ─── Guard ────────────────────────────────────────────────────────────────────
 # Prevent double-sourcing.
@@ -368,11 +369,14 @@ build_dynamic_env_base() {
     BEDROCK_KB_ID="${BEDROCK_KB_ID:-}" \
     AGENTCORE_MEMORY_STORE_ID="${AGENTCORE_MEMORY_STORE_ID:-}" \
     AGENTCORE_GATEWAY_URL="${AGENTCORE_GATEWAY_URL:-}" \
+    AWS_REGION="${AWS_REGION:-}" \
+    EMBEDDING_MODEL_ID="${EMBEDDING_MODEL_ID:-}" \
+    EMBEDDINGS_PROVIDER="${EMBEDDINGS_PROVIDER:-}" \
     VOYAGE_ENDPOINT="${VOYAGE_ENDPOINT:-}" \
     MEMORY_TRACE_VALUES="${MEMORY_TRACE_VALUES:-0}" \
     TRACE_PROMPT_BODY="${TRACE_PROMPT_BODY:-0}" \
     TRACE_REDACT="${TRACE_REDACT:-0}" \
-    python3 -c "
+    python3 - <<'PYEOF'
 import json, os
 env = {
   'AWS_REGION':                os.environ.get('AWS_REGION', ''),
@@ -392,8 +396,11 @@ env = {
   'EMBEDDING_MODEL_ID':        os.environ.get('EMBEDDING_MODEL_ID', ''),
   'EMBEDDINGS_PROVIDER':       os.environ.get('EMBEDDINGS_PROVIDER', ''),
   'VOYAGE_SAGEMAKER_ENDPOINT': os.environ.get('VOYAGE_ENDPOINT', ''),
-  'VOYAGE_OUTPUT_DIM':         '1024',
-  'VOYAGE_REQUEST_FORMAT':     os.environ.get('VOYAGE_REQUEST_FORMAT', 'multimodal'),
+  # Voyage configuration is intentionally minimal here. The runtime adapter
+  # (api/src/adapters/voyage-embedding.ts) hard-codes the canonical multimodal
+  # envelope and VOYAGE_EMBEDDING_DIMS=1024. The legacy text-only envelope and
+  # its companion env vars were removed in the multimodal-only migration —
+  # see docs/reference/voyage.md.
   # LTM trace-value gating — sourced from operator .env so flips are
   # captured by ./deploy/deploy-agents.sh and never hand-edited on EC2.
   # 0 (default) = redacted; 1 = raw text in trace events.
@@ -402,7 +409,8 @@ env = {
   'TRACE_REDACT':              os.environ.get('TRACE_REDACT', '0'),
 }
 print(json.dumps({k: str(v) for k, v in env.items() if v}))
-")
+PYEOF
+)
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -596,6 +604,95 @@ PY
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
+# warm_mcp_runtime <runtime_arn> [warmup_invocations]
+#
+# Pre-warm an AgentCore Runtime MCP container by issuing direct
+# `invoke-agent-runtime` MCP `initialize` calls. This avoids the cold-start
+# race that lands the AgentCore Gateway target in status=FAILED:
+#
+#   1. Operator runs `create-gateway-target` (or TF null_resource does it).
+#   2. The Gateway immediately probes the target via MCP `tools/list`.
+#   3. AgentCore Runtime status=READY ≠ "warm container exists". If no
+#      container is in the pool, AgentCore cold-starts one (~20-40s).
+#   4. The Gateway probe times out (10-15s ceiling) → target = FAILED with
+#      "Unable to connect to the MCP server" even though the container is
+#      perfectly healthy and reachable seconds later.
+#
+# Empirically (docs/status/debugging.md "AgentCore Gateway target FAILED with
+# cold-start race"), 2-3 warm invocations are enough — they fill the runtime
+# pool with containers that respond inside the Gateway's probe window for
+# `idleRuntimeSessionTimeout` (default 900s / 15 min).
+#
+# Each invocation uses a NEW `mcp-session-id` so AgentCore allocates a
+# distinct container slot in the pool. Errors are non-fatal: the helper logs
+# warnings and returns success, because warmup is best-effort — the subsequent
+# Gateway probe will surface any real connectivity problems.
+#
+# Args:
+#   $1 runtime_arn          Full AgentCore runtime ARN (required).
+#   $2 warmup_count         Number of warmup invocations (default 3, or
+#                           $MCP_WARMUP_INVOCATIONS env var).
+#
+# Skip with: MCP_RUNTIME_WARMUP=0 (incident-response only).
+# ══════════════════════════════════════════════════════════════════════════════
+warm_mcp_runtime() {
+  local runtime_arn="$1"
+  local warmup_count="${2:-${MCP_WARMUP_INVOCATIONS:-3}}"
+  local region="${AWS_REGION:-us-east-1}"
+
+  if [[ "${MCP_RUNTIME_WARMUP:-1}" != "1" ]]; then
+    _ac_warn "MCP_RUNTIME_WARMUP=0 — skipping MCP runtime warmup (gateway target FAILED risk on cold start)"
+    return 0
+  fi
+
+  if [[ -z "$runtime_arn" || "$runtime_arn" == "None" ]]; then
+    _ac_warn "warm_mcp_runtime: empty runtime_arn — skipping"
+    return 0
+  fi
+
+  _ac_log "warm_mcp_runtime: pre-warming ${runtime_arn##*/} with ${warmup_count} invocation(s) to avoid Gateway cold-start race"
+
+  local i tmpfile status_code success=0
+  for i in $(seq 1 "$warmup_count"); do
+    tmpfile=$(mktemp -t mcp-warmup.XXXXXX.bin)
+    # MCP `initialize` is the lightest valid JSON-RPC request that exercises
+    # the full request → container → response path. We deliberately use
+    # `cli-binary-format raw-in-base64-out` because the AWS CLI defaults to
+    # base64-decoding `--payload` otherwise (rejecting our JSON literal as
+    # "Invalid base64").
+    if status_code=$(aws bedrock-agentcore invoke-agent-runtime \
+        --region "$region" \
+        --agent-runtime-arn "$runtime_arn" \
+        --qualifier DEFAULT \
+        --mcp-session-id "deploy-warmup-${i}-$(date +%s)-$$" \
+        --mcp-protocol-version "2025-06-18" \
+        --content-type "application/json" \
+        --accept "application/json, text/event-stream" \
+        --payload '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"deploy-warmup","version":"1.0"}}}' \
+        --cli-binary-format raw-in-base64-out \
+        "$tmpfile" 2>/dev/null \
+        | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("statusCode",""))' 2>/dev/null); then
+      if [[ "$status_code" == "200" ]]; then
+        success=$(( success + 1 ))
+        _ac_log "warm_mcp_runtime: invocation ${i}/${warmup_count} → statusCode=200"
+      else
+        _ac_warn "warm_mcp_runtime: invocation ${i}/${warmup_count} → statusCode=${status_code:-?}"
+      fi
+    else
+      _ac_warn "warm_mcp_runtime: invocation ${i}/${warmup_count} failed (CLI error) — continuing"
+    fi
+    rm -f "$tmpfile"
+  done
+
+  if (( success > 0 )); then
+    _ac_ok "warm_mcp_runtime: ${success}/${warmup_count} warm invocations succeeded — runtime pool warm for ~15min"
+  else
+    _ac_warn "warm_mcp_runtime: 0/${warmup_count} warm invocations succeeded — gateway target may still hit cold-start race"
+  fi
+  return 0
+}
+
+# ══════════════════════════════════════════════════════════════════════════════
 # force_mcp_runtime_image_sync
 #
 # Container-mode AgentCore runtimes are wired to `<repo>:latest` in Terraform.
@@ -755,6 +852,23 @@ PY
     return 0
   fi
 
+  # Pre-warm the runtime BEFORE deleting the gateway target. Without this,
+  # the next `terraform apply` recreates the target against a cold runtime
+  # (status=READY but no container in the pool); the gateway probe times
+  # out and the target lands FAILED. See docs/status/debugging.md
+  # "AgentCore Gateway target FAILED with cold-start race".
+  local runtime_arn
+  runtime_arn=$(echo "$cfg_json" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+print(d.get("agentRuntimeArn", ""))
+' 2>/dev/null || echo "")
+  if [[ -n "$runtime_arn" && "$runtime_arn" != "None" ]]; then
+    warm_mcp_runtime "$runtime_arn"
+  else
+    _ac_warn "force_mcp_runtime_image_sync: could not resolve runtime ARN for warmup — gateway target may hit cold-start race on recreate"
+  fi
+
   # The gateway caches tool schemas at create-gateway-target time. Delete the
   # existing target so the null_resource in modules/agentcore-gateway re-runs
   # on the next apply (which re-fetches tools/list against the new runtime
@@ -885,6 +999,23 @@ self_heal_failed_gateway_target() {
   if [[ "$still" != "0" ]]; then
     _ac_warn "self-heal: target ${existing_id} did not disappear within 60s — aborting recreate"
     return 1
+  fi
+
+  # Pre-warm the runtime BEFORE recreating the target. The failed-target case
+  # almost always coincides with a cold runtime pool, so without this step the
+  # recreated target lands FAILED again with the same "Unable to connect" reason.
+  # The endpoint URL-encodes the runtime ARN; decode it for invoke-agent-runtime.
+  local runtime_arn
+  runtime_arn=$(MCP_ENDPOINT="$mcp_endpoint" python3 -c '
+import os, re, urllib.parse
+endpoint = os.environ.get("MCP_ENDPOINT", "")
+m = re.search(r"/runtimes/([^/]+)/invocations", endpoint)
+print(urllib.parse.unquote(m.group(1)) if m else "")
+' 2>/dev/null || echo "")
+  if [[ -n "$runtime_arn" ]]; then
+    warm_mcp_runtime "$runtime_arn"
+  else
+    _ac_warn "self-heal: could not extract runtime ARN from endpoint '${mcp_endpoint}' — recreate may hit cold-start race"
   fi
 
   _ac_log "self-heal: recreating target '${target_name}' on gateway ${gateway_id}"

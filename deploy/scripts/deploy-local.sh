@@ -369,7 +369,7 @@ else
   # voyage on the local path must run deploy-shared.sh first.
   export EMBEDDINGS_PROVIDER="${EMBEDDINGS_PROVIDER:-titan}"
   export EMBEDDING_MODEL_ID="${EMBEDDING_MODEL_ID:-amazon.titan-embed-text-v2:0}"
-  export EMBEDDING_DIMENSIONS="${EMBEDDING_DIMENSIONS:-1024}"
+  # Embedding dim is a code constant (VOYAGE_EMBEDDING_DIMS) — no env override.
 
   log "Seeding collections (customers, products, orders, troubleshooting, indexes)..."
   bun db-seeding/seed-all.ts \
@@ -405,7 +405,9 @@ lsof -ti:3000 | xargs kill -9 2>/dev/null || true
 lsof -ti:8501 | xargs kill -9 2>/dev/null || true
 sleep 1
 
-# Load env
+# Load env — deploy-local.sh writes .env.live in `export KEY="value"` form
+# (bash-source-safe), so direct `source` works here. The EC2 path uses a
+# separate Docker-format file (.env.docker) — see deploy/scripts/_env-live.sh.
 source "$REPO_ROOT/.env.live"
 export PATH="$HOME/.bun/bin:$PATH"
 

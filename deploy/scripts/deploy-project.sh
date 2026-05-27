@@ -51,6 +51,8 @@ SKIP_SMOKE=false
 # build_and_upload_code_artifact, update_runtime_env_dynamic, etc.)
 # shellcheck source=deploy/scripts/_agents-common.sh
 source "$SCRIPT_DIR/_agents-common.sh"
+# shellcheck source=deploy/scripts/_voyage-config.sh
+source "$SCRIPT_DIR/_voyage-config.sh"
 AWS_REGION="${AWS_REGION:-us-east-1}"
 ENVIRONMENT="${ENVIRONMENT:-dev}"
 PROJECT_NAME="${PROJECT_NAME:-multiagent-mongodb-framework}"
@@ -387,7 +389,6 @@ rm -f /tmp/.atlas_check.json
 SHARED_BUCKET="${PROJECT_NAME}-${ENVIRONMENT}-${ACCOUNT_ID}"
 VOYAGE_ARN="${VOYAGE_MODEL_PACKAGE_ARN:-}"
 VOYAGE_INSTANCE="${VOYAGE_INSTANCE_TYPE:-ml.g6.xlarge}"
-VOYAGE_REQUEST_FORMAT="${VOYAGE_REQUEST_FORMAT:-}"
 VOYAGE_MARKETPLACE_MODEL="${VOYAGE_MARKETPLACE_MODEL:-}"
 VOYAGE_MODEL_LABEL=""
 EMBEDDINGS_MODEL_ID=""
@@ -399,12 +400,12 @@ GIT_SHA=$(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null || echo "unknow
 AGENTCORE_CODE_ARTIFACT_PREFIX="artifacts/agentcore-runtime/${GIT_SHA}/deployment_package.zip"
 
 # ── Embedding provider guard: explicit opt-in, no silent fallback ─────────────
-# The pipeline supports three explicit modes:
+# The pipeline supports two explicit modes:
+#   voyage — provision SageMaker from VOYAGE_MODEL_PACKAGE_ARN. Multimodal-only —
+#            VOYAGE_MARKETPLACE_MODEL must be in SUPPORTED_VOYAGE_MODELS
+#            (see api/src/adapters/voyage-embedding.ts). The legacy
+#            text-only envelope (voyage-3-5-lite / voyage-3 / voyage-4) is removed.
 #   titan  — no SageMaker endpoint, query/doc embeddings use Bedrock Titan v2.
-#   voyage — provision SageMaker from VOYAGE_MODEL_PACKAGE_ARN. Supported request
-#            envelopes are selected by VOYAGE_REQUEST_FORMAT:
-#              multimodal -> voyage-multimodal-3
-#              legacy     -> voyage-3.5-lite / older text-only Voyage listing
 EMBEDDINGS_PROVIDER="${EMBEDDINGS_PROVIDER:-}"
 case "$EMBEDDINGS_PROVIDER" in
   voyage)
@@ -415,36 +416,34 @@ case "$EMBEDDINGS_PROVIDER" in
     fi
     # Marketplace ARN tail format:
     #   arn:aws:sagemaker:<region>:<vendor>:model-package/<package-name>
-    # AWS Marketplace package names may include vendor version suffixes or the
-    # published `voyage-multimodel-3-updated-*` package tail. Keep provider
-    # routing based on the canonical model family, but preserve the exact tail
-    # in deploy-manifest.json so version suffixes never disappear silently.
+    # AWS Marketplace package names may include vendor version suffixes (e.g.
+    # `voyage-multimodel-3-updated-…` / `voyage-multimodal-3-5-v1-…`). We
+    # normalise the family from the ARN tail and then refuse anything that is
+    # NOT a supported multimodal model — the legacy envelope is gone, so a
+    # text-only subscription cannot ride the multimodal wire.
     VOYAGE_ARN_TAIL="${VOYAGE_ARN##*/}"
-    if [[ "$VOYAGE_ARN_TAIL" =~ ^voyage-multimo(dal|del)-3($|-) ]]; then
+    if [[ "$VOYAGE_ARN_TAIL" =~ ^voyage-multimo(dal|del)-3-5($|-) ]]; then
+      VOYAGE_MODEL_LABEL="voyage-multimodal-3.5"
+    elif [[ "$VOYAGE_ARN_TAIL" =~ ^voyage-multimo(dal|del)-3($|-) ]]; then
       VOYAGE_MODEL_LABEL="voyage-multimodal-3"
-      VOYAGE_REQUEST_FORMAT="${VOYAGE_REQUEST_FORMAT:-multimodal}"
-      [[ "$VOYAGE_REQUEST_FORMAT" == "multimodal" ]] || err "voyage-multimodal-3 requires VOYAGE_REQUEST_FORMAT=multimodal"
-      EMBEDDINGS_VOYAGE_MULTIMODAL="true"
-    elif [[ "$VOYAGE_ARN_TAIL" =~ ^voyage-3-5-lite($|-) ]]; then
-      VOYAGE_MODEL_LABEL="voyage-3-5-lite"
-      VOYAGE_REQUEST_FORMAT="${VOYAGE_REQUEST_FORMAT:-legacy}"
-      [[ "$VOYAGE_REQUEST_FORMAT" == "legacy" ]] || err "voyage-3-5-lite requires VOYAGE_REQUEST_FORMAT=legacy"
     else
-      VOYAGE_MODEL_LABEL="$VOYAGE_MARKETPLACE_MODEL"
-      [[ -n "$VOYAGE_MODEL_LABEL" && "$VOYAGE_MODEL_LABEL" != "voyage-multimodal-3" ]] || err "Could not infer Voyage model from VOYAGE_MODEL_PACKAGE_ARN tail '$VOYAGE_ARN_TAIL'.
-       Set VOYAGE_MARKETPLACE_MODEL to the selected custom model and VOYAGE_REQUEST_FORMAT to multimodal or legacy."
-      [[ "$VOYAGE_ARN_TAIL" =~ ^voyage- ]] || err "VOYAGE_MODEL_PACKAGE_ARN tail '$VOYAGE_ARN_TAIL' is not a Voyage model package.
-       Use an ARN whose model-package name starts with 'voyage-'."
-      [[ "$VOYAGE_MODEL_LABEL" =~ ^voyage- ]] || err "VOYAGE_MARKETPLACE_MODEL='$VOYAGE_MODEL_LABEL' is not a Voyage model label.
-       Use a label starting with 'voyage-'."
-      [[ "$VOYAGE_REQUEST_FORMAT" == "multimodal" || "$VOYAGE_REQUEST_FORMAT" == "legacy" ]] || err "Custom Voyage model '$VOYAGE_MODEL_LABEL' requires VOYAGE_REQUEST_FORMAT=multimodal or legacy"
+      VOYAGE_MODEL_LABEL="${VOYAGE_MARKETPLACE_MODEL:-}"
     fi
+    if [[ -z "$VOYAGE_MODEL_LABEL" ]]; then
+      err "Could not infer a multimodal Voyage model from VOYAGE_MODEL_PACKAGE_ARN tail '$VOYAGE_ARN_TAIL'.
+       Re-run ./deploy/scripts/setup-voyage-marketplace.sh --model voyage-multimodal-3 (or voyage-multimodal-3.5)."
+    fi
+    # Hard gate: only multimodal models are allowed end-to-end. The bash SSOT
+    # (deploy/scripts/_voyage-config.sh) reads SUPPORTED_VOYAGE_MODELS from
+    # api/src/adapters/voyage-embedding.ts so adding a new model is one TS edit.
+    voyage_assert_multimodal_or_die "$VOYAGE_MODEL_LABEL"
+    EMBEDDINGS_VOYAGE_MULTIMODAL="true"
     EMBEDDINGS_MODEL_ID="$VOYAGE_ARN_TAIL"
     VOYAGE_MARKETPLACE_MODEL="$VOYAGE_MODEL_LABEL"
     if [[ -z "$VOYAGE_ENDPOINT_SUFFIX" ]]; then
       VOYAGE_ENDPOINT_SUFFIX="$(echo "$VOYAGE_MODEL_LABEL" | tr '[:upper:]' '[:lower:]' | sed -E 's/[_.]/-/g; s/[^a-z0-9-]+/-/g; s/^-+//; s/-+$//')"
     fi
-    ok "Embeddings: ${VOYAGE_MODEL_LABEL} via SageMaker (${VOYAGE_REQUEST_FORMAT} request format; package ${VOYAGE_ARN_TAIL})"
+    ok "Embeddings: ${VOYAGE_MODEL_LABEL} via SageMaker (multimodal-only; package ${VOYAGE_ARN_TAIL})"
     ;;
   titan)
     # Explicit, deliberate non-default embeddings provider — Bedrock Titan v2 only. No
@@ -453,7 +452,6 @@ case "$EMBEDDINGS_PROVIDER" in
     VOYAGE_ARN=""
     VOYAGE_MODEL_LABEL=""
     EMBEDDINGS_MODEL_ID="amazon.titan-embed-text-v2:0"
-    VOYAGE_REQUEST_FORMAT="${VOYAGE_REQUEST_FORMAT:-multimodal}"
     warn "═══════════════════════════════════════════════════════════════════════"
     warn "  EMBEDDINGS_PROVIDER=titan — explicit non-default embeddings provider"
     warn "  Voyage SageMaker endpoint will NOT be provisioned."
@@ -472,7 +470,6 @@ case "$EMBEDDINGS_PROVIDER" in
     err "EMBEDDINGS_PROVIDER='$EMBEDDINGS_PROVIDER' is not recognised. Use 'voyage' or 'titan'."
     ;;
 esac
-export VOYAGE_REQUEST_FORMAT
 export VOYAGE_MARKETPLACE_MODEL
 export EMBEDDINGS_MODEL_ID
 export EMBEDDINGS_VOYAGE_MULTIMODAL
@@ -1094,7 +1091,6 @@ log "Reconciling MongoDB indexes (safe to re-run)..."
   MONGODB_URI="$MONGODB_URI" \
     MONGODB_DB="$ATLAS_DB_NAME" \
     WAIT_FOR_ATLAS_SEARCH_INDEXES=1 \
-    EMBEDDING_DIMENSIONS="${EMBEDDING_DIMENSIONS:-1024}" \
     bun db-seeding/seed-indexes.ts
 )
 ok "MongoDB indexes verified (seed-indexes)"
@@ -1350,7 +1346,7 @@ if [[ -n "$AGENTCORE_ORCHESTRATOR_ID" ]]; then
 
   export AWS_REGION MONGODB_URI ATLAS_DB_NAME BEDROCK_KB_ID \
          AGENTCORE_MEMORY_STORE_ID AGENTCORE_GATEWAY_URL \
-         VOYAGE_ENDPOINT EMBEDDINGS_PROVIDER VOYAGE_REQUEST_FORMAT \
+         VOYAGE_ENDPOINT EMBEDDINGS_PROVIDER \
          AGENTCORE_RUNTIME_DEPLOYMENT_MODE SHARED_BUCKET AGENTCORE_CODE_ARTIFACT_PREFIX \
          ECR_RUNTIME_REPO
 
@@ -1367,10 +1363,13 @@ if [[ -n "$AGENTCORE_ORCHESTRATOR_ID" ]]; then
 fi
 
 # ══════════════════════════════════════════════════════════════════════════════
-# PHASE 7 — Write .env.live + copy to EC2 via SSM
+# PHASE 7 — Write .env.docker (Docker --env-file) + .env.live (bash-source)
+#           + copy both to EC2 via SSM. systemd unit files on EC2 reference
+#           /opt/multiagent/.env.docker (modules/ec2/user_data.sh); .env.live
+#           is the bash-source-safe sibling for laptop dev + SSM debugging.
 # ══════════════════════════════════════════════════════════════════════════════
 sep
-log "Phase 7 — Writing .env.live and copying to EC2 via SSM..."
+log "Phase 7 — Writing .env.docker + .env.live and copying to EC2 via SSM..."
 ensure_agent_config_refresh_token
 
 if [[ -n "$VOYAGE_ENDPOINT" ]]; then
@@ -1388,7 +1387,7 @@ else
 fi
 
 # Strict-mode embeddings (api/src/lib/embed-query.ts):
-# In voyage stacks, EMBEDDING_MODEL_ID must NOT be present in .env.live —
+# In voyage stacks, EMBEDDING_MODEL_ID must NOT be present in the env files —
 # its mere presence used to enable a silent Bedrock fallback when Voyage
 # stuttered, which produced `embeddingModel: amazon.titan-embed-text-v2:0`
 # rows in `chat_messages` / `agent_memory_facts`. The runtime now refuses to
@@ -1400,107 +1399,13 @@ else
   EMBEDDING_MODEL_ID_LINE="# EMBEDDING_MODEL_ID intentionally omitted — strict ${EMBEDDINGS_PROVIDER} mode (no Bedrock fallback)"
 fi
 
-cat > "$REPO_ROOT/.env.live" <<EOF
-# EC2 mode — generated by deploy.sh on $(date -u +"%Y-%m-%dT%H:%M:%SZ")
-# Embedding: ${EMBEDDING_LINE}
-# Tools:     MongoDB MCP direct AgentCore Runtime; Gateway for non-Mongo tools
-# NOTE: plain KEY=VALUE only — no export, no quotes, no declare -x
-ORCHESTRATOR_MODE=runtime
-AGENT_CONFIG_REFRESH_TOKEN=${AGENT_CONFIG_REFRESH_TOKEN}
-
-# MongoDB Atlas
-MONGODB_URI=${MONGODB_URI}
-# Public-SRV fallback for laptop-side tools (memory-recall-diagnostic.py,
-# scenario tests, post-deploy-smoke). The API container itself uses MONGODB_URI
-# (PrivateLink) for VPC-only egress.
-MONGODB_URI_PUBLIC=${MONGODB_URI_PUBLIC}
-MONGODB_DB=${ATLAS_DB_NAME}
-
-# Bedrock
-BEDROCK_KB_ID=${BEDROCK_KB_ID}
-AWS_REGION=${AWS_REGION}
-
-# Embedding — explicit provider switch from deploy.sh (strict mode, no silent fallback).
-#   voyage  → VOYAGE_SAGEMAKER_ENDPOINT set, selected Voyage Marketplace model
-#             EMBEDDING_MODEL_ID is intentionally NOT written (would enable
-#             a forbidden Bedrock fallback if it leaked into the runtime).
-#   titan   → VOYAGE_SAGEMAKER_ENDPOINT empty, Bedrock Titan v2 (deviation)
-EMBEDDINGS_PROVIDER=${EMBEDDINGS_PROVIDER}
-VOYAGE_SAGEMAKER_ENDPOINT=${VOYAGE_ENDPOINT}
-VOYAGE_OUTPUT_DIM=1024
-VOYAGE_REQUEST_FORMAT=${VOYAGE_REQUEST_FORMAT:-multimodal}
-${EMBEDDING_MODEL_ID_LINE}
-
-# AgentCore — Memory store, Gateway, Agent runtimes (orchestrator + specialists)
-AGENTCORE_MEMORY_STORE_ID=${AGENTCORE_MEMORY_STORE_ID}
-AGENTCORE_GATEWAY_URL=${AGENTCORE_GATEWAY_URL}
-AGENTCORE_ORCHESTRATOR_ARN=${AGENTCORE_ORCHESTRATOR_ARN}
-EOF
-# Append one AGENTCORE_<UPPER>_ARN line per discovered specialist so that
-# agentcoreSpecialistArn() in api/src/adapters/agentcore-runtime.ts can pick
-# them up via the legacy AGENTCORE_<UPPER>_ARN env-var fallback path.
-# This replaces the former hardcoded three-line block and works for any number
-# of specialist agents defined in config/agents/*.agent.md.
-for _spec_id in "${SPECIALIST_IDS[@]:-}"; do
-  _upper_id="$(printf '%s' "$_spec_id" | tr '[:lower:]-' '[:upper:]_')"
-  _spec_arn="$(specialist_runtime_arn "$_spec_id")"
-  [[ -n "$_spec_arn" ]] && echo "AGENTCORE_${_upper_id}_ARN=${_spec_arn}" >> "$REPO_ROOT/.env.live"
-done
-unset _spec_id _upper_id _spec_arn
-cat >> "$REPO_ROOT/.env.live" <<EOF
-
-# Tool hosting — all agent MCP traffic goes through AgentCore Gateway. The
-# Gateway target invokes the dedicated MongoDB MCP AgentCore Runtime.
-SHORT_TERM_MEMORY_BACKEND=agentcore
-PERSIST_CHAT_SESSIONS=1
-MEMORY_TTL_DAYS=30
-
-# Long-term memory fact extractor. Pinned to Claude Haiku 4.5 because the
-# previous default (claude-3-5-haiku-20241022) is deprecated and silently
-# AccessDenied on freshly granted Bedrock accounts. Override only if you have
-# enabled a different tool-use-capable model in your account.
-MEMORY_EXTRACTION_MODEL_ID=us.anthropic.claude-haiku-4-5-20251001-v1:0
-
-# LTM / trace value gating — sourced from .env so flips are deploy-tracked
-# (no SSH/SSM hand-editing of /opt/multiagent/.env.live on EC2).
-#   MEMORY_TRACE_VALUES=1 → raw fact strings in trace events. Default 0 = "<redacted>".
-#   TRACE_PROMPT_BODY=1   → prompt.assembled.body attached (full system prompt).
-#   TRACE_REDACT=1        → blanket redactDeep pass over every event payload.
-MEMORY_TRACE_VALUES=${MEMORY_TRACE_VALUES:-0}
-TRACE_PROMPT_BODY=${TRACE_PROMPT_BODY:-0}
-TRACE_REDACT=${TRACE_REDACT:-0}
-
-# CloudWatch (API + UI log groups; journald → CW agent on EC2 ships here)
-CLOUDWATCH_LOG_GROUP=${CW_API_LOG_GROUP}
-CLOUDWATCH_UI_LOG_GROUP=${CW_UI_LOG_GROUP}
-
-# Cognito — JWT auth for the API. Always on; assertJwksAuthConfigured() refuses to boot
-# the API without AUTH_JWKS_URI + AUTH_ISSUER (api/src/lib/jwt-verify.ts).
-AUTH_JWKS_URI=${COGNITO_JWKS}
-AUTH_ISSUER=https://cognito-idp.${AWS_REGION}.amazonaws.com/${COGNITO_POOL_ID}
-STREAMLIT_COGNITO_POOL_ID=${COGNITO_POOL_ID}
-STREAMLIT_COGNITO_CLIENT_ID=${COGNITO_CLIENT_ID}
-
-# EC2 URLs
-STREAMLIT_API_URL=http://${EC2_IP}:3000/
-
-# OpenTelemetry — points Bun API + Streamlit UI at the local ADOT Collector
-# sidecar (modules/adot-collector). The sidecar signs SigV4 outbound to the
-# AWS X-Ray OTLP endpoint, so apps never need their own credentials for
-# telemetry. When OTEL_EXPORTER_OTLP_ENDPOINT is empty (e.g. enable_adot_collector
-# = false in Terraform), the Bun bootstrap falls back to in-process tracing
-# only and the Streamlit auto-instrumentation no-ops gracefully.
-OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-http://127.0.0.1:4318}
-OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
-OTEL_SERVICE_NAME=multiagent-api
-OTEL_RESOURCE_ATTRIBUTES=service.namespace=multiagent,deployment.environment=${ENVIRONMENT:-dev},service.version=${GIT_SHA:-unknown}
-OTEL_TRACES_SAMPLER=parentbased_traceidratio
-OTEL_TRACES_SAMPLER_ARG=${OTEL_SAMPLE_RATIO:-1.0}
-# Streamlit-side instrumentation hook (Python distro convention).
-OTEL_PYTHON_LOG_CORRELATION=true
-OTEL_PYTHON_LOG_FORMAT=%(asctime)s %(levelname)s [%(name)s] [trace_id=%(otelTraceID)s span_id=%(otelSpanID)s resource.service.name=%(otelServiceName)s] - %(message)s
-EOF
-ok ".env.live written"
+# Shared writer for `.env.docker` (Docker --env-file, canonical) + `.env.live`
+# (bash-source-safe variant). Both files go to $REPO_ROOT and are pushed to
+# /opt/multiagent/ on EC2 by sync_env_live_to_ec2 below.
+# shellcheck source=deploy/scripts/_env-live.sh
+source "$SCRIPT_DIR/_env-live.sh"
+write_env_live_files "deploy-project.sh"
+ok ".env.docker + .env.live written"
 
 wait_for_instance_status_ok "$EC2_INSTANCE_ID"
 wait_for_ssm_online "$EC2_INSTANCE_ID"
@@ -1559,17 +1464,10 @@ source "$SCRIPT_DIR/_preflight-checks.sh"
 preflight_validate project-pre-env-sync
 
 # Copy via SSM Session Manager — no SSH key required.
-log "Copying .env.live to EC2 ($EC2_INSTANCE_ID) via SSM..."
-_ENV_B64=$(base64 < "$REPO_ROOT/.env.live" | tr -d '\n')
-ENV_SYNC_CMD_ID=$(send_ssm_command_retry \
-  "$EC2_INSTANCE_ID" \
-  "multiagent: sync .env.live" \
-  "[\"echo '${_ENV_B64}' | base64 -d > /opt/multiagent/.env.live && chmod 600 /opt/multiagent/.env.live\"]" \
-  12) || err "Failed to send .env.live to EC2 via SSM"
-
-wait_for_ssm_command_success "$ENV_SYNC_CMD_ID" "$EC2_INSTANCE_ID" 24 \
-  || err ".env.live sync command failed on EC2"
-ok ".env.live synced to /opt/multiagent/.env.live"
+log "Copying .env.docker + .env.live to EC2 ($EC2_INSTANCE_ID) via SSM..."
+sync_env_live_to_ec2 "$EC2_INSTANCE_ID" \
+  || err "env-file sync to EC2 failed"
+ok ".env.docker + .env.live synced to /opt/multiagent/ on $EC2_INSTANCE_ID"
 
 # ══════════════════════════════════════════════════════════════════════════════
 # PHASE 8 — Restart services on EC2 + ECR docker login

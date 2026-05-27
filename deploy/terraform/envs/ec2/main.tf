@@ -275,8 +275,12 @@ resource "null_resource" "seed_mongodb_indexes" {
     command = "bun ${path.module}/../../../../db-seeding/seed-indexes.ts"
 
     environment = {
-      MONGODB_URI                   = module.mongodb_atlas.connection_string
-      MONGODB_DB                    = var.atlas_db_name
+      MONGODB_URI = module.mongodb_atlas.connection_string
+      MONGODB_DB  = var.atlas_db_name
+      # NOTE: must match VOYAGE_EMBEDDING_DIMS in
+      # api/src/adapters/voyage-embedding.ts. Terraform can't shell out to
+      # voyage-print.ts here, so the literal is pinned by the bun guard test
+      # `voyage SSOT — terraform <-> TS parity for embedding dim`.
       EMBEDDING_DIMENSIONS          = "1024"
       WAIT_FOR_ATLAS_SEARCH_INDEXES = "1"
     }
@@ -1125,11 +1129,40 @@ module "cloudwatch_genai" {
       arn = module.agentcore_gateway.gateway_arn
     }
   }
+  # AgentCore Runtime vended log delivery — orchestrator + each specialist +
+  # mongodb-mcp. Without these, the auto-provisioned
+  # `/aws/bedrock-agentcore/runtimes/<id>-DEFAULT` log groups stay empty and
+  # the smoke `agentcore_trace_join` step warns about missing `trace_id`
+  # propagation. Static map keys (e.g. "orchestrator", "mongodb_mcp",
+  # specialist agent.id) keep for_each plan-able even when runtime_id is
+  # `(known after apply)` on a fresh deploy.
+  agentcore_runtimes = merge(
+    {
+      orchestrator = {
+        id  = module.acr_orchestrator.runtime_id
+        arn = module.acr_orchestrator.runtime_arn
+      }
+      mongodb_mcp = {
+        id  = module.mongodb_mcp_runtime.runtime_id
+        arn = module.mongodb_mcp_runtime.runtime_arn
+      }
+    },
+    {
+      for k, m in module.acr_specialists :
+      k => {
+        id  = m.runtime_id
+        arn = m.runtime_arn
+      }
+    },
+  )
   tags = local.common_tags
 
   depends_on = [
     module.agentcore_memory,
     module.agentcore_gateway,
+    module.acr_orchestrator,
+    module.acr_specialists,
+    module.mongodb_mcp_runtime,
   ]
 }
 

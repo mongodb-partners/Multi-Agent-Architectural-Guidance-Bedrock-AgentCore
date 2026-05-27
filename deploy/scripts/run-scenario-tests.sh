@@ -29,12 +29,15 @@ result() {
 # Safe .env.live readers (avoid sourcing — URIs contain &)
 _ev() { awk -F= -v k="$1" '$1==k {sub(/^[^=]+=/,""); print; exit}' .env.live 2>/dev/null || true; }
 
+# Voyage SSOT bridge — provides voyage_embedding_dims().
+# shellcheck source=deploy/scripts/_voyage-config.sh
+source "${REPO_ROOT}/deploy/scripts/_voyage-config.sh"
+
 MONGODB_URI="$(_ev MONGODB_URI)"
 MONGODB_URI_PUBLIC="$(_ev MONGODB_URI_PUBLIC)"
 MONGODB_DB="$(_ev MONGODB_DB)"
 EMBEDDINGS_PROVIDER="${EMBEDDINGS_PROVIDER:-$(_ev EMBEDDINGS_PROVIDER)}"
-EMBEDDING_DIMENSIONS="${EMBEDDING_DIMENSIONS:-$(_ev VOYAGE_OUTPUT_DIM)}"
-[[ -n "$EMBEDDING_DIMENSIONS" ]] || EMBEDDING_DIMENSIONS=1024
+EMBEDDING_DIMENSIONS="$(voyage_embedding_dims)"
 VOYAGE_SAGEMAKER_ENDPOINT="$(_ev VOYAGE_SAGEMAKER_ENDPOINT)"
 BEDROCK_KB_ID="$(_ev BEDROCK_KB_ID)"
 KB_DATA_SOURCE_ID="${KB_DATA_SOURCE_ID:-$(_ev KB_DATA_SOURCE_ID)}"

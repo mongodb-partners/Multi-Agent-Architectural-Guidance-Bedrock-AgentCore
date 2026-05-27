@@ -81,8 +81,13 @@ ATLAS_VECTOR_INDEX="troubleshooting-vector-index"
 ATLAS_SECRET_NAME="${PROJECT_NAME}-bedrock-kb-creds-${ENVIRONMENT}"
 IAM_ROLE_NAME="${PROJECT_NAME}-bedrock-kb-${ENVIRONMENT}-role"
 EMBED_MODEL_ID="${EMBEDDING_MODEL_ID:-amazon.titan-embed-text-v2:0}"
-# titan-embed-text-v2:0 outputs 1024 dims by default
-EMBEDDING_DIMENSIONS="${EMBEDDING_DIMENSIONS:-1024}"
+# Embedding dimension comes from the Voyage TS SSOT
+# (api/src/adapters/voyage-embedding.ts → VOYAGE_EMBEDDING_DIMS). The bash
+# bridge `voyage_embedding_dims` reads the same constant; both the Voyage
+# and Titan stacks index at the same dim.
+# shellcheck source=deploy/scripts/_voyage-config.sh
+source "$SCRIPT_DIR/_voyage-config.sh"
+EMBEDDING_DIMENSIONS="$(voyage_embedding_dims)"
 
 # ── derive Atlas vars from TF_ vars if not set directly ──────────────────────
 ATLAS_PROJECT_ID="${ATLAS_PROJECT_ID:-${TF_VAR_mongodb_atlas_project_id:-}}"

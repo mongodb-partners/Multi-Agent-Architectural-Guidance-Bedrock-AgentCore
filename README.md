@@ -97,7 +97,7 @@ config/skills/order-management/
 Agents use configuration-driven tools:
 
 - MongoDB: `mongodb_query`, `mongodb_vector_search`, `mongodb_aggregate` (MongoDB MCP runtime)
-- Bedrock: `bedrock_kb_retrieve`, `generate_embedding`
+- Bedrock: `bedrock_kb_retrieve`, `embed_multimodal_content` (multimodal — text + image_url + image_base64)
 - Skills: `activate_skill`, `read_skill_resource`, `run_skill_script`
 - HTTP: `config/http-tools.json` and per-skill `http-tools.json`
 

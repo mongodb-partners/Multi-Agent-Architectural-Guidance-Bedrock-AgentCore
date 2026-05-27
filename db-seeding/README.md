@@ -18,8 +18,8 @@ MongoDB seed scripts for the Bedrock Multi-Agent demo stack. Each script is stan
 
 When `EMBEDDINGS_PROVIDER` flips (e.g. titan ↔ voyage), the existing stored embeddings have the wrong dimension / wrong provider tag. The deploy-time wrapper auto-detects this via three independent signals:
 
-- SSM `/<SHARED_VPC_NAME>/<region>/embeddings/dim` ≠ current `EMBEDDING_DIMENSIONS`
-- A sampled seeder-owned row's `embedding.length` ≠ current `EMBEDDING_DIMENSIONS`
+- SSM `/<SHARED_VPC_NAME>/<region>/embeddings/dim` ≠ current `VOYAGE_EMBEDDING_DIMS`
+- A sampled seeder-owned row's `embedding.length` ≠ current `VOYAGE_EMBEDDING_DIMS`
 - A sampled seeder-owned row's `embeddingModel` doesn't start with the current provider prefix
 
 Any one signal triggers `REWIRE_EMBEDDINGS=1` automatically. Operators can also force it manually:
@@ -64,12 +64,13 @@ MONGODB_URI=... bun db-seeding/seed-products.ts
 | `MONGODB_DB` | `<project>_<env>` (e.g. `mongodb_multiagent_dev`) | Target database name; project+env-derived by `.env` |
 | `MEMORY_TTL_DAYS` | `90` | TTL for `agent_memory_facts` documents (days) |
 | `CHAT_MESSAGES_COLLECTION` | `chat_messages` | Override the vector-searchable chat message mirror name |
-| `EMBEDDING_DIMENSIONS` | `1024` | Vector index dimensions (must match your embedding model) |
 | `VECTOR_SIMILARITY` | `cosine` | `cosine` \| `euclidean` \| `dotProduct` |
 | `WAIT_FOR_ATLAS_SEARCH_INDEXES` | `0` | Set to `1` in deploy flows to wait until Atlas Search/vector indexes are queryable |
 | `EMBEDDING_MODEL_ID` | `amazon.titan-embed-text-v2:0` | Bedrock model for embeddings |
 | `EMBED_BATCH_DELAY_MS` | `200` | Delay between embedding API calls (throttle) |
 | `AWS_REGION` | `us-east-1` | Required for `seed-embeddings.ts` |
+
+> **Embedding dim is a code constant, not an env var.** `VOYAGE_EMBEDDING_DIMS` (1024) lives in `api/src/adapters/voyage-embedding.ts` and is imported directly by `seed-indexes.ts`. Bumping it is a code change pinned by `api/tests/unit/voyage-ssot-guard.test.ts`.
 
 ## Atlas vector search indexes
 

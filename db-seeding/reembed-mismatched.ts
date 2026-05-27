@@ -41,9 +41,15 @@ import type { Collection } from "mongodb";
 import { connect } from "./connect.ts";
 // Single source of truth for the Voyage request envelope. The historical
 // local copy of buildVoyageBody here caused 'input' vs 'inputs' drift to land
-// in the recovery path — the worst possible time. Pure function: reads env
-// (VOYAGE_REQUEST_FORMAT, VOYAGE_OUTPUT_DIM) at call time.
-import { buildVoyageRequestBody } from "../api/src/adapters/voyage-embedding.ts";
+// in the recovery path — the worst possible time. Multimodal-only after the
+// voyage-multimodal-only-sagemaker PR; text inputs are wrapped via
+// `textToMultimodal()` before crossing the typed adapter boundary.
+import {
+  buildVoyageRequestBody,
+  textToMultimodal,
+  getVoyageEndpoint,
+  getVoyageModelName,
+} from "../api/src/adapters/voyage-embedding.ts";
 
 // ---------------------------------------------------------------------------
 // Config + strict provider gate
@@ -52,7 +58,7 @@ import { buildVoyageRequestBody } from "../api/src/adapters/voyage-embedding.ts"
 const args = new Set(process.argv.slice(2));
 const APPLY = args.has("--apply");
 const DECLARED_PROVIDER = (process.env.EMBEDDINGS_PROVIDER ?? "").trim().toLowerCase();
-const VOYAGE_ENDPOINT = process.env.VOYAGE_SAGEMAKER_ENDPOINT?.trim();
+const VOYAGE_ENDPOINT = getVoyageEndpoint();
 const BEDROCK_MODEL_ID = process.env.EMBEDDING_MODEL_ID?.trim();
 const region = process.env.AWS_REGION ?? "us-east-1";
 
@@ -108,10 +114,8 @@ const reembedFilter = {
 // on the API runtime). Both providers return 1024-d vectors.
 // ---------------------------------------------------------------------------
 
-// Body builder imported below from the api adapter — DO NOT inline a third
-// copy here. The historical local copy caused 'input' vs 'inputs' drift to
-// land in operator recovery runs (worst possible time) the moment the API
-// adapter changed shape.
+// Body builder imported from the api adapter — DO NOT inline a third
+// copy here. Multimodal-only; text is wrapped via `textToMultimodal`.
 
 async function embedViaVoyage(text: string): Promise<{ vector: number[]; model: string }> {
   const client = new SageMakerRuntimeClient({ region });
@@ -119,7 +123,7 @@ async function embedViaVoyage(text: string): Promise<{ vector: number[]; model: 
     EndpointName: VOYAGE_ENDPOINT!,
     ContentType: "application/json",
     Accept: "application/json",
-    Body: Buffer.from(buildVoyageRequestBody(text, "document")),
+    Body: Buffer.from(buildVoyageRequestBody([textToMultimodal(text)], "document")),
   });
   const res = await client.send(cmd);
   const decoded = JSON.parse(new TextDecoder().decode(res.Body)) as {
@@ -131,7 +135,7 @@ async function embedViaVoyage(text: string): Promise<{ vector: number[]; model: 
   if (!Array.isArray(vector)) {
     throw new Error(`Voyage returned no embedding: ${JSON.stringify(decoded).slice(0, 200)}`);
   }
-  const model = decoded.model ?? process.env.VOYAGE_MODEL_NAME?.trim() ?? "voyage-multimodal-3";
+  const model = decoded.model ?? getVoyageModelName();
   return { vector, model };
 }
 

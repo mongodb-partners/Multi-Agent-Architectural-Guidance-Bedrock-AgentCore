@@ -22,7 +22,7 @@ flowchart LR
 | Tool family | Agent-facing names | Runtime home | Configure in |
 |---|---|---|---|
 | MongoDB MCP tools | `mongodb_query`, `mongodb_vector_search`, `mongodb_aggregate` | `mcp-runtimes/mongodb-mcp/`, wrapped by `api/src/adapters/mongodb-mcp-client.ts` | Agent `tools:` list + Mongo env vars |
-| Bedrock in-process tools | `bedrock_kb_retrieve`, `generate_embedding` | `api/src/lib/base-tools.ts` | Agent `tools:` list + Bedrock/Voyage env vars |
+| Bedrock in-process tools | `bedrock_kb_retrieve`, `embed_multimodal_content` | `api/src/lib/base-tools.ts` | Agent `tools:` list + Bedrock/Voyage env vars |
 | Skill loading tools | `activate_skill`, `read_skill_resource` | `api/src/lib/base-tools.ts` + `api/src/lib/skill-loader.ts` | Agent `skills:` list and skill folders |
 | Skill script tool | `run_skill_script` | `api/src/lib/base-tools.ts` | Agent `tools:` list + `config/skills/<skill>/scripts/*.mjs` |
 | Skill HTTP tools | `<skill>/<localName>` | `api/src/lib/http-tools-runtime.ts` | `config/skills/<skill>/http-tools.json` + root allowlist |
@@ -141,19 +141,20 @@ Retrieves passages from an Amazon Bedrock Knowledge Base.
 
 Use this when the answer should come from the Bedrock KB corpus, not directly from MongoDB product/order collections.
 
-### `generate_embedding`
+### `embed_multimodal_content`
 
-Generates a text embedding for advanced flows and diagnostics.
+Generates embeddings for multimodal inputs (interleaved text + images) — the only embedding tool the SDK exposes after the multimodal-only migration. Replaces the legacy text-only `generate_embedding`.
 
 | Item | Details |
 |---|---|
-| Agent-facing name | `generate_embedding` |
-| Runtime implementation | `api/src/lib/base-tools.ts` |
-| Input | `text`, optional `input_type` (`query` or `document`) |
-| Provider | Voyage SageMaker when `VOYAGE_SAGEMAKER_ENDPOINT` is set; otherwise Bedrock via `EMBEDDING_MODEL_ID` |
-| Common use | Mostly internal/diagnostic; `mongodb_vector_search` embeds `queryText` automatically |
+| Agent-facing name | `embed_multimodal_content` |
+| Runtime implementation | `api/src/lib/base-tools.ts` → `embedQueryText` / `embedDocumentText` in `api/src/lib/embed-query.ts` |
+| Input | `inputs: MultimodalItem[]`, optional `input_type` (`query` or `document`). Each item: `{ content: Array<{ type: "text", text } \| { type: "image_url", image_url } \| { type: "image_base64", image_base64 }> }`. Schema is a `z.discriminatedUnion("type", ...)`. |
+| Provider | Voyage SageMaker when `EMBEDDINGS_PROVIDER=voyage` (full multimodal); Bedrock Titan when `=titan` (text-only — rejects image segments with `titan_no_multimodal`). |
+| Common use | Mostly internal/diagnostic; `mongodb_vector_search` embeds `queryText` automatically. |
+| Trace events | `tool.call` on success (with per-item segment counts), `error` on failure (base64 data redacted via `redactBase64Segments`). |
 
-Most agents should prefer `mongodb_vector_search` with `queryText` instead of manually calling this tool.
+Most agents should prefer `mongodb_vector_search` with `queryText` instead of manually calling this tool. See [`docs/reference/voyage.md`](voyage.md) for the canonical request envelope.
 
 ## 5. Skill tools
 
@@ -296,7 +297,7 @@ Global HTTP tools are not skill-activation gated. Use them only when the tool is
 | Load a long schema/reference file | `read_skill_resource` |
 | Deterministic skill-local policy check | `run_skill_script` |
 | Call Lambda Function URL / API Gateway | Skill HTTP tool or global HTTP tool |
-| Generate an embedding directly | `generate_embedding` |
+| Generate an embedding directly | `embed_multimodal_content` |
 
 ## 8. Debug checklist
 

@@ -22,9 +22,12 @@ exec > /var/log/multiagent-setup.log 2>&1
 
 echo "=== Multi-Agent application bootstrap started $(date -u +%Y-%m-%dT%H:%M:%SZ) ==="
 
-# ── App directory created FIRST so deploy.sh SSM .env.live copy never races ──
+# ── App directory created FIRST so deploy.sh SSM env-file copies never race ──
+# deploy-project.sh / deploy-api.sh ship a pair of files:
+#   .env.docker  → Docker --env-file (consumed by the systemd units below)
+#   .env.live    → bash-source-safe (laptop dev + SSM-shell debugging)
 mkdir -p /opt/multiagent
-touch /opt/multiagent/.env.live
+touch /opt/multiagent/.env.docker /opt/multiagent/.env.live
 
 # ── App log files pre-created so systemd `append:` works on first boot ────────
 touch /var/log/multiagent-api.log /var/log/multiagent-ui.log
@@ -228,7 +231,7 @@ ExecStartPre=-/usr/bin/docker rm multiagent-api
 ExecStart=/usr/bin/docker run --rm \
   --name multiagent-api \
   --network=host \
-  --env-file /opt/multiagent/.env.live \
+  --env-file /opt/multiagent/.env.docker \
   ${ecr_api_image}
 ExecStop=/usr/bin/docker stop multiagent-api
 Restart=on-failure
@@ -262,7 +265,7 @@ ExecStartPre=-/usr/bin/docker rm multiagent-ui
 ExecStart=/usr/bin/docker run --rm \
   --name multiagent-ui \
   --network=host \
-  --env-file /opt/multiagent/.env.live \
+  --env-file /opt/multiagent/.env.docker \
   ${ecr_ui_image}
 ExecStop=/usr/bin/docker stop multiagent-ui
 Restart=on-failure

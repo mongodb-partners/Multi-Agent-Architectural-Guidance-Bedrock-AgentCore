@@ -58,7 +58,7 @@ api/
 │   ├── lib/                      Domain — agent-classifier, run-chat-stream, prompt, long-term-memory,
 │   │                             session-store, trace-collector, embed-query, mongo-client, …
 │   ├── adapters/                 agentcore-runtime, mongodb-mcp-client, resolve-model, voyage-embedding
-│   └── lib/base-tools.ts         In-process Strands tools (bedrock_kb_retrieve, generate_embedding, read_skill_resource)
+│   └── lib/base-tools.ts         In-process Strands tools (bedrock_kb_retrieve, embed_multimodal_content, read_skill_resource)
 ├── scripts/
 │   ├── validate-bun-compat.ts          Bun + Node 22 smoke
 │   ├── validate-agentcore-memory.ts    AgentCore Memory SDK contract

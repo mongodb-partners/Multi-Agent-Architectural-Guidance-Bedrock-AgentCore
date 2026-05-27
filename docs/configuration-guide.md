@@ -81,7 +81,7 @@ Validated by [`api/src/lib/schemas.ts`](../api/src/lib/schemas.ts) (`agentFrontm
 | `model` | string | no | (none — Bedrock SDK default) | Bedrock inference profile or model ID. Today's defaults: orchestrator + order-management = `us.anthropic.claude-haiku-4-5-20251001-v1:0`; troubleshooting + product-recommendation = `us.anthropic.claude-sonnet-4-6`. Source of truth: [`config/agents/`](../config/agents/). |
 | `maxTokens` | int (> 0) | no | `4096` | Cap on output tokens |
 | `temperature` | number `[0, 2]` | no | `0.7` | Sampling temperature |
-| `tools` | string[] | no | `[]` | Names of tools to attach. Built-ins: `mongodb_query`, `mongodb_vector_search`, `mongodb_aggregate`, `bedrock_kb_retrieve`, `generate_embedding`, `activate_skill`, `read_skill_resource`, `run_skill_script`. Skill-scoped HTTP tools: `<skillId>/<localName>`. Complete catalog: [`reference/tools.md`](reference/tools.md). |
+| `tools` | string[] | no | `[]` | Names of tools to attach. Built-ins: `mongodb_query`, `mongodb_vector_search`, `mongodb_aggregate`, `bedrock_kb_retrieve`, `embed_multimodal_content`, `activate_skill`, `read_skill_resource`, `run_skill_script`. Skill-scoped HTTP tools: `<skillId>/<localName>`. Complete catalog: [`reference/tools.md`](reference/tools.md). |
 | `skills` | string[] | no | `[]` | Skills the agent is **allowed** to activate. `read_skill_resource` and `run_skill_script` only resolve within these skills (gate enforced in `base-tools.ts`). |
 | `memory.shortTerm` | bool | no | — | Currently informational — short-term is always on |
 | `memory.longTerm` | bool | no | — | If `true` AND `userId` is known, enable long-term memory read/write |
@@ -206,7 +206,7 @@ Each entry in `tools[]`:
 
 | Field | Type | Required | Default | Notes |
 |---|---|---|---|---|
-| `name` | string `^[a-z][a-z0-9_]*$` (case-insensitive) | yes | — | Reserved names are skipped: `activate_skill`, `read_skill_resource`, `run_skill_script`, `mongodb_query`, `mongodb_vector_search`, `bedrock_kb_retrieve`, `generate_embedding`. Duplicate names within a file: first wins, others logged as `duplicate`. |
+| `name` | string `^[a-z][a-z0-9_]*$` (case-insensitive) | yes | — | Reserved names are skipped: `activate_skill`, `read_skill_resource`, `run_skill_script`, `mongodb_query`, `mongodb_vector_search`, `bedrock_kb_retrieve`, `embed_multimodal_content`. Duplicate names within a file: first wins, others logged as `duplicate`. |
 | `description` | string (≥ 1 char) | yes | — | Shown to the model |
 | `method` | enum: `GET` / `POST` / `PUT` / `PATCH` / `DELETE` | no | `POST` | HTTP method |
 | `url` | string (≥ 1 char) | yes | — | `${ENV_VAR}` placeholders are expanded at call time from `process.env` (missing var → empty string). |

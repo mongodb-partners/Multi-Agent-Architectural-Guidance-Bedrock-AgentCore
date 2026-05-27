@@ -29,7 +29,10 @@
  *   - EMBEDDINGS_PROVIDER=voyage|titan (mandatory)
  *   - VOYAGE_SAGEMAKER_ENDPOINT=<endpoint-name>  (when EMBEDDINGS_PROVIDER=voyage)
  *     OR  EMBEDDING_MODEL_ID=<bedrock-model-id>  (when EMBEDDINGS_PROVIDER=titan)
- *   - VOYAGE_REQUEST_FORMAT=multimodal (default — voyage-multimodal-3) | legacy (voyage-3.5-lite)
+ *
+ * Voyage is multimodal-only — `voyage-multimodal-3` or `voyage-multimodal-3.5`.
+ * The legacy `voyage-3.5-lite` text-only path is removed (see
+ * docs/reference/voyage.md for the single supported envelope shape).
  *
  * Run (Voyage AI multimodal-3):
  *   MONGODB_URI=... EMBEDDINGS_PROVIDER=voyage \
@@ -52,11 +55,16 @@ import { connect } from "./connect.ts";
 // Single source of truth for the Voyage request envelope. Importing the
 // API-side builder eliminates the drift surface that caused 'Field required'
 // 400s when the seeder copy and the runtime copy disagreed about
-// 'input' vs 'inputs'. Pure function: only reads env at call time.
-import { buildVoyageRequestBody } from "../api/src/adapters/voyage-embedding.ts";
+// 'input' vs 'inputs'. Multimodal-only — text inputs are wrapped via
+// `textToMultimodal` before crossing the typed adapter boundary.
+import {
+  buildVoyageRequestBody,
+  getVoyageEndpoint,
+  textToMultimodal,
+} from "../api/src/adapters/voyage-embedding.ts";
 
 const DECLARED_PROVIDER = (process.env.EMBEDDINGS_PROVIDER ?? "").trim().toLowerCase();
-const VOYAGE_ENDPOINT = process.env.VOYAGE_SAGEMAKER_ENDPOINT?.trim();
+const VOYAGE_ENDPOINT = getVoyageEndpoint();
 const BEDROCK_MODEL_ID = process.env.EMBEDDING_MODEL_ID?.trim();
 const REWIRE = process.env.REWIRE_EMBEDDINGS === "1";
 const BATCH_DELAY_MS = Number(process.env.EMBED_BATCH_DELAY_MS ?? 200);
@@ -150,17 +158,13 @@ const TROUBLESHOOTING_PLAN: CollectionPlan = {
 // Embedding functions
 // ---------------------------------------------------------------------------
 
-// voyage-multimodal-3 returns a fixed 1024-d vector (matches the Atlas index).
-// voyage-3.5-lite (legacy) returns 2048-d by default and accepts output_dimension —
-// keep VOYAGE_OUTPUT_DIM=1024 there too. Override via env if you rebuild the
-// index for a different size.
-//
-// The request envelope itself is built by `buildVoyageRequestBody` imported
-// from api/src/adapters/voyage-embedding.ts (above). DO NOT inline a local
-// copy here — historical drift between this seeder and the API adapter was
-// the proximate cause of the "Field required: input" SageMaker 400 burn.
-// Both readers honor VOYAGE_REQUEST_FORMAT + VOYAGE_OUTPUT_DIM at runtime,
-// so seeder runs and API runs see the same envelope guaranteed by import.
+// voyage-multimodal-3 / voyage-multimodal-3.5 return a fixed 1024-d vector
+// matching the Atlas index. The request envelope is built by
+// `buildVoyageRequestBody` imported from api/src/adapters/voyage-embedding.ts —
+// DO NOT inline a local copy here. Multimodal-only after the
+// voyage-multimodal-only-sagemaker PR; text inputs are wrapped via
+// `textToMultimodal()` so the seeder, the API runtime, and the live preflight
+// all send byte-identical bodies to SageMaker.
 
 async function embedViaVoyage(text: string): Promise<number[]> {
   const client = new SageMakerRuntimeClient({ region });
@@ -168,7 +172,7 @@ async function embedViaVoyage(text: string): Promise<number[]> {
     EndpointName: VOYAGE_ENDPOINT!,
     ContentType: "application/json",
     Accept: "application/json",
-    Body: Buffer.from(buildVoyageRequestBody(text, "document")),
+    Body: Buffer.from(buildVoyageRequestBody([textToMultimodal(text)], "document")),
   });
   const res = await client.send(cmd);
   const decoded = JSON.parse(new TextDecoder().decode(res.Body)) as {

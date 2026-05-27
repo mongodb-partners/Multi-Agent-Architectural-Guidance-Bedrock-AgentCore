@@ -1,40 +1,39 @@
 /**
- * Text → embedding for `mongodb_vector_search` and write-side indexing.
+ * `string | MultimodalItem` → embedding for `mongodb_vector_search` and
+ * write-side indexing (LTM, chat-message mirror).
  *
  * Strict provider selection — `EMBEDDINGS_PROVIDER` (in `.env`) is the single
  * source of truth and is mandatory. There is **no cross-provider fallback**
  * under any circumstance:
  *
- *   1. `voyage` — Voyage AI on SageMaker via `VOYAGE_SAGEMAKER_ENDPOINT`.
- *      If Voyage is unconfigured, throws, or returns an unrecognized shape,
- *      the function returns `{ ok: false, code: "voyage_strict_failed" }`.
- *      Bedrock is **never** called.
- *   2. `titan` — Bedrock Titan / Cohere via `EMBEDDING_MODEL_ID`. On any
- *      failure returns `{ ok: false, code: "titan_strict_failed" }`. Voyage
- *      is **never** called.
- *   3. anything else (including unset / empty) — returns
- *      `{ ok: false, code: "no_provider_configured" }`. There is no legacy
- *      soft-fallback branch.
+ *   1. `voyage` — Voyage AI multimodal on SageMaker via
+ *      `VOYAGE_SAGEMAKER_ENDPOINT`. Supports text and image segments
+ *      (URL or inline base64).
+ *   2. `titan` — Bedrock Titan / Cohere via `EMBEDDING_MODEL_ID`. Text-only.
+ *      Titan + image input is rejected with `titan_no_multimodal` — there
+ *      is no silent down-cast to text.
+ *   3. anything else — `no_provider_configured`.
  *
- * Sits between the LLM (which passes natural-language `queryText`) and the
- * MongoDB MCP gateway (which only accepts a pre-computed `queryVector`). The
- * wrapper in `api/src/adapters/mongodb-mcp-client.ts` calls `embedQueryText`
- * once per vector search call to produce the `queryVector` it forwards.
+ * Existing text-only call sites (`embedQueryText("hello")`,
+ * `embedDocumentText(text)`) keep working unchanged — `string` arguments
+ * auto-wrap via `textToMultimodal()` before crossing the typed adapter
+ * boundary. Image-capable call sites pass a `MultimodalItem` directly.
  *
- * Errors are returned as structured `EmbedResult` values rather than thrown,
- * so the wrapper can pass them back to the LLM as a tool-result error block
- * (the model can then fall back to keyword search via `mongodb_query`).
- *
- * The vector dimensions must match the Atlas Vector Search index for the
- * collection (see `db-seeding/seed-indexes.ts` — both indexes are 1024-d by
- * default and `VOYAGE_OUTPUT_DIM` pins voyage-3.5-lite to 1024).
+ * Vector dimensions must match the Atlas Vector Search index for the
+ * collection — both are 1024-d (`VOYAGE_EMBEDDING_DIMS`).
  */
 
 import { logger } from "./logger.ts";
 import {
   isVoyageConfigured,
   getVoyageEndpoint,
+  getVoyageModelName,
   voyageGenerateEmbedding,
+  textToMultimodal,
+  hasImageSegment,
+  redactBase64Segments,
+  type MultimodalItem,
+  type VoyageInputType,
 } from "../adapters/voyage-embedding.ts";
 import { bedrockGenerateEmbedding } from "../adapters/bedrock-retrieval.ts";
 
@@ -47,34 +46,41 @@ export type EmbedErrorCode =
   | "no_provider_configured"
   | "voyage_strict_failed"
   | "titan_strict_failed"
+  | "titan_no_multimodal"
   | "embed_threw";
 
-/** Default Voyage model name when SageMaker omits the `model` field in the response. */
-const VOYAGE_MODEL_FALLBACK = "voyage-multimodal-3";
+/** Accept either a plain string (auto-wrapped to a single-text-segment
+ *  MultimodalItem) or a fully-typed MultimodalItem from a caller that
+ *  needs image segments. */
+export type EmbeddableInput = string | MultimodalItem;
 
 /**
- * Run the configured embedding provider against `text`.
+ * Run the configured embedding provider against `input`.
  *
- * Empty / whitespace-only input is treated as a caller bug — we return a
- * `no_provider_configured`-style error so the LLM sees a clean tool error
- * rather than an opaque downstream failure.
+ * Empty / whitespace-only string input is a caller bug; we return a
+ * structured error so the LLM sees a clean tool error rather than an
+ * opaque downstream failure.
  *
- * In strict-voyage mode, any Voyage failure is hard — Bedrock is never tried.
- * In strict-titan mode, any Bedrock failure is hard — Voyage is never tried.
+ * Titan + image input is rejected (`titan_no_multimodal`). The provider
+ * gate is the choke point — no caller has to know.
  */
-export async function embedQueryText(text: string, abortSignal?: AbortSignal): Promise<EmbedResult> {
-  return embedWithInputType(text, "query", abortSignal);
+export async function embedQueryText(
+  input: EmbeddableInput,
+  abortSignal?: AbortSignal,
+): Promise<EmbedResult> {
+  return embedWithInputType(input, "query", abortSignal);
 }
 
 /**
  * Write-side embedder. Same provider rules as `embedQueryText` but passes
- * `input_type: "document"` to Voyage so the resulting vectors land in the
- * same semantic space as the offline seed pipeline (see
- * `db-seeding/seed-embeddings.ts`). Use this for indexing/save paths —
- * facts, chat messages — and `embedQueryText` for query-time embedding.
+ * `input_type: "document"` to Voyage so resulting vectors land in the
+ * same semantic space as the offline seed pipeline.
  */
-export async function embedDocumentText(text: string, abortSignal?: AbortSignal): Promise<EmbedResult> {
-  return embedWithInputType(text, "document", abortSignal);
+export async function embedDocumentText(
+  input: EmbeddableInput,
+  abortSignal?: AbortSignal,
+): Promise<EmbedResult> {
+  return embedWithInputType(input, "document", abortSignal);
 }
 
 function declaredProvider(): "voyage" | "titan" | "" {
@@ -83,27 +89,67 @@ function declaredProvider(): "voyage" | "titan" | "" {
   return "";
 }
 
+/** Normalize EmbeddableInput → MultimodalItem and the plain string used
+ *  for Titan (which is text-only). Returns null on empty text. */
+function normalize(input: EmbeddableInput): { item: MultimodalItem; plainText: string } | null {
+  if (typeof input === "string") {
+    const trimmed = input.trim();
+    if (!trimmed) return null;
+    return { item: textToMultimodal(trimmed), plainText: trimmed };
+  }
+  if (!Array.isArray(input) || input.length === 0) return null;
+  // Plain-text extraction for the Titan path: concatenate text segments.
+  const plainText = input
+    .filter((s): s is { type: "text"; text: string } => s.type === "text")
+    .map((s) => s.text)
+    .join(" ")
+    .trim();
+  return { item: input, plainText };
+}
+
 async function embedWithInputType(
-  text: string,
-  inputType: "query" | "document",
+  input: EmbeddableInput,
+  inputType: VoyageInputType,
   abortSignal?: AbortSignal,
 ): Promise<EmbedResult> {
-  const trimmed = (text ?? "").trim();
-  if (!trimmed) {
+  const norm = normalize(input);
+  if (!norm) {
     return {
       ok: false,
       code: "no_provider_configured",
-      message: "embedding input text is empty",
+      message: "embedding input is empty",
     };
   }
+  const { item, plainText } = norm;
+  const hasImage = hasImageSegment(item);
 
   const provider = declaredProvider();
 
   if (provider === "voyage") {
-    return embedVoyageStrict(trimmed, inputType, abortSignal);
+    return embedVoyageStrict(item, inputType, abortSignal);
   }
   if (provider === "titan") {
-    return embedTitanStrict(trimmed, abortSignal);
+    if (hasImage) {
+      logger.warn("[embed-query] titan + image input rejected (titan is text-only)", {
+        inputType,
+        sample: previewJson(redactBase64Segments([item])[0]),
+      });
+      return {
+        ok: false,
+        code: "titan_no_multimodal",
+        message:
+          "EMBEDDINGS_PROVIDER=titan but input contains image segments. Titan is text-only — " +
+          "set EMBEDDINGS_PROVIDER=voyage for image embedding.",
+      };
+    }
+    if (!plainText) {
+      return {
+        ok: false,
+        code: "no_provider_configured",
+        message: "titan path requires at least one non-empty text segment",
+      };
+    }
+    return embedTitanStrict(plainText, abortSignal);
   }
 
   return {
@@ -115,8 +161,8 @@ async function embedWithInputType(
 }
 
 async function embedVoyageStrict(
-  text: string,
-  inputType: "query" | "document",
+  item: MultimodalItem,
+  inputType: VoyageInputType,
   abortSignal?: AbortSignal,
 ): Promise<EmbedResult> {
   if (!isVoyageConfigured()) {
@@ -128,11 +174,10 @@ async function embedVoyageStrict(
     };
   }
   try {
-    const r = await voyageGenerateEmbedding(text, getVoyageEndpoint(), inputType, abortSignal);
+    const r = await voyageGenerateEmbedding(item, getVoyageEndpoint(), inputType, abortSignal);
     const v = extractEmbedding(r);
     if (v) {
-      const modelId =
-        v.modelId ?? process.env.VOYAGE_MODEL_NAME?.trim() ?? VOYAGE_MODEL_FALLBACK;
+      const modelId = v.modelId ?? getVoyageModelName();
       return { ok: true, source: "voyage", modelId, vector: v.embedding };
     }
     logger.warn("[embed-query] voyage returned unrecognized shape (strict mode — no fallback)", {
@@ -149,6 +194,7 @@ async function embedVoyageStrict(
     logger.warn("[embed-query] voyage call threw (strict mode — no fallback)", {
       error: message,
       inputType,
+      itemPreview: previewJson(redactBase64Segments([item])[0]),
     });
     return { ok: false, code: "voyage_strict_failed", message };
   }

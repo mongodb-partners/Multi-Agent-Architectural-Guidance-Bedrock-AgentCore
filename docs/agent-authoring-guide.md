@@ -224,7 +224,7 @@ Tools include **built-in** Strands tools (MongoDB, KB, embeddings, ...), **skill
 | `mongodb_query` | Runs find / findOne / aggregate / updateOne against MongoDB | Live — proxied through AgentCore Gateway to the dedicated MongoDB MCP AgentCore Runtime |
 | `mongodb_vector_search` | Performs semantic/vector search against a MongoDB Atlas collection | Live — Atlas `$vectorSearch` via the same Gateway-backed MongoDB MCP runtime |
 | `bedrock_kb_retrieve` | Retrieves passages from a Bedrock Knowledge Base | Live — real Bedrock KB when `BEDROCK_KB_ID` + AWS credentials set |
-| `generate_embedding` | Generates a text embedding via Amazon Bedrock (Titan / Cohere) | Live — real Bedrock embedding when `EMBEDDING_MODEL_ID` + AWS credentials set |
+| `embed_multimodal_content` | Generates an embedding for a multimodal item (text + `image_url` + `image_base64`). Single-path call to Voyage SageMaker when `EMBEDDINGS_PROVIDER=voyage`, Bedrock Titan when `=titan` (titan rejects image segments with `titan_no_multimodal`). | Live — `inputs: MultimodalItem[]` schema (z.discriminatedUnion). |
 
 **Notes:**
 

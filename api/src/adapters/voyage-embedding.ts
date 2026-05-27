@@ -1,116 +1,187 @@
 /**
- * Voyage AI embedding adapter — calls a SageMaker endpoint hosting a Voyage
- * model deployed from the MongoDB AWS Marketplace listing.
+ * Voyage AI multimodal embedding adapter — SINGLE TS SOURCE OF TRUTH.
  *
- * Two listings are supported and selected by `VOYAGE_REQUEST_FORMAT`:
+ * This file is the ONLY TypeScript file that may:
+ *   - Read any `process.env.VOYAGE_*` variable.
+ *   - Know which Voyage models are supported.
+ *   - Construct the SageMaker request body.
+ *   - Know the canonical embedding dimension (`VOYAGE_EMBEDDING_DIMS`).
+ *   - Validate model names or response dimensions.
  *
- * - `multimodal` (default — voyage-multimodal-3):
- *     Request:  { "inputs": [{ "content": [{ "type": "text", "text": "..." }] }],
- *                 "input_type": "query" | "document",
- *                 "truncation": true,
- *                 "output_encoding": null }
+ * Every other TS file imports from here. Non-TS consumers (bash, python,
+ * terraform-via-comment-pin) call `api/scripts/voyage-print.ts {body,models,dims}`
+ * which re-exports this module's outputs.
  *
- * - `legacy` (voyage-3.5-lite / voyage-3 — the older text-only listing):
- *     Request:  { "input": ["..."], "input_type": "query" | "document",
- *                 "output_dimension": <int> }
+ * Drift prevention: `api/tests/unit/voyage-ssot-guard.test.ts` fails CI if
+ * the canonical body literal, env reads, supported-model list, or embedding
+ * dim leak into other files. `pf_check_voyage_ssot_only_source` enforces
+ * the same on the bash side.
  *
- * Both listings respond with the same envelope:
- *     { "data": [{ "embedding": [...], "index": 0 }], "model": "...", "usage": {...} }
+ * Multimodal-only. There is exactly ONE envelope shape:
  *
- * Set VOYAGE_SAGEMAKER_ENDPOINT to the SageMaker endpoint name (not the ARN).
- * voyage-multimodal-3 returns **1024-d** embeddings (matches the Atlas vector
- * index + Bedrock Titan v2). The legacy listing exposes `output_dimension` to
- * pick {256, 512, 1024, 2048}.
+ *     {
+ *       "inputs": [
+ *         { "content": [
+ *           { "type": "text", "text": "..." } |
+ *           { "type": "image_url", "image_url": "https://..." } |
+ *           { "type": "image_base64", "image_base64": "data:image/png;base64,..." }
+ *         ] },
+ *         ...
+ *       ],
+ *       "input_type": "query" | "document",
+ *       "truncation": true,
+ *       "output_encoding": null
+ *     }
  *
- * Subscribe to voyage-multimodal-3 at:
- *   https://aws.amazon.com/marketplace/pp/prodview-hrid2zxusacxy
- * (one-time EULA acceptance per AWS account; ARN discovered via
- *  deploy/scripts/setup-voyage-marketplace.sh --model voyage-multimodal-3).
+ * The legacy `{ input: [string], output_dimension }` text-only envelope is
+ * DELETED — it was the proximate cause of the SageMaker "Pydantic: input
+ * Field required" 400. The codebase no longer has a "format" concept.
+ *
+ * Transport: existing SageMaker Marketplace endpoint via
+ * `@aws-sdk/client-sagemaker-runtime`. No direct `api.voyageai.com` calls.
  */
 
 import { SageMakerRuntimeClient, InvokeEndpointCommand } from "@aws-sdk/client-sagemaker-runtime";
 import type { JSONValue } from "@strands-agents/sdk";
+import { z } from "zod";
 
-export type VoyageInputType = "query" | "document";
-export type VoyageRequestFormat = "multimodal" | "legacy";
+// ---------------------------------------------------------------------------
+// Canonical constants — SSOT
+// ---------------------------------------------------------------------------
 
-let _client: SageMakerRuntimeClient | null = null;
+/** The two Voyage models this stack speaks to. Anything else is rejected at
+ *  boot by `assertSupportedVoyageModel`. Adding a new model = edit this
+ *  one literal; architecture-guard tests + bash include auto-pick it up. */
+export const SUPPORTED_VOYAGE_MODELS = [
+  "voyage-multimodal-3",
+  "voyage-multimodal-3.5",
+] as const;
 
-function getClient(): SageMakerRuntimeClient {
-  if (!_client) {
-    _client = new SageMakerRuntimeClient({ region: process.env.AWS_REGION ?? "us-east-1" });
-  }
-  return _client;
-}
+export type SupportedVoyageModel = (typeof SUPPORTED_VOYAGE_MODELS)[number];
 
-/** Output dimensions for the legacy listing. 1024 keeps wire compat with the
- *  Atlas vector index sized for Bedrock Titan v2 (1024-d). Allowed values:
- *  2048 (default), 1024, 512, 256. Ignored for `multimodal` request format
- *  because voyage-multimodal-3 returns a fixed 1024-d vector. */
-const VOYAGE_OUTPUT_DIM = Number(process.env.VOYAGE_OUTPUT_DIM ?? 1024);
+/** Canonical embedding dimension for the Voyage multimodal family.
+ *  Both `voyage-multimodal-3` and `voyage-multimodal-3.5` return 1024-d
+ *  vectors. Atlas vector indexes are sized to match. */
+export const VOYAGE_EMBEDDING_DIMS = 1024 as const;
 
-/** Request envelope shape — defaults to "multimodal" (voyage-multimodal-3).
- *  Set VOYAGE_REQUEST_FORMAT=legacy to fall back to the voyage-3.5-lite shape
- *  for environments that still subscribe to that older Marketplace listing. */
-function requestFormat(): VoyageRequestFormat {
-  const raw = (process.env.VOYAGE_REQUEST_FORMAT ?? "multimodal").trim().toLowerCase();
-  return raw === "legacy" ? "legacy" : "multimodal";
-}
-
+/** Per-text-segment truncation budget. Voyage's documented multimodal limit
+ *  is ~32k characters per text piece; we enforce a hard slice so a long
+ *  doc segment doesn't blow the per-request byte budget on its own. */
 const VOYAGE_TEXT_MAX_CHARS = 32_000;
 
-export function buildVoyageRequestBody(
-  text: string,
-  inputType: VoyageInputType,
-  format: VoyageRequestFormat = requestFormat(),
-): string {
-  const truncated = text.slice(0, VOYAGE_TEXT_MAX_CHARS);
-  if (format === "legacy") {
-    return JSON.stringify({
-      input: [truncated],
-      input_type: inputType,
-      output_dimension: VOYAGE_OUTPUT_DIM,
-    });
-  }
-  // multimodal (voyage-multimodal-3) — wraps each piece of content in the
-  // inputs[].content[] array. For a text-only call we send a single text piece.
-  return JSON.stringify({
-    inputs: [{ content: [{ type: "text", text: truncated }] }],
-    input_type: inputType,
-    truncation: true,
-    output_encoding: null,
-  });
+/** Hard byte cap for the entire SageMaker request body. The SageMaker
+ *  Runtime synchronous invoke limit is 5 MB; we leave headroom for
+ *  HTTP/JSON overhead and the SageMaker envelope so a single oversized
+ *  `image_base64` payload returns a clear `voyage_body_too_large` error
+ *  with an actionable hint rather than a generic SageMaker 413. */
+const VOYAGE_MAX_BODY_BYTES = 4 * 1024 * 1024;
+
+/** Default Voyage model name when neither env nor response carries one. */
+const VOYAGE_MODEL_FALLBACK: SupportedVoyageModel = "voyage-multimodal-3";
+
+// ---------------------------------------------------------------------------
+// Public types — multimodal boundary
+// ---------------------------------------------------------------------------
+
+export type VoyageInputType = "query" | "document";
+
+/** Text segment. The Voyage container truncates internally too, but we
+ *  pre-slice at `VOYAGE_TEXT_MAX_CHARS` so the byte cap math is predictable. */
+export type MultimodalTextSegment = {
+  type: "text";
+  text: string;
+};
+
+/** HTTPS URL segment. Voyage SDK takes a plain string here (NOT
+ *  `{ url: string }`). The SageMaker container resolves the URL itself. */
+export type MultimodalImageUrlSegment = {
+  type: "image_url";
+  image_url: string;
+};
+
+/** Base64 image segment. MUST include the `data:image/<mime>;base64,`
+ *  header per the Voyage container contract (and per the reference doc's
+ *  guardrail #4). Bare base64 strings are rejected at the zod boundary. */
+export type MultimodalImageBase64Segment = {
+  type: "image_base64";
+  image_base64: string;
+};
+
+export type MultimodalSegment =
+  | MultimodalTextSegment
+  | MultimodalImageUrlSegment
+  | MultimodalImageBase64Segment;
+
+/** One interleaved input. Each item produces one embedding in the response. */
+export type MultimodalItem = MultimodalSegment[];
+
+// ---------------------------------------------------------------------------
+// Public zod schemas — re-exported into Strands tool inputs + container probe
+// ---------------------------------------------------------------------------
+
+const BASE64_HEADER_RE =
+  /^data:image\/(png|jpeg|jpg|webp|gif);base64,/;
+
+export const multimodalSegmentSchema: z.ZodType<MultimodalSegment> = z.discriminatedUnion("type", [
+  z.object({ type: z.literal("text"), text: z.string().min(1) }),
+  z.object({ type: z.literal("image_url"), image_url: z.string().url() }),
+  z.object({
+    type: z.literal("image_base64"),
+    image_base64: z.string().regex(BASE64_HEADER_RE, {
+      message:
+        "image_base64 must begin with `data:image/(png|jpeg|jpg|webp|gif);base64,` (header retained per Voyage contract)",
+    }),
+  }),
+]);
+
+export const multimodalItemSchema: z.ZodType<MultimodalItem> = z
+  .array(multimodalSegmentSchema)
+  .min(1, { message: "MultimodalItem must contain at least one segment" });
+
+// ---------------------------------------------------------------------------
+// Public helpers
+// ---------------------------------------------------------------------------
+
+/** Wrap a plain string into the canonical MultimodalItem shape. Existing
+ *  text-only call sites (`embedDocumentText("hello")`, `embedQueryText(q)`)
+ *  stay unchanged — `string` arguments auto-wrap via this helper before
+ *  hitting the typed adapter boundary. */
+export function textToMultimodal(text: string): MultimodalItem {
+  return [{ type: "text", text }];
 }
 
-export async function voyageGenerateEmbedding(
-  text: string,
-  endpointName: string,
-  inputType: VoyageInputType = "document",
-  abortSignal?: AbortSignal,
-): Promise<JSONValue> {
-  const body = buildVoyageRequestBody(text, inputType);
-
-  const cmd = new InvokeEndpointCommand({
-    EndpointName: endpointName,
-    ContentType: "application/json",
-    Accept: "application/json",
-    Body: Buffer.from(body),
-  });
-
-  const res = await getClient().send(cmd, abortSignal ? { abortSignal } : undefined);
-  const decoded = JSON.parse(new TextDecoder().decode(res.Body)) as {
-    data: { embedding: number[]; index: number }[];
-    model: string;
-    usage: { total_tokens: number };
-  };
-
-  const embedding = decoded.data[0]?.embedding;
-  if (!Array.isArray(embedding)) {
-    return { status: "error", error: "Voyage AI returned no embedding", raw: decoded };
-  }
-
-  return { status: "ok", embedding, model: decoded.model, dimensions: embedding.length };
+/** Does any segment in this item carry image data (URL or base64)? Used by
+ *  the embed-query gate to refuse `EMBEDDINGS_PROVIDER=titan` + image input
+ *  with a structured `titan_no_multimodal` error. */
+export function hasImageSegment(item: MultimodalItem): boolean {
+  return item.some((s) => s.type === "image_url" || s.type === "image_base64");
 }
+
+/** Has any item in this batch got an image segment? */
+export function anyItemHasImage(items: MultimodalItem[]): boolean {
+  return items.some(hasImageSegment);
+}
+
+/** Redact base64 image bytes from a MultimodalItem before logging. We
+ *  keep the header (so the mime type is visible) and append a `<elided NB>`
+ *  marker so payloads of any size produce bounded log lines. */
+export function redactBase64Segments(items: MultimodalItem[]): MultimodalItem[] {
+  return items.map((segs) =>
+    segs.map((seg) => {
+      if (seg.type !== "image_base64") return seg;
+      const header = seg.image_base64.split(",")[0] ?? "data:image/?;base64";
+      const bodyLen = Math.max(0, seg.image_base64.length - header.length - 1);
+      return {
+        type: "image_base64" as const,
+        image_base64: `${header},<elided ${bodyLen}B>`,
+      };
+    }),
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Env reads — only this file
+// ---------------------------------------------------------------------------
 
 /** True when the Voyage AI SageMaker endpoint is configured. */
 export function isVoyageConfigured(): boolean {
@@ -121,4 +192,233 @@ export function getVoyageEndpoint(): string {
   const ep = process.env.VOYAGE_SAGEMAKER_ENDPOINT?.trim();
   if (!ep) throw new Error("VOYAGE_SAGEMAKER_ENDPOINT is not set");
   return ep;
+}
+
+/** The Voyage model name from `VOYAGE_MARKETPLACE_MODEL` (preferred) or
+ *  `VOYAGE_MODEL_NAME` (legacy), defaulting to `voyage-multimodal-3`. */
+export function getVoyageModelName(): string {
+  return (
+    process.env.VOYAGE_MARKETPLACE_MODEL?.trim() ||
+    process.env.VOYAGE_MODEL_NAME?.trim() ||
+    VOYAGE_MODEL_FALLBACK
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Assertions — call at boot + per-response
+// ---------------------------------------------------------------------------
+
+/** Throws if `name` is not in `SUPPORTED_VOYAGE_MODELS`. Called from both
+ *  `api/src/index.ts` (existing assertEmbeddingsProvider) AND
+ *  `api/src/agent-runtime-code.ts:501` (the AgentCore-bundled boot guard).
+ *  Both must remain in lockstep — `agent-runtime-code.ts` is bundled into
+ *  `dist/agent-runtime-code.js` and deployed via `./deploy/deploy-agents.sh`,
+ *  so missing it means specialist runtimes boot with a stale guard. */
+export function assertSupportedVoyageModel(name: string): void {
+  const trimmed = (name ?? "").trim();
+  if (!trimmed) {
+    throw new Error(
+      "Voyage model name is empty — set VOYAGE_MARKETPLACE_MODEL (or VOYAGE_MODEL_NAME) " +
+        `to one of: ${SUPPORTED_VOYAGE_MODELS.join(", ")}`,
+    );
+  }
+  if (!(SUPPORTED_VOYAGE_MODELS as readonly string[]).includes(trimmed)) {
+    throw new Error(
+      `Voyage model '${trimmed}' is not supported. ` +
+        `This stack is multimodal-only. Allowed: ${SUPPORTED_VOYAGE_MODELS.join(", ")}. ` +
+        "Re-run ./deploy/scripts/setup-voyage-marketplace.sh --model voyage-multimodal-3.",
+    );
+  }
+}
+
+/** Throws if `actual` ≠ `VOYAGE_EMBEDDING_DIMS`. Called inside
+ *  `voyageGenerateEmbedding` immediately after the SageMaker response is
+ *  parsed — catches mid-stream container/model swaps that silently return
+ *  a different dim (the failure mode the legacy EMBEDDING_DIMENSIONS
+ *  preflight existed to catch). */
+export function assertExpectedEmbeddingDims(actual: number): void {
+  if (actual !== VOYAGE_EMBEDDING_DIMS) {
+    throw new Error(
+      `Voyage embedding dimension mismatch: got ${actual}, expected ${VOYAGE_EMBEDDING_DIMS}. ` +
+        "The deployed model is returning a vector that does not match the Atlas vector index. " +
+        "Likely causes: (a) endpoint serves a non-multimodal Voyage package despite the name, " +
+        "(b) Atlas index was reseeded for a different provider. " +
+        "Re-run ./deploy/scripts/setup-voyage-marketplace.sh --model voyage-multimodal-3 " +
+        "then ./deploy/deploy-api.sh && ./deploy/deploy-agents.sh --auto-approve.",
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Body builder — the ONLY function that converts the typed boundary into
+// the SageMaker container's wire envelope.
+// ---------------------------------------------------------------------------
+
+export function buildVoyageRequestBody(
+  items: MultimodalItem[],
+  inputType: VoyageInputType,
+): string {
+  if (!Array.isArray(items) || items.length === 0) {
+    throw new Error("buildVoyageRequestBody: items must be a non-empty MultimodalItem[]");
+  }
+
+  // Validate every item via the canonical schema. This is the line that
+  // makes it structurally impossible for a flat `string[]` (from a model
+  // tool-call that down-cast multimodal intent) to reach the wire.
+  const validated = items.map((item, idx) => {
+    const parsed = multimodalItemSchema.parse(item) as MultimodalItem;
+    return {
+      content: parsed.map((seg) =>
+        seg.type === "text"
+          ? { type: "text" as const, text: seg.text.slice(0, VOYAGE_TEXT_MAX_CHARS) }
+          : seg,
+      ),
+      // idx kept locally for error messages only; not emitted on the wire.
+      __idx: idx,
+    };
+  });
+
+  const envelope = {
+    inputs: validated.map(({ content }) => ({ content })),
+    input_type: inputType,
+    truncation: true,
+    output_encoding: null as null,
+  };
+
+  const body = JSON.stringify(envelope);
+  const byteLen = Buffer.byteLength(body, "utf8");
+  if (byteLen > VOYAGE_MAX_BODY_BYTES) {
+    throw new Error(
+      `voyage_body_too_large: request body is ${byteLen}B (limit ${VOYAGE_MAX_BODY_BYTES}B). ` +
+        "Hint: use `image_url` instead of `image_base64` for large images — the SageMaker " +
+        "container fetches the URL server-side and does not consume request bytes.",
+    );
+  }
+  return body;
+}
+
+// ---------------------------------------------------------------------------
+// SageMaker invocation
+// ---------------------------------------------------------------------------
+
+let _client: SageMakerRuntimeClient | null = null;
+
+function getClient(): SageMakerRuntimeClient {
+  if (!_client) {
+    _client = new SageMakerRuntimeClient({ region: process.env.AWS_REGION ?? "us-east-1" });
+  }
+  return _client;
+}
+
+/** Result envelope for a single invocation. Caller decides how to consume —
+ *  the chat-message mirror, LTM writer, and MCP vector-search wrapper all
+ *  speak this same shape via `embed-query.ts`. */
+export type VoyageInvocationOk = {
+  status: "ok";
+  embedding: number[];
+  model: string;
+  dimensions: number;
+};
+
+export type VoyageInvocationError = {
+  status: "error";
+  error: string;
+  raw?: unknown;
+};
+
+export type VoyageInvocationResult = VoyageInvocationOk | VoyageInvocationError;
+
+/** Single-item convenience: send one MultimodalItem, return its embedding.
+ *  All current consumers (embed-query, seeders, probe) embed one item at a
+ *  time so we keep the API simple here. A batched form lives one call below. */
+export async function voyageGenerateEmbedding(
+  item: MultimodalItem,
+  endpointName: string,
+  inputType: VoyageInputType = "document",
+  abortSignal?: AbortSignal,
+): Promise<JSONValue> {
+  const r = await voyageGenerateEmbeddings([item], endpointName, inputType, abortSignal);
+  if (r.status !== "ok") return r as JSONValue;
+  return {
+    status: "ok",
+    embedding: r.embeddings[0]!,
+    model: r.model,
+    dimensions: r.embeddings[0]!.length,
+  } as JSONValue;
+}
+
+export type VoyageBatchOk = {
+  status: "ok";
+  embeddings: number[][];
+  model: string;
+};
+
+/** Batched form. Returns one embedding per input item, in order. */
+export async function voyageGenerateEmbeddings(
+  items: MultimodalItem[],
+  endpointName: string,
+  inputType: VoyageInputType = "document",
+  abortSignal?: AbortSignal,
+): Promise<VoyageBatchOk | VoyageInvocationError> {
+  const body = buildVoyageRequestBody(items, inputType);
+
+  const cmd = new InvokeEndpointCommand({
+    EndpointName: endpointName,
+    ContentType: "application/json",
+    Accept: "application/json",
+    Body: Buffer.from(body),
+  });
+
+  const res = await getClient().send(cmd, abortSignal ? { abortSignal } : undefined);
+  let decoded: {
+    data: { embedding: number[]; index: number }[];
+    model?: string;
+    usage?: { total_tokens?: number };
+  };
+  try {
+    decoded = JSON.parse(new TextDecoder().decode(res.Body));
+  } catch (err) {
+    return {
+      status: "error",
+      error: `Voyage returned a non-JSON body: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+
+  if (!Array.isArray(decoded.data) || decoded.data.length === 0) {
+    return { status: "error", error: "Voyage AI returned no embeddings", raw: decoded };
+  }
+
+  const ordered: number[][] = new Array(items.length);
+  for (const row of decoded.data) {
+    if (!Array.isArray(row.embedding)) {
+      return { status: "error", error: "Voyage response row missing embedding array", raw: row };
+    }
+    const idx = typeof row.index === "number" ? row.index : -1;
+    if (idx < 0 || idx >= items.length) {
+      // Container may emit rows in arrival order without an `index` — fall
+      // back to positional assignment for the next empty slot.
+      const slot = ordered.findIndex((v) => v === undefined);
+      if (slot === -1) {
+        return { status: "error", error: "Voyage returned more rows than inputs", raw: decoded };
+      }
+      ordered[slot] = row.embedding;
+    } else {
+      ordered[idx] = row.embedding;
+    }
+  }
+
+  for (let i = 0; i < ordered.length; i++) {
+    if (!Array.isArray(ordered[i])) {
+      return { status: "error", error: `Voyage response missing embedding for input[${i}]`, raw: decoded };
+    }
+  }
+
+  // Single dim assertion against the first row — they're all the same model.
+  assertExpectedEmbeddingDims(ordered[0]!.length);
+
+  return {
+    status: "ok",
+    embeddings: ordered,
+    model: decoded.model ?? getVoyageModelName(),
+  };
 }

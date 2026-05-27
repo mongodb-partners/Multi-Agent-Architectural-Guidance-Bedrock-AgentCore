@@ -104,10 +104,8 @@ These are typically set in `.env.live` by `deploy-project.sh`. For local dev wit
 | `EMBEDDINGS_PROVIDER` | `titan` or `voyage` | Explicit embedding provider. `titan` needs no Voyage ARN; `voyage` provisions/uses SageMaker from `VOYAGE_MODEL_PACKAGE_ARN`. |
 | `EMBEDDING_MODEL_ID` | `amazon.titan-embed-text-v2:0` | Bedrock embedding model for `EMBEDDINGS_PROVIDER=titan` and fallback paths. Must match Atlas vector index dimensionality (Titan v2 = 1024-d). |
 | `VOYAGE_MODEL_PACKAGE_ARN` | `arn:aws:sagemaker:...:model-package/voyage-...` | Required only for `EMBEDDINGS_PROVIDER=voyage`. Must point at a Voyage package. The default is `voyage-multimodal-3`; AWS may expose that family as `voyage-multimodel-3-updated-*`. |
-| `VOYAGE_MARKETPLACE_MODEL` | `voyage-multimodal-3` or `voyage-3-5-lite` | Selected Voyage Marketplace model. Used for endpoint naming and env consistency. |
+| `VOYAGE_MARKETPLACE_MODEL` | `voyage-multimodal-3` or `voyage-multimodal-3.5` | Selected Voyage Marketplace model — only the two multimodal listings are supported. |
 | `VOYAGE_SAGEMAKER_ENDPOINT` | `mongodb-multiagent3-voyage-multimodal-3-dev` | Runtime endpoint name written by deploy when Voyage is enabled. If empty, API + AgentCore runtimes use Titan. |
-| `VOYAGE_REQUEST_FORMAT` | `multimodal` or `legacy` | SageMaker request envelope. Use `multimodal` for `voyage-multimodal-3`; use `legacy` for `voyage-3-5-lite`. |
-| `VOYAGE_OUTPUT_DIM` | `1024` | Embedding dimension to request from legacy Voyage models. Pinned to 1024 to match the Atlas index. **Re-seed required if changed.** |
 
 ### MongoDB
 
@@ -151,14 +149,14 @@ Notes:
 
 ## 4. Embedding Provider Modes
 
-The deployment supports three explicit modes:
+The deployment supports two explicit modes:
 
 | Mode | Required env | Runtime behavior |
 |---|---|---|
-| Titan/no ARN | `EMBEDDINGS_PROVIDER=titan` | No SageMaker endpoint is created. API + AgentCore runtimes use Bedrock Titan v2 (`amazon.titan-embed-text-v2:0`). |
-| Voyage multimodal | `EMBEDDINGS_PROVIDER=voyage`, `VOYAGE_MARKETPLACE_MODEL=voyage-multimodal-3`, `VOYAGE_REQUEST_FORMAT=multimodal`, `VOYAGE_MODEL_PACKAGE_ARN=...voyage-multimodal-3...` or `...voyage-multimodel-3-updated...` | Provisions SageMaker and uses Voyage multimodal embeddings. This is the recommended path. |
-| Voyage legacy/text | `EMBEDDINGS_PROVIDER=voyage`, `VOYAGE_MARKETPLACE_MODEL=voyage-3-5-lite`, `VOYAGE_REQUEST_FORMAT=legacy`, `VOYAGE_OUTPUT_DIM=1024`, `VOYAGE_MODEL_PACKAGE_ARN=...voyage-3-5-lite...` | Provisions SageMaker and uses the older text-only Voyage listing. |
-| Voyage custom | `EMBEDDINGS_PROVIDER=voyage`, `VOYAGE_MARKETPLACE_MODEL=voyage-...`, `VOYAGE_REQUEST_FORMAT=multimodal` or `legacy`, `VOYAGE_MODEL_PACKAGE_ARN=...model-package/voyage-...` | Provisions SageMaker for another Voyage Marketplace package. The package tail and model label must start with `voyage-`. |
+| Titan/no ARN | `EMBEDDINGS_PROVIDER=titan` | No SageMaker endpoint is created. API + AgentCore runtimes use Bedrock Titan v2 (`amazon.titan-embed-text-v2:0`). Text-only. |
+| Voyage multimodal | `EMBEDDINGS_PROVIDER=voyage`, `VOYAGE_MARKETPLACE_MODEL=voyage-multimodal-3` (or `voyage-multimodal-3.5`), `VOYAGE_MODEL_PACKAGE_ARN=...multimodal...` | Provisions SageMaker and uses Voyage multimodal embeddings. Supports interleaved text + images at the tool boundary. |
+
+Text-only Voyage listings (`voyage-3*`, `voyage-4*`, `voyage-code-*`, …) are unsupported — the legacy `{ "input": [...] }` request branch was removed in the multimodal-only migration. The bash SSOT (`voyage_supported_models`) is the source of truth; preflight refuses anything outside it.
 
 `products`, `troubleshooting_docs`, `agent_memory_facts`, and `chat_messages` are the collections with semantic retrieval. The first two are embedded by `db-seeding/seed-embeddings.ts`; long-term memory facts and chat-message mirrors are embedded online by the API as they are written. `orders`, `customers`, `chat_sessions`, and `traces` remain structured-only.
 
@@ -176,8 +174,8 @@ The deployment supports three explicit modes:
 ### One-time setup
 
 1. **Subscribe to the Marketplace listing** (manual; cannot be automated — requires EULA acceptance):
-   - Voyage path: [MongoDB voyage-multimodal-3](https://aws.amazon.com/marketplace/pp/prodview-hrid2zxusacxy)
-   - Legacy path: [MongoDB voyage-3.5-lite Embedding Model](https://aws.amazon.com/marketplace/pp/prodview-xj76cqxng4wyw)
+   - [MongoDB voyage-multimodal-3](https://aws.amazon.com/marketplace/pp/prodview-hrid2zxusacxy) — recommended
+   - [voyage-multimodal-3.5](https://aws.amazon.com/marketplace/) — same envelope, slightly newer
    - Click **Continue to Subscribe** → **Accept Offer**
 2. **Request GPU quota** (if not already granted):
    - Open [SageMaker Service Quotas — us-east-1](https://console.aws.amazon.com/servicequotas/home/services/sagemaker/quotas)
@@ -185,9 +183,8 @@ The deployment supports three explicit modes:
 3. **Discover the region-specific Product ARN and persist it to `.env`:**
    ```bash
    ./deploy/scripts/setup-voyage-marketplace.sh --model voyage-multimodal-3
-   # or: ./deploy/scripts/setup-voyage-marketplace.sh --model voyage-3-5-lite
    ```
-   This appends/updates `EMBEDDINGS_PROVIDER`, `VOYAGE_MODEL_PACKAGE_ARN`, `VOYAGE_MARKETPLACE_MODEL`, `VOYAGE_REQUEST_FORMAT`, `VOYAGE_OUTPUT_DIM`, and endpoint suffix settings in `.env` (and pushes the ARN to GitHub Secrets if `gh auth status` is OK).
+   This appends/updates `EMBEDDINGS_PROVIDER`, `VOYAGE_MODEL_PACKAGE_ARN`, `VOYAGE_MARKETPLACE_MODEL`, and the endpoint suffix settings in `.env` (and pushes the ARN to GitHub Secrets if `gh auth status` is OK). Refuses non-multimodal models — see `voyage_assert_multimodal_or_die` in [`deploy/scripts/_voyage-config.sh`](../../deploy/scripts/_voyage-config.sh).
 
 ### Enable on a deployed environment
 
@@ -204,7 +201,7 @@ REWIRE_EMBEDDINGS=1 bun db-seeding/seed-embeddings.ts
 ```
 
 **Automatic REWIRE detection.** `deploy/scripts/_seed-embeddings.sh::run_embedding_seed` (Phase 5b) inspects three signals before invoking the seeder:
-1. SSM `/<SHARED_VPC_NAME>/<region>/embeddings/dim` vs current `EMBEDDING_DIMENSIONS`.
+1. SSM `/<SHARED_VPC_NAME>/<region>/embeddings/dim` vs `voyage_embedding_dims` (TS SSOT).
 2. A sampled seeder-owned row's stored `embedding.length`.
 3. A sampled seeder-owned row's `embeddingModel` prefix (`voyage:` vs `bedrock:`).
 
@@ -212,7 +209,7 @@ Any mismatch forces `REWIRE_EMBEDDINGS=1` automatically and the seeder wipes see
 
 ### What deploy-project.sh does for you
 
-When `EMBEDDINGS_PROVIDER=voyage`, `deploy-shared.sh` provisions the SageMaker endpoint and `deploy-project.sh` validates the selected Voyage model/request format and sets `VOYAGE_SAGEMAKER_ENDPOINT`, `VOYAGE_OUTPUT_DIM=1024`, and `VOYAGE_REQUEST_FORMAT` on all surfaces that need them:
+When `EMBEDDINGS_PROVIDER=voyage`, `deploy-shared.sh` provisions the SageMaker endpoint and `deploy-project.sh` validates the selected multimodal Voyage model (via `voyage_assert_multimodal_or_die` from the bash SSOT) and sets `VOYAGE_SAGEMAKER_ENDPOINT` on all surfaces that need it. The request envelope is generated by the TS SSOT (`buildVoyageRequestBody` → multimodal) at runtime, so no per-environment flag controls it:
 
 1. **EC2 API** — written into `/opt/multiagent/.env.live`, picked up on next API restart
 2. **AgentCore Runtimes** (orchestrator + 3 specialists + MongoDB MCP runtime) — `aws bedrock-agentcore-control update-agent-runtime --environment-variables ...` in Phase 6b. The MongoDB MCP runtime receives precomputed `queryVector` (the API embeds first), but other runtimes need the env var for any in-runtime embedding paths.

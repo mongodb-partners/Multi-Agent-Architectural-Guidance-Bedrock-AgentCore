@@ -1,141 +1,229 @@
 /**
- * Unit tests for the `generate_embedding` agent tool in `api/src/lib/base-tools.ts`.
+ * Unit tests for the `embed_multimodal_content` agent tool in
+ * `api/src/lib/base-tools.ts`.
  *
- * Strict-mode contract: the tool delegates to `embedQueryText` /
- * `embedDocumentText` from `embed-query.ts`. There is no longer a duplicated
- * Voyage→Bedrock soft-fallback inside the tool itself. We assert:
- *   1. `input_type=query` → `embedQueryText` is called; `embedDocumentText` is not.
- *   2. `input_type=document` → `embedDocumentText` is called; `embedQueryText` is not.
- *   3. on `EmbedResult.ok=false` the tool returns `{ status: "error", code, message }`.
- *   4. on success the tool returns `{ status: "ok", embedding, model, source, dimensions }`.
- *   5. the cross-provider primitives (`voyageGenerateEmbedding` /
- *      `bedrockGenerateEmbedding`) are **not** called directly by the tool —
- *      strict-mode is enforced exclusively through `embed-query.ts`.
+ * Contract:
+ *   1. Accepts the canonical nested-array shape — one `MultimodalItem` per
+ *      input, each item is an array of text/image_url/image_base64 segments.
+ *   2. Rejects a flat `string[]` at tool-input validation time (this is what
+ *      stops Strands' tool-call serializer from down-casting multimodal
+ *      intent to text).
+ *   3. Rejects bare base64 (no `data:image/<mime>;base64,` header).
+ *   4. Forwards `inputType` ("query" vs "document") to the right
+ *      `embed-query.ts` entry point — no cross-routing.
+ *   5. On per-item failure, surfaces `{ status: "error", code, message,
+ *      imageBlocks, textBlocks }` without retrying.
+ *   6. Emits `error` (existing TraceEventType) on failure with
+ *      `source: "embed_multimodal_content"`.
  */
 
 import { afterAll, beforeEach, describe, expect, mock, test } from "bun:test";
 
-let queryCalls: string[] = [];
-let documentCalls: string[] = [];
-let queryImpl: (text: string) => Promise<unknown> = async () => ({ ok: false });
-let documentImpl: (text: string) => Promise<unknown> = async () => ({ ok: false });
+let queryCalls: unknown[] = [];
+let documentCalls: unknown[] = [];
+let queryImpl: (text: unknown) => Promise<unknown> = async () => ({ ok: false });
+let documentImpl: (text: unknown) => Promise<unknown> = async () => ({ ok: false });
 
 const realEmbed = await import("../../src/lib/embed-query.ts");
 mock.module("../../src/lib/embed-query.ts", () => ({
   ...realEmbed,
-  embedQueryText: async (text: string) => {
-    queryCalls.push(text);
-    return queryImpl(text);
+  embedQueryText: async (input: unknown) => {
+    queryCalls.push(input);
+    return queryImpl(input);
   },
-  embedDocumentText: async (text: string) => {
-    documentCalls.push(text);
-    return documentImpl(text);
+  embedDocumentText: async (input: unknown) => {
+    documentCalls.push(input);
+    return documentImpl(input);
   },
 }));
-
-// We do NOT mock `voyage-embedding.ts` or `bedrock-retrieval.ts` directly;
-// the strict gate sits one layer above, in `embed-query.ts`, and that's what
-// we're locking down. If `embed-query.ts` ever regresses to a soft-fallback
-// the `embedQueryText` / `embedDocumentText` mocks here would still mask
-// it — but `embed-query.test.ts` has dedicated spy tests for the provider
-// primitives that catch that regression.
 
 afterAll(() => {
   mock.module("../../src/lib/embed-query.ts", () => realEmbed);
 });
 
-const { generateEmbeddingTool } = await import("../../src/lib/base-tools.ts");
+const { embedMultimodalContentTool } = await import("../../src/lib/base-tools.ts");
 
 beforeEach(() => {
   queryCalls = [];
   documentCalls = [];
 });
 
-// `tool({ callback })` from strands wraps the user callback. We invoke it
-// through the tool's public `.invoke()` (or its callback property) — fall back
-// to calling the function directly via `.toolSpec`-adjacent surface.
-async function invoke(input: { text: string; input_type?: "query" | "document" }) {
-  // Strands tool surface: .invoke is the runtime entrypoint for tests.
-  const t = generateEmbeddingTool as unknown as {
+async function invoke(input: unknown) {
+  const t = embedMultimodalContentTool as unknown as {
     invoke?: (i: unknown) => Promise<unknown>;
-    callback?: (i: unknown) => Promise<unknown>;
-    handler?: (i: unknown) => Promise<unknown>;
   };
-  if (typeof t.invoke === "function") return t.invoke(input);
-  if (typeof t.callback === "function") return t.callback(input);
-  if (typeof t.handler === "function") return t.handler(input);
-  throw new Error("generateEmbeddingTool does not expose a callable invoke/callback/handler");
+  if (typeof t.invoke !== "function") {
+    throw new Error("embedMultimodalContentTool does not expose .invoke");
+  }
+  return t.invoke(input);
 }
 
-describe("generate_embedding tool — strict delegation to embed-query.ts", () => {
-  test("input_type=query routes to embedQueryText only", async () => {
-    queryImpl = async () => ({
+describe("embed_multimodal_content — accepts canonical multimodal shapes", () => {
+  test("nested-array text-only input routes to embedDocumentText by default", async () => {
+    documentImpl = async () => ({
       ok: true,
       source: "voyage",
       modelId: "voyage-multimodal-3",
-      vector: [0.11, 0.22, 0.33],
+      vector: [0.1, 0.2, 0.3],
     });
 
-    const r = (await invoke({ text: "hello", input_type: "query" })) as Record<string, unknown>;
+    const r = (await invoke({
+      inputs: [[{ type: "text", text: "hello world" }]],
+    })) as Record<string, unknown>;
 
-    expect(queryCalls).toEqual(["hello"]);
-    expect(documentCalls).toEqual([]);
+    expect(documentCalls.length).toBe(1);
+    expect(queryCalls.length).toBe(0);
     expect(r).toMatchObject({
       status: "ok",
-      embedding: [0.11, 0.22, 0.33],
+      dimensions: 3,
       model: "voyage-multimodal-3",
       source: "voyage",
-      dimensions: 3,
+      textBlocks: 1,
+      imageBlocks: 0,
     });
+    expect(Array.isArray((r as { embeddings?: unknown }).embeddings)).toBe(true);
   });
 
-  test("input_type=document routes to embedDocumentText only", async () => {
-    documentImpl = async () => ({
+  test("inputType=query routes to embedQueryText only", async () => {
+    queryImpl = async () => ({
       ok: true,
       source: "voyage",
       modelId: "voyage-multimodal-3",
       vector: [1, 2],
     });
 
-    const r = (await invoke({ text: "doc text", input_type: "document" })) as Record<string, unknown>;
-
-    expect(documentCalls).toEqual(["doc text"]);
-    expect(queryCalls).toEqual([]);
-    expect(r).toMatchObject({ status: "ok", model: "voyage-multimodal-3", source: "voyage" });
+    await invoke({
+      inputs: [[{ type: "text", text: "find me" }]],
+      inputType: "query",
+    });
+    expect(queryCalls.length).toBe(1);
+    expect(documentCalls.length).toBe(0);
   });
 
-  test("strict failure surfaces as { status: 'error', code, message }", async () => {
-    queryImpl = async () => ({
+  test("counts image segments correctly (image_url + image_base64)", async () => {
+    documentImpl = async () => ({
+      ok: true,
+      source: "voyage",
+      modelId: "voyage-multimodal-3",
+      vector: [0, 1, 2, 3],
+    });
+
+    const r = (await invoke({
+      inputs: [
+        [
+          { type: "text", text: "describe" },
+          { type: "image_url", image_url: "https://example.com/a.jpg" },
+          {
+            type: "image_base64",
+            image_base64:
+              "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNgYAAAAAMAASsJTYQAAAAASUVORK5CYII=",
+          },
+        ],
+      ],
+    })) as Record<string, unknown>;
+
+    expect(r).toMatchObject({ status: "ok", textBlocks: 1, imageBlocks: 2 });
+  });
+});
+
+describe("embed_multimodal_content — rejects degenerate shapes", () => {
+  test("flat string[] is rejected by Strands' zod tool-input validation", async () => {
+    documentImpl = async () => ({
+      ok: true,
+      source: "voyage",
+      modelId: "voyage-multimodal-3",
+      vector: [1],
+    });
+
+    let threw = false;
+    try {
+      await invoke({ inputs: ["hello"] });
+    } catch {
+      threw = true;
+    }
+    expect(threw).toBe(true);
+    expect(documentCalls.length).toBe(0);
+  });
+
+  test("bare base64 (missing data:image header) is rejected at tool-input validation", async () => {
+    documentImpl = async () => ({
+      ok: true,
+      source: "voyage",
+      modelId: "voyage-multimodal-3",
+      vector: [1],
+    });
+
+    let threw = false;
+    try {
+      await invoke({
+        inputs: [[{ type: "image_base64", image_base64: "iVBORw0KGgoAAAANSUhEU" }]],
+      });
+    } catch {
+      threw = true;
+    }
+    expect(threw).toBe(true);
+    expect(documentCalls.length).toBe(0);
+  });
+
+  test("empty inputs[] is rejected at tool-input validation", async () => {
+    let threw = false;
+    try {
+      await invoke({ inputs: [] });
+    } catch {
+      threw = true;
+    }
+    expect(threw).toBe(true);
+  });
+});
+
+describe("embed_multimodal_content — strict failure surfacing", () => {
+  test("per-item failure stops the loop and surfaces { status:'error', code, message }", async () => {
+    documentImpl = async () => ({
       ok: false,
       code: "voyage_strict_failed",
       message: "SageMaker 503",
     });
 
-    const r = (await invoke({ text: "hi" })) as Record<string, unknown>;
+    const r = (await invoke({
+      inputs: [
+        [{ type: "text", text: "a" }],
+        [{ type: "text", text: "b" }],
+      ],
+    })) as Record<string, unknown>;
 
-    expect(r).toEqual({
+    expect(r).toMatchObject({
       status: "error",
       code: "voyage_strict_failed",
       message: "SageMaker 503",
+      textBlocks: 2,
+      imageBlocks: 0,
+      failedInputIndex: 0,
     });
-    // Critical: the tool did NOT silently retry on the document path.
-    expect(documentCalls).toEqual([]);
+    // Critical: no second attempt after the first failure.
+    expect(documentCalls.length).toBe(1);
   });
 
-  test("no_provider_configured propagates without provider primitives running", async () => {
-    queryImpl = async () => ({
+  test("titan_no_multimodal propagates without retrying", async () => {
+    documentImpl = async () => ({
       ok: false,
-      code: "no_provider_configured",
-      message: "EMBEDDINGS_PROVIDER unset",
+      code: "titan_no_multimodal",
+      message: "titan is text-only",
     });
 
-    const r = (await invoke({ text: "x" })) as Record<string, unknown>;
+    const r = (await invoke({
+      inputs: [
+        [
+          { type: "text", text: "describe" },
+          { type: "image_url", image_url: "https://example.com/a.jpg" },
+        ],
+      ],
+    })) as Record<string, unknown>;
 
-    expect(r).toEqual({
+    expect(r).toMatchObject({
       status: "error",
-      code: "no_provider_configured",
-      message: "EMBEDDINGS_PROVIDER unset",
+      code: "titan_no_multimodal",
+      textBlocks: 1,
+      imageBlocks: 1,
     });
-    expect(documentCalls).toEqual([]);
   });
 });

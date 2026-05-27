@@ -76,6 +76,32 @@ variable "agentcore_gateways" {
   description = "Map of static-key -> { id, arn } for AgentCore Gateway resources. Same shape and rationale as agentcore_memories — keys must be static (e.g. \"main\") so for_each plans without a two-pass apply on fresh deploys."
 }
 
+variable "agentcore_runtimes" {
+  type = map(object({
+    id  = string
+    arn = string
+  }))
+  default     = {}
+  description = <<-EOT
+    Map of static-key -> { id, arn } for AgentCore Runtime resources.
+
+    Same shape + rationale as `agentcore_memories` / `agentcore_gateways`:
+    the static map KEY (e.g. "orchestrator", "order_management",
+    "mongodb_mcp") keeps for_each plan-able even when runtime_id is
+    `(known after apply)` on a fresh deploy.
+
+    AgentCore auto-creates `/aws/bedrock-agentcore/runtimes/<id>-DEFAULT`
+    log groups for runtimes, BUT it does NOT wire up a delivery, so those
+    log groups stay empty. This module fans out the same
+    (source + destination + delivery) pipeline used for memory/gateway —
+    container stdout/stderr from each runtime then flows to
+    `/aws/vendedlogs/bedrock-agentcore/runtime/APPLICATION_LOGS/<id>` and
+    the API's `trace_id` JSON field becomes queryable for end-to-end
+    distributed-trace correlation (see e2e-smoke/post-deploy-smoke.py
+    `agentcore_trace_join`).
+  EOT
+}
+
 variable "agentcore_memory_ids" {
   type        = list(string)
   description = "AgentCore Memory IDs to wire vended log delivery for. Pass module.agentcore_memory.memory_id (wrapped in [...]) from envs/ec2; the module fans out a delivery source + destination + delivery per id."

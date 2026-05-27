@@ -23,15 +23,16 @@ Environment overrides:
     COGNITO_CLIENT_ID      Override deploy-manifest.cognito_client_id
     E2E_USER, E2E_PASS     Cognito credentials (defaults: alex/DemoUser#2026)
     MONGODB_URI_PUBLIC     Preferred. Public SRV URI used for off-VPC tooling
-                           (chat_messages cleanup in scenarios C/F). Emitted to
-                           `.env.live` by deploy-api.sh. The harness auto-loads
-                           `.env.live` (Docker --env-file format) before
-                           reading env vars, so no shell wiring is required.
+                           (chat_messages cleanup in scenarios C/F). Emitted by
+                           deploy-api.sh into the env-file pair at the repo
+                           root. The harness auto-loads `.env.docker` (or
+                           falls back to `.env.live`) before reading env vars,
+                           so no shell wiring is required.
     MONGODB_URI            Fallback. Used when MONGODB_URI_PUBLIC is unset.
-                           The .env.live `MONGODB_URI` is the PrivateLink
-                           direct URI — usable only from inside the EC2 VPC.
+                           The `MONGODB_URI` value is the PrivateLink direct
+                           URI — usable only from inside the EC2 VPC.
                            If you're running the harness from your laptop and
-                           see "scenarios C/F SKIPPED", it means .env.live is
+                           see "scenarios C/F SKIPPED", it means the env file is
                            missing or out of date; rerun deploy-api.sh.
     MONGODB_DB             Database name (defaults to deploy manifest value)
     MEMORY_DIAG_SETTLE     Seconds to wait between plant and recall (default 6)
@@ -139,20 +140,27 @@ def load_manifest_resources(path: Path) -> dict[str, Any]:
 
 
 def _load_env_live_into_environ() -> None:
-    """Auto-load `.env.live` (KEY=VALUE per line — same format Docker
-    `--env-file` accepts) into `os.environ` for any keys not already set.
+    """Auto-load `.env.docker` (Docker `--env-file` format: plain KEY=VALUE,
+    no quotes, no escapes) into `os.environ` for any keys not already set.
 
-    Rationale: `.env.live` contains `MONGODB_URI_PUBLIC` (and a few other
-    knobs the harness reads), but cannot be `source`d in bash because URLs
-    contain `&` which bash parses as background. Reading the file directly
-    here means `python3 e2e-smoke/memory-recall-diagnostic.py` "just works"
-    after `deploy-api.sh`, no shell-level wiring required.
+    Rationale: `.env.docker` is the canonical Docker format written by
+    `deploy/scripts/_env-live.sh` — values pass through verbatim (no shell
+    parsing, no escape sequences) so it's the safest source for Python.
+    Reading the file directly here means `python3 e2e-smoke/...` "just
+    works" after `deploy-api.sh`, no shell wiring required.
+
+    `.env.live` (the bash-source-safe sibling) is also accepted as a
+    fallback if only that file exists — single-layer surrounding quotes
+    are stripped.
 
     Existing env vars win — explicit overrides from the caller's shell are
     never clobbered. Comment lines (`#`) and blank lines are skipped.
     """
-    candidate = Path(__file__).resolve().parents[1] / ".env.live"
-    if not candidate.exists():
+    repo_root = Path(__file__).resolve().parents[1]
+    docker_file = repo_root / ".env.docker"
+    bash_file = repo_root / ".env.live"
+    candidate = docker_file if docker_file.exists() else (bash_file if bash_file.exists() else None)
+    if candidate is None:
         return
     try:
         for line in candidate.read_text().splitlines():
@@ -164,14 +172,14 @@ def _load_env_live_into_environ() -> None:
             key, _, value = line.partition("=")
             key = key.strip()
             value = value.strip()
-            # Match docker --env-file: strip a single layer of surrounding
-            # quotes, otherwise pass through verbatim (including & : ?).
+            # `.env.docker` is unquoted by construction; `.env.live` wraps
+            # every value in double quotes. Strip one outer layer if present.
             if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
                 value = value[1:-1]
             if key and key not in os.environ:
                 os.environ[key] = value
     except OSError as exc:
-        log(f"warn: failed to read .env.live ({exc}); falling back to current env")
+        log(f"warn: failed to read {candidate.name} ({exc}); falling back to current env")
 
 
 def resolve_config() -> dict[str, Any]:
@@ -955,7 +963,7 @@ def scenario_F(ctx: HarnessContext) -> ScenarioResult:
     # for the resolution rules.
     uri = os.environ.get("MONGODB_URI_PUBLIC") or os.environ.get("MONGODB_URI", "")
     if not uri:
-        s.skip("neither MONGODB_URI_PUBLIC nor MONGODB_URI set — source .env.live, or re-run from EC2 SSM")
+        s.skip("neither MONGODB_URI_PUBLIC nor MONGODB_URI set — ensure .env.docker or .env.live is present at repo root, or re-run from EC2 SSM")
         return s
     try:
         from pymongo import MongoClient  # type: ignore

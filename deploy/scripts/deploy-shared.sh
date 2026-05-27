@@ -263,8 +263,9 @@ done
 ok "All ${#REQUIRED_PARAMS[@]} SSM params populated"
 
 # Post-apply preflight: confirm the freshly-provisioned Voyage SageMaker
-# endpoint actually accepts the configured VOYAGE_REQUEST_FORMAT envelope.
-# Skipped automatically when EMBEDDINGS_PROVIDER != voyage. Catches the case
+# endpoint actually accepts the canonical multimodal envelope produced by
+# `voyage_canonical_body` (== `buildVoyageRequestBody`). Skipped automatically
+# when EMBEDDINGS_PROVIDER != voyage. Catches the case
 # where VOYAGE_MARKETPLACE_MODEL claims voyage-multimodal-3 but
 # VOYAGE_MODEL_PACKAGE_ARN points at a text-only Voyage listing — without
 # this, db-seeding/seed-embeddings.ts is the first place to hit the 4xx,

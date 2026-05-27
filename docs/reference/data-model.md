@@ -194,7 +194,7 @@ Shared retrieval primitives live in [`api/src/lib/vector-retrieval.ts`](../../ap
 
 ## 4. Embedding dimensions
 
-- **Voyage `voyage-multimodal-3` (default)**: 1024-d, cosine similarity. Configured via `VOYAGE_SAGEMAKER_ENDPOINT` + `VOYAGE_REQUEST_FORMAT=multimodal`.
+- **Voyage `voyage-multimodal-3` / `voyage-multimodal-3.5` (default)**: 1024-d, cosine similarity. Configured via `VOYAGE_SAGEMAKER_ENDPOINT`; the multimodal request envelope is built by `buildVoyageRequestBody` (no env flag). See [`docs/reference/voyage.md`](voyage.md).
 - **Bedrock Titan v2 fallback** (`EMBEDDINGS_PROVIDER=titan`): 1024-d via `output_dimension=1024` on the Titan request envelope — matches Voyage so no re-index is needed when switching providers.
 
 Override via `EMBEDDING_DIMENSIONS` (passed to `seed-indexes.ts`) when seeding a different model. **All four vector indexes must use the same dimension** because the API picks the embedding provider at query time, not per-collection.

@@ -11,7 +11,7 @@ const RESERVED_TOOL_NAMES = new Set([
   "mongodb_query",
   "mongodb_vector_search",
   "bedrock_kb_retrieve",
-  "generate_embedding",
+  "embed_multimodal_content",
 ]);
 
 let cached: { mtimeMs: number; data: HttpToolsFile } | null = null;

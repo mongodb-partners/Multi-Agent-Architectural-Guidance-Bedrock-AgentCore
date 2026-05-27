@@ -169,8 +169,6 @@ re-embeds those rows once the provider is healthy again.
 | `VOYAGE_MODEL_PACKAGE_ARN` | — | Marketplace ARN for a Voyage model package. The validator requires a `model-package/voyage-...` ARN; The reference stack uses the `voyage-multimodal-3` family, which AWS may expose as `voyage-multimodel-3-updated-*` | `EMBEDDINGS_PROVIDER=voyage` | `deploy-project.sh`, [`modules/voyage-sagemaker/`](../../deploy/terraform/modules/voyage-sagemaker/) |
 | `VOYAGE_MARKETPLACE_MODEL` | `voyage-multimodal-3` | Pinned model; override only with written deviation | Default-on | `setup-voyage-marketplace.sh` |
 | `VOYAGE_INSTANCE_TYPE` | `ml.g6.xlarge` | SageMaker real-time endpoint instance | Default-on | `modules/voyage-sagemaker` |
-| `VOYAGE_REQUEST_FORMAT` | `multimodal` | `multimodal` (voyage-multimodal-3) or `legacy` (voyage-3.5-lite / voyage-3) | Per-model contract | [`api/src/adapters/voyage-embedding.ts`](../../api/src/adapters/voyage-embedding.ts) |
-| `VOYAGE_OUTPUT_DIM` | `1024` | Voyage output dimension; must match Atlas vector index | Legacy format only | `voyage-embedding.ts` |
 | `VOYAGE_SAGEMAKER_ENDPOINT` | — | SageMaker endpoint name written to `.env.live` by `deploy-project.sh` | `EMBEDDINGS_PROVIDER=voyage` | `voyage-embedding.ts`, `embed-query.ts` |
 | `TF_VAR_voyage_endpoint_name_suffix` | `voyage-multimodal-3` | Naming fragment | Voyage path | `modules/voyage-sagemaker` |
 | `EMBEDDING_MODEL_ID` | — | Bedrock embedding model id (Titan v2 = `amazon.titan-embed-text-v2:0`) | `EMBEDDINGS_PROVIDER=titan` | `assert-embeddings-provider.ts`, `embed-query.ts` |
@@ -304,8 +302,7 @@ These are set in `deploy-project.sh` from `.env` and rarely overridden by hand.
 |---|---|---|
 | `TF_VAR_voyage_endpoint_name_suffix` | `voyage-multimodal-3` | Endpoint name fragment |
 | `VOYAGE_INSTANCE_TYPE` | `ml.g6.xlarge` | SageMaker endpoint instance type (GPU required — `ml.g6.xlarge` or `ml.g5.xlarge`). Set in `.env`, consumed by `deploy-shared.sh` |
-| `VOYAGE_REQUEST_FORMAT` | `multimodal` | Voyage request envelope — `multimodal` (default, `voyage-multimodal-3`) or `legacy` (`voyage-3.5-lite` / `voyage-3`) |
-| `VOYAGE_MARKETPLACE_MODEL` | `voyage-multimodal-3` | Pinned to the default model; override only for explicit written deviation |
+| `VOYAGE_MARKETPLACE_MODEL` | `voyage-multimodal-3` | One of `voyage-multimodal-3` / `voyage-multimodal-3.5` — the only supported multimodal listings. See [`docs/reference/voyage.md`](voyage.md). |
 
 > The `voyage-sagemaker` module's `instance_count` Terraform variable defaults to `1` and is not currently sourced from an env var — edit the module call in `envs/shared/main.tf` if you need to scale beyond one instance.
 

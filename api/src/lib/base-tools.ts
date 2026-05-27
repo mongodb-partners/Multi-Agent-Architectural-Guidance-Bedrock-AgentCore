@@ -3,6 +3,11 @@ import { z } from "zod";
 import { logger } from "./logger.ts";
 import { bedrockKbRetrieve } from "../adapters/bedrock-retrieval.ts";
 import { embedDocumentText, embedQueryText } from "./embed-query.ts";
+import {
+  multimodalItemSchema,
+  redactBase64Segments,
+  type MultimodalItem,
+} from "../adapters/voyage-embedding.ts";
 import { pathToFileURL } from "node:url";
 import type { Sort } from "mongodb";
 import { readSkillResourceFile, resolveSkillResourcePath, type SkillRegistry } from "./skill-loader.ts";
@@ -248,34 +253,126 @@ export const bedrockKbRetrieveTool = tool({
   },
 });
 
-export const generateEmbeddingTool = tool({
-  name: "generate_embedding",
+/**
+ * `embed_multimodal_content` — typed multimodal Strands tool.
+ *
+ * Replaces the legacy text-only `generate_embedding`. The `inputSchema`
+ * uses `z.discriminatedUnion("type", […])` so Strands' tool-input
+ * validation rejects flat `string[]` arrays at the boundary; multimodal
+ * intent reaches `embed-query.ts` unchanged and the SageMaker container
+ * sees the canonical `{ inputs: [{ content: [...] }], ... }` envelope.
+ *
+ * Inputs:
+ *   inputs:    array of MultimodalItem. Each item is an array of
+ *              segments; segments are `{type:"text", text}`,
+ *              `{type:"image_url", image_url:"https://..."}`, or
+ *              `{type:"image_base64", image_base64:"data:image/png;base64,..."}`.
+ *   inputType: "query" | "document" (default "document").
+ *
+ * Output: `{ status:"ok", embeddings: number[][], dimensions, model, source }`
+ *          on success, `{ status:"error", code, message, ... }` on failure.
+ *
+ * Trace emission uses EXISTING TraceEventType members only:
+ *   - tool.call on success (toolName, latencyMs, inputs/result summary)
+ *   - error    on failure (source="embed_multimodal_content",
+ *                          class=code, message, payload preview)
+ */
+export const embedMultimodalContentTool = tool({
+  name: "embed_multimodal_content",
   description:
-    "Generate a text embedding. Uses the embedding provider declared by " +
-    "EMBEDDINGS_PROVIDER ('voyage' or 'titan') — no cross-provider fallback. " +
-    "input_type: 'query' for search queries, 'document' for content to be indexed.",
+    "Generate embeddings for one or more interleaved text/image inputs. Each input is an " +
+    "array of segments and produces one embedding vector. Segments: " +
+    "{type:'text', text:'...'} | {type:'image_url', image_url:'https://...'} | " +
+    "{type:'image_base64', image_base64:'data:image/png;base64,...'} (header required). " +
+    "Uses the embedding provider declared by EMBEDDINGS_PROVIDER — Voyage on SageMaker for " +
+    "multimodal; Titan (text-only) refuses image segments with titan_no_multimodal.",
   inputSchema: z.object({
-    text: z.string(),
-    input_type: z.enum(["query", "document"]).optional().default("query"),
+    inputs: z.array(multimodalItemSchema).min(1),
+    inputType: z.enum(["query", "document"]).optional().default("document"),
   }),
   callback: async (input): Promise<JSONValue> => {
-    const inputType = input.input_type ?? "query";
-    // Delegate to the single strict-mode provider gate in `embed-query.ts`.
-    // Both LTM writes, the chat-mirror, MCP vector search, and this agent
-    // tool now share the same provider selection — there is no longer a
-    // duplicated Voyage→Bedrock fallback in this file.
-    const r = inputType === "document"
-      ? await embedDocumentText(input.text)
-      : await embedQueryText(input.text);
-    if (!r.ok) {
-      return { status: "error", code: r.code, message: r.message };
+    const t0 = Date.now();
+    const trace = currentTrace();
+    const inputType: "query" | "document" = input.inputType ?? "document";
+    const items = input.inputs as MultimodalItem[];
+
+    // Per-item segment counts — used for both the on-success trace and
+    // the on-failure error payload so an operator can correlate the
+    // failure with the exact input shape that hit the wire.
+    let textBlocks = 0;
+    let imageBlocks = 0;
+    for (const item of items) {
+      for (const seg of item) {
+        if (seg.type === "text") textBlocks++;
+        else imageBlocks++;
+      }
     }
+
+    const embedFn = inputType === "document" ? embedDocumentText : embedQueryText;
+    const vectors: number[][] = [];
+    let lastModelId = "";
+    let lastSource: "voyage" | "bedrock" | undefined;
+
+    for (let i = 0; i < items.length; i++) {
+      const r = await embedFn(items[i]);
+      if (!r.ok) {
+        const errPayload = {
+          class: r.code,
+          message: r.message,
+          source: "embed_multimodal_content",
+        } as const;
+        try {
+          trace?.event("error", errPayload);
+        } catch {
+          // trace failures must never destabilise the tool callback
+        }
+        return {
+          status: "error",
+          code: r.code,
+          message: r.message,
+          provider: lastSource ?? null,
+          dimensions: 0,
+          imageBlocks,
+          textBlocks,
+          failedInputIndex: i,
+        };
+      }
+      vectors.push(r.vector);
+      lastModelId = r.modelId;
+      lastSource = r.source;
+    }
+
+    const dimensions = vectors[0]?.length ?? 0;
+
+    try {
+      trace?.event("tool.call", {
+        toolName: "embed_multimodal_content",
+        input: {
+          inputs: redactBase64Segments(items),
+          inputType,
+        },
+        result: {
+          dimensions,
+          model: lastModelId,
+          source: lastSource,
+          imageBlocks,
+          textBlocks,
+          embeddings: vectors.length,
+          latencyMs: Date.now() - t0,
+        },
+      });
+    } catch {
+      // trace failures must never destabilise the tool callback
+    }
+
     return {
       status: "ok",
-      embedding: r.vector,
-      model: r.modelId,
-      source: r.source,
-      dimensions: r.vector.length,
+      embeddings: vectors,
+      dimensions,
+      model: lastModelId,
+      source: lastSource ?? null,
+      imageBlocks,
+      textBlocks,
     };
   },
 });
@@ -334,7 +431,7 @@ export function makeActivateSkillTool(registry: SkillRegistry): Tool {
  */
 const staticToolByName: Record<string, Tool> = {
   bedrock_kb_retrieve: bedrockKbRetrieveTool,
-  generate_embedding: generateEmbeddingTool,
+  embed_multimodal_content: embedMultimodalContentTool,
 };
 
 /** Mongo tool names that always come from the gateway MCP target, never from

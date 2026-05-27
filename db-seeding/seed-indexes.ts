@@ -147,8 +147,11 @@ console.log(`✅  Regular indexes: ${regularOk}/${regularIndexes.length} created
 // On a local MongoDB or Community Server this will throw — that is expected.
 // ─────────────────────────────────────────────────────────────────────────────
 
-// voyage-3 = 1024d, voyage-3-lite = 512d, Titan v2 = 1536d
-const EMBEDDING_DIMENSIONS = Number(process.env.EMBEDDING_DIMENSIONS ?? 1024);
+// Embedding dimension comes from the TS SSOT in
+// api/src/adapters/voyage-embedding.ts so every Atlas index, the deployed
+// model, and the bash deploy helpers agree. There is no env override —
+// raising the dim is a code change pinned by `voyage-ssot-guard.test.ts`.
+import { VOYAGE_EMBEDDING_DIMS as EMBEDDING_DIMENSIONS } from "../api/src/adapters/voyage-embedding.ts";
 const SIMILARITY = (process.env.VECTOR_SIMILARITY ?? "cosine") as "cosine" | "euclidean" | "dotProduct";
 const WAIT_FOR_ATLAS_SEARCH_INDEXES = ["1", "true", "yes"].includes(
   (process.env.WAIT_FOR_ATLAS_SEARCH_INDEXES ?? "").trim().toLowerCase(),

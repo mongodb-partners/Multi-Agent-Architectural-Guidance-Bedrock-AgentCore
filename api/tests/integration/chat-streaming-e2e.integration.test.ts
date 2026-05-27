@@ -28,6 +28,7 @@ mock.module("../../src/adapters/agentcore-runtime.ts", () => ({
     id === "order-management"
       ? "arn:aws:bedrock-agentcore:us-east-1:000000000000:runtime/order"
       : undefined,
+  setAgentcoreSpecialistArnOverrides: () => undefined,
   // Async generator that yields each frame on a separate microtask so the
   // chat route MUST forward incrementally to surface them in order.
   invokeAgentRuntime: async function* () {

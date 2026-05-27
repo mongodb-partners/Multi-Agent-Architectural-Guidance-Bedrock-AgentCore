@@ -47,6 +47,10 @@ locals {
       arn = "arn:${data.aws_partition.current.partition}:bedrock-agentcore:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:gateway/${id}"
     }
   }
+  # Runtime delivery is map-only (no ids-list fallback): runtime IDs include
+  # an AWS-generated 10-char random suffix that is never known at the time
+  # the operator writes tfvars, so a list-of-strings shape is impractical.
+  runtime_map = var.agentcore_runtimes
   common_tags = merge(var.tags, {
     Project     = var.project_name
     Environment = var.environment
@@ -158,9 +162,12 @@ resource "aws_cloudwatch_log_resource_policy" "xray_spans" {
 }
 
 # -----------------------------------------------------------------------------
-# AgentCore service-vended log delivery for Memory + Gateway resources.
-# Without these, the AgentCore Agents tab in GenAI Observability stays empty
-# for memory/gateway columns (runtime logs are AWS-managed automatically).
+# AgentCore service-vended log delivery for Memory + Gateway + Runtime
+# resources. Without these the AgentCore Agents tab in GenAI Observability
+# stays empty for memory/gateway columns, AND the runtime
+# `/aws/bedrock-agentcore/runtimes/<id>-DEFAULT` group (auto-provisioned by
+# AgentCore but never populated) keeps its `otel-rt-logs` stream empty —
+# so `trace_id` end-to-end correlation breaks at the API → runtime hop.
 #
 # Delivery model = source + destination + delivery edge per resource.
 # Log group naming follows the AWS-documented convention:
@@ -260,4 +267,68 @@ resource "aws_cloudwatch_log_delivery" "agentcore_gateway" {
 
   delivery_source_name     = aws_cloudwatch_log_delivery_source.agentcore_gateway[each.key].name
   delivery_destination_arn = aws_cloudwatch_log_delivery_destination.agentcore_gateway[each.key].arn
+}
+
+# ----- Runtime resources -----
+#
+# AgentCore auto-provisions `/aws/bedrock-agentcore/runtimes/<id>-DEFAULT`
+# (single `otel-rt-logs` stream) for every runtime, but with no delivery
+# configured the stream stays empty — runtime container stdout/stderr is
+# silently dropped. This block creates the missing
+# (DeliverySource + DeliveryDestination + Delivery) edge per runtime,
+# matching the memory/gateway pattern above, so the API's structured logs
+# (with `trace_id` correlated to the upstream API span) actually land in
+# CloudWatch. Without it, distributed-trace search by `trace_id` only
+# resolves on the Hono API side and the orchestrator → specialist hop is
+# invisible.
+#
+# Destination log-group naming mirrors the documented vended-logs path
+# (`/aws/vendedlogs/bedrock-agentcore/runtime/APPLICATION_LOGS/<id>`)
+# rather than the auto-provisioned `/aws/bedrock-agentcore/runtimes/...`
+# group. This keeps three things working:
+#   1. CloudWatch console auto-discovery for AgentCore runtime dashboards.
+#   2. Vended-log retention controlled by `agentcore_log_retention_days`
+#      (the auto-provisioned group has no retention by default).
+#   3. The smoke test `agentcore_trace_join` discovery, which scans the
+#      vended-logs hierarchy and is project-scoped via the runtime id.
+
+resource "aws_cloudwatch_log_group" "agentcore_runtime" {
+  for_each = local.runtime_map
+
+  name              = "/aws/vendedlogs/bedrock-agentcore/runtime/APPLICATION_LOGS/${each.value.id}"
+  retention_in_days = var.agentcore_log_retention_days
+
+  tags = merge(local.common_tags, {
+    Name        = "agentcore-runtime-${each.value.id}"
+    AgentCoreId = each.value.id
+  })
+}
+
+resource "aws_cloudwatch_log_delivery_source" "agentcore_runtime" {
+  for_each = local.runtime_map
+
+  # See agentcore_memory above for the 60-char rationale. Runtime ids
+  # already include the project name + random suffix so they're globally
+  # unique on their own.
+  name         = substr("runtime-${each.value.id}", 0, 60)
+  log_type     = "APPLICATION_LOGS"
+  resource_arn = each.value.arn
+}
+
+resource "aws_cloudwatch_log_delivery_destination" "agentcore_runtime" {
+  for_each = local.runtime_map
+
+  name          = substr("runtime-dst-${each.value.id}", 0, 60)
+  output_format = "json"
+
+  delivery_destination_configuration {
+    destination_resource_arn = aws_cloudwatch_log_group.agentcore_runtime[each.key].arn
+  }
+}
+
+resource "aws_cloudwatch_log_delivery" "agentcore_runtime" {
+  for_each = local.runtime_map
+
+  delivery_source_name     = aws_cloudwatch_log_delivery_source.agentcore_runtime[each.key].name
+  delivery_destination_arn = aws_cloudwatch_log_delivery_destination.agentcore_runtime[each.key].arn
 }

@@ -318,6 +318,49 @@ See § 5 above. Code: [`db-seeding/seed-indexes.ts`](../../db-seeding/seed-index
 ### Two runtime entrypoints — drift is the bug
 The runtime has **exactly one** entrypoint: [`api/src/agent-runtime-code.ts`](../../api/src/agent-runtime-code.ts). Both `Dockerfile.agentcore` and the direct-code S3 bundle invoke this file. `agent-runtime-server.ts` has been deleted. If `deployment_mode = "container"` ever needs to come back, add a thin wrapper around `agent-runtime-code.ts`, never a parallel implementation.
 
+### Two env files: `.env.docker` (Docker) and `.env.live` (bash) — keep them in sync
+Deploy scripts emit a **pair** of files at the repo root and ship both to `/opt/multiagent/`:
+
+- **`.env.docker`** — plain `KEY=VALUE`, no quotes. Consumed by `docker run --env-file` from `multiagent-{api,ui}.service` (Docker's `--env-file` treats quotes as literal characters in the value, so the file MUST be unquoted).
+- **`.env.live`** — bash-source-safe `KEY="value"` with backslash / quote / dollar / backtick escapes. Always safe for `source .env.live` from any laptop shell.
+
+Both are derived from one canonical schema by [`deploy/scripts/_env-live.sh`](../../deploy/scripts/_env-live.sh) — `.env.docker` is the source of truth and `.env.live` is generated from it by `_quote_for_bash()`. Never hand-edit one without the other; if you find yourself patching `/opt/multiagent/*.env*` on EC2 by hand, you have already lost — re-run the matching `deploy-*.sh` instead.
+
+The dual-file design replaced an earlier `source-env-files.sh` helper that tried to bash-source the Docker-format file safely. That helper is gone — `.env.live` is now always source-safe by construction.
+
+### AgentCore Runtime CloudWatch logs need explicit vended-log delivery
+**Symptom.** Post-deploy smoke warns `0 AgentCore-runtime log events with trace_id=<hex>` even though the API log group shows the trace and the chat turn succeeded end-to-end. `aws logs describe-log-streams --log-group-name /aws/bedrock-agentcore/runtimes/<runtime-id>-DEFAULT` shows one auto-created `otel-rt-logs` stream with `lastEventTimestamp=None` — stream provisioned, but never written to.
+
+**Cause.** When AgentCore creates a runtime it auto-provisions `/aws/bedrock-agentcore/runtimes/<runtime-id>-<endpoint>` as the *intended* destination for OTLP-logs that the Python ADOT distro (`aws-opentelemetry-distro` + `AGENT_OBSERVABILITY_ENABLED=true`) would push to the in-container sidecar. The Node.js runtime here writes structured JSON to stdout/stderr but never speaks OTLP-logs, so the auto-provisioned stream stays empty forever. AgentCore does NOT auto-create a CloudWatch Logs `Delivery` for runtime stdout/stderr the way it does for some other AWS services — that has to be wired explicitly.
+
+**Fix (already applied).** [`deploy/terraform/modules/cloudwatch-genai`](../../deploy/terraform/modules/cloudwatch-genai) now provisions a `(DeliverySource + DeliveryDestination + Delivery)` triple per runtime — orchestrator, every specialist, and the MongoDB MCP runtime — into `/aws/vendedlogs/bedrock-agentcore/runtime/APPLICATION_LOGS/<runtime-id>` (matches the AWS-documented vended-logs path). Runtime container stdout/stderr (which our `lib/logger.ts` already tags with W3C `trace_id`) then ships through CWL's managed delivery pipeline; `trace_id` becomes JSON-searchable end-to-end. Runtime IDs are passed via the `agentcore_runtimes` map in [`envs/ec2/main.tf`](../../deploy/terraform/envs/ec2/main.tf) using static keys (`orchestrator`, `mongodb_mcp`, specialist agent ids) so `for_each` plans without a two-pass apply.
+
+**Permanent guardrails (do not remove):**
+- The `/aws/vendedlogs/bedrock-agentcore/runtime/...` path is the only canonical one for application logs — the auto-provisioned `/aws/bedrock-agentcore/runtimes/<id>-DEFAULT` path stays in use for AWS service-level signals but should never be expected to carry application JSON.
+- Smoke discovery uses the runtime **ARN list** from `.env.docker` (orchestrator + `AGENTCORE_*_ARN` specialists + `MONGODB_MCP_RUNTIME_ARN`), never a name prefix on the API log group — the two naming schemes are independent (`/multiagent/...` vs `mongodb_multiagent3_*`) and a prefix derivation will silently mismatch.
+- Adding a new specialist `.agent.md` is enough — `module.acr_specialists` is for_each'd and the cloudwatch-genai wire-up uses the same map, so a new runtime is picked up by delivery on the first re-apply.
+
+**Recovery for an existing deploy.** Re-running the full `deploy-full-with-*.sh` orchestrator or a targeted `terraform apply -target=module.cloudwatch_genai[0].aws_cloudwatch_log_delivery.agentcore_runtime` creates the missing edges idempotently. No EC2 / runtime restart is required — delivery starts collecting from the next container invocation.
+
+### AgentCore Gateway target FAILED with cold-start race
+**Symptom.** Deploy reaches Phase 9a3 (`Direct MCP tool probe`) and fails with `mcpProbe=timeout` / `gateway_target_status=FAILED`. `aws bedrock-agentcore-control get-gateway-target` shows `statusReasons: ["Failed to connect and fetch tools from the provided MCP target server. Error - Unable to connect to the MCP server. Please check the server"]`. The MCP AgentCore Runtime is `status=READY` and `aws bedrock-agentcore invoke-agent-runtime ... initialize ...` returns `statusCode=200` with a valid MCP envelope. The container CloudWatch log group has only the `mongodb-mcp listening` line for the most recent container start (no `mcp request start` events for the failed window).
+
+**Cause.** `Runtime status=READY` ≠ "warm container in the AgentCore container pool". The gateway creates the target and immediately probes it via MCP `tools/list`. If the pool is empty, AgentCore cold-starts a container (~20-40s ECR pull + node startup) while the gateway's tools-list probe times out in ~10s and gives up. By the time the container is actually serving, the target has already been written FAILED — and AgentCore Gateway never retries the schema discovery for the lifetime of the target.
+
+The race is silent because:
+- The runtime itself stays healthy — direct `invoke-agent-runtime` calls work.
+- The CloudWatch body-parser SyntaxError you may see (`Unexpected token '�' ... is not valid JSON`) is a **separate** retry that arrives after the container finally starts; it is NOT the failed gateway probe.
+
+**Permanent guardrails (do not remove):**
+- `warm_mcp_runtime` in [`deploy/scripts/_agents-common.sh`](../../deploy/scripts/_agents-common.sh) issues 3 direct `invoke-agent-runtime` `initialize` calls before the target is created or recreated. The function is called from `force_mcp_runtime_image_sync` (before target delete) AND `self_heal_failed_gateway_target` (between delete and recreate).
+- The Terraform null_resource in [`deploy/terraform/modules/agentcore-gateway/main.tf`](../../deploy/terraform/modules/agentcore-gateway/main.tf) (`mcp_server_gateway_target`) inlines the same 3-invocation warm-up loop immediately before `aws bedrock-agentcore-control create-gateway-target`. This covers the first-deploy path where no helper is sourced.
+- `MCP_RUNTIME_WARMUP=0` is incident-response only — never set in CI or normal deploys.
+
+**Recovery for an in-progress deploy that hit this bug pre-fix:**
+1. Warm the runtime manually: `aws bedrock-agentcore invoke-agent-runtime --agent-runtime-arn <runtime-arn> --qualifier DEFAULT --mcp-session-id "manual-$(date +%s)" --mcp-protocol-version 2025-06-18 --content-type "application/json" --accept "application/json, text/event-stream" --payload '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"manual","version":"1.0"}}}' --cli-binary-format raw-in-base64-out /tmp/out.bin` — repeat 2-3 times.
+2. Delete the failed target: `aws bedrock-agentcore-control delete-gateway-target --gateway-identifier <gw> --target-id <tid>` and wait for it to disappear from `list-gateway-targets`.
+3. Re-run `./deploy/deploy-full-with-privatelink.sh --auto-approve --skip-network --skip-shared` (or just `terraform apply -target=module.agentcore_gateway.null_resource.mcp_server_gateway_target[0]` in `envs/ec2`).
+
 ### MCP MongoDB URI must be the mode-correct private form (not public SRV)
 In privatelink mode the runtime `MONGODB_URI` is the **multi-host non-SRV** PL URI with `tlsAllowInvalidHostnames=true`. In peering mode it is `connectionStrings.privateSrv` (or the matching multi-host form). Public `mongodb+srv://` URIs do not resolve from the private VPC and surface as `MongoAPIError: No addresses found at host`. The TF outputs in `modules/mongodb-atlas` (`privatelink_connection_string` and `peering_connection_string` / `peering_connection_srv_string`) feed the right value into `MONGODB_URI` — do not patch post-apply.
 
@@ -374,7 +417,7 @@ db.agent_memory_facts.countDocuments({ embeddingModel: /^amazon\.titan/ })
 db.chat_messages.countDocuments({ embeddingError: { $exists: true } })
 ```
 
-**Atlas index dimension footnote.** Both `amazon.titan-embed-text-v2:0` (1024-d) and `voyage-multimodal-3` / `voyage-3.5-lite` (1024-d via `VOYAGE_OUTPUT_DIM=1024`) share the same Atlas vector index dimension. Mismatched rows therefore don't crash vector search — they just return wrong results. This is why the silent-fallback bug took so long to surface.
+**Atlas index dimension footnote.** Both `amazon.titan-embed-text-v2:0` (1024-d) and `voyage-multimodal-3` / `voyage-multimodal-3.5` (1024-d, pinned by `VOYAGE_EMBEDDING_DIMS` in `api/src/adapters/voyage-embedding.ts`) share the same Atlas vector index dimension. Mismatched rows therefore don't crash vector search — they just return wrong results. This is why the silent-fallback bug took so long to surface. See [`docs/reference/voyage.md`](../reference/voyage.md) for the SSOT.
 
 **Backfill.** Run [`db-seeding/reembed-mismatched.ts`](../../db-seeding/reembed-mismatched.ts) (dry-run by default; `--apply` to write) to re-embed mismatched rows with the declared provider. Idempotent — safe to re-run after every provider switch.
 

@@ -28,12 +28,14 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 ENV_FILE="$REPO_ROOT/.env"
+# shellcheck source=deploy/scripts/_voyage-config.sh
+source "$SCRIPT_DIR/_voyage-config.sh"
 
-# Default to voyage-multimodal-3, but keep voyage-3-5-lite as a supported legacy
-# option for lower-cost/text-only deployments.
+# Multimodal-only. SUPPORTED_VOYAGE_MODELS lives in
+# api/src/adapters/voyage-embedding.ts and is mirrored by
+# deploy/scripts/_voyage-config.sh — adding a new model is one TS edit.
 MODEL="${VOYAGE_MARKETPLACE_MODEL:-voyage-multimodal-3}"
 MODEL_FROM_ARGS=false
-REQUIRE_VOYAGE_MULTIMODAL_3="${REQUIRE_VOYAGE_MULTIMODAL_3:-false}"
 AWS_REGION="${AWS_REGION:-us-east-1}"
 UPDATE_ENV=true
 UPDATE_GH=true
@@ -47,7 +49,7 @@ VOYAGE_VENDOR_ACCOUNT="865070037744"
 # Per-model Marketplace landing pages — resolved after `--model` is parsed.
 declare -A MARKETPLACE_URLS=(
   [voyage-multimodal-3]="https://aws.amazon.com/marketplace/pp/prodview-hrid2zxusacxy"
-  [voyage-3-5-lite]="https://aws.amazon.com/marketplace/pp/prodview-xj76cqxng4wyw"
+  [voyage-multimodal-3.5]="https://aws.amazon.com/marketplace/pp/prodview-hrid2zxusacxy"
 )
 
 while [[ $# -gt 0 ]]; do
@@ -106,18 +108,16 @@ ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text 2>/dev/n
   || err "AWS credentials invalid or expired. Run: source .env"
 ok "AWS account: $ACCOUNT_ID (region: $AWS_REGION)"
 
-# Optional model guard — fail fast on any silent deviation from voyage-multimodal-3.
-if [[ "$REQUIRE_VOYAGE_MULTIMODAL_3" == "true" && "$MODEL" != "voyage-multimodal-3" ]]; then
-  err "Refusing to subscribe to '$MODEL' — this stack pins voyage-multimodal-3.
-     To override, re-run with REQUIRE_VOYAGE_MULTIMODAL_3=false (requires written sign-off)."
-fi
-if [[ ! "$MODEL" =~ ^voyage- ]]; then
-  err "Unsupported model '$MODEL'. Voyage model labels must start with 'voyage-'."
-fi
+# Multimodal-only gate — refuse non-multimodal models BEFORE we open the
+# Marketplace page. This is the choke point that previously let an operator
+# subscribe to voyage-3-5-lite by mistake and end up with a text-only
+# endpoint that rejected the multimodal envelope at first-write time.
+voyage_assert_multimodal_or_die "$MODEL" || \
+  err "Refusing to subscribe to '$MODEL'. Use --model voyage-multimodal-3 (or voyage-multimodal-3.5)."
 if [[ -z "${MARKETPLACE_URLS[$MODEL]:-}" ]]; then
   warn "No dedicated Marketplace URL configured for '$MODEL' — opening the Voyage seller page."
 fi
-ok "Target Voyage model: $MODEL"
+ok "Target Voyage model: $MODEL (multimodal-only — confirmed by _voyage-config.sh)"
 
 # ── Phase 2 — Check subscription state ────────────────────────────────────────
 sep
@@ -125,10 +125,14 @@ log "Phase 2 — Checking Marketplace subscription for '$MODEL'..."
 
 model_package_groups() {
   # Voyage's public model name is voyage-multimodal-3, but some Marketplace
-  # package groups use a voyage-multimodel-3-updated-* tail.
+  # package groups use a voyage-multimodel-3-updated-* tail (typo in the
+  # publisher metadata persists across re-publishes).
   case "$MODEL" in
     voyage-multimodal-3)
       printf '%s\n' "voyage-multimodal-3" "voyage-multimodel-3-updated"
+      ;;
+    voyage-multimodal-3.5)
+      printf '%s\n' "voyage-multimodal-3-5" "voyage-multimodel-3-5"
       ;;
     *)
       printf '%s\n' "$MODEL"
@@ -225,11 +229,7 @@ fi
 if [[ "$UPDATE_ENV" == "true" ]]; then
   sep
   log "Phase 4 — Updating $ENV_FILE..."
-  REQUEST_FORMAT="${VOYAGE_REQUEST_FORMAT:-multimodal}"
   ENDPOINT_SUFFIX="$MODEL"
-  if [[ "$MODEL" == "voyage-3-5-lite" ]]; then
-    REQUEST_FORMAT="legacy"
-  fi
 
   upsert_export() {
     local key="$1"
@@ -252,8 +252,6 @@ if [[ "$UPDATE_ENV" == "true" ]]; then
 export EMBEDDINGS_PROVIDER="voyage"
 export VOYAGE_MODEL_PACKAGE_ARN="$ARN"
 export VOYAGE_MARKETPLACE_MODEL="$MODEL"
-export VOYAGE_REQUEST_FORMAT="$REQUEST_FORMAT"
-export VOYAGE_OUTPUT_DIM="1024"
 export TF_VAR_voyage_endpoint_name_suffix="$ENDPOINT_SUFFIX"
 EOF
     chmod 600 "$ENV_FILE"
@@ -262,8 +260,6 @@ EOF
     upsert_export "EMBEDDINGS_PROVIDER" "voyage"
     upsert_export "VOYAGE_MODEL_PACKAGE_ARN" "$ARN"
     upsert_export "VOYAGE_MARKETPLACE_MODEL" "$MODEL"
-    upsert_export "VOYAGE_REQUEST_FORMAT" "$REQUEST_FORMAT"
-    upsert_export "VOYAGE_OUTPUT_DIM" "1024"
     upsert_export "TF_VAR_voyage_endpoint_name_suffix" "$ENDPOINT_SUFFIX"
     ok "Updated Voyage env vars in $ENV_FILE"
   fi

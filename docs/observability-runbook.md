@@ -141,9 +141,10 @@ The full ordered event list as structured JSON, last so it never crowds the synt
 |---|---|
 | Chat turn errored before any tool call | `/<SHARED_RESOURCE_PREFIX>/<env>/api` |
 | Chat turn looked fine in API but the model said "I cannot…" | `/aws/bedrock/invocations` (errors + stop reason) |
-| AgentCore Runtime invocation failed | `/<SHARED_RESOURCE_PREFIX>/<env>/api` (look for `[agentcore-runtime] InvokeAgentRuntime failed`), then `/aws/bedrock-agentcore/runtimes/<id>/...` for runtime-side stack |
+| AgentCore Runtime invocation failed | `/<SHARED_RESOURCE_PREFIX>/<env>/api` (look for `[agentcore-runtime] InvokeAgentRuntime failed`), then `/aws/vendedlogs/bedrock-agentcore/runtime/APPLICATION_LOGS/<runtime-id>` for runtime-side stack (matches API `trace_id`) |
 | Memory write / read seems wrong | `/aws/vendedlogs/bedrock-agentcore/memory/APPLICATION_LOGS/<id>` |
 | Gateway tool call returned 401 / 403 | `/aws/vendedlogs/bedrock-agentcore/gateway/APPLICATION_LOGS/<id>` |
+| MongoDB MCP tool call timed out / errored | `/aws/vendedlogs/bedrock-agentcore/runtime/APPLICATION_LOGS/<mongodb_mcp_runtime_id>` |
 | Span shows up in X-Ray but no JSON log lines | `/<SHARED_RESOURCE_PREFIX>/<env>/otel` — the OTLP-logs path may have emitted them |
 | PII detection alarm fired | `/aws/bedrock/invocations` filtered by `{ $.eventType = "DataMaskingFinding" }` |
 | Streamlit UI itself crashed | `/<SHARED_RESOURCE_PREFIX>/<env>/ui` |

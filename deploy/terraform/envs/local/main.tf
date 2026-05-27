@@ -63,8 +63,12 @@ resource "null_resource" "seed_mongodb_indexes" {
     command = "bun ${path.module}/../../../../db-seeding/seed-indexes.ts"
 
     environment = {
-      MONGODB_URI                   = module.mongodb_atlas.connection_string
-      MONGODB_DB                    = var.atlas_db_name
+      MONGODB_URI = module.mongodb_atlas.connection_string
+      MONGODB_DB  = var.atlas_db_name
+      # NOTE: must match VOYAGE_EMBEDDING_DIMS in
+      # api/src/adapters/voyage-embedding.ts. Terraform can't shell out to
+      # voyage-print.ts here, so the literal is pinned by the bun guard test
+      # `voyage SSOT — terraform <-> TS parity for embedding dim`.
       EMBEDDING_DIMENSIONS          = "1024"
       WAIT_FOR_ATLAS_SEARCH_INDEXES = "1"
     }

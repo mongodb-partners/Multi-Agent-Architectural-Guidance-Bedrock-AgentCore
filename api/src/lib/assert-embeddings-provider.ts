@@ -23,10 +23,15 @@
  */
 
 import { logger } from "./logger.ts";
+import {
+  assertSupportedVoyageModel,
+  getVoyageModelName,
+  isVoyageConfigured,
+  getVoyageEndpoint,
+} from "../adapters/voyage-embedding.ts";
 
 export function assertEmbeddingsProvider(): void {
   const declared = (process.env.EMBEDDINGS_PROVIDER ?? "").trim().toLowerCase();
-  const voyageEndpoint = (process.env.VOYAGE_SAGEMAKER_ENDPOINT ?? "").trim();
   const bedrockModelId = (process.env.EMBEDDING_MODEL_ID ?? "").trim();
 
   if (!declared) {
@@ -38,16 +43,22 @@ export function assertEmbeddingsProvider(): void {
 
   switch (declared) {
     case "voyage": {
-      if (!voyageEndpoint) {
+      if (!isVoyageConfigured()) {
         throw new Error(
           "EMBEDDINGS_PROVIDER=voyage but VOYAGE_SAGEMAKER_ENDPOINT is empty. " +
             "Refusing to start — the Voyage provider is not actually wired. " +
             "Either provision the SageMaker endpoint or switch EMBEDDINGS_PROVIDER=titan.",
         );
       }
-      logger.info("[embeddings] strict voyage mode — no Bedrock fallback", {
-        endpoint: voyageEndpoint,
-        format: process.env.VOYAGE_REQUEST_FORMAT ?? "multimodal",
+      const modelName = getVoyageModelName();
+      // Multimodal-only. Anything else (voyage-3, voyage-3.5-lite, …) is
+      // refused at boot so we never silently send the canonical multimodal
+      // envelope to a text-only endpoint and get a Pydantic 400 at
+      // first-write time. See `api/src/adapters/voyage-embedding.ts`.
+      assertSupportedVoyageModel(modelName);
+      logger.info("[embeddings] strict voyage mode — multimodal-only, no Bedrock fallback", {
+        endpoint: getVoyageEndpoint(),
+        model: modelName,
         voyageMultimodal: true,
       });
       if (bedrockModelId) {
@@ -70,10 +81,10 @@ export function assertEmbeddingsProvider(): void {
         voyageMultimodal: false,
         note: "amazon.titan-embed-text-v2:0 — set EMBEDDINGS_PROVIDER=voyage to use voyage-multimodal-3",
       });
-      if (voyageEndpoint) {
+      if (isVoyageConfigured()) {
         logger.warn(
           "[embeddings] VOYAGE_SAGEMAKER_ENDPOINT is set but ignored in titan mode — clean up .env.live to avoid confusion",
-          { endpoint: voyageEndpoint },
+          { endpoint: getVoyageEndpoint() },
         );
       }
       return;

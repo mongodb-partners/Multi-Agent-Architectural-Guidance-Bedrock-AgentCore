@@ -7,6 +7,7 @@ mock.module("../../src/adapters/agentcore-runtime.ts", () => ({
   assertAgentcoreOrchestratorArn: () => "arn:aws:bedrock-agentcore:us-east-1:000000000000:runtime/test",
   agentcoreOrchestratorArn: () => "arn:aws:bedrock-agentcore:us-east-1:000000000000:runtime/test",
   agentcoreSpecialistArn: () => undefined,
+  setAgentcoreSpecialistArnOverrides: () => undefined,
   // The streaming contract is `AsyncIterable<RuntimeStreamEvent>`; throwing
   // from the generator must surface as the chat route's AGENTCORE_RUNTIME_ERROR.
   // eslint-disable-next-line require-yield

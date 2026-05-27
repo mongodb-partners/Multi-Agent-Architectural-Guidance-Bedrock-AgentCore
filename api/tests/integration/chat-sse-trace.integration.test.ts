@@ -12,6 +12,7 @@ mock.module("../../src/adapters/agentcore-runtime.ts", () => ({
   agentcoreOrchestratorArn: () =>
     "arn:aws:bedrock-agentcore:us-east-1:000000000000:runtime/test",
   agentcoreSpecialistArn: () => undefined,
+  setAgentcoreSpecialistArnOverrides: () => undefined,
   // The streaming contract is `AsyncIterable<RuntimeStreamEvent>`. Yield a
   // single token then a `done` frame so the chat route forwards exactly the
   // shape it would in production.

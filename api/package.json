@@ -11,6 +11,8 @@
     "validate:agentcore": "bun run scripts/validate-agentcore-memory.ts",
     "validate:strands-otel": "bun run scripts/validate-strands-otel.ts",
     "validate:strands-retries": "bun run scripts/validate-strands-retries.ts",
+    "validate:strands-tools": "bun run scripts/validate-strands-tool-schema.ts",
+    "voyage:print": "bun run scripts/voyage-print.ts",
     "bench:ttfb": "bun run scripts/bench-chat-ttfb.ts",
     "test": "bun test tests/unit",
     "test:integration": "bun test tests/integration",

@@ -289,51 +289,39 @@ Advisory only — never fails. Prints expected resources, ~$240–320/month esti
 
 #### voyage-marketplace-model-matches-arn
 **Function:** `pf_check_voyage_marketplace_model_matches_arn`
-**Profiles:** `orchestrator-privatelink`, `orchestrator-peering` (inherited), `shared`, `project-pre-apply`, `api`, `agents`. Covering `api` + `agents` matters because hand-editing `VOYAGE_REQUEST_FORMAT` in `.env` and running `./deploy/deploy-api.sh` / `./deploy/deploy-agents.sh` would otherwise bake the bad value into `.env.live` + the AgentCore Runtime artifact without re-validation.
-**Catches:** A mismatch between **what the operator declared** in `.env` (`VOYAGE_MARKETPLACE_MODEL` + `VOYAGE_REQUEST_FORMAT`) and **what was actually subscribed** (`VOYAGE_MODEL_PACKAGE_ARN`). The Voyage AWS Marketplace splits into two request-envelope families per the [official `voyageai-aws` deploy notebook](https://github.com/voyage-ai/voyageai-aws/blob/main/deploy_voyage_model_package_sagemaker.ipynb):
+**Profiles:** `orchestrator-privatelink`, `orchestrator-peering` (inherited), `shared`, `project-pre-apply`, `api`, `agents`.
+**Catches:** A mismatch between **what the operator declared** in `.env` (`VOYAGE_MARKETPLACE_MODEL`) and **what was actually subscribed** (`VOYAGE_MODEL_PACKAGE_ARN`). This stack only supports the Voyage **multimodal** listings — `voyage-multimodal-3` and `voyage-multimodal-3.5`. Text-only Voyage listings (`voyage-3*`, `voyage-4*`, `voyage-code-*`, …) are refused at preflight; the legacy `{ "input": [...] }` request envelope was removed in the multimodal-only migration. See [`docs/reference/voyage.md`](reference/voyage.md) for the SSOT.
 
-| Family | Models | Request body shape |
-|--------|--------|--------------------|
-| `multimodal` | `voyage-multimodal-3`, `voyage-multimodal-3.5` | `{ "inputs": [{ "content": [...] }], "input_type": ..., "truncation": true, "output_encoding": null }` |
-| `text` (`legacy`) | `voyage-3`, `voyage-3-lite`, `voyage-3-large`, `voyage-3-5-lite`, `voyage-4`, `voyage-4-lite`, `voyage-4-large`, `voyage-code-3`, … | `{ "input": [...], "input_type": ..., "truncation": "true" }` |
+The endpoint **name** suffix is just a Terraform label — it does not determine the schema. The actual schema is fixed by `VOYAGE_MODEL_PACKAGE_ARN`. Without this check, a `.env` that names `voyage-multimodal-3` but whose `VOYAGE_MODEL_PACKAGE_ARN` points at a text-only Voyage listing deploys cleanly — and then [`db-seeding/seed-embeddings.ts`](../db-seeding/seed-embeddings.ts) fails every row with a Pydantic `1 validation error for InputData / input / Field required` at Phase 11 of `deploy-project.sh` (or in CI's post-deploy smoke).
 
-The endpoint **name** suffix is just a Terraform label — it does not determine the schema. The actual schema is fixed by `VOYAGE_MODEL_PACKAGE_ARN`. Without this check, a `.env` that names `voyage-multimodal-3` (suffix + `VOYAGE_REQUEST_FORMAT=multimodal`) but whose `VOYAGE_MODEL_PACKAGE_ARN` points at a text-only Voyage listing deploys cleanly — and then [`db-seeding/seed-embeddings.ts`](../db-seeding/seed-embeddings.ts) fails every row with a Pydantic `1 validation error for InputData / input / Field required` at Phase 11 of `deploy-project.sh` (or in CI's post-deploy smoke).
+The check gates on two things:
 
-The check classifies the ARN family by inspecting the resource-id tail (presence of `multimodal` → multimodal; otherwise text), then cross-checks:
-
-1. `VOYAGE_MARKETPLACE_MODEL` declared family matches the ARN family.
-2. `VOYAGE_REQUEST_FORMAT=multimodal` ⇔ family is `multimodal`; `VOYAGE_REQUEST_FORMAT=legacy` ⇔ family is `text`.
-3. `VOYAGE_REQUEST_FORMAT` is one of the two recognised tokens (not a typo).
+1. `VOYAGE_MARKETPLACE_MODEL` is in `voyage_supported_models` (bash SSOT) — i.e. `voyage-multimodal-3` or `voyage-multimodal-3.5`.
+2. `VOYAGE_MODEL_PACKAGE_ARN` resource-id tail contains `multimodal` (or one of the known spelling variants `multimodel` / `miltimodal` — both are Marketplace metadata typos).
 
 **Skipped when:** `EMBEDDINGS_PROVIDER != voyage`, or `VOYAGE_MODEL_PACKAGE_ARN` is empty (handled by `pf_check_voyage_marketplace_subscribed`).
 
-**Fix:**
-- **Intended `voyage-multimodal-3`:** re-run `./deploy/scripts/setup-voyage-marketplace.sh --model voyage-multimodal-3` (requires subscribing to the multimodal listing at https://aws.amazon.com/marketplace/pp/prodview-hrid2zxusacxy). The helper rewrites `VOYAGE_MODEL_PACKAGE_ARN`, `VOYAGE_REQUEST_FORMAT`, and `TF_VAR_voyage_endpoint_name_suffix` consistently.
-- **Intended a text-only model:** set `VOYAGE_MARKETPLACE_MODEL` (e.g. `voyage-3-5-lite`), `TF_VAR_voyage_endpoint_name_suffix` to the same value, and `VOYAGE_REQUEST_FORMAT=legacy`.
+**Fix:** Re-run `./deploy/scripts/setup-voyage-marketplace.sh --model voyage-multimodal-3` (subscribe at https://aws.amazon.com/marketplace/pp/prodview-hrid2zxusacxy). The helper rewrites `VOYAGE_MODEL_PACKAGE_ARN`, `VOYAGE_MARKETPLACE_MODEL`, and `TF_VAR_voyage_endpoint_name_suffix` consistently. If you need text-only embeddings, switch `EMBEDDINGS_PROVIDER=titan`.
 
 #### voyage-endpoint-live-smoke
 **Function:** `pf_check_voyage_endpoint_live_smoke`
 **Profiles:** `shared-post-apply` (right after `terraform apply` in `deploy-shared.sh`), `project-pre-apply` (re-check before `deploy-project.sh` Phase 11 seeds embeddings), `api` (re-check before image redeploy bakes `.env.live`).
-**Catches:** Same root cause as `voyage-marketplace-model-matches-arn` (and any future drift between the runtime adapter `api/src/adapters/voyage-embedding.ts` and the live Marketplace schema), but at runtime — by actually invoking the SageMaker endpoint with the configured envelope. Probes with body:
+**Catches:** Same root cause as `voyage-marketplace-model-matches-arn` (and any future drift between the runtime adapter `api/src/adapters/voyage-embedding.ts` and the live Marketplace schema), but at runtime — by actually invoking the SageMaker endpoint. The probe body comes from the bash SSOT helper `voyage_canonical_body "preflight ping" document`, which shells out to `bun api/scripts/voyage-print.ts body` (which itself calls `buildVoyageRequestBody`). One canonical body, one source of truth.
 
 ```json
-// VOYAGE_REQUEST_FORMAT=multimodal
 {"inputs":[{"content":[{"type":"text","text":"preflight ping"}]}],"input_type":"document","truncation":true,"output_encoding":null}
-
-// VOYAGE_REQUEST_FORMAT=legacy
-{"input":["preflight ping"],"input_type":"document","output_dimension":1024}
 ```
 
-A non-zero `aws sagemaker-runtime invoke-endpoint` is surfaced with the endpoint's own error text, and — when the error matches the canonical "wrong envelope" Pydantic fingerprint (`input` / `Field required`) — the failure envelope explicitly names which direction the mismatch is in:
+A non-zero `aws sagemaker-runtime invoke-endpoint` is surfaced with the endpoint's own error text, and — when the error matches the canonical "wrong envelope" Pydantic fingerprint (`input` / `Field required`) — the failure envelope reads:
 
 ```
 endpoint rejected the multimodal envelope (sent 'inputs', expected 'input').
-The deployed model package is text-only despite the endpoint name.
+The deployed model package is text-only — this stack only supports multimodal Voyage listings.
 ```
 
-A 200 OK with no `data[0].embedding` (or `embeddings[0]`) array is also flagged.
+A 200 OK is additionally cross-checked against `voyage_embedding_dims` (1024 today, sourced from `VOYAGE_EMBEDDING_DIMS` in the TS SSOT). Any dim drift fails the check.
 
-**Skipped when:** `EMBEDDINGS_PROVIDER != voyage`, or the endpoint name cannot yet be resolved (`VOYAGE_SAGEMAKER_ENDPOINT` / `TF_VAR_voyage_endpoint_name_suffix` both unset — `shared-post-apply` exports the Terraform output before invoking).
+**Skipped when:** `EMBEDDINGS_PROVIDER != voyage`, or the endpoint name cannot yet be resolved (`VOYAGE_SAGEMAKER_ENDPOINT` / `TF_VAR_voyage_endpoint_name_suffix` both unset — `shared-post-apply` exports the Terraform output before invoking), or `bun` is unavailable on the host (the SSOT body cannot be built without it).
 
 **Fix:** The failure envelope walks you through running `pf_check_voyage_marketplace_model_matches_arn` first (cheap, env-only). If it passed, you have an env/ARN that agree internally but disagree with the actually-deployed model — verify what's behind the endpoint via:
 
@@ -346,7 +334,7 @@ aws sagemaker describe-model --model-name "$MODEL" --region "$AWS_REGION" \
   --query 'PrimaryContainer.ModelPackageName' --output text
 ```
 
-If the resolved `ModelPackageName` tail doesn't match what `.env` declares, re-run `./deploy/scripts/setup-voyage-marketplace.sh --model <correct-model>` then `./deploy/scripts/deploy-shared.sh` to let Terraform replace the SageMaker model + endpoint config. If the deployed model is right but the envelope is wrong, flip `VOYAGE_REQUEST_FORMAT` and redeploy API + agent runtimes: `./deploy/deploy-api.sh && ./deploy/deploy-agents.sh --auto-approve`.
+Re-run `./deploy/scripts/setup-voyage-marketplace.sh --model voyage-multimodal-3` then `./deploy/scripts/deploy-shared.sh` to let Terraform replace the SageMaker model + endpoint config.
 
 #### sagemaker-endpoint-quota
 **Function:** `pf_check_sagemaker_endpoint_quota`

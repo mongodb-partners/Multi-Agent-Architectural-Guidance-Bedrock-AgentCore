@@ -103,13 +103,11 @@ export TF_VAR_my_ip=$(curl -s https://checkip.amazonaws.com)/32
 
 # Embeddings. Titan works without a Voyage ARN. To use Voyage, run:
 #   ./deploy/scripts/setup-voyage-marketplace.sh --model voyage-multimodal-3
-# or:
-#   ./deploy/scripts/setup-voyage-marketplace.sh --model voyage-3-5-lite
+# (or voyage-multimodal-3.5 — the only two supported listings; see
+# docs/reference/voyage.md)
 export EMBEDDINGS_PROVIDER="titan" # titan | voyage
 export VOYAGE_MODEL_PACKAGE_ARN="" # required only when EMBEDDINGS_PROVIDER=voyage
 export VOYAGE_MARKETPLACE_MODEL="voyage-multimodal-3"
-export VOYAGE_REQUEST_FORMAT="multimodal" # legacy for voyage-3-5-lite
-export VOYAGE_OUTPUT_DIM="1024"
 export VOYAGE_INSTANCE_TYPE="ml.g6.xlarge" # GPU; CPU instances reject the model package
 ```
 
@@ -394,7 +392,7 @@ Key Terraform variables (defaults tuned for low-volume dev / staging):
 | Phase 8: "Role validation failed" | IAM trust policy not yet propagated | The `aws_bedrockagentcore_agent_runtime` resource will retry on the next `terraform apply`; if it still fails after 30s, re-run `deploy-full-with-privatelink.sh`. |
 | Terraform fails with duplicate ECR/Logs/S3 VPC endpoint or duplicate endpoint SG rule errors | Shared VPC already has singleton AWS service endpoints or access rules | Set `TF_VAR_create_agentcore_runtime_vpc_endpoints=false` before deploy. EC2 mode reuses the existing endpoints and treats duplicate endpoint access rules as success. |
 | Terraform apply says "Saved plan is stale" | Remote state changed after the plan was created | Re-run `deploy-full-with-privatelink.sh`; the retry wrapper re-plans and applies against current state. |
-| Deploy rejects Voyage model/request format | `VOYAGE_MODEL_PACKAGE_ARN`, `VOYAGE_MARKETPLACE_MODEL`, and `VOYAGE_REQUEST_FORMAT` disagree | Use `setup-voyage-marketplace.sh --model voyage-multimodal-3` for `multimodal`, `--model voyage-3-5-lite` for `legacy`, or set a custom `voyage-...` model label with the matching request format, then re-source `.env`. |
+| Deploy rejects Voyage model | `VOYAGE_MARKETPLACE_MODEL` is not a supported multimodal listing or its ARN family disagrees | Re-run `setup-voyage-marketplace.sh --model voyage-multimodal-3` (or `voyage-multimodal-3.5`). Text-only Voyage models are unsupported — use `EMBEDDINGS_PROVIDER=titan` instead. See [`docs/reference/voyage.md`](reference/voyage.md). |
 | API health hangs on `mcpServer` / MCP logs are empty | Missing VPC endpoints for the VPC-mode MongoDB MCP runtime | EC2 mode should create ECR API, ECR Docker, S3 gateway, and CloudWatch Logs endpoints. Apply `envs/ec2` and verify those endpoints are `available`. |
 | `/health` shows `agentcore: "inactive"` | AgentCore Memory store not `ACTIVE` (provisioning or `DELETING`) | `aws bedrock-agentcore-control list-memories` — confirm `AGENTCORE_MEMORY_STORE_ID` in `.env.live` matches an `ACTIVE` memory. Re-run `deploy-project.sh` if the store is stuck deleting. |
 | `/health` shows `bedrockKnowledgeBase: "unreachable"` but KB exists | EC2 role missing Bedrock KB retrieve permission or wrong KB id | Confirm `BEDROCK_KB_ID` in `.env.live`. EC2 IAM should allow `bedrock-agent-runtime:Retrieve` (see `modules/ec2/main.tf`). API logs: `[health] bedrock KB probe`. Re-run `./deploy/deploy-api.sh` after IAM/terraform fixes. |
