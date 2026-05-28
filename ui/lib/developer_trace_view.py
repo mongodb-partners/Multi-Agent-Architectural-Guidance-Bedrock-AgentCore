@@ -121,6 +121,7 @@ def render_developer_details(core_trace: dict, settings: Any = None, api_token: 
         )
         _dev_identifiers(dev_trace, events)
         _dev_span_tree(dev_trace, events)
+        _dev_orchestrator_internals(events)
         _dev_prompt_and_model_io(events)
         _dev_mongo_internals(events)
         _dev_memory_internals(events)
@@ -747,6 +748,161 @@ def _dev_memory_internals(events: list[dict]) -> None:
 # ---------------------------------------------------------------------------
 # _dev_agentcore_internals
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# _dev_orchestrator_internals — multi-specialist orchestration raw view
+# ---------------------------------------------------------------------------
+
+
+def _dev_orchestrator_internals(events: list[dict]) -> None:
+    """Raw orchestration view for the multi-specialist flow.
+
+    Renders three event families when present:
+      - ``orchestrator.multi_route_decision`` — classifier scores,
+        thresholds, every rejected candidate.
+      - ``orchestrator.specialist_draft`` — per-specialist draft preview
+        (full text up to the per-event byte cap), runtime span id, failure
+        stack when present.
+      - ``orchestrator.synthesis`` — synthesizer agent metadata: model id,
+        inputs, omitted specialists, output bytes, persistence flag.
+
+    Older traces (single-specialist single-handoff) emit none of these,
+    so this section degrades to nothing.
+    """
+    decisions = _events_of(events, "orchestrator.multi_route_decision")
+    drafts = _events_of(events, "orchestrator.specialist_draft")
+    syntheses = _events_of(events, "orchestrator.synthesis")
+    if not (decisions or drafts or syntheses):
+        return
+
+    with st.expander("Orchestrator internals (multi-specialist)", expanded=False):
+        # ---- Multi-route decision ---------------------------------------
+        for d in decisions:
+            p = _payload(d)
+            path = p.get("pathTaken") or "single"
+            latency = p.get("latencyMs")
+            latency_str = f" · decided in {int(latency)} ms" if isinstance(latency, (int, float)) else ""
+            st.markdown(f"**Path:** `{path}`{latency_str}")
+
+            sel = p.get("selected") or []
+            if sel:
+                st.caption(f"Selected ({len(sel)}):")
+                rows = "| # | agentId | source | score | reasoning |\n|---|---|---|---|---|\n"
+                for i, s in enumerate(sel):
+                    score = s.get("score")
+                    score_str = (
+                        f"{float(score):.2f}" if isinstance(score, (int, float)) else "—"
+                    )
+                    reasoning = (s.get("reasoning") or "—").replace("|", "\\|")
+                    rows += (
+                        f"| {i + 1} | `{s.get('agentId') or '?'}` | "
+                        f"`{s.get('source') or '?'}` | {score_str} | {reasoning} |\n"
+                    )
+                st.markdown(rows)
+
+            rej = p.get("rejected") or []
+            if rej:
+                with st.container(border=True):
+                    st.caption(f"Rejected candidates ({len(rej)}):")
+                    rows = "| agentId | score | reason |\n|---|---|---|\n"
+                    for r in rej:
+                        score = r.get("score")
+                        score_str = (
+                            f"{float(score):.2f}" if isinstance(score, (int, float)) else "—"
+                        )
+                        reason = (r.get("reason") or "—").replace("|", "\\|")
+                        rows += f"| `{r.get('agentId') or '?'}` | {score_str} | {reason} |\n"
+                    st.markdown(rows)
+
+            thresholds = p.get("thresholds")
+            if isinstance(thresholds, dict):
+                st.caption("Thresholds (env-knob snapshot):")
+                _render_jsonish(thresholds)
+            elif _is_omitted_sentinel(thresholds):
+                _render_omitted_sentinel(thresholds, label="thresholds")
+
+            input_msg = p.get("inputMessage")
+            if input_msg:
+                st.caption("Input message preview:")
+                st.code(_short_text(str(input_msg), 1000))
+
+        # ---- Per-specialist drafts --------------------------------------
+        if drafts:
+            st.markdown("**Specialist drafts**")
+            for dr in drafts:
+                dp = _payload(dr)
+                rank = dp.get("rank")
+                name = dp.get("agentName") or dp.get("agentId") or "?"
+                status = dp.get("status") or "?"
+                bytes_ = dp.get("answerBytes") or 0
+                latency = dp.get("latencyMs")
+                latency_str = f" · {int(latency)} ms" if isinstance(latency, (int, float)) else ""
+                rank_str = f"#{rank} " if isinstance(rank, int) else ""
+                with st.container(border=True):
+                    st.markdown(
+                        f"{rank_str}**{name}** — `{status}` · {bytes_} bytes{latency_str}"
+                    )
+                    span_id = dp.get("runtimeSpanId")
+                    if span_id:
+                        st.caption(f"runtimeSpanId: `{span_id}`")
+                    elif _is_omitted_sentinel(span_id):
+                        _render_omitted_sentinel(span_id, label="runtimeSpanId")
+                    preview = dp.get("answerPreview")
+                    if _is_omitted_sentinel(preview):
+                        _render_omitted_sentinel(preview, label="answerPreview")
+                    elif preview:
+                        st.caption("Draft preview:")
+                        st.code(_short_text(str(preview), 4000))
+                    if dp.get("failureClass") or dp.get("failureMessage"):
+                        st.error(
+                            f"{dp.get('failureClass') or 'Error'}: "
+                            f"{dp.get('failureMessage') or 'unknown'}"
+                        )
+                    stack = dp.get("failureStack")
+                    if _is_omitted_sentinel(stack):
+                        _render_omitted_sentinel(stack, label="failureStack")
+                    elif stack:
+                        with st.expander("failureStack", expanded=False):
+                            st.code(str(stack))
+
+        # ---- Synthesis summary ------------------------------------------
+        if syntheses:
+            st.markdown("**Synthesizer agent**")
+            for sy in syntheses:
+                sp = _payload(sy)
+                model = sp.get("modelId") or "?"
+                out_bytes = sp.get("outputBytes") or 0
+                latency = sp.get("latencyMs")
+                latency_str = f" · {int(latency)} ms" if isinstance(latency, (int, float)) else ""
+                persisted = sp.get("finalAnswerPersisted")
+                pers_chip = (
+                    " · :material/check_circle: persisted"
+                    if persisted
+                    else " · :material/cancel: not persisted"
+                )
+                st.markdown(
+                    f"model `{model}` · {out_bytes} bytes{latency_str}{pers_chip}"
+                )
+                inputs = sp.get("inputSpecialists") or []
+                if inputs:
+                    st.caption(f"Input specialists ({len(inputs)}):")
+                    rows = "| agentId | bytes |\n|---|---|\n"
+                    for i in inputs:
+                        rows += f"| `{i.get('agentId') or '?'}` | {i.get('answerBytes') or 0} |\n"
+                    st.markdown(rows)
+                omitted = sp.get("omittedSpecialists") or []
+                if omitted:
+                    st.caption(f"Omitted ({len(omitted)}):")
+                    rows = "| agentId | reason |\n|---|---|\n"
+                    for o in omitted:
+                        rows += f"| `{o.get('agentId') or '?'}` | `{o.get('reason') or '?'}` |\n"
+                    st.markdown(rows)
+
+
+# ---------------------------------------------------------------------------
+# _dev_agentcore_internals
+# ---------------------------------------------------------------------------
+
 
 def _dev_agentcore_internals(trace: dict, events: list[dict]) -> None:
     invokes = _events_of(events, "agentcore.invoke")

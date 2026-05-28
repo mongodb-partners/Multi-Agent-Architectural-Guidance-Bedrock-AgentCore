@@ -27,7 +27,10 @@ import {
 } from "@aws-sdk/client-bedrock-agentcore";
 import { runChatStream } from "./lib/run-chat-stream.ts";
 import { runSwarmChatStream } from "./lib/swarm-chat-stream.ts";
-import { classifyAgent } from "./lib/agent-classifier.ts";
+import {
+  runMultiSpecialistFlow,
+  type SpecialistInvoker,
+} from "./lib/multi-specialist-orchestrator.ts";
 import { logger } from "./lib/logger.ts";
 import { assertEmbeddingsProvider } from "./lib/assert-embeddings-provider.ts";
 import type { ChatMessage } from "./lib/session-store.ts";
@@ -88,6 +91,16 @@ async function readRequestBody(req: IncomingMessage): Promise<string> {
  * own collector via `forwardTrace` so the API receives them on the outer
  * SSE channel.
  */
+/**
+ * Invoke a specialist runtime and yield raw `RuntimeStreamEvent`s.
+ *
+ * The orchestrator runtime path uses this same shape as the API path's
+ * `invokeAgentRuntime(...)` so they can both feed
+ * `runMultiSpecialistFlow(...)` through one `SpecialistInvoker` interface.
+ *
+ * The wrapper `agentcore.invoke` span is created here on the orchestrator
+ * runtime's collector and reported via `params.onWrapperSpan(spanId)`.
+ */
 async function* invokeSpecialistStream(
   specialistId: string,
   payload: {
@@ -98,8 +111,8 @@ async function* invokeSpecialistStream(
     userJwt?: string;
   },
   collector: TraceCollector | undefined,
-  forwardTrace: ((ev: import("./lib/trace-types.ts").TraceEvent) => void) | undefined,
-): AsyncGenerator<ChatStreamPart> {
+  onWrapperSpan?: (spanId: string | undefined) => void,
+): AsyncGenerator<import("./lib/runtime-sse.ts").RuntimeStreamEvent> {
   const arn = getSpecialistArn(specialistId);
   if (!arn) {
     throw new Error(
@@ -131,6 +144,13 @@ async function* invokeSpecialistStream(
     latencyMs: 0,
     targetAgentId: specialistId,
   });
+  if (onWrapperSpan) {
+    try {
+      onWrapperSpan(wrapperId);
+    } catch {
+      // listener errors must never destabilize the runtime call
+    }
+  }
 
   const t0 = Date.now();
   let runtimeResponse;
@@ -173,23 +193,15 @@ async function* invokeSpecialistStream(
     throw new Error(`Empty response from specialist runtime '${specialistId}'`);
   }
 
-  let nestedTraceId: string | undefined;
-  let nestedEventsDropped = 0;
   let bytesIn = 0;
+  let lastDoneError: { code: string; message: string } | undefined;
   try {
     for await (const ev of parseRuntimeSseStream(body as AsyncIterable<Uint8Array>)) {
-      if (ev.kind === "stream") {
-        yield ev.part;
-      } else if (ev.kind === "trace") {
-        bytesIn += JSON.stringify(ev.event).length;
-        forwardTrace?.(ev.event);
-      } else if (ev.kind === "done") {
-        nestedTraceId = ev.payload.nestedTraceId;
-        nestedEventsDropped = ev.payload.nestedEventsDropped ?? 0;
-        if (ev.payload.error) {
-          throw new Error(ev.payload.error.message);
-        }
+      if (ev.kind === "trace") bytesIn += JSON.stringify(ev.event).length;
+      if (ev.kind === "done" && ev.payload.error) {
+        lastDoneError = ev.payload.error;
       }
+      yield ev;
     }
   } finally {
     const latencyMs = Date.now() - t0;
@@ -202,15 +214,11 @@ async function* invokeSpecialistStream(
         responseBytes: bytesIn,
         latencyMs,
         httpStatus: 200,
+        ...(lastDoneError ? {
+          errorClass: lastDoneError.code,
+          errorMessage: lastDoneError.message,
+        } : {}),
       });
-      if (nestedTraceId || nestedEventsDropped) {
-        collector.event("agentcore.nested_trace", {
-          nestedTraceId,
-          nestedRuntimeArn: arn,
-          eventCount: 0, // events forwarded live; not re-attached here
-          nestedEventsDropped,
-        });
-      }
     }
   }
 }
@@ -224,75 +232,120 @@ async function* handleOrchestrator(
   forwardTrace: ((ev: import("./lib/trace-types.ts").TraceEvent) => void) | undefined,
   userJwt: string | undefined,
 ): AsyncGenerator<ChatStreamPart> {
-  let targetAgentId = "";
-  let reasoning: string | undefined;
-  const classifyStart = Date.now();
+  // Multi-specialist orchestration. Same helper as the Hono API path —
+  // produces the same SSE/trace contract so `USE_ORCHESTRATOR_RUNTIME=1` is
+  // externally indistinguishable from the production single-hop route.
+  const invokeSpecialist: SpecialistInvoker = ({
+    specialistId,
+    message: msg,
+    priorTurns: turns,
+    memoryContext: ctx,
+    onWrapperSpan,
+  }) =>
+    invokeSpecialistStream(
+      specialistId,
+      {
+        message: msg,
+        sessionId,
+        priorTurns: turns,
+        memoryContext: ctx,
+        userJwt,
+      },
+      collector,
+      onWrapperSpan,
+    );
 
-  // Use the same generated config/agents classifier as the Hono API direct
-  // routing path. Swarm remains available as a fallback for unexpected
-  // classifier misses, but the primary route must not rely on a hardcoded
-  // orchestrator handoff list.
-  const classification = await classifyAgent({ message, priorTurns });
-  if (classification && classification.agentId !== "orchestrator") {
-    targetAgentId = classification.agentId;
-    reasoning = classification.reasoning || classification.source;
-  }
+  const flow = runMultiSpecialistFlow({
+    message,
+    priorTurns,
+    memoryContext,
+    collector,
+    invokeSpecialist,
+  });
 
-  if (!targetAgentId) {
-    // Fallback to the legacy swarm classifier path. Its own tokens are
-    // suppressed; we only need the first specialist handoff.
-    for await (const part of runSwarmChatStream({
-      userMessage: message,
-      priorTurns,
-      memoryContext,
-    })) {
-      if (part.type === "handoff") {
-        targetAgentId = part.to;
-        reasoning = part.label || undefined;
-        break;
+  while (true) {
+    const next = await flow.next();
+    if (next.done) {
+      const result = next.value;
+      logger.info("[runtime:orchestrator] multi-flow finished", {
+        sessionId,
+        pathTaken: result.pathTaken,
+        successful: result.successfulSpecialists.length,
+        failed: result.failedSpecialists.length,
+      });
+      // Fallback: classifier returned nothing. Try the legacy swarm
+      // classifier as a last resort — only when there are zero successful
+      // OR failed specialists (i.e. nothing was even attempted).
+      if (
+        result.pathTaken === "single" &&
+        result.successfulSpecialists.length === 0 &&
+        result.failedSpecialists.length === 0
+      ) {
+        let targetAgentId = "";
+        let reasoning: string | undefined;
+        for await (const part of runSwarmChatStream({
+          userMessage: message,
+          priorTurns,
+          memoryContext,
+        })) {
+          if (part.type === "handoff") {
+            targetAgentId = part.to;
+            reasoning = part.label || undefined;
+            break;
+          }
+          if (part.type === "stream_error") throw new Error(part.message);
+        }
+        if (targetAgentId && getSpecialistArn(targetAgentId)) {
+          logger.info("[runtime:orchestrator] swarm-fallback routing", {
+            sessionId,
+            targetAgentId,
+          });
+          yield { type: "handoff", from: "orchestrator", to: targetAgentId, label: reasoning ?? "" };
+          for await (const ev of invokeSpecialistStream(
+            targetAgentId,
+            { message, sessionId, priorTurns, memoryContext, userJwt },
+            collector,
+            undefined,
+          )) {
+            if (ev.kind === "stream") {
+              yield ev.part;
+            } else if (ev.kind === "trace") {
+              forwardTrace?.(ev.event);
+            }
+          }
+        }
       }
-      if (part.type === "stream_error") throw new Error(part.message);
+      return;
+    }
+    const ev = next.value;
+    if (ev.kind === "specialist_started") {
+      yield {
+        type: "handoff",
+        from: "orchestrator",
+        to: ev.specialistId,
+        label: `specialist ${ev.rank + 1} of multi-route`,
+      };
+      yield {
+        type: "agent_active",
+        agentId: ev.specialistId,
+        agentName: ev.specialistName,
+      };
+    } else if (ev.kind === "specialist_stream") {
+      yield ev.part;
+    } else if (ev.kind === "specialist_trace") {
+      forwardTrace?.(ev.event);
+    } else if (ev.kind === "synthesis_started") {
+      yield {
+        type: "agent_active",
+        agentId: "orchestrator",
+        agentName: "Orchestrator",
+      };
+    } else if (ev.kind === "synthesis_stream") {
+      yield ev.part;
+    } else if (ev.kind === "stream_error") {
+      yield { type: "stream_error", code: ev.code, message: ev.message };
     }
   }
-
-  if (collector && targetAgentId) {
-    collector.event("agentcore.classification", {
-      inputMessage: message.slice(0, 500),
-      chosenSpecialist: targetAgentId,
-      reasoning,
-      latencyMs: Date.now() - classifyStart,
-    });
-  }
-
-  if (!targetAgentId || !getSpecialistArn(targetAgentId)) {
-    // Swarm produced no routable handoff (or the chosen specialist has no
-    // configured runtime ARN). Surface this as a clear stream_error rather
-    // than silently delegating back to the orchestrator persona — the
-    // orchestrator persona is a router, not an answerer, and would emit
-    // confusing "I'll connect you with…" text instead of a useful reply.
-    logger.warn("[runtime:orchestrator] no specialist resolved; emitting stream_error", {
-      sessionId,
-      targetAgentId: targetAgentId || "(none)",
-      hasArn: targetAgentId ? Boolean(getSpecialistArn(targetAgentId)) : false,
-    });
-    yield {
-      type: "stream_error",
-      code: "NO_SPECIALIST_ROUTE",
-      message: targetAgentId
-        ? `Could not route to specialist '${targetAgentId}': runtime ARN not configured.`
-        : "Could not classify your message to a specialist; please rephrase.",
-    };
-    return;
-  }
-
-  logger.info("[runtime:orchestrator] routing to specialist", { targetAgentId, sessionId });
-  yield { type: "handoff", from: "orchestrator", to: targetAgentId, label: reasoning ?? "" };
-  yield* invokeSpecialistStream(
-    targetAgentId,
-    { message, sessionId, priorTurns, memoryContext, userJwt },
-    collector,
-    forwardTrace,
-  );
 }
 
 async function* handleSpecialist(

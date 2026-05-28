@@ -32,7 +32,10 @@ import { withTrace } from "../lib/trace-context.ts";
 import { withGatewayJwt } from "../lib/gateway-auth-context.ts";
 import { withCurrentUserId } from "../lib/user-id-context.ts";
 import { persistTrace } from "../lib/trace-store.ts";
-import { classifyAgent } from "../lib/agent-classifier.ts";
+import {
+  runMultiSpecialistFlow,
+  type SpecialistInvoker,
+} from "../lib/multi-specialist-orchestrator.ts";
 import type { TraceEvent } from "../lib/trace-types.ts";
 
 const bodySchema = z.object({
@@ -234,40 +237,29 @@ chatRoutes.post("/chat", async (c) => {
     memoryBytes: memoryContext ? Buffer.byteLength(memoryContext, "utf8") : 0,
   });
 
-  // Phase 2 — direct routing. Pick the specialist (heuristic + Haiku
-  // fallback) and skip the orchestrator runtime entirely on the happy path.
-  // The orchestrator runtime path is preserved behind USE_ORCHESTRATOR_RUNTIME=1
-  // for one release in case of regressions.
+  // Routing.
+  //
+  // Three paths:
+  //   1. `orchestrator` + `!USE_ORCHESTRATOR_RUNTIME`  → multi-specialist
+  //      orchestration runs IN-API (inside streamSSE below). Classification
+  //      and specialist invocation are handled by `runMultiSpecialistFlow`.
+  //   2. `orchestrator` + `USE_ORCHESTRATOR_RUNTIME=1` → fall through to the
+  //      orchestrator AgentCore Runtime (rollback path). The runtime
+  //      container's `handleOrchestrator` does its own classification.
+  //   3. Explicit specialist agent id → invoke that specialist's runtime
+  //      directly. No classifier hop.
+  //
+  // `routeAgentId` is the *current* agent for SSE `agent_info` and trace
+  // turn start. For path (1) it stays `"orchestrator"` because the multi
+  // flow runs under the orchestrator persona; specialist activation events
+  // are emitted by the flow as it iterates ranked specialists.
+  const useMultiSpecialistOrchestrator =
+    requestedAgentId === "orchestrator" && !useOrchestratorRuntime();
   let routeAgentId = requestedAgentId;
   let runtimeArn: string | undefined;
   let invokeMode: "ec2_to_orchestrator" | "ec2_to_specialist" = "ec2_to_orchestrator";
-  let classifierHandoffEmitted: { from: string; to: string; label: string } | undefined;
 
-  if (requestedAgentId === "orchestrator" && !useOrchestratorRuntime()) {
-    const classifyT0 = Date.now();
-    const classification = await (collector
-      ? withTrace(collector, () => classifyAgent({ message: body.message, priorTurns }))
-      : classifyAgent({ message: body.message, priorTurns }));
-    if (classification && classification.agentId !== "orchestrator") {
-      const specialistArn = agentcoreSpecialistArn(classification.agentId);
-      if (specialistArn) {
-        routeAgentId = classification.agentId;
-        runtimeArn = specialistArn;
-        invokeMode = "ec2_to_specialist";
-        collector?.event("agentcore.classification", {
-          inputMessage: body.message.slice(0, 500),
-          chosenSpecialist: classification.agentId,
-          reasoning: classification.reasoning,
-          latencyMs: Date.now() - classifyT0,
-        });
-        classifierHandoffEmitted = {
-          from: "orchestrator",
-          to: classification.agentId,
-          label: classification.reasoning ?? "",
-        };
-      }
-    }
-  } else if (requestedAgentId !== "orchestrator") {
+  if (!useMultiSpecialistOrchestrator && requestedAgentId !== "orchestrator") {
     const specialistArn = agentcoreSpecialistArn(requestedAgentId);
     if (specialistArn) {
       runtimeArn = specialistArn;
@@ -333,14 +325,16 @@ chatRoutes.post("/chat", async (c) => {
         data: JSON.stringify({ agentId: routeAgentId, agentName: requestedAgent.name }),
       });
 
-      if (classifierHandoffEmitted) {
-        await stream.writeSSE({
-          event: "handoff",
-          data: JSON.stringify(classifierHandoffEmitted),
-        });
-      }
-
       let fullReply = "";
+      /**
+       * `finalAgentId` is the agentId persisted with the assistant message
+       * and used by `setFinalAgentId(...)` for the trace summary. For the
+       * single-specialist fast path it becomes the routed specialist; for
+       * the synthesis path it stays `"orchestrator"` (the synthesizer agent
+       * is an internal construct — the user-visible final answer agent
+       * remains the orchestrator).
+       */
+      let finalAgentId = routeAgentId;
       let streamFailed: { code: string; message: string } | undefined;
       const handoffsSeen: string[] = [];
       const nestedTraceEvents: TraceEvent[] = [];
@@ -372,106 +366,293 @@ chatRoutes.post("/chat", async (c) => {
         }, SSE_KEEPALIVE_MS);
       }
 
+      // Helper: forward a runtime trace event to the UI's SSE `trace`
+      // channel. Used by both the single-runtime path and the multi-flow's
+      // specialist trace pipe.
+      const forwardRuntimeTrace = async (ev: TraceEvent): Promise<void> => {
+        nestedTraceEvents.push(ev);
+        const enrichedNested = enrichVectorSearchTraceEvents(nestedTraceEvents);
+        nestedTraceEvents.length = 0;
+        nestedTraceEvents.push(...(enrichedNested as TraceEvent[]));
+        const traceToForward = enrichedNested[enrichedNested.length - 1] ?? ev;
+        if (traceToForward.type === "model.text_delta_batch") {
+          const now = Date.now();
+          if (now - lastDeltaForwardTs < TRACE_THROTTLE_MS) return;
+          lastDeltaForwardTs = now;
+        }
+        if (!stream.aborted) {
+          try {
+            await stream.writeSSE({ event: "trace", data: JSON.stringify(traceToForward) });
+          } catch {
+            // Client closed; persistence below still runs.
+          }
+        }
+      };
+
       try {
         reqLog.info("[chat] routing to AgentCore Runtime", {
           agentId: routeAgentId,
           requestId,
           mode: invokeMode,
           hasRuntimeOverride: Boolean(runtimeArn),
+          useMultiSpecialistOrchestrator,
           traceCollectorId: collector?.traceId,
           sseKeepaliveMs: SSE_KEEPALIVE_MS,
         });
 
-        for await (const ev of invokeAgentRuntime({
-          message: body.message,
-          agentId: routeAgentId,
-          sessionId: body.sessionId,
-          priorTurns,
-          memoryContext,
-          userJwt: bearerToken,
-          runtimeArn,
-          invokeMode,
-        })) {
-          if (ev.kind === "stream") {
-            const part = ev.part;
-            if (part.type === "token") {
-              fullReply += part.text;
-              if (collector && !firstClientTokenSent) {
-                firstClientTokenSent = true;
-                collector.event("latency.checkpoint", {
-                  name: "api.client.first_token",
-                  elapsedMs: Date.now() - collector.startTs,
-                  agentId: routeAgentId,
-                });
-                reqLog.debug("[chat] first token to client", { agentId: routeAgentId });
+        if (useMultiSpecialistOrchestrator) {
+          // Multi-specialist orchestration. The helper:
+          //   - classifies the message via `classifyAgents(...)`
+          //   - sequentially invokes each ranked specialist using the
+          //     adapter below (`invokeSpecialist`)
+          //   - emits `orchestrator.multi_route_decision`, per-specialist
+          //     `orchestrator.specialist_draft`, and (multi path only)
+          //     `orchestrator.synthesis` trace events
+          //   - on the single-specialist fast path, the specialist's
+          //     tokens become the persisted assistant message
+          //   - on the synthesis path, the synthesizer agent's tokens are
+          //     persisted instead, and specialist tokens carry
+          //     `phase: "specialist"` so the UI renders them as drafts only
+          const invokeSpecialist: SpecialistInvoker = ({
+            specialistId,
+            message,
+            priorTurns: turns,
+            memoryContext: ctx,
+            onWrapperSpan,
+          }) => {
+            const arn = agentcoreSpecialistArn(specialistId);
+            if (!arn) {
+              throw new Error(
+                `No runtime ARN configured for specialist '${specialistId}'.`,
+              );
+            }
+            return invokeAgentRuntime({
+              message,
+              agentId: specialistId,
+              sessionId: body.sessionId,
+              priorTurns: turns,
+              memoryContext: ctx,
+              userJwt: bearerToken,
+              runtimeArn: arn,
+              invokeMode: "ec2_to_specialist",
+              onWrapperSpan,
+            });
+          };
+
+          const flow = runMultiSpecialistFlow({
+            message: body.message,
+            priorTurns,
+            memoryContext,
+            collector,
+            invokeSpecialist,
+          });
+
+          while (true) {
+            const next = await flow.next();
+            if (next.done) {
+              const result = next.value;
+              fullReply = result.finalAnswer;
+              // The persisted assistant agentId is `"orchestrator"` on the
+              // synthesis path (the user-visible final answer agent) and
+              // the routed specialist on the single-specialist fast path.
+              if (result.pathTaken === "single") {
+                const single = result.successfulSpecialists[0]
+                  ?? result.failedSpecialists[0];
+                if (single) {
+                  finalAgentId = single.agentId;
+                  handoffsSeen.push(single.agentId);
+                }
+              } else {
+                finalAgentId = "orchestrator";
               }
-              await stream.writeSSE({
-                event: "token",
-                data: JSON.stringify({ text: part.text }),
-              });
-            } else if (part.type === "handoff") {
-              handoffsSeen.push(part.to);
+              break;
+            }
+            const ev = next.value;
+            if (ev.kind === "specialist_started") {
+              // Emit handoff + agent_active so the UI can render an
+              // attributed draft block immediately.
+              handoffsSeen.push(ev.specialistId);
               await stream.writeSSE({
                 event: "handoff",
-                data: JSON.stringify({ from: part.from, to: part.to, label: part.label }),
-              });
-            } else if (part.type === "agent_active") {
-              await stream.writeSSE({
-                event: "agent_active",
-                data: JSON.stringify({ agentId: part.agentId, agentName: part.agentName }),
-              });
-            } else if (part.type === "skill_loaded") {
-              await stream.writeSSE({
-                event: "skill_loaded",
-                data: JSON.stringify({ skillName: part.skillName }),
-              });
-            } else if (part.type === "tool_call") {
-              await stream.writeSSE({
-                event: "tool_call",
-                data: JSON.stringify({ tool: part.tool, status: part.status }),
-              });
-            } else if (part.type === "stream_error") {
-              streamFailed = { code: part.code, message: part.message };
-              await stream.writeSSE({
-                event: "error",
-                data: JSON.stringify({ code: part.code, message: part.message, requestId }),
-              });
-            }
-          } else if (ev.kind === "trace") {
-            nestedTraceEvents.push(ev.event);
-            const enrichedNested = enrichVectorSearchTraceEvents(nestedTraceEvents);
-            nestedTraceEvents.length = 0;
-            nestedTraceEvents.push(...(enrichedNested as TraceEvent[]));
-            const traceToForward = enrichedNested[enrichedNested.length - 1] ?? ev.event;
-            // Forward live to UI on the same `trace` SSE channel the
-            // collector listener uses. Throttle delta batches identically.
-            if (traceToForward.type === "model.text_delta_batch") {
-              const now = Date.now();
-              if (now - lastDeltaForwardTs < TRACE_THROTTLE_MS) {
-                continue;
-              }
-              lastDeltaForwardTs = now;
-            }
-            if (!stream.aborted) {
-              try {
-                await stream.writeSSE({ event: "trace", data: JSON.stringify(traceToForward) });
-              } catch {
-                // Client closed; persistence below still runs.
-              }
-            }
-          } else if (ev.kind === "done") {
-            nestedTraceId = ev.payload.nestedTraceId;
-            nestedEventsDropped = ev.payload.nestedEventsDropped ?? 0;
-            if (ev.payload.error && !streamFailed) {
-              streamFailed = ev.payload.error;
-              await stream.writeSSE({
-                event: "error",
                 data: JSON.stringify({
-                  code: ev.payload.error.code,
-                  message: ev.payload.error.message,
-                  requestId,
+                  from: "orchestrator",
+                  to: ev.specialistId,
+                  label: `specialist ${ev.rank + 1} of multi-route`,
                 }),
               });
+              await stream.writeSSE({
+                event: "agent_active",
+                data: JSON.stringify({
+                  agentId: ev.specialistId,
+                  agentName: ev.specialistName,
+                }),
+              });
+            } else if (ev.kind === "specialist_stream") {
+              const part = ev.part;
+              if (part.type === "token") {
+                if (collector && !firstClientTokenSent) {
+                  firstClientTokenSent = true;
+                  collector.event("latency.checkpoint", {
+                    name: "api.client.first_token",
+                    elapsedMs: Date.now() - collector.startTs,
+                    agentId: ev.specialistId,
+                  });
+                }
+                // Phase metadata rides along on the SSE token frame so
+                // the UI can render specialist drafts vs final answer.
+                await stream.writeSSE({
+                  event: "token",
+                  data: JSON.stringify({
+                    text: part.text,
+                    ...(part.phase ? { phase: part.phase } : {}),
+                    ...(part.specialistId ? { specialistId: part.specialistId } : {}),
+                    ...(part.specialistName ? { specialistName: part.specialistName } : {}),
+                    ...(part.rank !== undefined ? { rank: part.rank } : {}),
+                  }),
+                });
+              } else if (part.type === "skill_loaded") {
+                await stream.writeSSE({
+                  event: "skill_loaded",
+                  data: JSON.stringify({ skillName: part.skillName }),
+                });
+              } else if (part.type === "tool_call") {
+                await stream.writeSSE({
+                  event: "tool_call",
+                  data: JSON.stringify({ tool: part.tool, status: part.status }),
+                });
+              } else if (part.type === "agent_active") {
+                await stream.writeSSE({
+                  event: "agent_active",
+                  data: JSON.stringify({ agentId: part.agentId, agentName: part.agentName }),
+                });
+              } else if (part.type === "handoff") {
+                handoffsSeen.push(part.to);
+                await stream.writeSSE({
+                  event: "handoff",
+                  data: JSON.stringify({ from: part.from, to: part.to, label: part.label }),
+                });
+              } else if (part.type === "stream_error") {
+                // Handled by helper's `specialist_ended.failure`; we don't
+                // emit a top-level error here because other specialists or
+                // the synthesizer might still produce a usable answer.
+              }
+            } else if (ev.kind === "specialist_trace") {
+              await forwardRuntimeTrace(ev.event);
+            } else if (ev.kind === "specialist_ended") {
+              // Trace already emitted by helper; nothing UI-visible here.
+            } else if (ev.kind === "synthesis_started") {
+              // Signal the UI that the synthesis phase is starting. We
+              // reuse `agent_active` with `agentId: "orchestrator"` so
+              // existing UI handlers know to start a new live block.
+              await stream.writeSSE({
+                event: "agent_active",
+                data: JSON.stringify({
+                  agentId: "orchestrator",
+                  agentName: requestedAgent.name,
+                }),
+              });
+            } else if (ev.kind === "synthesis_stream") {
+              const part = ev.part;
+              if (part.type === "token") {
+                if (collector && !firstClientTokenSent) {
+                  firstClientTokenSent = true;
+                  collector.event("latency.checkpoint", {
+                    name: "api.client.first_token",
+                    elapsedMs: Date.now() - collector.startTs,
+                    agentId: "orchestrator",
+                  });
+                }
+                await stream.writeSSE({
+                  event: "token",
+                  data: JSON.stringify({
+                    text: part.text,
+                    ...(part.phase ? { phase: part.phase } : {}),
+                  }),
+                });
+              }
+            } else if (ev.kind === "synthesis_ended") {
+              // Trace already emitted by helper; nothing UI-visible here.
+            } else if (ev.kind === "stream_error") {
+              streamFailed = { code: ev.code, message: ev.message };
+              await stream.writeSSE({
+                event: "error",
+                data: JSON.stringify({ code: ev.code, message: ev.message, requestId }),
+              });
+            }
+          }
+        } else {
+          // Single-runtime path (specialist direct or USE_ORCHESTRATOR_RUNTIME=1).
+          for await (const ev of invokeAgentRuntime({
+            message: body.message,
+            agentId: routeAgentId,
+            sessionId: body.sessionId,
+            priorTurns,
+            memoryContext,
+            userJwt: bearerToken,
+            runtimeArn,
+            invokeMode,
+          })) {
+            if (ev.kind === "stream") {
+              const part = ev.part;
+              if (part.type === "token") {
+                fullReply += part.text;
+                if (collector && !firstClientTokenSent) {
+                  firstClientTokenSent = true;
+                  collector.event("latency.checkpoint", {
+                    name: "api.client.first_token",
+                    elapsedMs: Date.now() - collector.startTs,
+                    agentId: routeAgentId,
+                  });
+                  reqLog.debug("[chat] first token to client", { agentId: routeAgentId });
+                }
+                await stream.writeSSE({
+                  event: "token",
+                  data: JSON.stringify({ text: part.text }),
+                });
+              } else if (part.type === "handoff") {
+                handoffsSeen.push(part.to);
+                await stream.writeSSE({
+                  event: "handoff",
+                  data: JSON.stringify({ from: part.from, to: part.to, label: part.label }),
+                });
+              } else if (part.type === "agent_active") {
+                await stream.writeSSE({
+                  event: "agent_active",
+                  data: JSON.stringify({ agentId: part.agentId, agentName: part.agentName }),
+                });
+              } else if (part.type === "skill_loaded") {
+                await stream.writeSSE({
+                  event: "skill_loaded",
+                  data: JSON.stringify({ skillName: part.skillName }),
+                });
+              } else if (part.type === "tool_call") {
+                await stream.writeSSE({
+                  event: "tool_call",
+                  data: JSON.stringify({ tool: part.tool, status: part.status }),
+                });
+              } else if (part.type === "stream_error") {
+                streamFailed = { code: part.code, message: part.message };
+                await stream.writeSSE({
+                  event: "error",
+                  data: JSON.stringify({ code: part.code, message: part.message, requestId }),
+                });
+              }
+            } else if (ev.kind === "trace") {
+              await forwardRuntimeTrace(ev.event);
+            } else if (ev.kind === "done") {
+              nestedTraceId = ev.payload.nestedTraceId;
+              nestedEventsDropped = ev.payload.nestedEventsDropped ?? 0;
+              if (ev.payload.error && !streamFailed) {
+                streamFailed = ev.payload.error;
+                await stream.writeSSE({
+                  event: "error",
+                  data: JSON.stringify({
+                    code: ev.payload.error.code,
+                    message: ev.payload.error.message,
+                    requestId,
+                  }),
+                });
+              }
             }
           }
         }
@@ -499,11 +680,16 @@ chatRoutes.post("/chat", async (c) => {
       // so they never sit on the user's TTFB clock. The `done` SSE frame
       // fires next; long-term memory + persistTrace are dispatched as
       // dangling promises so they don't hold the response open either.
-      if (collector && nestedTraceEvents.length > 0) {
-        // Attach nested events under the outer agentcore.invoke wrapper. We
-        // walk back to find the wrapper id by scanning the collector's events
-        // for the most recent `agentcore.invoke` start emitted from this
-        // turn. The adapter created exactly one wrapper, so this is unambiguous.
+      //
+      // Multi-orchestrator path: per-specialist nested events are already
+      // attached under each specialist's wrapper span by the helper. We
+      // only fall through to the legacy single-wrapper attachment for the
+      // single-runtime branch.
+      if (
+        collector &&
+        !useMultiSpecialistOrchestrator &&
+        nestedTraceEvents.length > 0
+      ) {
         const wrapperId = findOutermostAgentcoreInvokeId(collector);
         if (wrapperId) {
           collector.attachEventsNested(nestedTraceEvents, wrapperId, {
@@ -521,26 +707,31 @@ chatRoutes.post("/chat", async (c) => {
 
       // Persist the assistant message synchronously (small Mongo write; we
       // need the messageId before emitting `done` so the client can deep-link).
+      // The persisted agent id is `finalAgentId`:
+      //   - synthesis path → `"orchestrator"` (the user-visible final agent)
+      //   - single-specialist fast path → the routed specialist
+      //   - explicit specialist or USE_ORCHESTRATOR_RUNTIME=1 → `routeAgentId`
       if (!streamFailed) {
-        await appendAssistantMessage(body.sessionId, fullReply, routeAgentId, userId);
+        await appendAssistantMessage(body.sessionId, fullReply, finalAgentId, userId);
         if (useAgentcoreShortTerm && fullReply.trim()) {
-          await tryWriteShortTermAssistantMessage(body.sessionId, userId, fullReply, routeAgentId);
+          await tryWriteShortTermAssistantMessage(body.sessionId, userId, fullReply, finalAgentId);
         }
         reqLog.info("[chat] assistant persisted", {
           messageId,
           replyBytes: Buffer.byteLength(fullReply, "utf8"),
-          routeAgentId,
+          finalAgentId,
         });
       }
 
       reqLog.info("[chat] runtime stream relay complete", {
         streamFailed: Boolean(streamFailed),
         nestedTraceEvents: nestedTraceEvents.length,
+        useMultiSpecialistOrchestrator,
       });
       if (collector) {
         collector.recordBytesIn(Buffer.byteLength(body.message, "utf8"));
         collector.recordBytesOut(Buffer.byteLength(fullReply, "utf8"));
-        collector.setFinalAgentId(handoffsSeen[handoffsSeen.length - 1] ?? routeAgentId);
+        collector.setFinalAgentId(finalAgentId);
         const durationMs = Date.now() - collector.startTs;
         collector.event("chat.turn.end", {
           durationMs,
@@ -548,7 +739,7 @@ chatRoutes.post("/chat", async (c) => {
         });
         try {
           recordChatTurn({
-            agentId: handoffsSeen[handoffsSeen.length - 1] ?? routeAgentId,
+            agentId: finalAgentId,
             latencyMs: durationMs,
             error: Boolean(streamFailed),
             errorClass: typeof streamFailed === "string" ? streamFailed : undefined,
@@ -608,8 +799,12 @@ chatRoutes.post("/chat", async (c) => {
         const userMessage = body.message;
         const reply = fullReply;
         const liveCollector = collector;
+        // LTM is keyed by (userId, agentId). We write under `finalAgentId`
+        // so future turns recall the cohesive answer (orchestrator on the
+        // synthesis path; the single specialist on the fast path).
+        const ltmAgentId = finalAgentId;
         queueMicrotask(() => {
-          void writeLongTermMemory(userId, routeAgentId, userMessage, reply)
+          void writeLongTermMemory(userId, ltmAgentId, userMessage, reply)
             .catch((e) => {
               reqLog.warn("[chat] writeLongTermMemory failed", {
                 error: e instanceof Error ? e.message : String(e),

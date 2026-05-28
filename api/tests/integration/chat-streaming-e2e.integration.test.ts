@@ -133,9 +133,17 @@ describe("POST /chat — end-to-end streaming through mocked AgentCore Runtime",
       "specialist!",
     ]);
 
+    // Multi-specialist orchestration may emit multiple agent_active events
+    // — one per specialist activation in the helper's flow PLUS the one
+    // forwarded from the underlying runtime stream. We only assert that at
+    // least one points at the routed specialist.
     const agentActives = events.filter((e) => e.event === "agent_active");
-    expect(agentActives).toHaveLength(1);
-    expect(JSON.parse(agentActives[0].data)).toMatchObject({ agentId: "order-management" });
+    expect(agentActives.length).toBeGreaterThanOrEqual(1);
+    expect(
+      agentActives.some(
+        (a) => (JSON.parse(a.data) as { agentId?: string }).agentId === "order-management",
+      ),
+    ).toBe(true);
 
     const handoff = events.find((e) => e.event === "handoff");
     expect(handoff).toBeDefined();

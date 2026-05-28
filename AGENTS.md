@@ -219,6 +219,7 @@ bun run validate:bun
 bun run validate:agentcore
 bun run validate:strands-otel      # before any OTel dep bump
 bun run validate:strands-retries   # before any Strands SDK bump
+bun run validate:multi-classifier  # before any classifier/threshold change — guards single-specialist default
 bun run test                       # unit tests
 bun run test:all                   # unit + integration (integration is env-gated)
 

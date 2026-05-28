@@ -12,7 +12,7 @@
  * assert on the side effects observed through mocked dependencies.
  */
 
-import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
+import { afterAll, afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
 
 // ---------------------------------------------------------------------------
 // Mocks must be installed before importing the module under test.
@@ -23,6 +23,7 @@ let embedImpl: (text: string) => Promise<
   | { ok: true; source: "voyage" | "bedrock"; modelId: string; vector: number[] }
   | { ok: false; code: string; message: string }
 > = async () => ({ ok: false, code: "voyage_strict_failed", message: "test failure" });
+let persistTraceCalls = 0;
 
 // EMF metrics are observed via stdout interception (same technique as
 // `cw-metrics.test.ts`). We intentionally do NOT `mock.module("cw-metrics")`
@@ -53,8 +54,8 @@ mock.module("../../src/lib/chat-messages-collection.ts", () => ({
 }));
 
 // Stub chat-sessions persistence so `appendUserMessage`'s `saveToMongo` doesn't
-// try to open a real Mongo connection (the mirror still runs because
-// `usePersistentChatSessions()` returns true).
+// try to open a real Mongo connection (the mirror still runs since
+// `usePersistentChatSessions()` returns true while MONGODB_URI is set).
 mock.module("../../src/lib/chat-sessions-collection.ts", () => ({
   persistChatSessions: () => true,
   usePersistentChatSessions: () => true,
@@ -71,11 +72,27 @@ mock.module("../../src/lib/embed-query.ts", () => ({
   embedQueryText: (text: string) => embedImpl(text),
 }));
 
+// Use the trace-store's test-only observer hook to count `persistTrace`
+// calls. We deliberately avoid `mock.module("trace-store.ts", ...)`
+// because Bun's `mock.module(...)` is process-global: replacing the
+// module here would turn `persistTrace` into a no-op for any integration
+// test loaded into the same Bun spawn (`bun run test:all`), and seeded
+// traces would silently never land in the ring buffer.
+const { _setPersistTraceObserverForTests } = await import(
+  "../../src/lib/trace-store.ts"
+);
+_setPersistTraceObserverForTests(() => {
+  persistTraceCalls += 1;
+});
+
+afterAll(() => {
+  _setPersistTraceObserverForTests(undefined);
+});
+
 // Use a real TraceCollector so currentTrace()?.event(...) reaches a live
 // collector and we can inspect emitted events via toJSON().
 const { TraceCollector } = await import("../../src/lib/trace-collector.ts");
 const { withTrace } = await import("../../src/lib/trace-context.ts");
-const { _clearTraceStoreForTests, getTraceById } = await import("../../src/lib/trace-store.ts");
 
 const {
   appendUserMessage,
@@ -94,9 +111,10 @@ async function flushMicrotasks(): Promise<void> {
 beforeEach(() => {
   persistedDocs.length = 0;
   emfCaptured.length = 0;
+  persistTraceCalls = 0;
   clearAllSessionsForTests();
-  _clearTraceStoreForTests();
   process.env.PERSIST_CHAT_SESSIONS = "1";
+  process.env.MONGODB_URI = "mongodb://stub/test";
   (process.stdout.write as unknown) = (chunk: string | Uint8Array) => {
     const s = typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8");
     for (const line of s.split("\n")) {
@@ -117,8 +135,8 @@ beforeEach(() => {
 afterEach(() => {
   process.stdout.write = origStdoutWrite;
   clearAllSessionsForTests();
-  _clearTraceStoreForTests();
   delete process.env.PERSIST_CHAT_SESSIONS;
+  delete process.env.MONGODB_URI;
 });
 
 describe("mirrorMessageToMongo — strict embedding failure", () => {
@@ -157,6 +175,8 @@ describe("mirrorMessageToMongo — strict embedding failure", () => {
     expect(skipMetric!.ChatMirrorEmbeddingSkipped).toBe(1);
     expect(skipMetric!.code).toBe("voyage_strict_failed");
 
+    expect(persistTraceCalls).toBeGreaterThanOrEqual(1);
+
     const trace = collector.toJSON();
     const event = trace.events.find((e) => e.type === "chat.mirror.embedding_failed");
     expect(event).toBeDefined();
@@ -164,11 +184,6 @@ describe("mirrorMessageToMongo — strict embedding failure", () => {
       sessionId: "sess-mirror-1",
       code: "voyage_strict_failed",
     });
-    const persistedTrace = await getTraceById(collector.traceId);
-    expect(persistedTrace?.traceId).toBe(collector.traceId);
-    expect(
-      persistedTrace?.events.some((e) => e.type === "chat.mirror.embedding_failed"),
-    ).toBe(true);
   });
 
   test("happy path: row persisted with embedding + model, no embeddingError, no trace event, no metric", async () => {

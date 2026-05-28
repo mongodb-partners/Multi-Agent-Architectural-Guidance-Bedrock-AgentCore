@@ -37,7 +37,25 @@ class ChatStreamError(RuntimeError):
 
 @dataclass
 class TokenEvent:
+    """One assistant token frame.
+
+    Multi-specialist orchestrator phase metadata (all optional for legacy
+    single-specialist streams):
+
+    - ``phase``: ``"specialist"`` for an attributed specialist draft;
+      ``"synthesis"`` for the orchestrator's final synthesized answer; ``None``
+      for legacy single-specialist tokens (which the UI persists as the final
+      answer, same as ``"synthesis"``).
+    - ``specialist_id`` / ``specialist_name`` / ``rank``: only set on
+      ``phase == "specialist"`` tokens; identify which specialist's draft
+      block to append into.
+    """
+
     text: str
+    phase: str | None = None
+    specialist_id: str | None = None
+    specialist_name: str | None = None
+    rank: int | None = None
 
 
 @dataclass
@@ -172,7 +190,14 @@ def stream_chat_events(
                     str(rid) if rid is not None else None,
                 )
             if ev in ("token", "message") and "text" in data:
-                yield TokenEvent(text=str(data["text"]))
+                phase = data.get("phase")
+                yield TokenEvent(
+                    text=str(data["text"]),
+                    phase=str(phase) if phase in ("specialist", "synthesis") else None,
+                    specialist_id=str(data["specialistId"]) if data.get("specialistId") else None,
+                    specialist_name=str(data["specialistName"]) if data.get("specialistName") else None,
+                    rank=int(data["rank"]) if isinstance(data.get("rank"), int) else None,
+                )
             elif ev in ("agent_active", "agent_info"):
                 yield AgentActiveEvent(
                     agent_id=str(data.get("agentId") or ""),

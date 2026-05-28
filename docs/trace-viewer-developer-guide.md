@@ -187,6 +187,22 @@ If the harness `e2e-smoke/memory-recall-diagnostic.py` is failing scenario C/D/E
 
 ---
 
+### 6b. Multi-specialist orchestration internals
+
+**What's shown.** Raw orchestration payloads for any orchestrator turn that ran through `runMultiSpecialistFlow(...)`. One block per event type:
+
+- **`orchestrator.multi_route_decision`** — full classifier output: `selected[]` (with per-agent `score`, `reasoning`, `source`), `rejected[]` (with per-agent rejection reason — `"below multi-min-score"`, `"outside multi-relative-margin"`, or `"max-agents-cap"`), the live `thresholds` snapshot (`multiMinScore`, `multiRelativeMargin`, `multiMaxAgents`, `heuristicMinScore`, `heuristicMargin`), and `pathTaken: "single" | "synthesis"`. This is the source of truth for "why did the orchestrator pick these agents on this turn?"
+- **`orchestrator.specialist_draft`** — one entry per specialist with `agentId`, `agentName`, `status` (`final` for fast path, `success` for synthesis path, `failed` on error, `empty` when the specialist returned no usable text), `answerByteCount`, `answerPreview` (first 512 chars, dev-mode only — stripped in `core` projection), `latencyMs`, `runtimeSpanId` (links back to the `agentcore.invoke` span), `failureMessage` and `failureStack` when present.
+- **`orchestrator.synthesis`** — synthesizer agent metadata: `modelId` (effective Bedrock model id, including any `MULTI_SYNTHESIS_MODEL_ID` override), `inputSpecialists[]` (which drafts were combined), `omittedSpecialists[]` (failed/empty drafts the synthesizer mentioned only in customer-safe language), `outputByteCount`, `latencyMs`, `persistedAsFinal: true` confirming the synthesis text became the durable assistant message.
+
+**Cross-references.** Each `orchestrator.specialist_draft.runtimeSpanId` matches an `agentcore.invoke` in §6 — click through to the corresponding card to see the full request/response body for that specialist. The synthesizer's Bedrock call appears in §5 (Model calls) tagged `agentId: "synthesizer"`, and in §1 (Identifiers) the Bedrock invocation log shows `requestMetadata.agentId = "synthesizer"` so the cost dashboard can attribute the synthesis spend separately from orchestrator routing.
+
+**Where in code.** `_dev_orchestrator_internals` in `developer_trace_view.py`. Sources: `OrchestratorMultiRouteDecisionPayload`, `OrchestratorSpecialistDraftPayload`, `OrchestratorSynthesisPayload` in `trace-types.ts`; emitted by `multi-specialist-orchestrator.ts` and `specialist-answer-synthesizer.ts`.
+
+**What it surfaces.** "Why did `classifyAgents` fan out to two specialists when I only asked one question?" → look at `selected[].score` vs the `thresholds.multiRelativeMargin` — if the runner-up was just inside the margin, tighten the knob. "Why did synthesis omit the second specialist?" → `omittedSpecialists[]` lists the reason. "Did the customer see the failed specialist's name?" → cross-check the `failureMessage` against the rendered final answer (the synthesizer is instructed to never expose specialist ids).
+
+---
+
 ### 7. Tool calls (verbose)
 
 **What's shown.** Full `tool.call` / `tool.result` pairs with raw `arguments` and `result` JSON. PII redaction is applied at emit time by `redactDeep` in the collector, with the **exempt list** (`PII_EXEMPT_FIELDS`) ensuring structural identifiers like `skill.activated.name` survive redaction.

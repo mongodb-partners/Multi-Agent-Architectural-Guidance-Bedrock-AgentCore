@@ -33,8 +33,10 @@ Runtime artifact modes:
 When `USE_ORCHESTRATOR_RUNTIME=1` is set on the API:
 
 1. API forwards every request to `AGENTCORE_ORCHESTRATOR_ARN` instead of running the in-process classifier.
-2. The orchestrator runtime runs `runChatStream("orchestrator")` and classifies internally (Strands Swarm or single-agent depending on `ORCHESTRATOR_MODE`).
-3. The orchestrator extracts the specialist target from a `handoff` event and invokes the matching ARN via `invokeSpecialistStream`, which is itself an SSE consumer — so streaming survives the second hop.
+2. The orchestrator runtime's `handleOrchestrator(...)` ([`api/src/agent-runtime-code.ts`](../api/src/agent-runtime-code.ts)) reuses the **same** `runMultiSpecialistFlow(...)` helper that the in-API path uses. Classification (`classifyAgents`), per-specialist invocation (via `invokeSpecialistStream`, which is itself an SSE consumer so streaming survives the second hop), draft buffering, and (when 2+ specialists fire) the in-process **synthesizer agent** all run inside the orchestrator runtime.
+3. The orchestrator emits the same SSE event surface as the in-API path: phase-tagged tokens (`phase: "specialist"` / `phase: "synthesis"` / unphased on the fast path), `orchestrator.multi_route_decision`, one `orchestrator.specialist_draft` per specialist, and (synthesis path) `orchestrator.synthesis`. The persisted assistant message is still tagged `agentId: "orchestrator"`.
+
+**Runtime parity contract.** Externally visible behavior under `USE_ORCHESTRATOR_RUNTIME=1` is identical to the default in-API path: same fast-path / synthesis branching, same trace events, same persistence rule. The only differences are the extra hop's latency and the fact that nested specialist trace events are spliced under the orchestrator runtime's `agentcore.invoke` wrapper rather than the API's. This parity is enforced by sharing the `runMultiSpecialistFlow` helper and the `SpecialistInvoker` abstraction; if the helper grows new behavior, both paths inherit it automatically.
 
 This path is kept as a one-release escape hatch in case a regression appears in the in-API classifier; it is not the default.
 

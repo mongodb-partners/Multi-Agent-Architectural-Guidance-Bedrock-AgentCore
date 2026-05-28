@@ -98,6 +98,17 @@ export type RuntimeInvokeParams = {
    * Use `ec2_to_specialist` when calling a specialist runtime directly.
    */
   invokeMode?: "ec2_to_orchestrator" | "ec2_to_specialist";
+  /**
+   * Optional callback invoked once after the `agentcore.invoke` wrapper
+   * span is started. Receives the span id (or `undefined` when tracing is
+   * disabled / no `currentTrace()`).
+   *
+   * Used by the multi-specialist orchestrator to record which wrapper span
+   * owns each specialist's nested trace events. The single-specialist path
+   * doesn't need this — it falls back to the most-recent-wrapper scan in
+   * `findOutermostAgentcoreInvokeId(...)`.
+   */
+  onWrapperSpan?: (spanId: string | undefined) => void;
 };
 
 /**
@@ -172,6 +183,16 @@ export async function* invokeAgentRuntime(
       requestHeadersPreview,
     },
   );
+  // Surface the wrapper span id to the caller as soon as it is created so
+  // the multi-specialist orchestrator can attach the right specialist's
+  // nested trace events under the matching wrapper.
+  if (params.onWrapperSpan) {
+    try {
+      params.onWrapperSpan(wrapperId);
+    } catch {
+      // Listener errors must never destabilize the runtime invocation.
+    }
+  }
 
   const command = new InvokeAgentRuntimeCommand({
     agentRuntimeArn: arn,

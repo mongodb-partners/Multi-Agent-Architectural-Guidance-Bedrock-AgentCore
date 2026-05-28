@@ -95,7 +95,7 @@ Accept: text/event-stream
 | Event | Payload | When |
 |---|---|---|
 | `agent_info` | `{agentId, agentName}` | Once at start of the response |
-| `stream` | `ChatStreamPart` JSON (`{type: "token" \| "tool_call" \| "skill_loaded" \| ...}`) | One per streamed part forwarded from the specialist runtime. The runtime container emits `event: stream` per SSE frame; the API forwards verbatim. |
+| `stream` | `ChatStreamPart` JSON (`{type: "token" \| "tool_call" \| "skill_loaded" \| ...}`) | One per streamed part forwarded from the specialist runtime. The runtime container emits `event: stream` per SSE frame; the API forwards verbatim. **Multi-specialist orchestration:** `token` parts may include `phase: "specialist" \| "synthesis"` plus `specialistId`, `specialistName`, `rank`. `phase: "specialist"` tokens are draft fragments streamed live from each specialist (NOT persisted). `phase: "synthesis"` tokens are the final cohesive answer (the only tokens persisted to `chat_sessions.messages`). On the single-specialist fast path no `phase` field is set and the specialist's tokens are themselves persisted. |
 | `token` | `{text}` | Legacy event — still emitted in local-dev / stub paths and by `swarm-chat-stream.ts`. AgentCore Runtime path emits `stream` instead. |
 | `skill_loaded` | `{skillName}` | When the agent activates a skill |
 | `tool_call` | `{tool, status}` | When a tool is invoked. `status` is `started` / `completed` / `failed` |
@@ -484,7 +484,10 @@ Highlights:
 | `skill.activated` | A skill was loaded into the agent's prompt |
 | `tool.call` | A generic Strands tool invocation (`phase: "start"` / `"end"`) |
 | `tool.http` / `tool.mcp` | Specialised tool events for HTTP- and MCP-flavoured tools |
-| `handoff.decision` | Orchestrator → specialist routing decision (with attribution) |
+| `handoff.decision` | Orchestrator → specialist routing decision (with attribution). Single-handoff legacy path. |
+| `orchestrator.multi_route_decision` | Multi-specialist routing decision: selected specialists (ordered), rejected candidates with reasons, classifier thresholds, source (`heuristic` / `haiku` / `cache` / `mixed`), and `pathTaken: "single" \| "synthesis"`. Emitted exactly once per orchestrator turn. |
+| `orchestrator.specialist_draft` | One per specialist invocation: `{ agentId, agentName, status: "final"\|"draft"\|"failed"\|"empty", answerByteCount, answerPreview?, latencyMs, runtimeSpanId?, failureMessage?, failureStack? }`. The `answerPreview`, `runtimeSpanId`, `failureStack` fields are stripped in the `core` projection (visible only in `?include=dev`). |
+| `orchestrator.synthesis` | Synthesizer agent summary: `{ modelId, inputSpecialists, omittedSpecialists, outputByteCount, latencyMs, persistedAsFinal }`. Emitted only when 2+ specialists ran. The Bedrock call inside synthesis is tagged `agentId: "synthesizer"` for cost attribution (the persisted assistant message itself remains tagged `agentId: "orchestrator"`). |
 | `agent.activate` | A node became active in the Swarm graph |
 | `mongo.*` | MongoDB intent / query / plan / result / diagnostic / vector_search / schema. `mongo.vector_search` includes query-vector preview, score summary/histogram, and compact `documentPreviews[]` metadata for the retrieved source documents, including native Mongo `_id` when present; Streamlit uses those previews for chat-side source pills and the Trace Viewer vector panel. |
 | `agentcore.invoke` / `agentcore.nested_trace` / `agentcore.classification` | AgentCore Runtime hops (with nested-trace splicing). `agentcore.invoke` carries `responseBody` + `requestHeadersPreview` / `responseHeadersPreview` for the Developer details panel. |

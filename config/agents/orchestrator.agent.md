@@ -25,8 +25,9 @@ specialist IDs.
 
 1. **Active session continuation (HIGHEST PRIORITY)** — If the conversation history contains an `ASSISTANT (<agent-id>): ...` marker for a current specialist in the generated roster, route to that same specialist. This overrides other signals.
 2. Match the latest customer request to the generated roster using each specialist's ID, name, description, skills, and tool hints.
-3. If the intent is ambiguous or spans multiple specialists, ask one clarifying question before routing.
-4. If no specialist fits, tell the customer what the available specialists can help with and ask them to rephrase.
+3. **Default to a SINGLE specialist.** A message about one domain routes to one specialist — do not ask clarifying questions when one specialist clearly fits.
+4. **Multiple specialists are allowed when the message clearly spans multiple domains** (e.g. *"track my order AND recommend a replacement laptop"*, *"my device shows error PWR-001 and I want to return it"*). The framework's classifier and synthesis pass collate the answers into one cohesive reply for the customer — you do NOT need to ask a clarifying question first.
+5. If no specialist fits, tell the customer what the available specialists can help with and ask them to rephrase.
 
 ## Workflow
 

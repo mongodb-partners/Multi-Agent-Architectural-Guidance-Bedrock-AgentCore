@@ -63,6 +63,9 @@ export type TraceEventType =
   | "agentcore.observability_link"
   | "agentcore.gateway"
   | "agentcore.retry"
+  | "orchestrator.multi_route_decision"
+  | "orchestrator.specialist_draft"
+  | "orchestrator.synthesis"
   | "latency.checkpoint"
   | "dev.environment"
   | "dev.byte_cap_hit"
@@ -623,6 +626,113 @@ export type AgentcoreRetryPayload = {
   httpStatus?: number;
 };
 
+// Multi-specialist orchestrator events --------------------------------------
+
+/**
+ * One-shot decision record for a turn under the multi-specialist orchestrator.
+ *
+ * Emitted exactly once per `agentId === "orchestrator"` turn (production API
+ * path or the AgentCore orchestrator runtime). Captures every specialist the
+ * classifier considered and which path the orchestrator took.
+ *
+ * The Trace Viewer renders this as a routing summary at the top of the
+ * Routing section, with rejected candidates and threshold knobs available
+ * via the Developer details panel.
+ */
+export type OrchestratorMultiRouteDecisionPayload = {
+  /**
+   * Selected specialists, ordered most-relevant first. Length 1 → fast path
+   * (the specialist's own reply is the final answer); length ≥ 2 → synthesis
+   * path (specialist answers are buffered and synthesized).
+   */
+  selected: Array<{
+    agentId: string;
+    agentName?: string;
+    score?: number;
+    source: "heuristic" | "haiku" | "cache";
+    reasoning?: string;
+  }>;
+  /** Specialists that were considered but not selected. */
+  rejected: Array<{
+    agentId: string;
+    score?: number;
+    reason?: string;
+  }>;
+  /** Effective env-knob snapshot for this decision. */
+  thresholds: {
+    multiMinScore: number;
+    multiRelativeMargin: number;
+    multiMaxAgents: number;
+    heuristicMinScore: number;
+    heuristicMargin: number;
+  };
+  /** "single" → fast path, "synthesis" → 2+ specialists then synthesis. */
+  pathTaken: "single" | "synthesis";
+  /** Original user message (truncated to 500 chars by the trace collector). */
+  inputMessage: string;
+  /** Total ms from "decision started" to "decision emitted" (heuristic + Haiku, if any). */
+  latencyMs: number;
+};
+
+/**
+ * One event per specialist invocation in a multi-specialist turn.
+ *
+ * Emitted in classifier-ranked order. Captures status (`final` for
+ * single-specialist fast path; `success`/`failed` for synthesis path) plus
+ * a preview of the specialist's answer for the Trace Viewer. Heavy fields
+ * (`answerPreview`, `runtimeSpanId`, `failureStack`) are stripped in `core`
+ * mode by the trace projection — kept available in `dev` mode.
+ */
+export type OrchestratorSpecialistDraftPayload = {
+  /** Position in the ranked classifier list (0-indexed). */
+  rank: number;
+  agentId: string;
+  agentName?: string;
+  status: "final" | "success" | "failed";
+  /** Total bytes of specialist text observed. Always populated. */
+  answerBytes: number;
+  /** First 4 KB of the specialist's reply text. Stripped in `core` mode. */
+  answerPreview?: string;
+  latencyMs: number;
+  /** Span id of the matching `agentcore.invoke` wrapper (debug-only). */
+  runtimeSpanId?: string;
+  /** Populated when `status === "failed"`. */
+  failureClass?: string;
+  failureMessage?: string;
+  /** Stack trace, dev-only. */
+  failureStack?: string;
+};
+
+/**
+ * Synthesis pass record. Emitted only when the orchestrator took the
+ * synthesis path (≥ 2 specialists). Captures the synthesizer agent's
+ * model id and timing. The auto-emitted `model.request` / `model.usage`
+ * events under `agentId: "synthesizer"` carry the full token usage; this
+ * event is the high-level summary the Trace Viewer renders alongside the
+ * specialist drafts.
+ */
+export type OrchestratorSynthesisPayload = {
+  /** Bedrock model id used by the synthesizer agent. */
+  modelId: string;
+  /** Specialists whose answers were folded into the final synthesis. */
+  inputSpecialists: Array<{
+    agentId: string;
+    agentName?: string;
+    answerBytes: number;
+  }>;
+  /** Specialists whose answers were dropped (failed or empty). */
+  omittedSpecialists: Array<{
+    agentId: string;
+    reason: "failed" | "empty";
+  }>;
+  /** Bytes of synthesized final answer streamed to the client. */
+  outputBytes: number;
+  /** Total ms from "synthesis started" to "synthesis finished". */
+  latencyMs: number;
+  /** True when the synthesized answer was persisted as the assistant turn. */
+  finalAnswerPersisted: boolean;
+};
+
 // Dev events ----------------------------------------------------------------
 
 export type DevEnvironmentPayload = {
@@ -706,6 +816,9 @@ export type TraceEvent =
   | (TraceEventBase & { type: "agentcore.observability_link"; payload: AgentcoreObservabilityLinkPayload })
   | (TraceEventBase & { type: "agentcore.gateway"; payload: AgentcoreGatewayPayload })
   | (TraceEventBase & { type: "agentcore.retry"; payload: AgentcoreRetryPayload })
+  | (TraceEventBase & { type: "orchestrator.multi_route_decision"; payload: OrchestratorMultiRouteDecisionPayload })
+  | (TraceEventBase & { type: "orchestrator.specialist_draft"; payload: OrchestratorSpecialistDraftPayload })
+  | (TraceEventBase & { type: "orchestrator.synthesis"; payload: OrchestratorSynthesisPayload })
   | (TraceEventBase & { type: "latency.checkpoint"; payload: LatencyCheckpointPayload })
   | (TraceEventBase & { type: "dev.environment"; payload: DevEnvironmentPayload })
   | (TraceEventBase & { type: "dev.byte_cap_hit"; payload: DevByteCapHitPayload })

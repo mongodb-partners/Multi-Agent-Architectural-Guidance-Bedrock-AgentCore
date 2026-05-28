@@ -617,16 +617,17 @@ agentcore_code_artifact_prefix    = "${AGENTCORE_CODE_ARTIFACT_PREFIX}"
 network_mode      = "${NETWORK_MODE}"
 EOF
 
-# AgentCore runtime VPCEs (ECR API, ECR DKR, Logs) are VPC-scoped singletons with
-# private_dns_enabled=true — only ONE set per VPC. When a second project deploys
-# into the same SHARED_VPC_NAME, creating them again fails with:
-#   "conflicting DNS domain for *.dkr.ecr... in the VPC"
-# Auto-detect existing endpoints and reuse via data.aws_vpc_endpoint + SG rules.
+# AgentCore runtime VPCEs are VPC-scoped singletons. Reuse existing shared-VPC
+# ECR/Logs/S3 endpoints, and copy any explicit TF_VAR override into tfvars
+# because terraform.tfvars has higher precedence than TF_VAR_*.
 SHARED_VPC_ID=$(aws ssm get-parameter --region "$AWS_REGION" \
   --name "/${SHARED_VPC_NAME}/${AWS_REGION}/vpc_id" \
   --query Parameter.Value --output text 2>/dev/null || echo "")
-CREATE_AGENTCORE_VPCE="true"
-if [[ -n "$SHARED_VPC_ID" && "$SHARED_VPC_ID" != "None" ]]; then
+CREATE_AGENTCORE_VPCE="${TF_VAR_create_agentcore_runtime_vpc_endpoints:-auto}"
+if [[ "$CREATE_AGENTCORE_VPCE" == "true" || "$CREATE_AGENTCORE_VPCE" == "false" ]]; then
+  log "Using explicit TF_VAR_create_agentcore_runtime_vpc_endpoints=${CREATE_AGENTCORE_VPCE}"
+elif [[ -n "$SHARED_VPC_ID" && "$SHARED_VPC_ID" != "None" ]]; then
+  CREATE_AGENTCORE_VPCE="true"
   MANAGED_AGENTCORE_VPCE_COUNT=$(terraform -chdir="$TF_DIR" state list 2>/dev/null \
     | python3 -c 'import sys
 managed = [line.strip() for line in sys.stdin if line.strip().startswith("aws_vpc_endpoint.agentcore_runtime_")]
@@ -635,13 +636,21 @@ print(len(managed))' 2>/dev/null || echo "0")
     --filters "Name=vpc-id,Values=${SHARED_VPC_ID}" \
     --query "length(VpcEndpoints[?ServiceName=='com.amazonaws.${AWS_REGION}.ecr.api' || ServiceName=='com.amazonaws.${AWS_REGION}.ecr.dkr' || ServiceName=='com.amazonaws.${AWS_REGION}.logs'])" \
     --output text 2>/dev/null || echo "0")
-  if [[ "${MANAGED_AGENTCORE_VPCE_COUNT:-0}" -gt 0 ]]; then
+  EXISTING_S3_VPCE_COUNT=$(aws ec2 describe-vpc-endpoints --region "$AWS_REGION" \
+    --filters "Name=vpc-id,Values=${SHARED_VPC_ID}" "Name=service-name,Values=com.amazonaws.${AWS_REGION}.s3" \
+    --query "length(VpcEndpoints)" \
+    --output text 2>/dev/null || echo "0")
+  if [[ "${MANAGED_AGENTCORE_VPCE_COUNT:-0}" -ge 4 ]]; then
     CREATE_AGENTCORE_VPCE="true"
-    log "Shared VPC ${SHARED_VPC_ID} has AgentCore ECR/Logs VPCEs managed by this Terraform state — keeping ownership (create_agentcore_runtime_vpc_endpoints=true)"
-  elif [[ "${EXISTING_VPCE_COUNT:-0}" -ge 3 ]]; then
+    log "Shared VPC ${SHARED_VPC_ID} has AgentCore VPCEs in this Terraform state — keeping ownership"
+  elif [[ "${MANAGED_AGENTCORE_VPCE_COUNT:-0}" -gt 0 ]]; then
+    err "Terraform state has only ${MANAGED_AGENTCORE_VPCE_COUNT}/4 AgentCore VPCE resources. Resolve partial state or rerun with TF_VAR_create_agentcore_runtime_vpc_endpoints=false after confirming ECR/Logs/S3 endpoints already exist."
+  elif [[ "${EXISTING_VPCE_COUNT:-0}" -ge 3 && "${EXISTING_S3_VPCE_COUNT:-0}" -ge 1 ]]; then
     CREATE_AGENTCORE_VPCE="false"
-    log "Shared VPC ${SHARED_VPC_ID} already has AgentCore ECR/Logs VPCEs — reusing (create_agentcore_runtime_vpc_endpoints=false)"
+    log "Shared VPC ${SHARED_VPC_ID} already has AgentCore ECR/Logs/S3 VPCEs — reusing"
   fi
+else
+  CREATE_AGENTCORE_VPCE="true"
 fi
 echo "create_agentcore_runtime_vpc_endpoints = ${CREATE_AGENTCORE_VPCE}" >> "$TF_DIR/terraform.tfvars"
 

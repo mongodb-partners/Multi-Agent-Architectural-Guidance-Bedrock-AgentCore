@@ -356,30 +356,146 @@ def render_model_activity(events: list[dict]) -> None:
 # ---------------------------------------------------------------------------
 
 def render_routing(events: list[dict]) -> None:
-    decisions = _events_of(events, "handoff.decision")
-    if not decisions:
+    """Render routing decisions for the customer-facing trace.
+
+    Two display paths, in priority order:
+
+    1. Multi-specialist orchestrator events — emitted by the in-API
+       orchestrator when classifyAgents picks 1+ specialists. Renders the
+       selected specialists, alternatives rejected, per-specialist draft
+       statuses (success/failed/final), and the synthesis summary.
+    2. Legacy ``handoff.decision`` events — emitted by the orchestrator
+       runtime when it asks Strands to pick a specialist via structured
+       output. Older traces only have these; we keep rendering them so
+       session replay continues to work.
+    """
+    multi_decisions = _events_of(events, "orchestrator.multi_route_decision")
+    drafts = _events_of(events, "orchestrator.specialist_draft")
+    syntheses = _events_of(events, "orchestrator.synthesis")
+    legacy_handoffs = _events_of(events, "handoff.decision")
+
+    if not (multi_decisions or drafts or syntheses or legacy_handoffs):
         return
+
     st.markdown('<div class="trace-section-title">Routing decisions</div>', unsafe_allow_html=True)
-    for d in decisions:
-        p = d.get("payload") or {}
-        fr, to = p.get("fromAgentId"), p.get("toAgentId")
-        conf = p.get("confidence")
-        chips: list[str] = []
-        if conf is not None:
-            chips.append(f'<span class="trace-chip">confidence {float(conf):.2f}</span>')
-        triggers = p.get("triggerSpans") or []
-        for t in triggers[:6]:
-            tx = t.get("text") if isinstance(t, dict) else str(t)
-            chips.append(f'<span class="trace-chip">{tx}</span>')
-        st.markdown(
-            f"**`{fr}` → `{to}`**<br>{' '.join(chips)}",
-            unsafe_allow_html=True,
+
+    # ---- Multi-specialist orchestrator summary -------------------------------
+    for md in multi_decisions:
+        mp = md.get("payload") or {}
+        path = str(mp.get("pathTaken") or "single")
+        selected = mp.get("selected") or []
+        rejected = mp.get("rejected") or []
+
+        path_label = (
+            "Single specialist (fast path)"
+            if path == "single"
+            else f"Multi-specialist synthesis ({len(selected)} specialists)"
         )
-        alts = p.get("alternativesConsidered") or []
-        if alts:
-            with st.expander(f"Alternatives considered ({len(alts)})", expanded=False):
-                for alt in alts:
-                    st.markdown(f"- **{alt.get('agentId')}** — score {alt.get('score', 0):.2f}")
+        st.markdown(f"**{path_label}**")
+
+        chips: list[str] = []
+        for s in selected:
+            agent_id = s.get("agentId") or "?"
+            agent_name = s.get("agentName") or agent_id
+            source = s.get("source") or ""
+            score = s.get("score")
+            chip = f'<span class="trace-chip"><strong>{agent_name}</strong>'
+            if score is not None:
+                try:
+                    chip += f" · score {float(score):.2f}"
+                except (TypeError, ValueError):
+                    pass
+            if source:
+                chip += f" · via {source}"
+            chip += "</span>"
+            chips.append(chip)
+        if chips:
+            st.markdown(" ".join(chips), unsafe_allow_html=True)
+
+        # Per-specialist draft status (matched to the decision by agent id).
+        if drafts:
+            with st.expander(f"Specialist drafts ({len(drafts)})", expanded=False):
+                for dr in drafts:
+                    dp = dr.get("payload") or {}
+                    status = str(dp.get("status") or "")
+                    name = dp.get("agentName") or dp.get("agentId") or "?"
+                    bytes_ = dp.get("answerBytes") or 0
+                    latency = dp.get("latencyMs")
+                    icon = {
+                        "final": ":material/check_circle:",
+                        "success": ":material/check_circle:",
+                        "failed": ":material/error:",
+                    }.get(status, ":material/circle:")
+                    line = f"{icon} **{name}** — `{status}` · {bytes_} bytes"
+                    if isinstance(latency, (int, float)):
+                        line += f" · {int(latency)} ms"
+                    st.markdown(line)
+                    if status == "failed":
+                        msg = dp.get("failureMessage") or "specialist failed"
+                        st.caption(f"reason: {msg}")
+
+        # Synthesis summary (only present on the multi-path).
+        if path == "synthesis":
+            for sy in syntheses:
+                sp = sy.get("payload") or {}
+                inputs = sp.get("inputSpecialists") or []
+                omitted = sp.get("omittedSpecialists") or []
+                model = sp.get("modelId") or "?"
+                out_bytes = sp.get("outputBytes") or 0
+                latency = sp.get("latencyMs")
+                latency_str = f" · {int(latency)} ms" if isinstance(latency, (int, float)) else ""
+                st.markdown(
+                    f"**Synthesizer agent** · model `{model}` · {out_bytes} bytes{latency_str}",
+                )
+                if inputs:
+                    inp_names = ", ".join(str(i.get("agentName") or i.get("agentId") or "?") for i in inputs)
+                    st.caption(f"Combined: {inp_names}")
+                if omitted:
+                    om_names = ", ".join(
+                        f"{o.get('agentId') or '?'} ({o.get('reason') or '?'})" for o in omitted
+                    )
+                    st.caption(f"Omitted: {om_names}")
+
+        # Rejected candidates — collapsed by default; helps explain "why
+        # didn't the classifier pick X".
+        if rejected:
+            with st.expander(f"Alternatives rejected ({len(rejected)})", expanded=False):
+                for alt in rejected:
+                    name = alt.get("agentId") or "?"
+                    score = alt.get("score")
+                    reason = alt.get("reason") or ""
+                    line = f"- **{name}**"
+                    if score is not None:
+                        try:
+                            line += f" — score {float(score):.2f}"
+                        except (TypeError, ValueError):
+                            pass
+                    if reason:
+                        line += f" — {reason}"
+                    st.markdown(line)
+
+    # ---- Legacy single-handoff path ------------------------------------------
+    if legacy_handoffs and not multi_decisions:
+        for d in legacy_handoffs:
+            p = d.get("payload") or {}
+            fr, to = p.get("fromAgentId"), p.get("toAgentId")
+            conf = p.get("confidence")
+            chips_legacy: list[str] = []
+            if conf is not None:
+                chips_legacy.append(f'<span class="trace-chip">confidence {float(conf):.2f}</span>')
+            triggers = p.get("triggerSpans") or []
+            for t in triggers[:6]:
+                tx = t.get("text") if isinstance(t, dict) else str(t)
+                chips_legacy.append(f'<span class="trace-chip">{tx}</span>')
+            st.markdown(
+                f"**`{fr}` → `{to}`**<br>{' '.join(chips_legacy)}",
+                unsafe_allow_html=True,
+            )
+            alts = p.get("alternativesConsidered") or []
+            if alts:
+                with st.expander(f"Alternatives considered ({len(alts)})", expanded=False):
+                    for alt in alts:
+                        st.markdown(f"- **{alt.get('agentId')}** — score {alt.get('score', 0):.2f}")
 
 
 # ---------------------------------------------------------------------------

@@ -117,6 +117,19 @@ The default chat path classifies the user message in the API (`api/src/lib/agent
 | `CLASSIFIER_HEURISTIC_MIN_SCORE` | `1.5` | Top-score threshold below which we fall through to Haiku | `agent-classifier.ts` |
 | `CLASSIFIER_HEURISTIC_MARGIN` | `0.75` | Required margin between top and runner-up before the heuristic accepts | `agent-classifier.ts` |
 
+### Multi-specialist orchestration
+
+`classifyAgents(...)` (the multi-select API used by the orchestrator route) defaults to **one** specialist per turn — multi-select fires only when there is strong evidence the message spans multiple distinct domains. Three knobs gate the multi path:
+
+| Variable | Default | Effect | Reader |
+|---|---|---|---|
+| `CLASSIFIER_MULTI_MIN_SCORE` | `3.0` | Absolute floor — runner-up specialist's heuristic score must clear this before multi-select is even considered. Tighten to bias toward single-specialist routing. | `agent-classifier.ts` |
+| `CLASSIFIER_MULTI_RELATIVE_MARGIN` | `1.5` | Close-tie window — runner-up must be within this many points of the leader to count as multi-domain. Tighten to require closer ties before fanning out. | `agent-classifier.ts` |
+| `CLASSIFIER_MULTI_MAX_AGENTS` | `2` | Hard cap on the number of specialists selected per turn. The Haiku tool schema also enforces `maxItems = CLASSIFIER_MULTI_MAX_AGENTS`. | `agent-classifier.ts` |
+| `MULTI_SYNTHESIS_MODEL_ID` | inherits orchestrator persona model | Override the Bedrock model id used by the in-process **synthesizer agent** (`api/src/lib/specialist-answer-synthesizer.ts`). The synthesizer agent reuses the cached model from `resolveModel(getAgent("orchestrator"))` by default, so this should only be set when you want a different (typically smaller/faster) model for the collation pass. | `specialist-answer-synthesizer.ts` |
+
+CI guard: `bun run validate:multi-classifier` runs every existing single-domain prompt through `classifyAgents(...)` heuristic-only and **fails** if any one fans out to >1 specialist. Run before changing any of the three thresholds above.
+
 ---
 
 ## 7. JWT authentication (mandatory)

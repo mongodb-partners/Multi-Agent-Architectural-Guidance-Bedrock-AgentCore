@@ -156,14 +156,28 @@ The actual request and response bodies live in Developer details — this sectio
 
 ## 10. Routing decisions (when present)
 
-For every orchestrator → specialist handoff:
+The Routing Decisions section renders **one of two layouts**, in priority order. Both branches read events emitted by [`api/src/lib/multi-specialist-orchestrator.ts`](../api/src/lib/multi-specialist-orchestrator.ts) (multi-handoff branch) or `handoff.decision` (legacy single-handoff branch).
+
+### Multi-specialist orchestration (`orchestrator.multi_route_decision` is present)
+
+Renders when the in-API orchestrator selected one or more specialists via `classifyAgents(...)`. Each turn emits exactly one `orchestrator.multi_route_decision` plus one `orchestrator.specialist_draft` per invoked specialist plus (only on the synthesis path) one `orchestrator.synthesis`.
+
+- **Path label** — `Single specialist (fast path)` for single-domain turns or `Multi-specialist synthesis (N specialists)` when the synthesizer agent ran.
+- **Selected specialists** — one chip per specialist with display name, classifier source (`heuristic` / `haiku` / `cache` / `mixed`), and heuristic score.
+- **Specialist drafts** — collapsed expander listing each specialist with status (`final` / `success` / `failed`), answer byte count, and latency. Failed specialists show a customer-safe failure caption.
+- **Synthesizer agent** (synthesis path only) — model id, output bytes, latency, list of input specialists, plus any omitted/failed specialists called out so the customer caveat is visible.
+- **Rejected alternatives** — specialists the classifier considered but did not pick, with rejection reason (below `CLASSIFIER_MULTI_MIN_SCORE`, outside `CLASSIFIER_MULTI_RELATIVE_MARGIN`, or `max-agents-cap`).
+
+### Legacy single-handoff (`handoff.decision` only)
+
+Renders when an older trace (or a non-orchestrator turn) only carries a `handoff.decision` event:
 
 - **From → To** — `orchestrator → order-management`.
 - **Trigger** — the heuristic span that fired (e.g. `keyword: "order"` with `score=1.79`).
 - **Runner-up** — second-best specialist + its score, so you can see how close the decision was.
 - **Confidence** — the score gap that produced the pick.
 
-Empty for single-agent turns. The full pre-rule rubric and the orchestrator's intermediate scratchpad are in Developer details.
+Empty for non-orchestrator turns (an explicit specialist `agentId` in the request bypasses the classifier entirely, so neither set of events is emitted). The full pre-rule rubric, raw classifier scores, runtime span ids, draft previews, and synthesizer system prompt all live in Developer details.
 
 ---
 

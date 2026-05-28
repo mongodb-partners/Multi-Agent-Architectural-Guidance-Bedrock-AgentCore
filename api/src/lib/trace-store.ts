@@ -105,8 +105,32 @@ async function getCollection(): Promise<ReturnType<NonNullable<Awaited<ReturnTyp
  * Write the trace to the ring buffer (always) and to MongoDB (when configured).
  * Returns the persisted document.
  */
+// Test-only observation hook. Unit tests that need to count `persistTrace`
+// invocations (e.g. `session-store-mirror.test.ts`) install a callback
+// here instead of replacing the entire module via `mock.module(...)`.
+// Module-level mocks are process-global in Bun and would turn the real
+// `persistTrace` into a no-op for any integration test sharing the same
+// Bun spawn (`bun run test:all`). The hook fires after the real ring-buffer
+// + Mongo write runs.
+let _persistTraceObserver: ((trace: Trace) => void) | undefined;
+export function _setPersistTraceObserverForTests(
+  observer: ((trace: Trace) => void) | undefined,
+): void {
+  _persistTraceObserver = observer;
+}
+
 export async function persistTrace(trace: Trace): Promise<Trace> {
   rememberInRing(trace);
+  // Observer fires synchronously after the ring-buffer write so it is
+  // visible to unit tests even if Mongo (`getCollection()`) is misconfigured
+  // or unreachable. Production callers don't await the observer.
+  if (_persistTraceObserver) {
+    try {
+      _persistTraceObserver(trace);
+    } catch {
+      /* observer errors must not affect production callers */
+    }
+  }
   const coll = await getCollection();
   if (coll) {
     try {

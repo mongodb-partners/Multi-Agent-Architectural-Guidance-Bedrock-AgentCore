@@ -91,6 +91,12 @@ const STRIP_FIELDS_BY_TYPE: Partial<Record<TraceEventType, ReadonlyArray<string>
   "tool.mcp": ["args", "result"],
   "agentcore.invoke": ["payload", "responseBody", "requestHeadersPreview", "responseHeadersPreview"],
   "skill.activated": ["bodyPreview", "resourceReads"],
+  // Multi-orchestrator events: keep id/status/byte counts/latency in core
+  // mode so the client Trace Viewer can render the routing summary, but
+  // strip the heavy debug-only fields (preview text, span ids, stack traces)
+  // until the user opens the Developer details panel.
+  "orchestrator.specialist_draft": ["answerPreview", "runtimeSpanId", "failureStack"],
+  "orchestrator.multi_route_decision": ["thresholds"],
 };
 
 /** Event types dropped entirely from `core` mode. The Developer details

@@ -152,15 +152,17 @@ const TRUNCATION_CAP_DEBUG = 65_536;
  * when traversed through a debug field.
  */
 const DEBUG_CAP_FIELDS: Partial<Record<TraceEventType, ReadonlySet<string>>> = {
-  "prompt.assembled":         new Set(["body"]),
-  "model.request":            new Set(["userMessage", "messagesSeed", "priorTurnsPreview"]),
-  "model.text_delta_batch":   new Set(["text"]),
-  "model.thinking_block":     new Set(["text"]),
-  "tool.call":                new Set(["input", "result"]),
-  "tool.http":                new Set(["body", "responseSnippet"]),
-  "tool.mcp":                 new Set(["args", "result"]),
-  "agentcore.invoke":         new Set(["payload", "responseBody"]),
-  "skill.activated":          new Set(["bodyPreview"]),
+  "prompt.assembled":                     new Set(["body"]),
+  "model.request":                        new Set(["userMessage", "messagesSeed", "priorTurnsPreview"]),
+  "model.text_delta_batch":               new Set(["text"]),
+  "model.thinking_block":                 new Set(["text"]),
+  "tool.call":                            new Set(["input", "result"]),
+  "tool.http":                            new Set(["body", "responseSnippet"]),
+  "tool.mcp":                             new Set(["args", "result"]),
+  "agentcore.invoke":                     new Set(["payload", "responseBody"]),
+  "skill.activated":                      new Set(["bodyPreview"]),
+  "orchestrator.specialist_draft":        new Set(["answerPreview", "failureStack"]),
+  "orchestrator.multi_route_decision":    new Set(["inputMessage"]),
 };
 
 function capString(s: string, cap: number): string {

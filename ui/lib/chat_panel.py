@@ -146,8 +146,15 @@ def handle_chat_input(api_base: str, token: str | None, agent_id: str) -> None:
         # Streamlit renders multi-agent text chronologically.
         text_placeholder = st.empty()
 
-        full = ""          # accumulates all text across agents (for session storage)
-        current_text = ""  # text for the current agent block only
+        # `full` accumulates text that becomes the persisted assistant
+        # message. In the multi-specialist flow, only synthesis tokens
+        # (and legacy unphased tokens for the single-specialist fast path)
+        # are appended; specialist-draft tokens are shown live but NOT
+        # persisted, because the synthesizer rolls them into one cohesive
+        # answer that becomes the saved record.
+        full = ""
+        current_text = ""           # text for the current visible block only
+        current_phase: str | None = None  # tracks "specialist" | "synthesis" | None
         badges: list[str] = []
         progress_seen: set[str] = set()
         active_tools: dict[str, bool] = {}
@@ -193,9 +200,16 @@ def handle_chat_input(api_base: str, token: str | None, agent_id: str) -> None:
                 on_response_headers=_capture_headers,
             ):
                 if isinstance(ev, TokenEvent):
-                    full += ev.text
+                    # Phase-aware accumulation:
+                    #   - phase == "specialist" → live draft only; NOT persisted.
+                    #   - phase == "synthesis" → final answer; persisted.
+                    #   - phase is None (legacy / single-specialist fast path)
+                    #     → persisted as the assistant message.
+                    if ev.phase != "specialist":
+                        full += ev.text
                     current_text += ev.text
                     text_placeholder.markdown(current_text + "▌")
+                    current_phase = ev.phase
 
                 elif isinstance(ev, AgentActiveEvent):
                     if agent_seen:
