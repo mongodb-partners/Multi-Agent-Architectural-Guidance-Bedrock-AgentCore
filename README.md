@@ -4,6 +4,10 @@ A **configuration-driven multi-agent reference architecture** on **AWS Bedrock**
 
 ---
 
+## Architecture
+
+![Architecture Diagram](/docs/architecture/Multi-agent-architecture-bedrock-agentcore.png)
+
 ## What this is
 
 A user types a question into a Streamlit UI → the Hono API receives it → an **in-API classifier** picks the right specialist agent → that specialist runs as an **AgentCore Runtime** on AWS Bedrock and streams the answer back over SSE. Mongo tools route through a **dedicated MongoDB MCP AgentCore Runtime**. Domain behavior lives in `.agent.md` + `SKILL.md` files — add a new vertical = add a new agent + skill, redeploy.
