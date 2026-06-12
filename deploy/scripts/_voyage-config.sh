@@ -7,6 +7,7 @@
 #   voyage_embedding_dims                       → prints embedding dim as bare integer
 #   voyage_model_family <model>                 → echoes 'multimodal' or 'text'
 #   voyage_assert_multimodal_or_die <model>     → exit 1 if model is not multimodal
+#   voyage_sagemaker_endpoint_suffix <value>    → prints SageMaker-safe endpoint suffix
 #
 # Every deploy script that touches Voyage or embedding-dim knowledge MUST
 # source this file rather than hand-roll the body, model list, or dim
@@ -88,7 +89,9 @@ voyage_supported_models() {
 }
 
 # voyage_embedding_dims
-# Prints VOYAGE_EMBEDDING_DIMS (an integer, currently 1024) from the TS SSOT.
+# Prints the resolved embedding dim (an integer) from the TS SSOT — the env
+# override when set, else the default (1024). Tracks the env automatically
+# because it shells out to `voyage-print.ts dims` (getVoyageEmbeddingDims()).
 voyage_embedding_dims() {
   if [[ -z "$_VOYAGE_DIMS_CACHE" ]]; then
     _voyage_require_bun || return 1
@@ -97,9 +100,20 @@ voyage_embedding_dims() {
   printf '%s' "$_VOYAGE_DIMS_CACHE"
 }
 
+# voyage_sagemaker_endpoint_suffix <value>
+# Normalizes a model-derived string into a SageMaker endpoint-name fragment.
+# SageMaker endpoint names allow alphanumerics and hyphens; model names such as
+# `voyage-multimodal-3.5` need the dot converted before Terraform creates the
+# endpoint.
+voyage_sagemaker_endpoint_suffix() {
+  printf '%s' "${1:-}" \
+    | tr '[:upper:]' '[:lower:]' \
+    | sed -E 's/[^a-z0-9-]+/-/g; s/^-+//; s/-+$//'
+}
+
 # voyage_model_family <model>
 # Echoes 'multimodal' if <model> is in the SSOT supported list, else 'text'.
-# Used by preflight + setup-voyage-marketplace to keep family classification
+# Used by preflight + deploy scripts to keep family classification
 # in lockstep with the TS SSOT.
 voyage_model_family() {
   local needle="$1"
@@ -119,9 +133,9 @@ voyage_model_family() {
 
 # voyage_assert_multimodal_or_die <model>
 # Exits 1 with a clear error if <model> is not a multimodal model.
-# Used by setup-voyage-marketplace.sh BEFORE writing any ARN to .env so an
-# operator cannot accidentally subscribe to a text-only Voyage listing
-# (voyage-3-5-lite, voyage-3, voyage-4 …) while the stack expects multimodal.
+# Used by preflight/deploy validation before accepting any Voyage ARN so an
+# operator cannot accidentally configure a text-only Voyage listing
+# (voyage-3-5-lite, voyage-3, voyage-4 ...) while the stack expects multimodal.
 voyage_assert_multimodal_or_die() {
   local model="$1"
   if [[ -z "$model" ]]; then

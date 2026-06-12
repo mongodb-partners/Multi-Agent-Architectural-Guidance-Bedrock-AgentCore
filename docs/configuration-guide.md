@@ -2,7 +2,7 @@
 
 > **Audience:** anyone editing the `config/` folder — adding or tuning agent personas, skills, scripts, references, HTTP tool definitions, app defaults, or demo-prompt seeds.
 >
-> **Companion:** [`advanced/deploy-tweak-guide.md`](advanced/deploy-tweak-guide.md) covers deploy-time and runtime tuning (mode flags, AWS resource identifiers, embedding providers, operational tunables, local dev wiring, sanity endpoints, validation scripts). [`reference/env-vars.md`](reference/env-vars.md) catalogs **every** environment variable read by the stack with defaults and the file that consumes it.
+> **Companion:** [`advanced/deploy-tweak-guide.md`](advanced/deploy-tweak-guide.md) covers deploy-time and runtime tuning (mode flags, AWS resource identifiers, embedding providers, operational tunables, local dev wiring, sanity endpoints, validation scripts). [`reference/env-vars.md`](reference/env-vars.md) catalogs **every** environment variable read by the stack with defaults and the file that consumes it. Teardown scripts and deferred cleanup helpers (including `reap-orphan-security-groups-privatelink.sh` and `reap-orphan-security-groups-vpc-peering.sh`) are documented in [`deployment-guide.md`](deployment-guide.md#6-tearing-it-down) and [`reference/deploy-scripts.md`](reference/deploy-scripts.md#4-teardown).
 
 `config/` is a markdown- and JSON-driven directory that defines every agent persona, skill, tool, reference document, app default, and demo-prompt seed the runtime loads at boot. Everything in this guide is **declarative file content** — no environment variables here. For env-driven runtime behavior see the deploy-tweak guide.
 
@@ -24,6 +24,7 @@ flowchart LR
 | Source | Purpose | Loaded by | Reload behavior |
 |---|---|---|---|
 | `config/agents/*.agent.md` | Agent persona, model, tools list, memory flags, handoffs | `api/src/lib/config-scan.ts` | Mtime cache; **AgentCore runtime** behavior requires `./deploy/deploy-agents.sh` |
+| `config/samples/` | Reference-only example agents/tools to copy from when authoring new config | Not loaded | Safe storage for examples; no runtime or deploy effect until copied into a live config directory |
 | `config/skills/<id>/SKILL.md` | Skill instructions + `metadata` block | `api/src/lib/skill-loader.ts` | Discovery cached by skills-dir mtime; body cached by file mtime |
 | `config/skills/<id>/scripts/*.mjs` | Dynamically imported by `run_skill_script` | `api/src/lib/base-tools.ts` (on demand) | Node ESM cache — process restart to re-import |
 | `config/skills/<id>/references/*.md` | Read by `read_skill_resource` | `api/src/lib/skill-loader.ts` (on demand) | Re-read on each call; capped by `SKILL_RESOURCE_MAX_BYTES` |
@@ -39,6 +40,8 @@ flowchart LR
 ## 2. Agent configuration (`config/agents/*.agent.md`)
 
 Each agent is a markdown file with YAML frontmatter. The file name (without `.agent.md`) **must** match the `id` field.
+
+Before creating or modifying a live agent, look in `config/samples/agents/` for reusable examples. Sample files are intentionally outside `config/agents/`; they are not returned by `GET /agents`, included in classifier rosters, or provisioned as AgentCore specialist runtimes.
 
 ```yaml
 ---

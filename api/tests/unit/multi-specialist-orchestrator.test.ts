@@ -190,15 +190,15 @@ describe("multi-specialist-orchestrator", () => {
     expect((draft.payload as { status: string }).status).toBe("final");
   });
 
-  test("FAILURE: classifier returns nothing → stream_error", async () => {
+  test("classifier abstains (returns nothing) → needs_clarification, not stream_error", async () => {
     const collector = makeCollector();
     const flow = runMultiSpecialistFlow({
-      message: "...",
+      message: "Can you help me?",
       collector,
       classifier: async () => undefined,
       invokeSpecialist: fakeInvoker({}, () => collector),
     });
-    const events: Array<{ kind: string }> = [];
+    const events: Array<{ kind: string; inputMessage?: string }> = [];
     let result: MultiSpecialistFlowResult | undefined;
     await withTrace(collector, async () => {
       while (true) {
@@ -207,11 +207,19 @@ describe("multi-specialist-orchestrator", () => {
           result = next.value;
           break;
         }
-        events.push({ kind: next.value.kind });
+        events.push(next.value as { kind: string; inputMessage?: string });
       }
     });
-    expect(events.find((e) => e.kind === "stream_error")).toBeDefined();
+    // No specialist was attempted, and we ask for clarification instead of erroring.
+    expect(events.find((e) => e.kind === "stream_error")).toBeUndefined();
+    const clar = events.find((e) => e.kind === "needs_clarification");
+    expect(clar).toBeDefined();
+    expect(clar?.inputMessage).toBe("Can you help me?");
     expect(result?.finalAnswer).toBe("");
+    expect(result?.successfulSpecialists.length).toBe(0);
+    expect(result?.failedSpecialists.length).toBe(0);
+    // A clarification-route trace event is emitted for observability.
+    expect(eventsOfType(collector, "orchestrator.clarification_route").length).toBe(1);
   });
 
   test("FAILURE: specialist throws → marked as failed", async () => {

@@ -177,7 +177,7 @@ If the harness `e2e-smoke/memory-recall-diagnostic.py` is failing scenario C/D/E
 - `mode` — `ec2_to_orchestrator` (typical) / `orchestrator_to_specialist` (intra-AgentCore hop) / `mcp_runtime`
 - `requestBody` / `responseBody` previews (capped via the tiered truncation system — see §13)
 - Request + response headers previews (`requestHeadersPreview` / `responseHeadersPreview`)
-- The always-emitted `observability_link` — a click-through to the GenAI Observability "Agents" tab scoped to this specialist + this trace id
+- The always-emitted `observability_link` — a **CloudWatch logs** deep-link to the runtime's managed log group (`/aws/bedrock-agentcore/runtimes/<runtimeId>-DEFAULT`), plus an **X-Ray** deep-link built from the OTel trace id (canonical `1-<8 hex>-<24 hex>` form). The X-Ray link is omitted when no OTel trace id is present (e.g. OTel export disabled).
 
 `agentcore.retry` events render in the Retries sub-section (§9), not here.
 

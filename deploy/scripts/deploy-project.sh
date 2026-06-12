@@ -96,6 +96,27 @@ ok()   { echo "  [ec2] ✓ $*"; }
 err()  { echo "  [ec2] ✗ $*" >&2; exit 1; }
 warn() { echo "  [ec2] ⚠ $*"; }
 sep()  { echo "────────────────────────────────────────────────"; }
+urlencode_component() {
+  local LC_ALL=C
+  local value="$1"
+  local out=""
+  local i ch encoded
+
+  for ((i = 0; i < ${#value}; i++)); do
+    ch="${value:i:1}"
+    case "$ch" in
+      [a-zA-Z0-9.~_-])
+        out+="$ch"
+        ;;
+      *)
+        printf -v encoded '%%%02X' "'$ch"
+        out+="$encoded"
+        ;;
+    esac
+  done
+
+  printf '%s' "$out"
+}
 
 # shellcheck source=deploy/scripts/_sg-cleanup.sh
 source "$SCRIPT_DIR/_sg-cleanup.sh"
@@ -144,9 +165,10 @@ apply_with_retry() {
       rm -f "$log_file"
       return 0
     fi
-    # Transient = network/timeout error talking to Atlas, or Terraform saved-plan
-    # staleness after state changed between plan and apply.
-    if grep -qE 'cloud\.mongodb\.com.*(i/o timeout|connection reset|connection refused|EOF|TLS handshake timeout)|Saved plan is stale' "$log_file"; then
+    # Transient = local DNS resolver / network blip (shared classifier) OR
+    # Terraform saved-plan staleness after state changed between plan and apply.
+    if deploy_log_has_transient_error "$log_file" \
+       || grep -qE 'Saved plan is stale' "$log_file"; then
       warn "Transient Terraform apply error detected on attempt ${attempt} — will re-plan and retry"
       attempt=$((attempt + 1))
       continue
@@ -347,6 +369,22 @@ export TF_VAR_atlas_private_key="${MONGODB_ATLAS_PRIVATE_KEY:-}"
 [[ -n "${TF_VAR_atlas_public_key:-}" ]]  || err "MONGODB_ATLAS_PUBLIC_KEY not set in .env"
 [[ -n "${TF_VAR_atlas_private_key:-}" ]] || err "MONGODB_ATLAS_PRIVATE_KEY not set in .env"
 
+# MCP write gate — propagate MONGODB_ALLOW_WRITE from .env into Terraform so the
+# mongodb-mcp AgentCore Runtime is baked with MONGODB_ALLOW_WRITE=1 (insertOne /
+# updateOne). Mirrors parseBoolEnv() truthy set in mongodb-mcp guards.mjs.
+# Normalize to a literal true/false (not 1) to avoid HCL bool-coercion ambiguity.
+case "$(printf '%s' "${MONGODB_ALLOW_WRITE:-}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')" in
+  1|true|yes|on) export TF_VAR_mongodb_allow_write=true ;;
+  *)            export TF_VAR_mongodb_allow_write=false ;;
+esac
+ok "MCP write gate: mongodb_allow_write=${TF_VAR_mongodb_allow_write}"
+
+# Terraform cannot call the TS Voyage SSOT directly. Resolve the optional
+# VOYAGE_OUTPUT_DIM env knob through the bash bridge once, then expose the
+# validated value to envs/ec2 as var.voyage_output_dim.
+export TF_VAR_voyage_output_dim="$(voyage_embedding_dims)"
+ok "Voyage embedding output dim: ${TF_VAR_voyage_output_dim}"
+
 DEPLOY_DIAG_LABEL="ec2"
 # shellcheck source=deploy/scripts/_deploy-diagnostics.sh
 source "$SCRIPT_DIR/_deploy-diagnostics.sh"
@@ -411,7 +449,7 @@ case "$EMBEDDINGS_PROVIDER" in
   voyage)
     if [[ -z "$VOYAGE_ARN" ]]; then
       err "EMBEDDINGS_PROVIDER=voyage but VOYAGE_MODEL_PACKAGE_ARN is empty.
-       Run: ./deploy/scripts/setup-voyage-marketplace.sh   (one-time, opens Marketplace)
+       Subscribe to the supported Voyage AI Marketplace listing, then set VOYAGE_MODEL_PACKAGE_ARN in .env.
        Then re-source .env and re-run this script."
     fi
     # Marketplace ARN tail format:
@@ -431,7 +469,7 @@ case "$EMBEDDINGS_PROVIDER" in
     fi
     if [[ -z "$VOYAGE_MODEL_LABEL" ]]; then
       err "Could not infer a multimodal Voyage model from VOYAGE_MODEL_PACKAGE_ARN tail '$VOYAGE_ARN_TAIL'.
-       Re-run ./deploy/scripts/setup-voyage-marketplace.sh --model voyage-multimodal-3 (or voyage-multimodal-3.5)."
+       Set VOYAGE_MARKETPLACE_MODEL in .env to voyage-multimodal-3 or voyage-multimodal-3.5."
     fi
     # Hard gate: only multimodal models are allowed end-to-end. The bash SSOT
     # (deploy/scripts/_voyage-config.sh) reads SUPPORTED_VOYAGE_MODELS from
@@ -440,8 +478,13 @@ case "$EMBEDDINGS_PROVIDER" in
     EMBEDDINGS_VOYAGE_MULTIMODAL="true"
     EMBEDDINGS_MODEL_ID="$VOYAGE_ARN_TAIL"
     VOYAGE_MARKETPLACE_MODEL="$VOYAGE_MODEL_LABEL"
+    VOYAGE_ENDPOINT_SUFFIX_RAW="${VOYAGE_ENDPOINT_SUFFIX:-$VOYAGE_MODEL_LABEL}"
+    VOYAGE_ENDPOINT_SUFFIX="$(voyage_sagemaker_endpoint_suffix "$VOYAGE_ENDPOINT_SUFFIX_RAW")"
     if [[ -z "$VOYAGE_ENDPOINT_SUFFIX" ]]; then
-      VOYAGE_ENDPOINT_SUFFIX="$(echo "$VOYAGE_MODEL_LABEL" | tr '[:upper:]' '[:lower:]' | sed -E 's/[_.]/-/g; s/[^a-z0-9-]+/-/g; s/^-+//; s/-+$//')"
+      err "Voyage endpoint suffix resolved to an empty SageMaker name from '${VOYAGE_ENDPOINT_SUFFIX_RAW}'"
+    fi
+    if [[ "$VOYAGE_ENDPOINT_SUFFIX_RAW" != "$VOYAGE_ENDPOINT_SUFFIX" ]]; then
+      warn "Normalized Voyage endpoint suffix '${VOYAGE_ENDPOINT_SUFFIX_RAW}' -> '${VOYAGE_ENDPOINT_SUFFIX}' for SageMaker"
     fi
     ok "Embeddings: ${VOYAGE_MODEL_LABEL} via SageMaker (multimodal-only; package ${VOYAGE_ARN_TAIL})"
     ;;
@@ -457,7 +500,7 @@ case "$EMBEDDINGS_PROVIDER" in
     warn "  Voyage SageMaker endpoint will NOT be provisioned."
     warn "  Embeddings: amazon.titan-embed-text-v2:0 (1024-d) via Bedrock."
     warn "  This is recorded in deploy-manifest.json. To restore the Voyage multimodal default,"
-    warn "  set EMBEDDINGS_PROVIDER=voyage and re-run setup-voyage-marketplace.sh."
+    warn "  set EMBEDDINGS_PROVIDER=voyage plus VOYAGE_MODEL_PACKAGE_ARN / VOYAGE_MARKETPLACE_MODEL."
     warn "═══════════════════════════════════════════════════════════════════════"
     ;;
   "")
@@ -552,11 +595,20 @@ SHARED_NETWORK_MODE=$(aws ssm get-parameter \
   --name "/${SHARED_VPC_NAME}/${AWS_REGION}/network_mode" \
   --query "Parameter.Value" --output text 2>/dev/null || echo "")
 if [[ "$SHARED_NETWORK_MODE" != "$NETWORK_MODE" ]]; then
+  case "$SHARED_NETWORK_MODE" in
+    peering)
+      DESTROY_PROJECT="./deploy/destroy/destroy-project-with-vpc-peering.sh"
+      DESTROY_SHARED="./deploy/destroy/destroy-shared-with-vpc-peering.sh"
+      ;;
+    *)
+      DESTROY_PROJECT="./deploy/destroy/destroy-project-with-privatelink.sh"
+      DESTROY_SHARED="./deploy/destroy/destroy-shared-with-privatelink.sh"
+      ;;
+  esac
   err "NETWORK MODE MISMATCH: shared network reports mode='${SHARED_NETWORK_MODE}' but env says '${NETWORK_MODE}'.
      PrivateLink and VPC peering are mutually exclusive per account. To switch modes run:
-       ./deploy/scripts/destroy.sh --mode ec2
-       ./deploy/scripts/destroy.sh --mode shared    # optional
-       ./deploy/scripts/destroy.sh --mode network
+       ${DESTROY_PROJECT}
+       ${DESTROY_SHARED}
      Then re-run deploy-network.sh with the desired NETWORK_MODE before re-running this script."
 fi
 
@@ -574,6 +626,20 @@ encrypt = true
 # dynamodb_table omitted — SCP on this account blocks DynamoDB CreateTable.
 EOF
 ok "backend.hcl written (state key: ${ENVIRONMENT}/ec2/terraform.tfstate)"
+
+# ── Operator/deploy-machine IP for the Atlas IP access list ─────────────────
+# Atlas is NEVER opened to 0.0.0.0/0. In privatelink mode the mongodb-atlas
+# module scopes the only public-SRV allowlist entry to this /32 ("anywhere it
+# was created from"); runtime traffic uses PrivateLink and bypasses the list.
+# In peering mode the module uses the VPC CIDR instead and this is ignored.
+# shellcheck source=deploy/scripts/_operator-ip.sh
+source "$SCRIPT_DIR/_operator-ip.sh"
+if [[ "$NETWORK_MODE" == "privatelink" ]]; then
+  resolve_operator_ip_cidr "deploy" || err "Could not determine operator IP for the Atlas IP access list (privatelink mode). Atlas must be reachable from the deploy machine without 0.0.0.0/0. Set OPERATOR_IP_CIDR=A.B.C.D/32 in .env (or TF_VAR_my_ip) and re-run."
+  ok "Atlas IP access list will be scoped to operator IP ${OPERATOR_IP_CIDR}"
+else
+  resolve_operator_ip_cidr "deploy" || true
+fi
 
 cat > "$TF_DIR/terraform.tfvars" <<EOF
 # EC2 mode — generated by deploy.sh
@@ -596,6 +662,8 @@ atlas_db_name    = "${ATLAS_DB_NAME}"
 # kb_iam_role_name omitted on purpose — bedrock-kb module derives a unique
 # IAM role name from project_name + environment so parallel deploys do not collide.
 embed_model_id   = "amazon.titan-embed-text-v2:0"
+# Optional dedicated S3 bucket for KB source docs. Empty = shared bucket.
+kb_docs_bucket_name = "${KB_DOCS_BUCKET:-}"
 
 # EC2 — SSM Session Manager for shell access (no SSH key required)
 ec2_instance_type = "t3.medium"
@@ -615,46 +683,23 @@ agentcore_code_artifact_prefix    = "${AGENTCORE_CODE_ARTIFACT_PREFIX}"
 # (verified by the SSM canary above and by the \`check "network_mode_matches_shared"\`
 # block in envs/ec2/main.tf). Switching modes requires destroy + redeploy.
 network_mode      = "${NETWORK_MODE}"
+
+# Operator/deploy-machine public IP — the ONLY public-SRV Atlas IP access list
+# entry in privatelink mode (replaces the former 0.0.0.0/0). Auto-detected by
+# deploy-project.sh; override via OPERATOR_IP_CIDR / TF_VAR_my_ip in .env.
+operator_ip_cidr  = "${OPERATOR_IP_CIDR:-}"
 EOF
 
-# AgentCore runtime VPCEs are VPC-scoped singletons. Reuse existing shared-VPC
-# ECR/Logs/S3 endpoints, and copy any explicit TF_VAR override into tfvars
-# because terraform.tfvars has higher precedence than TF_VAR_*.
-SHARED_VPC_ID=$(aws ssm get-parameter --region "$AWS_REGION" \
-  --name "/${SHARED_VPC_NAME}/${AWS_REGION}/vpc_id" \
-  --query Parameter.Value --output text 2>/dev/null || echo "")
-CREATE_AGENTCORE_VPCE="${TF_VAR_create_agentcore_runtime_vpc_endpoints:-auto}"
-if [[ "$CREATE_AGENTCORE_VPCE" == "true" || "$CREATE_AGENTCORE_VPCE" == "false" ]]; then
-  log "Using explicit TF_VAR_create_agentcore_runtime_vpc_endpoints=${CREATE_AGENTCORE_VPCE}"
-elif [[ -n "$SHARED_VPC_ID" && "$SHARED_VPC_ID" != "None" ]]; then
-  CREATE_AGENTCORE_VPCE="true"
-  MANAGED_AGENTCORE_VPCE_COUNT=$(terraform -chdir="$TF_DIR" state list 2>/dev/null \
-    | python3 -c 'import sys
-managed = [line.strip() for line in sys.stdin if line.strip().startswith("aws_vpc_endpoint.agentcore_runtime_")]
-print(len(managed))' 2>/dev/null || echo "0")
-  EXISTING_VPCE_COUNT=$(aws ec2 describe-vpc-endpoints --region "$AWS_REGION" \
-    --filters "Name=vpc-id,Values=${SHARED_VPC_ID}" \
-    --query "length(VpcEndpoints[?ServiceName=='com.amazonaws.${AWS_REGION}.ecr.api' || ServiceName=='com.amazonaws.${AWS_REGION}.ecr.dkr' || ServiceName=='com.amazonaws.${AWS_REGION}.logs'])" \
-    --output text 2>/dev/null || echo "0")
-  EXISTING_S3_VPCE_COUNT=$(aws ec2 describe-vpc-endpoints --region "$AWS_REGION" \
-    --filters "Name=vpc-id,Values=${SHARED_VPC_ID}" "Name=service-name,Values=com.amazonaws.${AWS_REGION}.s3" \
-    --query "length(VpcEndpoints)" \
-    --output text 2>/dev/null || echo "0")
-  if [[ "${MANAGED_AGENTCORE_VPCE_COUNT:-0}" -ge 4 ]]; then
-    CREATE_AGENTCORE_VPCE="true"
-    log "Shared VPC ${SHARED_VPC_ID} has AgentCore VPCEs in this Terraform state — keeping ownership"
-  elif [[ "${MANAGED_AGENTCORE_VPCE_COUNT:-0}" -gt 0 ]]; then
-    err "Terraform state has only ${MANAGED_AGENTCORE_VPCE_COUNT}/4 AgentCore VPCE resources. Resolve partial state or rerun with TF_VAR_create_agentcore_runtime_vpc_endpoints=false after confirming ECR/Logs/S3 endpoints already exist."
-  elif [[ "${EXISTING_VPCE_COUNT:-0}" -ge 3 && "${EXISTING_S3_VPCE_COUNT:-0}" -ge 1 ]]; then
-    CREATE_AGENTCORE_VPCE="false"
-    log "Shared VPC ${SHARED_VPC_ID} already has AgentCore ECR/Logs/S3 VPCEs — reusing"
-  fi
-else
-  CREATE_AGENTCORE_VPCE="true"
-fi
-echo "create_agentcore_runtime_vpc_endpoints = ${CREATE_AGENTCORE_VPCE}" >> "$TF_DIR/terraform.tfvars"
-
-ok "terraform.tfvars written (network_mode=${NETWORK_MODE}, create_agentcore_runtime_vpc_endpoints=${CREATE_AGENTCORE_VPCE})"
+# NOTE: the `create_agentcore_runtime_vpc_endpoints` decision is intentionally
+# NOT made here. It is resolved AFTER `terraform init` (Phase 5a below) because
+# the only authoritative "does THIS stack already own the 4 AgentCore VPCEs?"
+# signal is `terraform state list`, which requires an initialized backend.
+# Deciding pre-init is unsafe: a wiped local `.terraform` makes state list
+# return empty, the auto path then sees the endpoints existing in the VPC,
+# picks `false`, and the next apply DESTROYS this project's ECR/Logs/S3/Atlas
+# endpoints. See docs/status/debugging.md "AgentCore VPCE create/reuse probe
+# must run after terraform init".
+ok "terraform.tfvars written (network_mode=${NETWORK_MODE})"
 
 # ── Phase 4a — Discover agents + write agents.auto.tfvars.json ────────────────
 sep
@@ -724,6 +769,65 @@ deploy_diag_checkpoint "terraform init start: terraform init -input=false -recon
 terraform init -input=false -reconfigure -backend-config="$TF_DIR/backend.hcl"
 ok "init complete"
 
+# ── Phase 5a — Resolve create_agentcore_runtime_vpc_endpoints (POST-INIT) ─────
+# AgentCore runtime VPCEs (ECR API/DKR, CloudWatch Logs, S3 gateway) are
+# VPC-scoped singletons OWNED BY THIS stack. This decision runs after
+# `terraform init` so `terraform state list` reflects the real remote state and
+# reliably reports whether this stack already owns them.
+#
+# Fail-closed contract: any ambiguity (state list errored, backend unreadable)
+# keeps create=true so a transient read failure can NEVER plan a destroy of
+# live endpoints. `false` (reuse external singletons) is chosen ONLY when state
+# was readable AND confirms this stack owns none of the four.
+sep
+log "Phase 5a — Resolving create_agentcore_runtime_vpc_endpoints (post-init)..."
+SHARED_VPC_ID=$(aws ssm get-parameter --region "$AWS_REGION" \
+  --name "/${SHARED_VPC_NAME}/${AWS_REGION}/vpc_id" \
+  --query Parameter.Value --output text 2>/dev/null || echo "")
+CREATE_AGENTCORE_VPCE="${TF_VAR_create_agentcore_runtime_vpc_endpoints:-auto}"
+if [[ "$CREATE_AGENTCORE_VPCE" == "true" || "$CREATE_AGENTCORE_VPCE" == "false" ]]; then
+  log "Using explicit TF_VAR_create_agentcore_runtime_vpc_endpoints=${CREATE_AGENTCORE_VPCE}"
+elif [[ -n "$SHARED_VPC_ID" && "$SHARED_VPC_ID" != "None" ]]; then
+  CREATE_AGENTCORE_VPCE="true"
+  # Capture `terraform state list` separately from the parse so a non-zero exit
+  # (uninitialized / locked / transient backend error) is detected. On failure
+  # we keep create=true rather than mis-reading "empty output" as "this stack
+  # owns nothing" — the exact bug that destroyed live endpoints after a local
+  # .terraform wipe.
+  TF_STATE_LIST_OK=true
+  if ! TF_STATE_LIST_OUT="$(terraform -chdir="$TF_DIR" state list 2>/dev/null)"; then
+    TF_STATE_LIST_OK=false
+    TF_STATE_LIST_OUT=""
+    warn "terraform state list failed after init — forcing create_agentcore_runtime_vpc_endpoints=true (fail-closed: never destroy live endpoints on an ambiguous read)"
+  fi
+  MANAGED_AGENTCORE_VPCE_COUNT=$(printf '%s\n' "$TF_STATE_LIST_OUT" | python3 -c 'import sys
+managed = [line.strip() for line in sys.stdin if line.strip().startswith("aws_vpc_endpoint.agentcore_runtime_")]
+print(len(managed))' 2>/dev/null || echo "0")
+  EXISTING_VPCE_COUNT=$(aws ec2 describe-vpc-endpoints --region "$AWS_REGION" \
+    --filters "Name=vpc-id,Values=${SHARED_VPC_ID}" \
+    --query "length(VpcEndpoints[?ServiceName=='com.amazonaws.${AWS_REGION}.ecr.api' || ServiceName=='com.amazonaws.${AWS_REGION}.ecr.dkr' || ServiceName=='com.amazonaws.${AWS_REGION}.logs'])" \
+    --output text 2>/dev/null || echo "0")
+  EXISTING_S3_VPCE_COUNT=$(aws ec2 describe-vpc-endpoints --region "$AWS_REGION" \
+    --filters "Name=vpc-id,Values=${SHARED_VPC_ID}" "Name=service-name,Values=com.amazonaws.${AWS_REGION}.s3" \
+    --query "length(VpcEndpoints)" \
+    --output text 2>/dev/null || echo "0")
+  if [[ "${MANAGED_AGENTCORE_VPCE_COUNT:-0}" -ge 4 ]]; then
+    CREATE_AGENTCORE_VPCE="true"
+    log "Shared VPC ${SHARED_VPC_ID} has AgentCore VPCEs in this Terraform state — keeping ownership"
+  elif [[ "${MANAGED_AGENTCORE_VPCE_COUNT:-0}" -gt 0 ]]; then
+    err "Terraform state has only ${MANAGED_AGENTCORE_VPCE_COUNT}/4 AgentCore VPCE resources. Resolve partial state or rerun with TF_VAR_create_agentcore_runtime_vpc_endpoints=false after confirming ECR/Logs/S3 endpoints already exist."
+  elif [[ "$TF_STATE_LIST_OK" == "true" && "${EXISTING_VPCE_COUNT:-0}" -ge 3 && "${EXISTING_S3_VPCE_COUNT:-0}" -ge 1 ]]; then
+    # Reuse ONLY when state was readable and confirms this stack owns none of
+    # them — i.e. they are genuinely externally-owned shared-VPC singletons.
+    CREATE_AGENTCORE_VPCE="false"
+    log "Shared VPC ${SHARED_VPC_ID} already has externally-owned AgentCore ECR/Logs/S3 VPCEs — reusing"
+  fi
+else
+  CREATE_AGENTCORE_VPCE="true"
+fi
+echo "create_agentcore_runtime_vpc_endpoints = ${CREATE_AGENTCORE_VPCE}" >> "$TF_DIR/terraform.tfvars"
+ok "create_agentcore_runtime_vpc_endpoints=${CREATE_AGENTCORE_VPCE} appended to terraform.tfvars"
+
 if [[ "$SKIP_DOCKER" != "true" ]]; then
   sep
   log "Phase 4d — Ensuring mongodb-mcp runtime ECR repo, then push image..."
@@ -753,10 +857,10 @@ if [[ "$SKIP_DOCKER" != "true" ]]; then
 
   ECR_REGISTRY=$(echo "$MCP_RUNTIME_REPO" | cut -d'/' -f1)
   log "  ECR login → $ECR_REGISTRY"
-  aws ecr get-login-password --region "$AWS_REGION" \
-    | docker login --username AWS --password-stdin "$ECR_REGISTRY" >/dev/null
-  log "  building mongodb-mcp-runtime image (linux/arm64)..."
   source "$SCRIPT_DIR/_docker-build.sh"
+  ecr_login_with_retry "$AWS_REGION" "$ECR_REGISTRY" >/dev/null \
+    || err "ECR login failed after retries (transient DNS/network did not clear)"
+  log "  building mongodb-mcp-runtime image (linux/arm64)..."
   docker_build_push_image linux/arm64 \
     "$REPO_ROOT/mcp-runtimes/mongodb-mcp/Dockerfile" \
     "$REPO_ROOT/mcp-runtimes/mongodb-mcp" \
@@ -844,6 +948,9 @@ load_tf_outputs() {
   COGNITO_CLIENT_ID=$(terraform output -raw cognito_app_client_id 2>/dev/null || echo "")
   COGNITO_JWKS=$(terraform output -raw cognito_jwks_uri 2>/dev/null || echo "")
   VOYAGE_ENDPOINT=$(terraform output -raw voyage_endpoint_name 2>/dev/null || echo "")
+  if [[ "$EMBEDDINGS_PROVIDER" == "titan" ]]; then
+    VOYAGE_ENDPOINT=""
+  fi
   ECR_API_REPO=$(terraform output -raw ecr_api_repository_url 2>/dev/null || echo "")
   ECR_UI_REPO=$(terraform output -raw ecr_ui_repository_url 2>/dev/null || echo "")
   ECR_RUNTIME_REPO=$(terraform output -raw ecr_agent_runtime_repository_url 2>/dev/null || echo "")
@@ -983,7 +1090,10 @@ BEDROCK_KB_ID="$(terraform output -raw knowledge_base_id 2>/dev/null || echo "")
 if [[ -n "$ATLAS_CONNECTION_STRING" ]]; then
   MONGODB_URI="$ATLAS_CONNECTION_STRING"
 else
-  MONGODB_URI="mongodb+srv://${ATLAS_DB_USER}:${TF_VAR_atlas_db_password}@${ATLAS_MONGO_HOST}/?retryWrites=true&w=majority"
+  MONGO_URI_USER="$(urlencode_component "$ATLAS_DB_USER")"
+  MONGO_URI_PASSWORD="$(urlencode_component "$TF_VAR_atlas_db_password")"
+  MONGODB_URI="mongodb+srv://${MONGO_URI_USER}:${MONGO_URI_PASSWORD}@${ATLAS_MONGO_HOST}/?retryWrites=true&w=majority"
+  unset MONGO_URI_USER MONGO_URI_PASSWORD
 fi
 
 # Preserve the public-SRV form before Phase 5c rewrites MONGODB_URI to the
@@ -1118,6 +1228,8 @@ run_embedding_seed "$ATLAS_DB_NAME" "$MONGODB_URI" \
 ok "Embedding seed complete"
 
 # ── Centralized preflight checks: post-apply (see docs/deployment-preflight-checks.md) ──
+export MONGODB_URI MONGODB_URI_PUBLIC
+export MONGODB_DB="$ATLAS_DB_NAME"
 # shellcheck source=deploy/scripts/_preflight-checks.sh
 source "$SCRIPT_DIR/_preflight-checks.sh"
 preflight_validate project-post-apply
@@ -1127,9 +1239,9 @@ preflight_validate project-post-apply
 #
 # privatelink mode: compute Atlas's awsPrivateLink direct URI (multi-host,
 #   tlsAllowInvalidHostnames=true) so the EC2 API avoids SRV DNS edge-cases.
-# peering mode: compute the cluster's connectionStrings.privateSrv (when
-#   "Enable Private DNS for Peering" is on) else connectionStrings.private
-#   (multi-host non-SRV). Peering hostnames are in the cluster's TLS SAN list,
+# peering mode: compute the cluster's connectionStrings.private direct
+#   multi-host URI. Do not use connectionStrings.privateSrv; SRV/TXT discovery
+#   adds cold-path latency. Peering hostnames are in the cluster's TLS SAN list,
 #   so NO tlsAllowInvalidHostnames is needed.
 #
 # Terraform seeds the mongodb-mcp runtime URI at apply time; Phase 6b
@@ -1218,16 +1330,10 @@ resp = subprocess.check_output([
 ], text=True)
 data = json.loads(resp)
 conn = (data.get("connectionStrings") or {})
-# Prefer SRV form (when "Enable Private DNS for Peering" is on); fall back to
-# the multi-host non-SRV form (connection_strings[0].private). Both resolve
-# to private peering IPs from inside the peered VPC.
-priv_srv = conn.get("privateSrv") or ""
+# Require multi-host non-SRV form to match the faster PrivateLink direct URI
+# shape and avoid SRV/TXT DNS lookups on cold runtime paths.
 priv_multi = conn.get("private") or ""
-if priv_srv:
-    # mongodb+srv://<host>
-    host = priv_srv.replace("mongodb+srv://", "", 1)
-    print(f"mongodb+srv://{user}:{pwd}@{host}/?retryWrites=true&w=majority")
-elif priv_multi:
+if priv_multi:
     # mongodb://<authority>[/?...]
     no_scheme = priv_multi.replace("mongodb://", "", 1)
     sep_char = "&" if "?" in no_scheme else "/?"
@@ -1235,7 +1341,7 @@ elif priv_multi:
     # tlsAllowInvalidHostnames needed (unlike PrivateLink).
     print(f"mongodb://{user}:{pwd}@{no_scheme}{sep_char}retryWrites=true&w=majority")
 else:
-    raise SystemExit("Atlas cluster has neither connectionStrings.privateSrv nor connectionStrings.private — peering not active yet?")
+    raise SystemExit("Atlas cluster has no connectionStrings.private multi-host URI — peering not active yet or Atlas has not populated the private direct URI")
 PY
   ); then
     MONGODB_URI="$API_PRIVATE_URI"
@@ -1245,9 +1351,9 @@ PY
     if ! echo "$MONGODB_URI" | grep -qE '\-pri\.'; then
       err "Computed peering URI does not contain '-pri.' (private peering host) — would route over the public SRV. Aborting to preserve privacy parity."
     fi
-    ok "API MongoDB URI normalized to peering connection string (private DNS form: $(echo "$MONGODB_URI" | grep -q 'mongodb+srv' && echo SRV || echo multi-host))"
+    ok "API MongoDB URI normalized to peering direct multi-host connection string"
   else
-    err "Could not compute Atlas peering URI for the API. Verify the peering connection is ACTIVE and that Atlas has populated the cluster's connectionStrings.private[Srv]."
+    err "Could not compute Atlas peering direct multi-host URI for the API. Verify the peering connection is ACTIVE and that Atlas has populated connectionStrings.private."
   fi
 fi
 
@@ -1539,11 +1645,15 @@ fi
 # --skip-docker only skips local build/push; a replaced EC2 host still needs
 # ECR auth and image pulls from the already-published tags.
 ECR_REGISTRY=$(echo "$ECR_API_REPO" | cut -d'/' -f1)
-RESTART_CMD="aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${ECR_REGISTRY} \
+# Retry the remote ECR login + image pulls (the network-facing steps) so a
+# transient DNS resolver / network blip on the EC2 host does not abort the
+# restart. The `ok` flag gates the restart so an exhausted retry budget still
+# fails the SSM command instead of restarting against a stale/missing image.
+RESTART_CMD="ok=0; for i in 1 2 3 4; do aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${ECR_REGISTRY} \
   && docker pull ${ECR_API_IMAGE} \
   && docker pull ${ECR_UI_IMAGE} \
-  && systemctl daemon-reload \
-  && systemctl restart multiagent-api multiagent-ui"
+  && ok=1 && break; echo ecr-login-pull attempt \$i failed, retrying in 10s; sleep 10; done; \
+  [ \$ok -eq 1 ] && systemctl daemon-reload && systemctl restart multiagent-api multiagent-ui"
 
 RESTART_CMD_ID=$(send_ssm_command_retry \
   "$EC2_INSTANCE_ID" \
@@ -1872,7 +1982,14 @@ export _M_BUCKET="$SHARED_BUCKET" _M_KB="$BEDROCK_KB_ID"
 export _M_EC2_IP="$EC2_IP"        _M_EC2_ID="$EC2_INSTANCE_ID"
 export _M_EC2_API="$EC2_API"      _M_EC2_UI="$EC2_UI"
 export _M_COGNITO_POOL="$COGNITO_POOL_ID" _M_COGNITO_CLIENT="$COGNITO_CLIENT_ID"
-export _M_VOYAGE="$VOYAGE_ENDPOINT"
+# Titan stacks must not advertise a Voyage endpoint in the manifest — the shared
+# stack may still provision SageMaker, but post-deploy smoke treats a non-empty
+# voyage_sagemaker_endpoint as "Voyage is active".
+if [[ "$EMBEDDINGS_PROVIDER" == "titan" ]]; then
+  export _M_VOYAGE=""
+else
+  export _M_VOYAGE="$VOYAGE_ENDPOINT"
+fi
 export _M_EMBEDDINGS_PROVIDER="$EMBEDDINGS_PROVIDER"
 export _M_EMBEDDINGS_MODEL="$EMBEDDINGS_MODEL_ID"
 export _M_EMBEDDINGS_VOYAGE_MULTIMODAL="$EMBEDDINGS_VOYAGE_MULTIMODAL"

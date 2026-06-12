@@ -60,9 +60,14 @@ err()  { echo "  [network] ✗ $*" >&2; exit 1; }
 warn() { echo "  [network] ⚠ $*"; }
 sep()  { echo "────────────────────────────────────────────────"; }
 
-# Same retry-on-transient-Atlas-API-error pattern as deploy.sh — the
+# Shared transient-error classifier (DNS resolver + network/transport blips).
+# shellcheck source=deploy/scripts/_transient-errors.sh
+source "$SCRIPT_DIR/_transient-errors.sh"
+
+# Same retry-on-transient-error pattern as deploy-project.sh — the
 # discover-or-create-pl.sh provisioner hits cloud.mongodb.com which can
-# i/o timeout / TLS-handshake-timeout under load.
+# i/o timeout / TLS-handshake-timeout under load, and a local DNS resolver
+# blip can also surface mid-apply.
 apply_with_retry() {
   local plan_file="$1"
   local max_attempts=3
@@ -92,8 +97,11 @@ apply_with_retry() {
       rm -f "$log_file"
       return 0
     fi
-    if grep -qE 'cloud\.mongodb\.com.*(i/o timeout|connection reset|connection refused|EOF|TLS handshake timeout)' "$log_file"; then
-      warn "Transient Atlas API error on attempt ${attempt} — will retry"
+    # Transient = local DNS resolver / network blip (shared classifier) OR
+    # Terraform saved-plan staleness after state changed between plan and apply.
+    if deploy_log_has_transient_error "$log_file" \
+       || grep -qE 'Saved plan is stale' "$log_file"; then
+      warn "Transient Atlas/network error on attempt ${attempt} — will re-plan and retry"
       attempt=$((attempt + 1))
       continue
     fi
@@ -192,7 +200,7 @@ SHARED_BUCKET="${PROJECT_NAME}-${ENVIRONMENT}-${ACCOUNT_ID}"
 # ── Pre-flight: mode-switch guard ───────────────────────────────────────────
 # If SSM /network_mode already exists from a previous apply, refuse to flip
 # the mode without an explicit --allow-mode-switch (and even then, operator
-# must have already run destroy.sh — otherwise resources from both modes
+# must have already run deploy/destroy/* — otherwise resources from both modes
 # will collide).
 EXISTING_MODE=$(aws ssm get-parameter \
   --region "$AWS_REGION" \
@@ -200,11 +208,20 @@ EXISTING_MODE=$(aws ssm get-parameter \
   --query "Parameter.Value" --output text 2>/dev/null || echo "")
 if [[ -n "$EXISTING_MODE" && "$EXISTING_MODE" != "$NETWORK_MODE" ]]; then
   if [[ "$ALLOW_MODE_SWITCH" != "true" ]]; then
+    case "$EXISTING_MODE" in
+      peering)
+        DESTROY_PROJECT="./deploy/destroy/destroy-project-with-vpc-peering.sh"
+        DESTROY_SHARED="./deploy/destroy/destroy-shared-with-vpc-peering.sh"
+        ;;
+      *)
+        DESTROY_PROJECT="./deploy/destroy/destroy-project-with-privatelink.sh"
+        DESTROY_SHARED="./deploy/destroy/destroy-shared-with-privatelink.sh"
+        ;;
+    esac
     err "MODE MISMATCH: SSM /${SHARED_VPC_NAME}/${AWS_REGION}/network_mode says '${EXISTING_MODE}' but env says '${NETWORK_MODE}'.
        PrivateLink and VPC peering are mutually exclusive per account — to switch modes run:
-         ./deploy/scripts/destroy.sh --mode ec2
-         ./deploy/scripts/destroy.sh --mode shared    # optional
-         ./deploy/scripts/destroy.sh --mode network
+         ${DESTROY_PROJECT}
+         ${DESTROY_SHARED}
        Then re-run with the desired NETWORK_MODE. Override with --allow-mode-switch only after the
        destroy completes successfully (otherwise resources from both modes will collide)."
   fi
@@ -249,11 +266,14 @@ encrypt = true
 EOF
 ok "backend.hcl written (state key: ${SHARED_VPC_NAME}/${AWS_REGION}/network/terraform.tfstate)"
 
-# Auto-detect operator's public IP (CIDR /32) for the Atlas IP access list
+# Auto-detect operator public IP (CIDR /32) for the Atlas IP access list
 # in peering mode. Without this, local-exec provisioners run from the
 # operator machine (db-seeding, ensure-collection, Atlas curl helpers)
 # can't reach the cluster after mongodb-atlas flips the default 0.0.0.0/0
 # entry to var.vpc_cidr. Override via env: export OPERATOR_IP_CIDR=A.B.C.D/32.
+if [[ -z "${OPERATOR_IP_CIDR:-}" && -n "${TF_VAR_my_ip:-}" ]]; then
+  OPERATOR_IP_CIDR="$TF_VAR_my_ip"
+fi
 if [[ "$NETWORK_MODE" == "peering" && -z "${OPERATOR_IP_CIDR:-}" ]]; then
   log "Auto-detecting operator public IP via checkip.amazonaws.com (override with OPERATOR_IP_CIDR=A.B.C.D/32)..."
   DETECTED_IP=$(curl -fsS --max-time 5 https://checkip.amazonaws.com 2>/dev/null | tr -d '[:space:]')

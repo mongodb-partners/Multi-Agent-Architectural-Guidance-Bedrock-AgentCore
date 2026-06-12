@@ -347,6 +347,47 @@ export function makeSkillHttpConfigTool(
   });
 }
 
+/** Raised by `invokeHttpToolByName` when no global tool matches `name`. */
+export class HttpToolNotFoundError extends Error {
+  constructor(public readonly toolName: string) {
+    super(`http_tool_not_found:${toolName}`);
+    this.name = "HttpToolNotFoundError";
+  }
+}
+
+/**
+ * Directly invoke a configured global HTTP tool by name — no LLM/agent loop.
+ *
+ * Used by the UI Debug page (`POST /http-tools/:name/invoke`) to exercise a
+ * Lambda Function URL tool deterministically. The same SSRF allowlist and
+ * mock-mode gates as the agent path apply (both run through `runHttpCall`).
+ * Returns the resolved URL alongside the result so the caller can confirm
+ * exactly which endpoint was hit.
+ *
+ * @throws {HttpToolNotFoundError} when `name` is not a global tool
+ * @throws {z.ZodError} when `input` fails the tool's parameter schema
+ */
+export async function invokeHttpToolByName(
+  name: string,
+  input: Record<string, unknown>,
+): Promise<{ tool: string; url: string; method: string; result: JSONValue }> {
+  const file = loadHttpToolsFile();
+  assertHttpToolsFileSecure(file, "config/http-tools.json");
+  const def = file.tools.find((t) => t.name === name);
+  if (!def) {
+    throw new HttpToolNotFoundError(name);
+  }
+  const parsed = buildInputSchema(def).parse(input ?? {});
+  const flat = normalizeInput(def, parsed as Record<string, unknown>);
+  const result = await runHttpCall(def, file, flat, def.name);
+  return {
+    tool: def.name,
+    url: expandEnvTemplate(def.url).trim(),
+    method: def.method,
+    result,
+  };
+}
+
 /** Map tool name → Strands Tool for all entries in http-tools.json. */
 export function buildHttpToolsMap(): Map<string, Tool> {
   const file = loadHttpToolsFile();

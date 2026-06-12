@@ -144,10 +144,8 @@ if [[ "$AUTO_APPROVE" != "true" ]]; then
   PrivateLink and VPC peering are MUTUALLY EXCLUSIVE per account —
   there is no hybrid mode. If KB ingestion fails, the only remediation
   is to destroy this peering stack and redeploy in PrivateLink mode:
-      ./deploy/scripts/destroy.sh --mode ec2
-      ./deploy/scripts/destroy.sh --mode shared    # optional
-      ./deploy/scripts/destroy.sh --mode network
-      # set NETWORK_MODE=privatelink (or unset) in .env
+      ./deploy/destroy/destroy-project-with-vpc-peering.sh
+      ./deploy/destroy/destroy-shared-with-vpc-peering.sh
       ./deploy/deploy-full-with-privatelink.sh
 
   Alternative: set TF_VAR_enable_kb_peering=false in .env to use public
@@ -178,9 +176,8 @@ EXISTING_MODE=$(aws ssm get-parameter \
 if [[ -n "$EXISTING_MODE" && "$EXISTING_MODE" != "peering" ]]; then
   err "MODE MISMATCH: SSM /${SHARED_VPC_NAME}/${AWS_REGION}/network_mode says '${EXISTING_MODE}' but this script enforces 'peering'.
      PrivateLink and VPC peering are mutually exclusive per account. To switch modes run:
-       ./deploy/scripts/destroy.sh --mode ec2
-       ./deploy/scripts/destroy.sh --mode shared    # optional
-       ./deploy/scripts/destroy.sh --mode network
+       ./deploy/destroy/destroy-project-with-privatelink.sh
+       ./deploy/destroy/destroy-shared-with-privatelink.sh
      Then re-run this script for a clean peering deploy."
 fi
 
@@ -281,8 +278,7 @@ echo "  To redeploy agents only : ./deploy/deploy-agents.sh"
 echo "  To redeploy API only    : ./deploy/deploy-api.sh"
 echo "  To re-discover Atlas IPs (operator after Atlas maintenance) :"
 echo "    $0 --skip-network --skip-shared"
-echo "  To tear down            : ./deploy/scripts/destroy.sh --mode ec2"
-echo "                            ./deploy/scripts/destroy.sh --mode shared"
-echo "                            ./deploy/scripts/destroy.sh --mode network"
+echo "  To tear down project    : ./deploy/destroy/destroy-project-with-vpc-peering.sh"
+echo "  To tear down shared     : ./deploy/destroy/destroy-shared-with-vpc-peering.sh"
 echo ""
 sep

@@ -18,8 +18,8 @@ MongoDB seed scripts for the Bedrock Multi-Agent demo stack. Each script is stan
 
 When `EMBEDDINGS_PROVIDER` flips (e.g. titan ↔ voyage), the existing stored embeddings have the wrong dimension / wrong provider tag. The deploy-time wrapper auto-detects this via three independent signals:
 
-- SSM `/<SHARED_VPC_NAME>/<region>/embeddings/dim` ≠ current `VOYAGE_EMBEDDING_DIMS`
-- A sampled seeder-owned row's `embedding.length` ≠ current `VOYAGE_EMBEDDING_DIMS`
+- SSM `/<SHARED_VPC_NAME>/<region>/embeddings/dim` ≠ the current resolved embedding dim (`getVoyageEmbeddingDims()` — `VOYAGE_OUTPUT_DIM` or the 1024 default)
+- A sampled seeder-owned row's `embedding.length` ≠ the current resolved embedding dim
 - A sampled seeder-owned row's `embeddingModel` doesn't start with the current provider prefix
 
 Any one signal triggers `REWIRE_EMBEDDINGS=1` automatically. Operators can also force it manually:
@@ -70,7 +70,7 @@ MONGODB_URI=... bun db-seeding/seed-products.ts
 | `EMBED_BATCH_DELAY_MS` | `200` | Delay between embedding API calls (throttle) |
 | `AWS_REGION` | `us-east-1` | Required for `seed-embeddings.ts` |
 
-> **Embedding dim is a code constant, not an env var.** `VOYAGE_EMBEDDING_DIMS` (1024) lives in `api/src/adapters/voyage-embedding.ts` and is imported directly by `seed-indexes.ts`. Bumping it is a code change pinned by `api/tests/unit/voyage-ssot-guard.test.ts`.
+> **Embedding dim defaults to 1024 and is configurable via `VOYAGE_OUTPUT_DIM`.** `getVoyageEmbeddingDims()` in `api/src/adapters/voyage-embedding.ts` is the single env reader (default `VOYAGE_DEFAULT_EMBEDDING_DIMS = 1024`); `seed-indexes.ts` derives `numDimensions` from it. Only `voyage-multimodal-3.5` supports non-1024 (256/512/1024/2048). The default + Terraform/bash parity are pinned by `api/tests/unit/voyage-ssot-guard.test.ts`. Changing the dim requires re-embedding (auto-detected here via `REWIRE_EMBEDDINGS`).
 
 ## Atlas vector search indexes
 

@@ -283,6 +283,15 @@ div[class*="stAlert"]:has(svg[data-testid="basewei-icon-Check"]) {
   background: rgba(0, 237, 100, 0.08) !important;
   font-weight: 600;
 }
+/* Hide the auto-generated "HTTP Tool Test" entry from the top nav — it lives
+   under the sidebar "Debug" section instead (see ui/app.py). Targets the page
+   slug derived from pages/3_HTTP_Tool_Test.py. */
+[data-testid="stSidebarNav"] li:has(a[href*="HTTP_Tool_Test"]) {
+  display: none !important;
+}
+[data-testid="stSidebarNav"] a[href*="HTTP_Tool_Test"] {
+  display: none !important;
+}
 
 /* ── Code blocks ─────────────────────────────────────────────────────────── */
 [data-testid="stCodeBlock"],

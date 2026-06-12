@@ -100,6 +100,22 @@ const STOPWORDS = new Set([
   "want", "looking", "ordered", "got", "now", "just",
 ]);
 
+/**
+ * Content-free filler tokens that survive stopword stripping but carry no
+ * routable domain signal on their own ("I need help with **something**",
+ * "can you do **anything**"). Used ONLY by the Tier A2 deterministic abstain
+ * gate in `classifyAgents` — NOT by the heuristic corpus tokenizer — so
+ * scoring behavior is unchanged. A message whose only remaining tokens are
+ * in this set is treated as low-signal and routed to clarification instead of
+ * being force-picked by Haiku. Deliberately excludes domain-adjacent words
+ * like "problem"/"issue" (troubleshooting) and "order" (order-management).
+ */
+const LOW_SIGNAL_TOKENS = new Set([
+  "something", "anything", "everything", "nothing", "someone", "anyone",
+  "somebody", "anybody", "stuff", "thing", "things", "whatever", "anyway",
+  "anyways", "somethings",
+]);
+
 function tokenize(text: string): string[] {
   return text
     .toLowerCase()
@@ -153,6 +169,35 @@ function multiMaxAgents(): number {
   const v = Number(process.env.CLASSIFIER_MULTI_MAX_AGENTS ?? 2);
   if (!Number.isFinite(v) || v < 1) return 2;
   return Math.floor(v);
+}
+
+/**
+ * Multi-intent escalation floor. In SINGLE mode, when a runner-up clears this
+ * score it signals a *plausible second domain* even though it didn't meet the
+ * stricter multi-select gates (`multiMinScore` / `multiRelativeMargin`). Rather
+ * than silently collapse a genuine two-domain request to one specialist, the
+ * heuristic abstains so Haiku can adjudicate single-vs-multi. Single-domain
+ * prompts score 0 on the runner-up, so they never escalate. Defaults to
+ * `heuristicMinScore()` (1.5) — i.e. the runner-up must itself be a legitimate
+ * candidate to trigger escalation. Overridable for tuning.
+ */
+function multiEscalateMinScore(): number {
+  const raw = process.env.CLASSIFIER_MULTI_ESCALATE_MIN_SCORE;
+  if (raw === undefined || raw.trim() === "") return heuristicMinScore();
+  const v = Number(raw);
+  return Number.isFinite(v) ? v : heuristicMinScore();
+}
+
+/**
+ * Whether the Haiku fallback is allowed to abstain (Tier B) on token-bearing
+ * but still-vague messages, so the caller asks the user to clarify instead of
+ * force-routing to the "closest" specialist. Default on. Set
+ * `ORCHESTRATOR_CLARIFY_ON_VAGUE=0` to restore the legacy forced-pick wording.
+ * Tier A (the deterministic low-signal gate) is unaffected by this flag.
+ */
+function clarifyOnVague(): boolean {
+  const v = process.env.ORCHESTRATOR_CLARIFY_ON_VAGUE?.trim().toLowerCase();
+  return v !== "0" && v !== "false" && v !== "no";
 }
 
 const CACHE_MAX_ENTRIES = 256;
@@ -243,7 +288,32 @@ function heuristicScore(messageTokens: Set<string>, messageBigrams: Set<string>,
   return score;
 }
 
-type HeuristicScored = { agentId: string; score: number };
+/**
+ * Human-readable "why" behind a heuristic match: the candidate-corpus terms
+ * that actually overlapped the message. Bigrams come first (quoted, since they
+ * are weighted higher than single tokens), then the longest matching tokens.
+ * Capped so the trace reasoning string stays short.
+ */
+function matchedTerms(
+  messageTokens: Set<string>,
+  messageBigrams: Set<string>,
+  candidate: Candidate,
+  limit = 6,
+): string[] {
+  const bigrams: string[] = [];
+  for (const bg of candidate.bigramSet) {
+    if (messageBigrams.has(bg)) bigrams.push(`"${bg}"`);
+  }
+  const tokens: string[] = [];
+  for (const tok of candidate.tokenSet) {
+    if (messageTokens.has(tok)) tokens.push(tok);
+  }
+  // Longest single tokens first — they tend to be the most domain-specific.
+  tokens.sort((a, b) => b.length - a.length);
+  return [...bigrams, ...tokens].slice(0, limit);
+}
+
+type HeuristicScored = { agentId: string; score: number; matched: string[] };
 
 function scoreAllCandidates(message: string): HeuristicScored[] {
   const candidates = buildCandidates();
@@ -252,7 +322,11 @@ function scoreAllCandidates(message: string): HeuristicScored[] {
   const tokenSet = new Set(tokens);
   const bigramSet = new Set(bigramsOf(tokens));
   return candidates
-    .map((c) => ({ agentId: c.agentId, score: heuristicScore(tokenSet, bigramSet, c) }))
+    .map((c) => ({
+      agentId: c.agentId,
+      score: heuristicScore(tokenSet, bigramSet, c),
+      matched: matchedTerms(tokenSet, bigramSet, c),
+    }))
     .sort((a, b) => b.score - a.score);
 }
 
@@ -288,7 +362,7 @@ function heuristicClassify(message: string): { agentId: string; score: number; r
  *     multiMinScore and are close → multi mode, returns both.
  */
 function heuristicClassifyMulti(message: string): {
-  selections: Array<{ agentId: string; score: number }>;
+  selections: Array<{ agentId: string; score: number; matched: string[] }>;
   rejected: Array<{ agentId: string; score: number; reason: string }>;
 } | undefined {
   const scored = scoreAllCandidates(message);
@@ -309,6 +383,13 @@ function heuristicClassifyMulti(message: string): {
     // Single mode. Honor the original ambiguity gate: when there's no clear
     // winner (gap < heuristicMargin), let Haiku break the tie.
     if (second && top.score - second.score < heuristicMargin()) return undefined;
+    // Multi-intent escalation: a runner-up that itself clears the
+    // secondary-signal floor (default = heuristicMinScore) indicates a
+    // plausible second domain that just missed the stricter multi-select
+    // gates. Defer to Haiku rather than collapse a genuine two-domain request
+    // to one specialist. Single-domain prompts score 0 here, so they stay
+    // single and never reach this branch.
+    if (second && second.score >= multiEscalateMinScore()) return undefined;
     const rejected: Array<{ agentId: string; score: number; reason: string }> = [];
     for (let i = 1; i < scored.length; i++) {
       const cand = scored[i];
@@ -319,15 +400,15 @@ function heuristicClassifyMulti(message: string): {
       rejected.push({ agentId: cand.agentId, score: cand.score, reason });
     }
     return {
-      selections: [{ agentId: top.agentId, score: top.score }],
+      selections: [{ agentId: top.agentId, score: top.score, matched: top.matched }],
       rejected,
     };
   }
 
   // Multi mode. Include the runner-up plus any further candidates that also
   // clear the gates, capped at multiMaxAgents.
-  const selections: Array<{ agentId: string; score: number }> = [
-    { agentId: top.agentId, score: top.score },
+  const selections: Array<{ agentId: string; score: number; matched: string[] }> = [
+    { agentId: top.agentId, score: top.score, matched: top.matched },
   ];
   const rejected: Array<{ agentId: string; score: number; reason: string }> = [];
   for (let i = 1; i < scored.length; i++) {
@@ -352,7 +433,7 @@ function heuristicClassifyMulti(message: string): {
       });
       continue;
     }
-    selections.push({ agentId: cand.agentId, score: cand.score });
+    selections.push({ agentId: cand.agentId, score: cand.score, matched: cand.matched });
   }
   return { selections, rejected };
 }
@@ -382,7 +463,11 @@ export function _setBedrockClientForTests(client: BedrockRuntimeClient | null): 
   _bedrockClient = client;
 }
 
-function buildToolConfig(agentIds: string[], maxAgents: number): ToolConfiguration {
+function buildToolConfig(
+  agentIds: string[],
+  maxAgents: number,
+  allowAbstain: boolean,
+): ToolConfiguration {
   return {
     tools: [
       {
@@ -396,15 +481,26 @@ function buildToolConfig(agentIds: string[], maxAgents: number): ToolConfigurati
               properties: {
                 agentIds: {
                   type: "array",
-                  minItems: 1,
+                  // When abstain is allowed, an empty array is valid (paired
+                  // with abstain: true). Otherwise the legacy minItems:1 holds.
+                  minItems: allowAbstain ? 0 : 1,
                   maxItems: maxAgents,
                   items: {
                     type: "string",
                     enum: agentIds,
                   },
                   description:
-                    "Ordered list of specialist agent IDs (most relevant first). Return a single-element array unless the message clearly spans multiple domains.",
+                    "Ordered list of specialist agent IDs (most relevant first). Return a single-element array unless the message clearly spans multiple domains. Leave empty only when abstaining.",
                 },
+                ...(allowAbstain
+                  ? {
+                      abstain: {
+                        type: "boolean",
+                        description:
+                          "Set true ONLY when the message is too vague or generic to map to any specialist domain (e.g. a bare greeting or 'I need help with something'). When true, return an empty agentIds array.",
+                      },
+                    }
+                  : {}),
                 reasoning: {
                   type: "string",
                   description: "One short clause explaining the choice and (if multi-select) why each agent is needed.",
@@ -428,6 +524,7 @@ async function haikuClassifyMulti(
   if (candidates.length === 0) return undefined;
   const agentIds = candidates.map((c) => c.agentId);
   const maxAgents = multiMaxAgents();
+  const allowAbstain = clarifyOnVague();
 
   const modelId = process.env.CLASSIFIER_MODEL_ID?.trim() || DEFAULT_CLASSIFIER_MODEL_ID;
   const directory = candidates
@@ -436,6 +533,11 @@ async function haikuClassifyMulti(
         `- ${c.agentId}: ${c.label}${c.prompt ? ` — ${c.prompt.replace(/\s+/g, " ").trim()}` : ""}`,
     )
     .join("\n");
+
+  const noFitRule = allowAbstain
+    ? `- If the message is too vague or generic to map to any domain (a bare greeting, "can you help me?", "what can you do?", "I need help with something"), set abstain: true and return an empty agentIds array. Do NOT guess a specialist for vague messages.
+- If the message clearly belongs to a domain, route to it — do NOT abstain. Only abstain when there is genuinely no domain signal.`
+    : `- If nothing fits clearly, still pick the closest single match — do NOT make up an agentId.`;
 
   const systemPrompt = `You are a router that picks the best specialist agent(s) for a customer message.
 Choose from this list ONLY:
@@ -451,7 +553,7 @@ Rules:
 - Examples of multi-agent (correct):
     "Track my order AND recommend a replacement laptop" → ["order-management", "product-recommendation"]
     "My device shows error PWR-001 and I want to return it" → ["troubleshooting", "order-management"]
-- If nothing fits clearly, still pick the closest single match — do NOT make up an agentId.
+${noFitRule}
 - Maximum ${maxAgents} agents. Order most-relevant first.
 - You MUST call the ${TOOL_NAME} tool exactly once.`;
 
@@ -471,14 +573,22 @@ Rules:
         system: [{ text: systemPrompt }],
         messages: [{ role: "user", content: [{ text: inputBlock }] }],
         inferenceConfig: { temperature: 0, maxTokens: 256 },
-        toolConfig: buildToolConfig(agentIds, maxAgents),
+        toolConfig: buildToolConfig(agentIds, maxAgents, allowAbstain),
       }),
     );
     const blocks = out.output?.message?.content ?? [];
     for (const block of blocks) {
       const tu = (block as { toolUse?: { name?: string; input?: unknown } }).toolUse;
       if (tu?.name === TOOL_NAME && tu.input && typeof tu.input === "object") {
-        const input = tu.input as { agentIds?: unknown; reasoning?: string };
+        const input = tu.input as { agentIds?: unknown; reasoning?: string; abstain?: unknown };
+        // Tier B abstain: model explicitly declined to route a vague message.
+        if (allowAbstain && input.abstain === true) {
+          logger.info("[classifier] Haiku abstained on vague message", {
+            modelId,
+            latencyMs: Date.now() - t0,
+          });
+          return undefined;
+        }
         const ids = Array.isArray(input.agentIds)
           ? (input.agentIds as unknown[]).filter(
               (s): s is string => typeof s === "string" && agentIds.includes(s),
@@ -541,14 +651,58 @@ export async function classifyAgents(input: {
 }): Promise<MultiClassificationResult | undefined> {
   const trace = currentTrace();
   const thresholds = snapshotThresholds();
-  const cached = cache.get(cacheKey(input.message));
-  if (cached) {
+  const t0 = Date.now();
+  const emitClassificationDecisions = (
+    decisions: Array<{ agentId: string; reasoning?: string }>,
+    latencyMs: number,
+  ): void => {
+    for (const decision of decisions) {
+      trace?.event("agentcore.classification", {
+        inputMessage: input.message.slice(0, 500),
+        chosenSpecialist: decision.agentId,
+        reasoning: decision.reasoning,
+        latencyMs,
+      });
+    }
+  };
+
+  // Tier A — deterministic low-signal gate. Runs before the
+  // cache/heuristic/Haiku path, so no Bedrock call is made for vague messages.
+  //
+  // A1 — zero content tokens after stopword + short-token stripping
+  // ("Can you help me?", "what can you do?"). Always on.
+  const tierAtokens = tokenize(input.message);
+  if (tierAtokens.length === 0) {
     trace?.event("agentcore.classification", {
       inputMessage: input.message.slice(0, 500),
-      chosenSpecialist: cached.selections[0]?.agentId,
-      reasoning: cached.selections[0]?.reasoning ?? "cache hit",
+      chosenSpecialist: undefined,
+      reasoning: "abstain: low-signal message (no content tokens)",
       latencyMs: 0,
     });
+    return undefined;
+  }
+  // A2 — tokens present but ALL are content-free filler ("I need help with
+  // something", "can you do anything"). These survive stopword stripping yet
+  // carry no domain signal, and Haiku does not reliably abstain on them — it
+  // force-picks the "closest" specialist (the same vague-message bug class as
+  // A1). Abstain deterministically so the orchestrator clarifies. Gated by
+  // clarifyOnVague so ORCHESTRATOR_CLARIFY_ON_VAGUE=0 restores forced-pick.
+  if (clarifyOnVague() && tierAtokens.every((t) => LOW_SIGNAL_TOKENS.has(t))) {
+    trace?.event("agentcore.classification", {
+      inputMessage: input.message.slice(0, 500),
+      chosenSpecialist: undefined,
+      reasoning: "abstain: only low-signal filler tokens (no domain signal)",
+      latencyMs: 0,
+    });
+    return undefined;
+  }
+
+  const cached = cache.get(cacheKey(input.message));
+  if (cached) {
+    emitClassificationDecisions(
+      cached.selections.map((s) => ({ agentId: s.agentId, reasoning: s.reasoning ?? "cache hit" })),
+      0,
+    );
     return {
       selections: cached.selections.map((s) => ({
         agentId: s.agentId,
@@ -562,19 +716,23 @@ export async function classifyAgents(input: {
 
   const heuristic = heuristicClassifyMulti(input.message);
   if (heuristic) {
-    const reasoning =
-      heuristic.selections.length > 1
-        ? `heuristic multi-match (top=${heuristic.selections[0].score.toFixed(2)} runnerUp=${heuristic.selections[1].score.toFixed(2)})`
-        : `heuristic match (score=${heuristic.selections[0].score.toFixed(2)})`;
+    // Per-selection reasoning: surface the actual corpus terms that matched
+    // the message so the trace Reasoning panel explains *why* this specialist
+    // was picked, not just the bare score.
+    const reasoningFor = (s: { score: number; matched: string[] }): string => {
+      const base = `heuristic match (score=${s.score.toFixed(2)})`;
+      return s.matched.length > 0 ? `${base} — matched: ${s.matched.join(", ")}` : base;
+    };
     const decisions = heuristic.selections.map((s) => ({
       agentId: s.agentId,
-      reasoning,
+      reasoning: reasoningFor(s),
     }));
     rememberInCache(input.message, { selections: decisions });
+    emitClassificationDecisions(decisions, Date.now() - t0);
     return {
       selections: heuristic.selections.map((s) => ({
         agentId: s.agentId,
-        reasoning,
+        reasoning: reasoningFor(s),
         source: "heuristic",
         score: s.score,
       })),
@@ -597,6 +755,7 @@ export async function classifyAgents(input: {
       reasoning: haiku.reasoning,
     }));
     rememberInCache(input.message, { selections: decisions });
+    emitClassificationDecisions(decisions, Date.now() - t0);
     return {
       selections: haiku.agentIds.map((id) => ({
         agentId: id,

@@ -149,9 +149,11 @@ console.log(`✅  Regular indexes: ${regularOk}/${regularIndexes.length} created
 
 // Embedding dimension comes from the TS SSOT in
 // api/src/adapters/voyage-embedding.ts so every Atlas index, the deployed
-// model, and the bash deploy helpers agree. There is no env override —
-// raising the dim is a code change pinned by `voyage-ssot-guard.test.ts`.
-import { VOYAGE_EMBEDDING_DIMS as EMBEDDING_DIMENSIONS } from "../api/src/adapters/voyage-embedding.ts";
+// model, and the bash deploy helpers agree. Configurable via VOYAGE_OUTPUT_DIM
+// (default 1024) — `getVoyageEmbeddingDims()` is the single env reader; the
+// default + parity are pinned by `voyage-ssot-guard.test.ts`.
+import { getVoyageEmbeddingDims } from "../api/src/adapters/voyage-embedding.ts";
+const EMBEDDING_DIMENSIONS = getVoyageEmbeddingDims();
 const SIMILARITY = (process.env.VECTOR_SIMILARITY ?? "cosine") as "cosine" | "euclidean" | "dotProduct";
 const WAIT_FOR_ATLAS_SEARCH_INDEXES = ["1", "true", "yes"].includes(
   (process.env.WAIT_FOR_ATLAS_SEARCH_INDEXES ?? "").trim().toLowerCase(),

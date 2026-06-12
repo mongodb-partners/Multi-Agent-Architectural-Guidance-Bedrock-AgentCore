@@ -370,10 +370,9 @@ export async function* invokeAgentRuntime(
         responseBody: responsePreview,
         responseHeadersPreview,
       });
-      // Always emit the observability link. The X-Ray / CloudWatch URLs need
-      // region + (optional) runtimeRequestId; if we don't have the runtime's
-      // request id we still emit the log-group reference so the dev panel can
-      // render a "search by trace id" link instead of a deep-link.
+      // Always emit the observability link. The CloudWatch log-group URL is
+      // always available; the X-Ray deep-link is only added when an OTel
+      // trace id is present (omitted otherwise to avoid a dead link).
       emitObservabilityLink(trace, arn, runtimeRequestId);
     }
     try {
@@ -432,16 +431,21 @@ function emitObservabilityLink(
     const region = process.env.AWS_REGION ?? "us-east-1";
     const runtimeName = arn.split("/").pop() ?? "agentcore-runtime";
     // CloudWatch log group convention for AgentCore Runtime: per-runtime,
-    // per-version log group. We can't know the version at this layer (we
-    // pass qualifier=DEFAULT) so we link to the runtime's log-group prefix.
-    const logGroup = `/aws/bedrock-agentcore/runtimes/${runtimeName}`;
+    // per-endpoint. We always invoke with qualifier=DEFAULT, so the managed
+    // group is `<runtimeId>-DEFAULT` (see AgentCore runtime docs / CDK).
+    const logGroup = `/aws/bedrock-agentcore/runtimes/${runtimeName}-DEFAULT`;
     const cloudwatchLogGroupUrl =
       `https://${region}.console.aws.amazon.com/cloudwatch/home?region=${region}` +
       `#logsV2:log-groups/log-group/${encodeURIComponent(logGroup)}`;
-    const xrayUrl = runtimeRequestId
-      ? `https://${region}.console.aws.amazon.com/cloudwatch/home?region=${region}` +
-        `#xray:traces/${encodeURIComponent(runtimeRequestId)}`
-      : `https://${region}.console.aws.amazon.com/cloudwatch/home?region=${region}#xray:traces`;
+    // X-Ray indexes traces by the canonical `1-<8 hex>-<24 hex>` id, derived
+    // from the 32-hex OTel/W3C trace id. The SDK request id is NOT an X-Ray
+    // id, so we only emit a deep-link when an OTel trace id is available.
+    const otelTraceId = trace.captureOtelIds()?.traceId;
+    const xrayUrl =
+      otelTraceId && otelTraceId.length === 32
+        ? `https://${region}.console.aws.amazon.com/cloudwatch/home?region=${region}` +
+          `#xray:traces/1-${otelTraceId.slice(0, 8)}-${otelTraceId.slice(8)}`
+        : undefined;
     trace.event("agentcore.observability_link", {
       xrayUrl,
       cloudwatchLogGroup: logGroup,

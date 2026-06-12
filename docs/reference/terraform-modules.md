@@ -59,7 +59,8 @@ Per-cluster NLB whose targets are the Atlas Interface VPCE ENIs, exposed back to
 
 ### `mongodb-atlas`
 Atlas cluster + DB user + DB. Emits mode-aware connection strings.
-- **Inputs**: `atlas_project_id`, `cluster_name`, `db_name`, `db_username`, `db_password`, `privatelink_endpoint_id`, `network_mode`, `vpc_cidr`.
+- **Inputs**: `atlas_project_id`, `cluster_name`, `db_name`, `db_username`, `db_password`, `privatelink_endpoint_id`, `network_mode`, `vpc_cidr`, `operator_ip_cidr`.
+- **IP access list (never `0.0.0.0/0`)**: `privatelink` mode scopes the only public-SRV entry to `operator_ip_cidr` (the deploy machine — runtime reaches Atlas via the PrivateLink endpoint, which bypasses the IP access list); `peering` mode scopes it to `vpc_cidr`. Atlas is never reachable from the open internet. Deploy scripts auto-detect `operator_ip_cidr` via `checkip.amazonaws.com` (override with `OPERATOR_IP_CIDR`).
 - **Outputs (mode-aware)**:
   - Always: `cluster_name`, `srv_address`, `connection_string`, `mongo_host`.
   - PrivateLink: `privatelink_connection_string`, `privatelink_srv_host`, `privatelink_ports`.
@@ -72,7 +73,7 @@ Atlas cluster + DB user + DB. Emits mode-aware connection strings.
 
 ### `bedrock-kb`
 Bedrock Knowledge Base with MongoDB Atlas vector store, IAM role, KB S3 bucket, data source, ingestion job seeded with [`deploy/kb-docs/`](../../deploy/kb-docs/).
-- **Inputs**: `aws_region`, `account_id`, `atlas_project_id`, `atlas_cluster_name`, `atlas_srv_host`, `kb_endpoint_host`, `atlas_db_user`, `atlas_db_password`, `atlas_db_name`, `atlas_collection`, `atlas_vector_index`, `embedding_dimensions`, `endpoint_service_name` (PL or peering NLB), `embed_model_id`, `shared_bucket_name`, `kb_docs_path`, `kb_iam_role_name`.
+- **Inputs**: `aws_region`, `account_id`, `atlas_project_id`, `atlas_cluster_name`, `atlas_srv_host`, `kb_endpoint_host`, `atlas_db_user`, `atlas_db_password`, `atlas_db_name`, `atlas_collection`, `atlas_vector_index`, `embedding_dimensions`, `endpoint_service_name` (PL or peering NLB), `embed_model_id`, `shared_bucket_name`, `kb_docs_bucket_name` (optional dedicated KB-docs bucket; empty = use shared bucket), `kb_docs_path`, `kb_iam_role_name`.
 - **Outputs**: `kb_docs_bucket_name`, `kb_docs_bucket_arn`, `atlas_secret_arn`, `atlas_secret_name`, `knowledge_base_id`, `knowledge_base_arn`, `data_source_id`, `kb_role_arn`.
 - **Used by**: `envs/ec2`, `envs/local`.
 
@@ -141,6 +142,8 @@ Per-component CloudWatch log groups: `/<SHARED_RESOURCE_PREFIX>/<env>/{api,ui,mc
 - **Outputs**: `api_log_group_name`, `ui_log_group_name`, `mcp_log_group_name`, `agentcore_log_group_name`.
 - **Used by**: `envs/shared`, `envs/local`.
 
+`envs/shared` wires that split from `api_log_retention_days` (default 30) and `aux_log_retention_days` (default 7). OTel groups use `otel_log_retention_days` and default to the API window.
+
 ### `adot-collector`
 ECR-hosted AWS Distro for OpenTelemetry collector image + config (templated). Runs as a sidecar on EC2 and ships OTLP spans + Atlas Prometheus metrics. Outputs the matching CloudWatch log groups (`otel`, `otel-atlas`).
 - **Inputs**: `project_name`, `environment`, `aws_region`, `shared_bucket_name`, `otel_log_group_name`, `enable_atlas_metrics`, `atlas_scrape_interval_sec`, `atlas_secret_arn`.
@@ -148,9 +151,9 @@ ECR-hosted AWS Distro for OpenTelemetry collector image + config (templated). Ru
 - **Used by**: `envs/ec2` (via the `ec2` module wiring `adot_collector_image` + `adot_config_etag`).
 
 ### `cloudwatch-genai`
-Bedrock GenAI observability — X-Ray CW resource policy, `gen_ai.*` span log group, AgentCore memory/gateway log groups, Transaction Search indexing toggle.
-- **Inputs**: `project_name`, `environment`, `span_retention_days`, `span_sampling_percent`, `agentcore_log_retention_days`, `enable_transaction_search_toggle`, `agentcore_memories[]`, `agentcore_gateways[]`, `agentcore_memory_ids[]`, `agentcore_gateway_ids[]`.
-- **Outputs**: `xray_cw_resource_policy_name`, `spans_log_group_name`, `spans_log_group_arn`, `memory_log_group_names`, `gateway_log_group_names`, `transaction_search_indexing_percentage`.
+Bedrock GenAI observability — X-Ray CW resource policy, `gen_ai.*` span log group, Transaction Search indexing toggle, and optional AgentCore vended `APPLICATION_LOGS`.
+- **Inputs**: `project_name`, `environment`, `span_retention_days`, `span_sampling_percent`, `agentcore_log_retention_days`, `enable_transaction_search_toggle`, `enable_agentcore_vended_application_logs`, `agentcore_memories[]`, `agentcore_gateways[]`, `agentcore_memory_ids[]`, `agentcore_gateway_ids[]`.
+- **Outputs**: `xray_cw_resource_policy_name`, `spans_log_group_name`, `spans_log_group_arn`, `memory_log_group_names`, `gateway_log_group_names`, `transaction_search_indexing_percentage`. `memory_log_group_names` / `gateway_log_group_names` are empty unless `enable_agentcore_vended_application_logs=true`.
 - **Used by**: `envs/ec2`.
 
 ### `bedrock-invocation-logging`

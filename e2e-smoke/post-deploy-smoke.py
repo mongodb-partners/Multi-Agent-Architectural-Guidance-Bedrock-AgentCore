@@ -123,11 +123,13 @@ def manifest_doc(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text())
 
 
-def check_health(api_url: str, resources: dict[str, Any]) -> None:
+def check_health(api_url: str, resources: dict[str, Any], manifest: dict[str, Any]) -> None:
     """
     /health smoke. We mirror deploy-project.sh Phase 9a2's contract:
     - mongodb + agentcore: HARD-REQUIRE 'connected'.
-    - bedrockKnowledgeBase: HARD-REQUIRE 'connected' when KB id is provisioned.
+    - bedrockKnowledgeBase: HARD-REQUIRE 'connected' when KB id is provisioned,
+      except peering-nlb where Bedrock-managed ingestion is experimental and
+      deployment keeps Mongo/vector smoke as the source of truth.
     - mcpServer: omitted on unauthenticated GET /health (Gateway MCP requires
       JWT). When present (optional Bearer on /health), WARN ONLY if not
       'connected'. Real MCP regressions are caught by runtime env wiring +
@@ -152,6 +154,13 @@ def check_health(api_url: str, resources: dict[str, Any]) -> None:
             "chat checks will catch real MCP regressions."
         )
     if resources.get("bedrock_kb_id"):
+        kb_conn_mode = _kb_connectivity_mode_from_manifest(manifest)
+        if kb_conn_mode == "peering-nlb" and deps.get("bedrockKnowledgeBase") != "connected":
+            log(
+                "  warning: /health dependency bedrockKnowledgeBase is "
+                f"{deps.get('bedrockKnowledgeBase')!r}; peering-nlb KB ingestion is non-blocking."
+            )
+            return
         require(
             deps.get("bedrockKnowledgeBase") == "connected",
             f"/health dependency bedrockKnowledgeBase is {deps.get('bedrockKnowledgeBase')!r}",
@@ -340,6 +349,53 @@ def check_terraform_outputs(resources: dict[str, Any], manifest: dict[str, Any])
     require("/" in cw_ui and cw_ui.rstrip("/").endswith("/ui"), f"unexpected ui log group: {cw_ui!r}")
 
 
+def check_cloudwatch_log_retention(resources: dict[str, Any]) -> None:
+    log("\n== CloudWatch log retention ==")
+    if os.environ.get("SKIP_TERRAFORM_CHECKS") == "1":
+        log("skipped via SKIP_TERRAFORM_CHECKS=1")
+        return
+
+    region = str(resources.get("aws_region") or os.environ.get("AWS_REGION") or "").strip()
+    require(region, "aws_region missing; cannot check CloudWatch log retention")
+
+    expected_outputs = {
+        "cloudwatch_api_log_group": 30,
+        "cloudwatch_ui_log_group": 7,
+        "cloudwatch_mcp_log_group": 7,
+        "cloudwatch_agentcore_log_group": 7,
+    }
+    observed: dict[str, int | None] = {}
+
+    for output_name, expected_days in expected_outputs.items():
+        group_name = run(["terraform", "output", "-raw", output_name], cwd=TF_DIR)
+        require(group_name, f"{output_name} output empty")
+        raw = run(
+            [
+                "aws",
+                "logs",
+                "describe-log-groups",
+                "--region",
+                region,
+                "--log-group-name-prefix",
+                group_name,
+                "--output",
+                "json",
+            ],
+            timeout=30,
+        )
+        groups = json.loads(raw).get("logGroups") or []
+        match = next((g for g in groups if g.get("logGroupName") == group_name), None)
+        require(match is not None, f"CloudWatch log group not found: {group_name}")
+        retention = match.get("retentionInDays")
+        observed[group_name] = retention
+        require(
+            retention == expected_days,
+            f"{group_name}: retention {retention or 'Never expire'} days, expected {expected_days}",
+        )
+
+    log(f"PASS cloudwatch_log_retention {json.dumps(observed, sort_keys=True)}")
+
+
 def check_bedrock_kb(resources: dict[str, Any], manifest: dict[str, Any]) -> None:
     network_mode = _network_mode_from_manifest(manifest)
     kb_conn_mode = _kb_connectivity_mode_from_manifest(manifest)
@@ -366,6 +422,78 @@ def check_bedrock_kb(resources: dict[str, Any], manifest: dict[str, Any]) -> Non
     info = json.loads(raw)
     log(json.dumps(info, sort_keys=True))
     require(info.get("status") == "ACTIVE", f"Bedrock KB is not ACTIVE: {info.get('status')}")
+
+    ds_id = run(
+        [
+            "aws",
+            "bedrock-agent",
+            "list-data-sources",
+            "--region",
+            str(region),
+            "--knowledge-base-id",
+            str(kb_id),
+            "--query",
+            "dataSourceSummaries[0].dataSourceId",
+            "--output",
+            "text",
+        ],
+        timeout=60,
+    )
+    require(ds_id and ds_id != "None", f"Bedrock KB {kb_id} has no data source")
+
+    latest_job_raw = run(
+        [
+            "aws",
+            "bedrock-agent",
+            "list-ingestion-jobs",
+            "--region",
+            str(region),
+            "--knowledge-base-id",
+            str(kb_id),
+            "--data-source-id",
+            ds_id,
+            "--sort-by",
+            "attribute=STARTED_AT,order=DESCENDING",
+            "--max-results",
+            "1",
+            "--query",
+            (
+                "ingestionJobSummaries[0].{"
+                "jobId:ingestionJobId,"
+                "status:status,"
+                "scanned:statistics.numberOfDocumentsScanned,"
+                "failed:statistics.numberOfDocumentsFailed,"
+                "new:statistics.numberOfNewDocumentsIndexed,"
+                "modified:statistics.numberOfModifiedDocumentsIndexed"
+                "}"
+            ),
+            "--output",
+            "json",
+        ],
+        timeout=60,
+    )
+    latest_job = json.loads(latest_job_raw)
+    require(latest_job, f"Bedrock KB data source {ds_id} has no ingestion jobs")
+    log(f"latest KB ingestion: {json.dumps(latest_job, sort_keys=True)}")
+    status = str(latest_job.get("status") or "")
+    scanned = int(latest_job.get("scanned") or 0)
+    failed = int(latest_job.get("failed") or 0)
+    kb_doc_files = sorted((ROOT / "deploy" / "kb-docs").glob("*.txt"))
+    kb_doc_names = [path.name for path in kb_doc_files]
+    require(kb_doc_files, "no local KB source documents found under deploy/kb-docs/*.txt")
+    if kb_conn_mode == "peering-nlb" and (status != "COMPLETE" or failed > 0):
+        log(
+            "  warning: latest KB ingestion is "
+            f"status={status!r} scanned={scanned} failed={failed}; "
+            "peering-nlb KB ingestion is experimental and non-blocking."
+        )
+    else:
+        require(status == "COMPLETE", f"latest KB ingestion job is not COMPLETE: {status}")
+        require(
+            scanned == len(kb_doc_files),
+            f"latest KB ingestion job scanned {scanned} source document(s), expected {len(kb_doc_files)}: {kb_doc_names}",
+        )
+        require(failed == 0, f"latest KB ingestion job completed with {failed} failed source document(s)")
 
     endpoint_service = str(info.get("endpointServiceName") or "")
     endpoint_host = str(info.get("endpoint") or "")
@@ -1076,6 +1204,37 @@ def check_cloudwatch_join(resources: dict[str, Any], api_url: str, token: str) -
             "WARN: no AgentCore runtime ARNs in env — AgentCore trace join skipped."
         )
         return
+    existing_agentcore_groups: list[str] = []
+    for grp in agentcore_groups:
+        try:
+            raw = run(
+                [
+                    "aws",
+                    "logs",
+                    "describe-log-groups",
+                    "--region",
+                    region,
+                    "--log-group-name-prefix",
+                    grp,
+                    "--output",
+                    "json",
+                ],
+                timeout=20,
+            )
+            groups = json.loads(raw).get("logGroups") or []
+        except (SmokeFailure, json.JSONDecodeError):
+            continue
+        if any(g.get("logGroupName") == grp for g in groups):
+            existing_agentcore_groups.append(grp)
+
+    if not existing_agentcore_groups:
+        log(
+            "AgentCore vended APPLICATION_LOGS disabled or absent — skipping "
+            "payload-bearing AgentCore trace join. API trace join above still "
+            "validates sanitized app logs."
+        )
+        return
+    agentcore_groups = existing_agentcore_groups
     log(f"agentcore_log_groups_scanned={len(agentcore_groups)} (vended-logs)")
 
     # AgentCore-managed log delivery to CloudWatch can lag 30-90 s on cold
@@ -1450,10 +1609,12 @@ def check_long_term_memory_embeddings(
         "  const afSample = await d.collection('agent_memory_facts').findOne("
         "    { ts: { $gte: sinceFacts }, fact: { $regex: uniqueToken }, embedding: { $exists: true, $type: 'array' } },"
         "    { projection: { embedding: 1, embeddingModel: 1 } });"
-        # chat_messages: any embedded row in the last 1h (timestamp is a string)
+        # chat_messages: newest embedded row in the last 1h (timestamp is a string).
+        # Sort descending so a provider switch mid-window cannot make findOne()
+        # return a stale row from the previous embeddings backend.
         "  const cmSample = await d.collection('chat_messages').findOne("
         "    { timestamp: { $gte: sinceMsgs }, embedding: { $exists: true, $type: 'array' } },"
-        "    { projection: { embedding: 1, embeddingModel: 1 } });"
+        "    { projection: { embedding: 1, embeddingModel: 1 }, sort: { timestamp: -1 } });"
         "  process.stdout.write(JSON.stringify({"
         "    agent_memory_facts: { withEmbeddingExists: Boolean(afSample), model: afSample ? (afSample.embeddingModel||null) : null, dim: afSample && Array.isArray(afSample.embedding) ? afSample.embedding.length : null },"
         "    chat_messages:      { withEmbeddingExists: Boolean(cmSample), model: cmSample ? (cmSample.embeddingModel||null) : null, dim: cmSample && Array.isArray(cmSample.embedding) ? cmSample.embedding.length : null },"
@@ -1509,12 +1670,13 @@ def main() -> int:
     log(f"manifest={args.manifest}")
     log(f"network_mode={_network_mode_from_manifest(full_manifest)}  kb_connectivity_mode={_kb_connectivity_mode_from_manifest(full_manifest)}")
 
-    check_health(api_url, resources)
+    check_health(api_url, resources, full_manifest)
     token = cognito_token(client_id)
     log(f"cognito_token_len={len(token)}")
     check_agents_endpoint(api_url, token)
     check_embedding_manifest_and_sagemaker(resources)
     check_terraform_outputs(resources, full_manifest)
+    check_cloudwatch_log_retention(resources)
     check_bedrock_kb(resources, full_manifest)
     # Verify every AgentCore Runtime has the Gateway MCP wiring vars BEFORE
     # the live chat checks. Missing AGENTCORE_GATEWAY_URL means mongodb_* tools cannot

@@ -80,17 +80,18 @@ log "UI repo  : $UI_REPO"
 log "Registry : $ECR_REGISTRY"
 echo ""
 
-# ── ECR login ─────────────────────────────────────────────────────────────────
-log "Logging in to ECR..."
-aws ecr get-login-password --region "$AWS_REGION" \
-  | docker login --username AWS --password-stdin "$ECR_REGISTRY"
-ok "ECR login successful"
-
 # Source the shared build/push helper (plain `docker build --platform` + `docker push`).
 # Cross-platform builds (linux/arm64 from amd64 hosts, linux/amd64 from Apple
 # Silicon) rely on QEMU binfmt being registered on the operator's machine —
 # the `pf_check_docker_cross_platforms` preflight verifies this before deploy.
+# Sourced BEFORE ECR login so `ecr_login_with_retry` is available.
 source "$SCRIPT_DIR/_docker-build.sh"
+
+# ── ECR login ─────────────────────────────────────────────────────────────────
+log "Logging in to ECR..."
+ecr_login_with_retry "$AWS_REGION" "$ECR_REGISTRY" \
+  || err "ECR login failed after retries (transient DNS/network did not clear)"
+ok "ECR login successful"
 
 # ── Build + push API image ────────────────────────────────────────────────────
 log "Building + pushing API image (linux/amd64, context: repo root, Dockerfile: api/Dockerfile)..."

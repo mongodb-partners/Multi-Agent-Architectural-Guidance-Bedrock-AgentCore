@@ -26,11 +26,11 @@ import {
   InvokeAgentRuntimeCommand,
 } from "@aws-sdk/client-bedrock-agentcore";
 import { runChatStream } from "./lib/run-chat-stream.ts";
-import { runSwarmChatStream } from "./lib/swarm-chat-stream.ts";
 import {
   runMultiSpecialistFlow,
   type SpecialistInvoker,
 } from "./lib/multi-specialist-orchestrator.ts";
+import { runOrchestratorClarification } from "./lib/orchestrator-clarify.ts";
 import { logger } from "./lib/logger.ts";
 import { assertEmbeddingsProvider } from "./lib/assert-embeddings-provider.ts";
 import type { ChatMessage } from "./lib/session-store.ts";
@@ -273,52 +273,23 @@ async function* handleOrchestrator(
         successful: result.successfulSpecialists.length,
         failed: result.failedSpecialists.length,
       });
-      // Fallback: classifier returned nothing. Try the legacy swarm
-      // classifier as a last resort — only when there are zero successful
-      // OR failed specialists (i.e. nothing was even attempted).
-      if (
-        result.pathTaken === "single" &&
-        result.successfulSpecialists.length === 0 &&
-        result.failedSpecialists.length === 0
-      ) {
-        let targetAgentId = "";
-        let reasoning: string | undefined;
-        for await (const part of runSwarmChatStream({
-          userMessage: message,
-          priorTurns,
-          memoryContext,
-        })) {
-          if (part.type === "handoff") {
-            targetAgentId = part.to;
-            reasoning = part.label || undefined;
-            break;
-          }
-          if (part.type === "stream_error") throw new Error(part.message);
-        }
-        if (targetAgentId && getSpecialistArn(targetAgentId)) {
-          logger.info("[runtime:orchestrator] swarm-fallback routing", {
-            sessionId,
-            targetAgentId,
-          });
-          yield { type: "handoff", from: "orchestrator", to: targetAgentId, label: reasoning ?? "" };
-          for await (const ev of invokeSpecialistStream(
-            targetAgentId,
-            { message, sessionId, priorTurns, memoryContext, userJwt },
-            collector,
-            undefined,
-          )) {
-            if (ev.kind === "stream") {
-              yield ev.part;
-            } else if (ev.kind === "trace") {
-              forwardTrace?.(ev.event);
-            }
-          }
-        }
-      }
       return;
     }
     const ev = next.value;
-    if (ev.kind === "specialist_started") {
+    if (ev.kind === "needs_clarification") {
+      // Vague / low-signal message: the classifier abstained. Ask the customer
+      // to clarify via the orchestrator instead of force-routing to a
+      // specialist. Mirrors the Hono API path so the two routes stay
+      // behaviorally identical.
+      yield { type: "agent_active", agentId: "orchestrator", agentName: "Orchestrator" };
+      for await (const part of runOrchestratorClarification({
+        userMessage: message,
+        priorTurns,
+        memoryContext,
+      })) {
+        yield part;
+      }
+    } else if (ev.kind === "specialist_started") {
       yield {
         type: "handoff",
         from: "orchestrator",

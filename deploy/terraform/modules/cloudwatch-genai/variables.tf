@@ -31,6 +31,12 @@ variable "agentcore_log_retention_days" {
   default     = 7
 }
 
+variable "enable_agentcore_vended_application_logs" {
+  type        = bool
+  description = "Opt in to AgentCore service-vended APPLICATION_LOGS for Memory, Gateway, and Runtime resources. These logs include raw request_payload / response_payload bodies, so the privacy-safe default is false."
+  default     = false
+}
+
 variable "enable_transaction_search_toggle" {
   type        = bool
   default     = false

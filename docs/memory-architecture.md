@@ -21,7 +21,7 @@ flowchart TB
   LT --> LTAC[AgentCore Memory Store<br/>fallback]
 ```
 
-For an editable picture: [`diagrams/03-memory-architecture.drawio`](diagrams/03-memory-architecture.drawio).
+For a dedicated Mermaid diagram page (write path + hybrid read pipeline): [`diagrams/03-memory-architecture.md`](diagrams/03-memory-architecture.md).
 
 ---
 

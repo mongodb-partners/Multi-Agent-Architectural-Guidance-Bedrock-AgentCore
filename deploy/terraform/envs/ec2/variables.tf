@@ -17,6 +17,12 @@ variable "shared_bucket_name" {
   type = string
 }
 
+variable "kb_docs_bucket_name" {
+  type        = string
+  default     = ""
+  description = "Optional dedicated S3 bucket for KB source docs. Empty = use the shared bucket."
+}
+
 # ── Shared network (envs/network) ─────────────────────────────────────────────
 variable "shared_vpc_name" {
   type        = string
@@ -53,6 +59,18 @@ variable "atlas_db_password" {
 variable "atlas_db_name" {
   type        = string
   description = "MongoDB Atlas database name. Caller must supply a project+env-scoped value, e.g. <PROJECT_NAME>_<ENVIRONMENT> (underscored)."
+}
+
+# Voyage embedding output dimension. Default 1024 matches VOYAGE_DEFAULT_EMBEDDING_DIMS
+# in api/src/adapters/voyage-embedding.ts (the SSOT). Terraform can't shell out to
+# voyage-print.ts, so this default is pinned by the bun guard test
+# `voyage SSOT — terraform <-> TS parity for embedding dim`. Deploy scripts
+# derive this Terraform variable from VOYAGE_OUTPUT_DIM via voyage_embedding_dims.
+# Only voyage-multimodal-3.5 supports non-1024 Matryoshka dims (256/512/1024/2048).
+variable "voyage_output_dim" {
+  type        = number
+  default     = 1024
+  description = "Voyage embedding output dimension passed to seed-indexes.ts (Atlas numDimensions). Derived from VOYAGE_OUTPUT_DIM by deploy scripts."
 }
 
 variable "mongodb_allow_write" {
@@ -116,6 +134,34 @@ variable "network_mode" {
   validation {
     condition     = contains(["privatelink", "peering"], var.network_mode)
     error_message = "network_mode must be either 'privatelink' or 'peering'."
+  }
+}
+
+variable "allow_network_mode_mismatch_on_destroy" {
+  type        = bool
+  default     = false
+  description = "Destroy-only escape hatch used by deploy/scripts/destroy.sh. Normal deploy/plan keeps the SSM network_mode canary strict; destroy can proceed through stale or partially torn-down network-mode metadata."
+}
+
+variable "atlas_peering_cidr" {
+  type        = string
+  default     = ""
+  description = "Destroy-only fallback Atlas peering CIDR. Normal deploy reads this from envs/network SSM; destroy can pass it directly when SSM peering keys are absent during partial cleanup."
+}
+
+# WHY: envs/ec2 owns the Atlas cluster + its IP access list (via the
+# mongodb-atlas module), so it must accept the operator IP and forward it down.
+# deploy-project.sh auto-detects the value and writes it into terraform.tfvars;
+# without this variable the per-project stack could not scope the allowlist and
+# would fall back to opening Atlas to the internet.
+variable "operator_ip_cidr" {
+  type        = string
+  default     = ""
+  description = "Operator/deploy-machine public IP in CIDR /32 form. In network_mode='privatelink' this is the ONLY Atlas IP access list entry the mongodb-atlas module creates (replaces the former 0.0.0.0/0 open entry) so Atlas is reachable from the deploy machine but not the public internet. Auto-detected and written to terraform.tfvars by deploy-project.sh (override with OPERATOR_IP_CIDR / TF_VAR_my_ip in .env). Ignored in peering mode."
+
+  validation {
+    condition     = var.operator_ip_cidr == "" || can(cidrnetmask(var.operator_ip_cidr))
+    error_message = "operator_ip_cidr must be empty or a valid IPv4 CIDR (e.g. 203.0.113.42/32)."
   }
 }
 
@@ -190,8 +236,8 @@ variable "mongodb_mcp_image_digest" {
   default     = ""
 }
 
-# Note: log_retention_days lives in envs/shared/variables.tf — the API/UI/
-# MCP/AgentCore/OTel log groups are shared singletons.
+# Note: shared log retention variables live in envs/shared/variables.tf — the
+# API/UI/MCP/AgentCore/OTel log groups are shared singletons.
 
 # ── CloudWatch GenAI Observability ────────────────────────────────────────────
 variable "enable_genai_observability" {
@@ -225,8 +271,14 @@ variable "span_sampling_percent" {
 
 variable "agentcore_vended_log_retention_days" {
   type        = number
-  description = "Retention for AgentCore memory + gateway vended APPLICATION_LOGS log groups."
+  description = "Retention for AgentCore vended APPLICATION_LOGS log groups when enable_agentcore_vended_application_logs=true."
   default     = 7
+}
+
+variable "enable_agentcore_vended_application_logs" {
+  type        = bool
+  description = "Opt in to AgentCore service-vended APPLICATION_LOGS for Memory, Gateway, and Runtime resources. These logs include raw request_payload / response_payload bodies, so the privacy-safe default is false."
+  default     = false
 }
 
 # Note: Bedrock invocation logging variables (enable_bedrock_invocation_logging,

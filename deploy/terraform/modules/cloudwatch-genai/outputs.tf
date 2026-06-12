@@ -19,12 +19,12 @@ output "spans_log_group_arn" {
 
 output "memory_log_group_names" {
   value       = { for k, lg in aws_cloudwatch_log_group.agentcore_memory : k => lg.name }
-  description = "Map of AgentCore memory id -> vended log group name."
+  description = "Map of AgentCore memory id -> vended log group name when enable_agentcore_vended_application_logs=true."
 }
 
 output "gateway_log_group_names" {
   value       = { for k, lg in aws_cloudwatch_log_group.agentcore_gateway : k => lg.name }
-  description = "Map of AgentCore gateway id -> vended log group name."
+  description = "Map of AgentCore gateway id -> vended log group name when enable_agentcore_vended_application_logs=true."
 }
 
 output "transaction_search_indexing_percentage" {

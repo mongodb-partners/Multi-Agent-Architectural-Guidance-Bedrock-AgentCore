@@ -1,11 +1,11 @@
 output "kb_docs_bucket_name" {
-  value       = var.shared_bucket_name
-  description = "Shared S3 bucket name (KB docs live under kb-docs/docs/ prefix)"
+  value       = local.kb_bucket_name
+  description = "S3 bucket holding KB docs under the kb-docs/docs/ prefix (dedicated bucket when kb_docs_bucket_name is set, otherwise the shared bucket)"
 }
 
 output "kb_docs_bucket_arn" {
-  value       = var.shared_bucket_arn
-  description = "Shared S3 bucket ARN"
+  value       = local.kb_bucket_arn
+  description = "ARN of the S3 bucket holding KB docs (dedicated or shared)"
 }
 
 output "atlas_secret_arn" {

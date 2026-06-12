@@ -40,17 +40,66 @@ locals {
   # S3 prefix under the shared bucket where KB docs are stored.
   # Bedrock data source is scoped to this prefix only.
   kb_docs_prefix = "kb-docs/docs"
+
+  # When kb_docs_bucket_name is set (and differs from the shared bucket), this
+  # module creates a dedicated bucket for KB source docs; otherwise docs live in
+  # the shared bucket. Reference the resource attribute (not the raw var) so
+  # Terraform creates the bucket BEFORE uploading objects on first apply.
+  kb_use_dedicated = var.kb_docs_bucket_name != "" && var.kb_docs_bucket_name != var.shared_bucket_name
+  kb_bucket_name   = local.kb_use_dedicated ? aws_s3_bucket.kb_docs[0].id : var.shared_bucket_name
+  kb_bucket_arn    = local.kb_use_dedicated ? aws_s3_bucket.kb_docs[0].arn : var.shared_bucket_arn
 }
 
 # =============================================================================
-# S3 — upload KB source documents to shared bucket under kb-docs/docs/ prefix
-# Bucket is created and managed by deploy/terraform/bootstrap.
+# S3 — optional dedicated bucket for KB source documents.
+# Created only when var.kb_docs_bucket_name is set (and differs from the shared
+# bucket). When unset, KB docs live in the shared bucket (managed by
+# deploy/terraform/bootstrap). Mirrors the bootstrap bucket hardening; uses
+# force_destroy = true because this bucket holds no Terraform state.
+# =============================================================================
+
+resource "aws_s3_bucket" "kb_docs" {
+  count = local.kb_use_dedicated ? 1 : 0
+
+  bucket        = var.kb_docs_bucket_name
+  force_destroy = true
+
+  tags = { Name = var.kb_docs_bucket_name }
+}
+
+resource "aws_s3_bucket_versioning" "kb_docs" {
+  count  = local.kb_use_dedicated ? 1 : 0
+  bucket = aws_s3_bucket.kb_docs[0].id
+  versioning_configuration { status = "Enabled" }
+}
+
+resource "aws_s3_bucket_server_side_encryption_configuration" "kb_docs" {
+  count  = local.kb_use_dedicated ? 1 : 0
+  bucket = aws_s3_bucket.kb_docs[0].id
+  rule {
+    apply_server_side_encryption_by_default { sse_algorithm = "AES256" }
+  }
+}
+
+resource "aws_s3_bucket_public_access_block" "kb_docs" {
+  count                   = local.kb_use_dedicated ? 1 : 0
+  bucket                  = aws_s3_bucket.kb_docs[0].id
+  block_public_acls       = true
+  ignore_public_acls      = true
+  block_public_policy     = true
+  restrict_public_buckets = true
+}
+
+# =============================================================================
+# S3 — upload KB source documents under the kb-docs/docs/ prefix.
+# Target bucket is the dedicated bucket above when configured, otherwise the
+# shared bucket created by deploy/terraform/bootstrap.
 # =============================================================================
 
 resource "aws_s3_object" "kb_doc" {
   for_each = fileset(var.kb_docs_path, "*.txt")
 
-  bucket       = var.shared_bucket_name
+  bucket       = local.kb_bucket_name
   key          = "${local.kb_docs_prefix}/${each.value}"
   source       = "${var.kb_docs_path}/${each.value}"
   content_type = "text/plain"
@@ -86,8 +135,8 @@ resource "aws_iam_role_policy" "kb_s3" {
       Effect = "Allow"
       Action = ["s3:GetObject", "s3:ListBucket"]
       Resource = [
-        var.shared_bucket_arn,
-        "${var.shared_bucket_arn}/kb-docs/*"
+        local.kb_bucket_arn,
+        "${local.kb_bucket_arn}/kb-docs/*"
       ]
     }]
   })
@@ -172,7 +221,7 @@ resource "null_resource" "ensure_collection" {
     command = "bun ${var.ensure_collection_script}"
 
     environment = {
-      MONGODB_URI  = "mongodb+srv://${var.atlas_db_user}:${var.atlas_db_password}@${var.atlas_srv_host}/?retryWrites=true&w=majority"
+      MONGODB_URI  = "mongodb+srv://${urlencode(var.atlas_db_user)}:${urlencode(var.atlas_db_password)}@${var.atlas_srv_host}/?retryWrites=true&w=majority"
       MONGODB_DB   = var.atlas_db_name
       MONGODB_COLL = var.atlas_collection
     }
@@ -293,7 +342,7 @@ resource "aws_bedrockagent_data_source" "s3" {
   data_source_configuration {
     type = "S3"
     s3_configuration {
-      bucket_arn         = var.shared_bucket_arn
+      bucket_arn         = local.kb_bucket_arn
       inclusion_prefixes = ["${local.kb_docs_prefix}/"]
     }
   }
@@ -376,85 +425,133 @@ resource "null_resource" "ingestion" {
       REGION="${var.aws_region}"
       KB_ID="${aws_bedrockagent_knowledge_base.this.id}"
       DS_ID="${aws_bedrockagent_data_source.s3.data_source_id}"
+      EXPECTED_DOCS="${length(fileset(var.kb_docs_path, "*.txt"))}"
+      INGESTION_REQUIRED="${var.ingestion_required}"
 
-      echo "Starting Bedrock KB ingestion job (kb=$KB_ID, ds=$DS_ID)..."
-      JOB_ID=$(aws bedrock-agent start-ingestion-job \
-        --knowledge-base-id "$KB_ID" \
-        --data-source-id "$DS_ID" \
-        --region "$REGION" \
-        --query 'ingestionJob.ingestionJobId' --output text 2>/tmp/_ingest_err.txt) || {
-        _ERR=$(cat /tmp/_ingest_err.txt 2>/dev/null || echo "unknown error")
-        if echo "$_ERR" | grep -qE "not able to call specified bedrock embedding model|Operation not allowed"; then
-          echo "WARNING: Bedrock model access not enabled for the embedding model."
-          echo "  → Enable 'Titan Embed Text v2' in the Bedrock console (Model access page)"
-          echo "    then re-run: terraform apply (or deploy.sh) to retry ingestion."
-          exit 0
+      fail_or_warn_ingestion() {
+        if [ "$INGESTION_REQUIRED" = "true" ]; then
+          exit 1
         fi
-        echo "ERROR starting ingestion job: $_ERR"
-        exit 1
+        echo "WARNING: Bedrock KB ingestion failed, but ingestion_required=false."
+        echo "WARNING: Continuing deploy because peering-NLB KB ingestion is experimental; app MongoDB/vector data was seeded separately."
+        exit 0
       }
-      echo "Job started: $JOB_ID"
 
-      for i in $(seq 1 30); do
-        STATUS=$(aws bedrock-agent get-ingestion-job \
+      print_ingestion_failure() {
+        echo "ERROR: Bedrock KB ingestion did not fully index all source documents."
+        echo "Failure details:"
+        FAILURE_JSON=$(aws bedrock-agent get-ingestion-job \
           --knowledge-base-id "$KB_ID" \
           --data-source-id "$DS_ID" \
           --ingestion-job-id "$JOB_ID" \
           --region "$REGION" \
-          --query 'ingestionJob.status' --output text 2>/dev/null || echo "IN_PROGRESS")
-        echo "  Ingestion: $STATUS ($i/30)"
-        if [ "$STATUS" = "COMPLETE" ]; then echo "Ingestion complete."; exit 0; fi
-        if [ "$STATUS" = "FAILED" ]; then
-          # Hard-fail the deploy. Silent FAILED was how we previously shipped
-          # P1-6 Option A as "done" while every ingestion job was failing
-          # with E11000 on the seed `docId_1` unique index — see memory.md
-          # ("Bedrock KB ingestion — `troubleshooting_docs.docId` must be a
-          # **partial** unique index"). Surfacing the failure reasons here
-          # makes that class of regression impossible to miss in CI.
-          echo "ERROR: Bedrock KB ingestion FAILED. Failure reasons:"
-          FAILURE_JSON=$(aws bedrock-agent get-ingestion-job \
+          --query 'ingestionJob.{Stats:statistics,Errors:failureReasons}' --output json 2>/dev/null || echo '{}')
+        echo "$FAILURE_JSON"
+
+        # TLS-keyword detection — catches the experimental peering-NLB-for-KB
+        # path failing TLS validation (Bedrock's MongoDB driver may reject
+        # the standard cluster cert when reached through NLB-over-peering).
+        # PrivateLink path won't hit these keywords on a normal ingestion;
+        # this banner only fires when the driver explicitly reports a TLS
+        # issue, so it's safe to print unconditionally.
+        if echo "$FAILURE_JSON" | grep -qiE "tls|certificate|ssl|handshake|hostname|unable to verify"; then
+          echo ""
+          echo "════════════════════════════════════════════════════════════════════"
+          echo " TLS / CERTIFICATE FAILURE detected in Bedrock KB ingestion."
+          echo ""
+          echo " If you are running in VPC peering mode (NETWORK_MODE=peering),"
+          echo " the NLB-over-peering path for KB ingestion is EXPERIMENTAL and"
+          echo " not partner-validated. Bedrock's MongoDB driver may reject the"
+          echo " standard cluster certificate when reached through the NLB."
+          echo ""
+          echo " PrivateLink and VPC peering are mutually exclusive per account."
+          echo " To recover, switch the entire deployment back to PrivateLink:"
+          echo "   ./deploy/destroy/destroy-project-with-vpc-peering.sh"
+          echo "   ./deploy/destroy/destroy-shared-with-vpc-peering.sh   # shared + network"
+          echo "   # Set NETWORK_MODE=privatelink in .env (or unset for default)"
+          echo "   ./deploy/deploy-full-with-privatelink.sh"
+          echo ""
+          echo " Alternative: set TF_VAR_enable_kb_peering=false to keep peering"
+          echo " for runtime traffic but use public Atlas SRV for KB ingestion"
+          echo " (privacy regression — KB ingestion no longer end-to-end private)."
+          echo "════════════════════════════════════════════════════════════════════"
+        fi
+        echo "→ enable APPLICATION_LOGS on the KB and grep status_reasons for the real driver error before assuming it's a network/PrivateLink issue."
+      }
+
+      for attempt in 1 2; do
+        echo "Starting Bedrock KB ingestion job (kb=$KB_ID, ds=$DS_ID, expected_docs=$EXPECTED_DOCS, attempt=$attempt/2)..."
+        JOB_ID=$(aws bedrock-agent start-ingestion-job \
+          --knowledge-base-id "$KB_ID" \
+          --data-source-id "$DS_ID" \
+          --region "$REGION" \
+          --query 'ingestionJob.ingestionJobId' --output text 2>/tmp/_ingest_err.txt) || {
+          _ERR=$(cat /tmp/_ingest_err.txt 2>/dev/null || echo "unknown error")
+          if echo "$_ERR" | grep -qE "not able to call specified bedrock embedding model|Operation not allowed"; then
+            echo "WARNING: Bedrock model access not enabled for the embedding model."
+            echo "  → Enable 'Titan Embed Text v2' in the Bedrock console (Model access page)"
+            echo "    then re-run: terraform apply (or deploy.sh) to retry ingestion."
+            exit 0
+          fi
+          echo "ERROR starting ingestion job: $_ERR"
+          exit 1
+        }
+        echo "Job started: $JOB_ID"
+
+        for i in $(seq 1 30); do
+          JOB_STATS=$(aws bedrock-agent get-ingestion-job \
             --knowledge-base-id "$KB_ID" \
             --data-source-id "$DS_ID" \
             --ingestion-job-id "$JOB_ID" \
             --region "$REGION" \
-            --query 'ingestionJob.{Stats:statistics,Errors:failureReasons}' --output json 2>/dev/null || echo '{}')
-          echo "$FAILURE_JSON"
-          # TLS-keyword detection — catches the experimental peering-NLB-for-KB
-          # path failing TLS validation (Bedrock's MongoDB driver may reject
-          # the standard cluster cert when reached through NLB-over-peering).
-          # PrivateLink path won't hit these keywords on a normal ingestion;
-          # this banner only fires when the driver explicitly reports a TLS
-          # issue, so it's safe to print unconditionally.
-          if echo "$FAILURE_JSON" | grep -qiE "tls|certificate|ssl|handshake|hostname|unable to verify"; then
-            echo ""
-            echo "════════════════════════════════════════════════════════════════════"
-            echo " TLS / CERTIFICATE FAILURE detected in Bedrock KB ingestion."
-            echo ""
-            echo " If you are running in VPC peering mode (NETWORK_MODE=peering),"
-            echo " the NLB-over-peering path for KB ingestion is EXPERIMENTAL and"
-            echo " not partner-validated. Bedrock's MongoDB driver may reject the"
-            echo " standard cluster certificate when reached through the NLB."
-            echo ""
-            echo " PrivateLink and VPC peering are mutually exclusive per account."
-            echo " To recover, switch the entire deployment back to PrivateLink:"
-            echo "   ./deploy/scripts/destroy.sh --mode ec2"
-            echo "   ./deploy/scripts/destroy.sh --mode shared    # optional"
-            echo "   ./deploy/scripts/destroy.sh --mode network"
-            echo "   # Set NETWORK_MODE=privatelink in .env (or unset for default)"
-            echo "   ./deploy/deploy-full-with-privatelink.sh"
-            echo ""
-            echo " Alternative: set TF_VAR_enable_kb_peering=false to keep peering"
-            echo " for runtime traffic but use public Atlas SRV for KB ingestion"
-            echo " (privacy regression — KB ingestion no longer end-to-end private)."
-            echo "════════════════════════════════════════════════════════════════════"
+            --query 'ingestionJob.[status,statistics.numberOfDocumentsScanned,statistics.numberOfDocumentsFailed,statistics.numberOfNewDocumentsIndexed,statistics.numberOfModifiedDocumentsIndexed]' \
+            --output text 2>/dev/null || echo "IN_PROGRESS 0 0 0 0")
+
+          set -- $JOB_STATS
+          STATUS="$1"
+          SCANNED="$2"
+          FAILED="$3"
+          NEW_DOCS="$4"
+          MOD_DOCS="$5"
+          [ -z "$STATUS" ] && STATUS=IN_PROGRESS
+          [ -z "$SCANNED" ] && SCANNED=0
+          [ -z "$FAILED" ] && FAILED=0
+          [ -z "$NEW_DOCS" ] && NEW_DOCS=0
+          [ -z "$MOD_DOCS" ] && MOD_DOCS=0
+          [ "$SCANNED" = "None" ] && SCANNED=0
+          [ "$FAILED" = "None" ] && FAILED=0
+          [ "$NEW_DOCS" = "None" ] && NEW_DOCS=0
+          [ "$MOD_DOCS" = "None" ] && MOD_DOCS=0
+
+          echo "  Ingestion: $STATUS scanned=$SCANNED failed=$FAILED new=$NEW_DOCS modified=$MOD_DOCS ($i/30)"
+          if [ "$STATUS" = "COMPLETE" ]; then
+            if [ "$FAILED" -eq 0 ] && [ "$SCANNED" -eq "$EXPECTED_DOCS" ]; then
+              echo "Ingestion complete with all source documents indexed."
+              exit 0
+            fi
+            echo "WARNING: ingestion completed with incomplete document coverage (scanned=$SCANNED expected=$EXPECTED_DOCS failed=$FAILED)."
+            if [ "$attempt" -lt 2 ]; then
+              echo "Retrying Bedrock KB ingestion once..."
+              break
+            fi
+            print_ingestion_failure
+            fail_or_warn_ingestion
           fi
-          echo "→ enable APPLICATION_LOGS on the KB and grep status_reasons for the real driver error before assuming it's a network/PrivateLink issue."
-          exit 1
-        fi
-        sleep 10
+          if [ "$STATUS" = "FAILED" ]; then
+            # Hard-fail the deploy. Silent FAILED was how we previously shipped
+            # P1-6 Option A as "done" while every ingestion job was failing
+            # with E11000 on the seed `docId_1` index — see memory.md
+            # ("Bedrock KB ingestion — `troubleshooting_docs.docId` must be a
+            # **partial** unique index"). Surfacing the failure reasons here
+            # makes that class of regression impossible to miss in CI.
+            print_ingestion_failure
+            fail_or_warn_ingestion
+          fi
+          sleep 10
+        done
       done
       echo "ERROR: Bedrock KB ingestion did not reach COMPLETE in 5 minutes."
-      exit 1
+      fail_or_warn_ingestion
     EOT
   }
 }

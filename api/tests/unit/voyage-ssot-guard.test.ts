@@ -13,8 +13,9 @@
  *   - imports `buildVoyageRequestBody` outside the allowlist
  *   - declares its own `EMBEDDING_DIMENSIONS=1024` literal
  *   - has bash supported-model / dim values that differ from the TS SSOT
- *   - has a Terraform `EMBEDDING_DIMENSIONS = "<n>"` literal that differs
- *     from VOYAGE_EMBEDDING_DIMS in the TS SSOT
+ *   - hardcodes a Terraform `EMBEDDING_DIMENSIONS = "<n>"` numeric literal
+ *     instead of deriving it from `var.voyage_output_dim`, or whose
+ *     `voyage_output_dim` default differs from VOYAGE_DEFAULT_EMBEDDING_DIMS
  * is a regression. These tests light up so the fix happens in the same PR.
  *
  * Companion bash-side guard: `pf_check_voyage_ssot_only_source` in
@@ -25,7 +26,11 @@ import { describe, expect, test } from "bun:test";
 import { execSync } from "node:child_process";
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import path from "node:path";
-import { SUPPORTED_VOYAGE_MODELS, VOYAGE_EMBEDDING_DIMS } from "../../src/adapters/voyage-embedding.ts";
+import {
+  SUPPORTED_VOYAGE_MODELS,
+  VOYAGE_DEFAULT_EMBEDDING_DIMS,
+  getVoyageEmbeddingDims,
+} from "../../src/adapters/voyage-embedding.ts";
 
 const REPO_ROOT = path.resolve(import.meta.dir, "../../..");
 
@@ -124,7 +129,7 @@ describe("voyage SSOT — env reads confined to adapter", () => {
     expect(hits).toEqual([]);
   });
 
-  test("no process.env.EMBEDDING_DIMENSIONS in TS source (must import VOYAGE_EMBEDDING_DIMS)", () => {
+  test("no process.env.EMBEDDING_DIMENSIONS in TS source (must use getVoyageEmbeddingDims())", () => {
     const re = /process\.env\.EMBEDDING_DIMENSIONS/;
     const hits = TS_FILES.filter((rel) => {
       if (rel.startsWith("api/tests/")) return false;
@@ -186,12 +191,13 @@ describe("voyage SSOT — bash <-> TS parity", () => {
     expect(bashOut.trim().split(/\s+/).sort()).toEqual([...SUPPORTED_VOYAGE_MODELS].sort());
   });
 
-  test("bash voyage_embedding_dims matches VOYAGE_EMBEDDING_DIMS", () => {
+  test("bash voyage_embedding_dims matches getVoyageEmbeddingDims()", () => {
+    // No VOYAGE_OUTPUT_DIM in the test env → both resolve to the default.
     const bashOut = execSync(
-      "bash -c 'source deploy/scripts/_voyage-config.sh && voyage_embedding_dims'",
+      "bash -c 'unset VOYAGE_OUTPUT_DIM; source deploy/scripts/_voyage-config.sh && voyage_embedding_dims'",
       { cwd: REPO_ROOT },
     ).toString();
-    expect(Number(bashOut.trim())).toBe(VOYAGE_EMBEDDING_DIMS);
+    expect(Number(bashOut.trim())).toBe(getVoyageEmbeddingDims());
   });
 
   test("bash voyage_canonical_body matches buildVoyageRequestBody byte-for-byte", () => {
@@ -209,35 +215,67 @@ describe("voyage SSOT — bash <-> TS parity", () => {
 });
 
 // ---------------------------------------------------------------------------
-// (f) Terraform <-> TS parity for EMBEDDING_DIMENSIONS literal
+// (f) Terraform <-> TS parity for the embedding-dim default.
+// The dim is now configurable via VOYAGE_OUTPUT_DIM: the seed null_resource
+// passes `EMBEDDING_DIMENSIONS = tostring(var.voyage_output_dim)`, and the
+// `voyage_output_dim` variable default is what must stay in lockstep with the
+// TS default (Terraform can't shell out to voyage-print.ts to resolve it).
 // ---------------------------------------------------------------------------
 
 describe("voyage SSOT — terraform <-> TS parity for embedding dim", () => {
-  const TF_FILES = [
-    "deploy/terraform/envs/ec2/main.tf",
-    "deploy/terraform/envs/local/main.tf",
+  // Variable declarations live in the env's variables.tf; the seed
+  // null_resource wiring lives in main.tf.
+  const TF_ENVS = [
+    {
+      vars: "deploy/terraform/envs/ec2/variables.tf",
+      main: "deploy/terraform/envs/ec2/main.tf",
+    },
+    {
+      vars: "deploy/terraform/envs/local/variables.tf",
+      main: "deploy/terraform/envs/local/main.tf",
+    },
   ];
 
-  for (const tf of TF_FILES) {
-    test(`${tf} declares EMBEDDING_DIMENSIONS = "${VOYAGE_EMBEDDING_DIMS}"`, () => {
-      const src = read(tf);
-      const m = src.match(/EMBEDDING_DIMENSIONS\s*=\s*"(\d+)"/);
+  for (const { vars, main } of TF_ENVS) {
+    test(`${vars} declares variable "voyage_output_dim" default = ${VOYAGE_DEFAULT_EMBEDDING_DIMS}`, () => {
+      const src = read(vars);
+      const m = src.match(
+        /variable\s+"voyage_output_dim"\s*\{[^}]*?\bdefault\s*=\s*(\d+)/s,
+      );
       expect(
         m,
-        `${tf} must declare an EMBEDDING_DIMENSIONS literal (TF can't shell out; literal is pinned by guard test)`,
+        `${vars} must declare a voyage_output_dim variable with a numeric default (TF can't shell out; the default is pinned by guard test)`,
       ).not.toBeNull();
-      expect(Number(m![1])).toBe(VOYAGE_EMBEDDING_DIMS);
+      expect(Number(m![1])).toBe(VOYAGE_DEFAULT_EMBEDDING_DIMS);
     });
 
-    test(`${tf} carries the SSOT-pin comment near the literal`, () => {
-      const src = read(tf);
-      // Comment is a soft signal — guard against silent edits. Either form
-      // ('must match VOYAGE_EMBEDDING_DIMS' or pointer to the TS SSOT file)
-      // is acceptable.
+    test(`${main} wires EMBEDDING_DIMENSIONS to var.voyage_output_dim (not a hardcoded literal)`, () => {
+      const src = read(main);
+      // Must derive from the variable, never a bare numeric literal.
+      expect(
+        /EMBEDDING_DIMENSIONS\s*=\s*tostring\(var\.voyage_output_dim\)/.test(src),
+        `${main} must set EMBEDDING_DIMENSIONS = tostring(var.voyage_output_dim)`,
+      ).toBe(true);
+      expect(
+        /EMBEDDING_DIMENSIONS\s*=\s*"\d+"/.test(src),
+        `${main} must NOT hardcode EMBEDDING_DIMENSIONS to a numeric literal`,
+      ).toBe(false);
+      // And the seeder must receive VOYAGE_OUTPUT_DIM so getVoyageEmbeddingDims() agrees.
+      expect(
+        /VOYAGE_OUTPUT_DIM\s*=\s*tostring\(var\.voyage_output_dim\)/.test(src),
+        `${main} must pass VOYAGE_OUTPUT_DIM = tostring(var.voyage_output_dim) to the seed null_resource`,
+      ).toBe(true);
+    });
+
+    test(`${main} carries the SSOT-pin comment near the wiring`, () => {
+      const src = read(main);
       const ok =
-        /VOYAGE_EMBEDDING_DIMS/.test(src) ||
+        /VOYAGE_DEFAULT_EMBEDDING_DIMS/.test(src) ||
         /voyage-embedding\.ts/.test(src);
-      expect(ok, `${tf} should mention VOYAGE_EMBEDDING_DIMS or voyage-embedding.ts near the literal`).toBe(true);
+      expect(
+        ok,
+        `${main} should mention VOYAGE_DEFAULT_EMBEDDING_DIMS or voyage-embedding.ts near the wiring`,
+      ).toBe(true);
     });
   }
 });
@@ -279,12 +317,21 @@ describe("voyage SSOT — deploy/ scripts must not hand-roll EMBEDDING_DIMENSION
     expect(hits).toEqual([]);
   });
 
-  test("no stale VOYAGE_OUTPUT_DIM references in deploy/ shell scripts", () => {
+  test("VOYAGE_OUTPUT_DIM appears in deploy shell scripts only as controlled env pass-through", () => {
     const deployShFiles = SH_FILES.filter(
       (rel) => rel.startsWith("deploy/") && rel !== PREFLIGHT_PATH,
     );
+    const allowedPassThrough = new Set([
+      "deploy/scripts/deploy-local.sh",
+      "deploy/scripts/deploy-project.sh",
+      "deploy/scripts/_agents-common.sh",
+      "deploy/scripts/_env-live.sh",
+    ]);
     const re = /VOYAGE_OUTPUT_DIM/;
-    const hits = deployShFiles.filter((rel) => re.test(read(rel)));
+    const hits = deployShFiles.filter((rel) => {
+      if (!re.test(read(rel))) return false;
+      return !allowedPassThrough.has(rel);
+    });
     expect(hits).toEqual([]);
   });
 });

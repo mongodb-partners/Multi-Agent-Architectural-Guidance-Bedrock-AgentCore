@@ -136,9 +136,8 @@ EXISTING_MODE=$(aws ssm get-parameter \
 if [[ -n "$EXISTING_MODE" && "$EXISTING_MODE" != "privatelink" ]]; then
   err "MODE MISMATCH: SSM /${SHARED_VPC_NAME}/${AWS_REGION}/network_mode says '${EXISTING_MODE}' but this script enforces 'privatelink'.
      PrivateLink and VPC peering are mutually exclusive per shared VPC. To switch modes run:
-       ./deploy/scripts/destroy.sh --mode ec2
-       ./deploy/scripts/destroy.sh --mode shared    # optional
-       ./deploy/scripts/destroy.sh --mode network
+       ./deploy/destroy/destroy-project-with-vpc-peering.sh
+       ./deploy/destroy/destroy-shared-with-vpc-peering.sh
      Then re-run this script for a clean PrivateLink deploy."
 fi
 
@@ -195,11 +194,55 @@ else
     --query "Parameter.Value" \
     --output text 2>/dev/null || echo "")
 
-  if [[ -n "$EXISTING_SHARED" ]]; then
+  # A single canary can survive a partial apply (or a partial destroy that left
+  # the log-group param behind) — so the cw_api_log_group probe alone can report
+  # "already deployed" while the Voyage SageMaker endpoint the shared stack owns
+  # is actually missing. That drift slips past Phase 1.5 and only surfaces as a
+  # hard failure in the Phase 2 project-pre-apply Voyage smoke. To make the
+  # orchestrator self-healing, when EMBEDDINGS_PROVIDER=voyage we additionally
+  # require the endpoint to be published in SSM *and* live in SageMaker before
+  # skipping. deploy-shared.sh is idempotent (plan/apply), so re-running it on a
+  # complete stack is a no-op.
+  SHARED_NEEDS_APPLY=false
+  SHARED_REASON=""
+
+  if [[ -z "$EXISTING_SHARED" ]]; then
+    SHARED_NEEDS_APPLY=true
+    SHARED_REASON="cw_api_log_group SSM canary not found"
+  elif [[ "${EMBEDDINGS_PROVIDER:-}" == "voyage" ]]; then
+    log "  Verifying Voyage SageMaker endpoint (EMBEDDINGS_PROVIDER=voyage) ..."
+    deploy_diag_checkpoint "checking voyage endpoint canary: aws ssm get-parameter --region ${AWS_REGION} --name /${SHARED_VPC_NAME}/${AWS_REGION}/voyage_sagemaker_endpoint_name"
+    VOYAGE_EP_NAME=$(aws ssm get-parameter \
+      --region "$AWS_REGION" \
+      --name "/${SHARED_VPC_NAME}/${AWS_REGION}/voyage_sagemaker_endpoint_name" \
+      --query "Parameter.Value" --output text 2>/dev/null || echo "")
+
+    if [[ -z "$VOYAGE_EP_NAME" || "$VOYAGE_EP_NAME" == "_empty_" ]]; then
+      SHARED_NEEDS_APPLY=true
+      SHARED_REASON="EMBEDDINGS_PROVIDER=voyage but SSM voyage_sagemaker_endpoint_name is missing/empty (shared stack partially applied)"
+    else
+      EP_STATUS=$(aws sagemaker describe-endpoint \
+        --region "$AWS_REGION" \
+        --endpoint-name "$VOYAGE_EP_NAME" \
+        --query "EndpointStatus" --output text 2>/dev/null || echo "")
+      if [[ -z "$EP_STATUS" ]]; then
+        SHARED_NEEDS_APPLY=true
+        SHARED_REASON="Voyage SageMaker endpoint '${VOYAGE_EP_NAME}' not found in SageMaker (shared stack drifted)"
+      elif [[ "$EP_STATUS" != "InService" ]]; then
+        SHARED_NEEDS_APPLY=true
+        SHARED_REASON="Voyage SageMaker endpoint '${VOYAGE_EP_NAME}' status=${EP_STATUS} (not InService)"
+      else
+        ok "Phase 1.5 — Voyage endpoint '${VOYAGE_EP_NAME}' is InService"
+      fi
+    fi
+  fi
+
+  if [[ "$SHARED_NEEDS_APPLY" == "false" ]]; then
     ok "Phase 1.5 — Shared stack already deployed (cw_api_log_group=$EXISTING_SHARED) — skipping deploy-shared.sh"
     log "          Re-apply with: bash $SHARED_SCRIPT --env-file $ENV_FILE"
   else
-    log "Phase 1.5 — Shared stack not found in SSM — running deploy-shared.sh ..."
+    warn "Phase 1.5 — Shared stack incomplete: ${SHARED_REASON}"
+    log "Phase 1.5 — Running deploy-shared.sh to reconcile ..."
     sep
 
     SHARED_ARGS=("--env-file" "$ENV_FILE")
@@ -236,8 +279,7 @@ echo "  Full deployment complete."
 echo "  Network : /${SHARED_VPC_NAME}/${AWS_REGION}/"
 echo "  To redeploy agents only : ./deploy/deploy-agents.sh"
 echo "  To redeploy API only    : ./deploy/deploy-api.sh"
-echo "  To tear down            : ./deploy/scripts/destroy.sh --mode ec2"
-echo "                            ./deploy/scripts/destroy.sh --mode shared"
-echo "                            ./deploy/scripts/destroy.sh --mode network"
+echo "  To tear down project    : ./deploy/destroy/destroy-project-with-privatelink.sh"
+echo "  To tear down shared     : ./deploy/destroy/destroy-shared-with-privatelink.sh"
 echo ""
 sep

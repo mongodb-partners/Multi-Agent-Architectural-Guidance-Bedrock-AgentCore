@@ -203,13 +203,16 @@ case "$EMBEDDINGS_PROVIDER" in
   "") err "EMBEDDINGS_PROVIDER is not set. Set 'voyage' or 'titan' in .env." ;;
   *)  err "EMBEDDINGS_PROVIDER='$EMBEDDINGS_PROVIDER' is not recognised. Use 'voyage' or 'titan'." ;;
 esac
+if [[ "$EMBEDDINGS_PROVIDER" == "titan" ]]; then
+  VOYAGE_ENDPOINT=""
+fi
 
 # ── Atlas private MONGODB_URI computation — mode-aware ───────────────────────
 # privatelink: Atlas awsPrivateLink direct multi-host URI with
 #   tlsAllowInvalidHostnames=true.
-# peering: cluster's connectionStrings.privateSrv (when Atlas Private DNS for
-#   Peering is on) else connectionStrings.private (multi-host non-SRV). NO
-#   tlsAllowInvalidHostnames — peering hostnames ARE in the cert SAN.
+# peering: cluster's connectionStrings.private direct multi-host URI only. NO
+#   SRV/TXT lookup and NO tlsAllowInvalidHostnames — peering hostnames ARE in
+#   the cert SAN.
 if [[ "$NETWORK_MODE" == "privatelink" ]]; then
   [[ -n "$ATLAS_PRIVATELINK_ENDPOINT_ID" ]] \
     || err "Missing Atlas PrivateLink endpoint ID for deterministic API deploy (privatelink mode)"
@@ -279,26 +282,22 @@ resp = subprocess.check_output([
 ], text=True)
 data = json.loads(resp)
 conn = (data.get("connectionStrings") or {})
-priv_srv = conn.get("privateSrv") or ""
 priv_multi = conn.get("private") or ""
-if priv_srv:
-    host = priv_srv.replace("mongodb+srv://", "", 1)
-    print(f"mongodb+srv://{user}:{pwd}@{host}/?retryWrites=true&w=majority")
-elif priv_multi:
+if priv_multi:
     no_scheme = priv_multi.replace("mongodb://", "", 1)
     sep_char = "&" if "?" in no_scheme else "/?"
     print(f"mongodb://{user}:{pwd}@{no_scheme}{sep_char}retryWrites=true&w=majority")
 else:
-    raise SystemExit("Atlas cluster has neither connectionStrings.privateSrv nor connectionStrings.private — peering not active yet?")
+    raise SystemExit("Atlas cluster has no connectionStrings.private multi-host URI — peering not active yet or Atlas has not populated the private direct URI")
 PY
   ); then
     MONGODB_URI="$API_PRIVATE_URI"
     if ! echo "$MONGODB_URI" | grep -qE '\-pri\.'; then
       err "Computed peering URI does not contain '-pri.' (private peering host) — would route over the public SRV. Aborting to preserve privacy parity."
     fi
-    ok "API MongoDB URI normalized to peering connection string"
+    ok "API MongoDB URI normalized to peering direct multi-host connection string"
   else
-    err "Could not compute Atlas peering URI for the API. Verify the peering connection is ACTIVE."
+    err "Could not compute Atlas peering direct multi-host URI for the API. Verify the peering connection is ACTIVE and that Atlas has populated connectionStrings.private."
   fi
 fi
 ok "Terraform outputs loaded"
@@ -361,9 +360,9 @@ PY
   fi
   export DOCKER_CONFIG="$DOCKER_CONFIG_DIR"
 
-  aws ecr get-login-password --region "$AWS_REGION" \
-    | docker login --username AWS --password-stdin "$ECR_REGISTRY" >/dev/null
   source "$SCRIPT_DIR/scripts/_docker-build.sh"
+  ecr_login_with_retry "$AWS_REGION" "$ECR_REGISTRY" \
+    || err "ECR login failed after retries (see output above)"
   docker_build_push_image linux/amd64 \
     "$REPO_ROOT/api/Dockerfile" \
     "$REPO_ROOT" \
@@ -413,10 +412,14 @@ log "Phase 6 — Pulling API image + restarting multiagent-api..."
 if [[ "$SKIP_DOCKER" == "true" ]]; then
   RESTART_CMD="systemctl daemon-reload && systemctl restart multiagent-api"
 else
-  RESTART_CMD="aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${ECR_REGISTRY} \
+  # Retry the remote ECR login + image pull (network-facing steps) so a
+  # transient DNS/network blip on the EC2 host does not abort the restart.
+  # The `ok` flag gates the restart so an exhausted retry budget still fails
+  # the SSM command rather than restarting against a stale/missing image.
+  RESTART_CMD="ok=0; for i in 1 2 3 4; do aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${ECR_REGISTRY} \
     && docker pull ${ECR_API_IMAGE} \
-    && systemctl daemon-reload \
-    && systemctl restart multiagent-api"
+    && ok=1 && break; echo ecr-login-pull attempt \$i failed, retrying in 10s; sleep 10; done; \
+    [ \$ok -eq 1 ] && systemctl daemon-reload && systemctl restart multiagent-api"
 fi
 
 RESTART_CMD_ID=$(send_ssm_command_retry \

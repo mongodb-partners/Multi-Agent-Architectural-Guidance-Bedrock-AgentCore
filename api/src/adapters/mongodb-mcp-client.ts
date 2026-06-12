@@ -33,7 +33,7 @@ import {
   type ToolStreamGenerator,
 } from "@strands-agents/sdk";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { logger } from "../lib/logger.ts";
+import { logger, redactMongoArgsForLog } from "../lib/logger.ts";
 import { appendTraceContextHeaders } from "../lib/otel.ts";
 import { currentTrace } from "../lib/trace-context.ts";
 import { currentGatewayJwt } from "../lib/gateway-auth-context.ts";
@@ -1251,9 +1251,13 @@ async function connectMcpClient(): Promise<McpClient> {
 
     logger.audit().info("[mcp] callTool", {
       toolName: tool.name,
-      argPreview:
-        typeof args === "object" && args !== null
-          ? JSON.stringify(scopedArgs).slice(0, 400)
+      // PII-bearing arg keys (filter/document/queryVector/…) are summarised
+      // before the line is serialized so customer emails / vectors never land
+      // in CloudWatch. Operators can opt back into raw args with
+      // MCP_LOG_RAW_ARGS=true. See lib/logger.ts.
+      args:
+        typeof scopedArgs === "object" && scopedArgs !== null
+          ? redactMongoArgsForLog(scopedArgs)
           : String(scopedArgs).slice(0, 400),
     });
     const mcpCallStart = Date.now();

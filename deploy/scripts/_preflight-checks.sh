@@ -60,6 +60,19 @@ export REPO_ROOT
 # shellcheck source=deploy/scripts/_voyage-config.sh
 source "${REPO_ROOT}/deploy/scripts/_voyage-config.sh"
 
+# Shared transient-error classifier (DNS resolver + network/transport blips) —
+# lets curl-based checks distinguish a local resolver blip (rerun) from a real
+# corp-proxy/firewall block.
+# shellcheck source=deploy/scripts/_transient-errors.sh
+source "${REPO_ROOT}/deploy/scripts/_transient-errors.sh"
+
+# Echo OPERATOR_IP_CIDR / TF_VAR_my_ip for preflight Atlas allowlist hints.
+_pf_operator_ip_cidr_hint() {
+  if [[ -n "${OPERATOR_IP_CIDR:-}" ]]; then printf '%s' "$OPERATOR_IP_CIDR"; return 0; fi
+  if [[ -n "${TF_VAR_my_ip:-}" ]]; then printf '%s' "$TF_VAR_my_ip"; return 0; fi
+  printf '%s' 'your-current-public-ip/32'
+}
+
 # ──────────────────────────────────────────────────────────────────────────────
 # State (reset at the top of each preflight_validate call)
 # ──────────────────────────────────────────────────────────────────────────────
@@ -271,16 +284,23 @@ _pf_aws_account_id() {
 
 # Atlas Admin API helper. Echoes HTTP status code; body in $1 (output file path).
 # Args: <out-file> <atlas v2 path>
+# Side effect: when the caller sets _PF_CURL_STDERR_FILE to a writable path,
+# curl's stderr lands there so the caller can classify a "000" (no HTTP
+# response) as a local DNS resolver blip vs a real external block via
+# deploy_error_is_transient_dns. A plain global cannot be used because callers
+# invoke this via `$(...)` (a subshell), so assignments would not propagate —
+# only on-disk file writes survive the subshell.
 _pf_atlas_api() {
   local out="$1" path="$2"
   local pub="${MONGODB_ATLAS_PUBLIC_KEY:-}"
   local prv="${MONGODB_ATLAS_PRIVATE_KEY:-}"
   if [[ -z "$pub" || -z "$prv" ]]; then echo "000"; return 0; fi
+  local _err_dst="${_PF_CURL_STDERR_FILE:-/dev/null}"
   curl -s -o "$out" -w "%{http_code}" \
     --user "${pub}:${prv}" --digest \
     --max-time 10 \
     -H "Accept: application/vnd.atlas.2023-01-01+json" \
-    "https://cloud.mongodb.com/api/atlas/v2${path}" 2>/dev/null || echo "000"
+    "https://cloud.mongodb.com/api/atlas/v2${path}" 2>"$_err_dst" || echo "000"
 }
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -391,6 +411,10 @@ PREFLIGHT_PROFILE_project_post_apply=(
   pf_check_env_required_keys_filled
   pf_check_atlas_api_keys_present
   pf_check_atlas_api_key_scope
+  # WHY: post-apply guard — fail the deploy if the live Atlas project still has a
+  # 0.0.0.0/0 entry, whether from a Terraform regression or a stale/manual entry
+  # that Terraform cannot see.
+  pf_check_atlas_no_public_ip_access_list
   pf_check_runtime_role_bedrock_invoke
   pf_check_privatelink_endpoint_available
   pf_check_vector_indexes_present
@@ -408,6 +432,9 @@ PREFLIGHT_PROFILE_local_post_apply=(
   pf_check_env_file_present_and_sourceable
   pf_check_atlas_api_keys_present
   pf_check_atlas_api_key_scope
+  # WHY: same public-internet guard for the laptop/local deploy path — local
+  # mode also must never leave Atlas open to 0.0.0.0/0.
+  pf_check_atlas_no_public_ip_access_list
   pf_check_vector_indexes_present
   pf_check_documents_have_embeddings
   pf_check_embedding_dim_consistency
@@ -1232,8 +1259,30 @@ pf_check_disk_and_docker_resources() {
   _pf_pass pf_check_disk_and_docker_resources "disk_free=${disk_free_gb:-?}GB"
 }
 
+# Resolve an account's effective quota for a service-code/quota-code straight
+# from AWS Service Quotas — never hardcode the limit. Prefers the customer-applied
+# value, then falls back to the published AWS default (still an AWS-sourced value,
+# not a constant). Echoes the integer floor, or an empty string if neither value
+# can be retrieved so the caller can degrade transparently instead of guessing.
+# IAM: servicequotas:GetServiceQuota + GetAWSDefaultServiceQuota
+# (deploy/iam/policy.json → ServiceQuotasForSageMakerAndVoyageSetup).
+_pf_resolve_quota() {
+  local region="$1" service_code="$2" quota_code="$3" v
+  v="$(aws service-quotas get-service-quota \
+        --region "$region" --service-code "$service_code" --quota-code "$quota_code" \
+        --query 'Quota.Value' --output text 2>/dev/null || true)"
+  if [[ -z "$v" || "$v" == "None" || "$v" == "null" ]]; then
+    v="$(aws service-quotas get-aws-default-service-quota \
+          --region "$region" --service-code "$service_code" --quota-code "$quota_code" \
+          --query 'Quota.Value' --output text 2>/dev/null || true)"
+  fi
+  [[ -z "$v" || "$v" == "None" || "$v" == "null" ]] && { echo ""; return 0; }
+  echo "${v%.*}"
+}
+
 # pf:check: pf_check_aws_service_limits
-# pf:catches: "Account-level VPC + Elastic IP quotas at floor (5/region default each)"
+# pf:catches: "Account-level VPC + Elastic IP quotas at floor — actual limits read
+#              live from Service Quotas (vpc/L-F678F1CE, ec2/L-0263D0A3), not hardcoded"
 # pf:source:  new-user friction (account quotas)
 # pf:related: pf_check_sagemaker_endpoint_quota — separate check for SageMaker GPU endpoint quota
 pf_check_aws_service_limits() {
@@ -1241,32 +1290,39 @@ pf_check_aws_service_limits() {
   local region="${AWS_REGION:-us-east-1}"
   local -a problems=() warnings=()
 
-  # VPCs per region (default 5; need at least 1 free unless reusing shared VPC)
-  local vpc_count
+  # VPCs per region — actual quota pulled live from Service Quotas (no hardcode).
+  # Need at least 1 free slot unless reusing the shared VPC.
+  local vpc_count vpc_limit
   vpc_count="$(aws ec2 describe-vpcs --region "$region" --query 'length(Vpcs)' --output text 2>/dev/null || echo '?')"
-  if [[ "$vpc_count" =~ ^[0-9]+$ ]] && (( vpc_count >= 5 )); then
+  vpc_limit="$(_pf_resolve_quota "$region" vpc L-F678F1CE)"
+  if [[ -z "$vpc_limit" ]]; then
+    warnings+=("Could not read the VPCs-per-Region quota (vpc/L-F678F1CE) from Service Quotas in ${region}; skipping the VPC headroom check")
+  elif [[ "$vpc_count" =~ ^[0-9]+$ ]] && (( vpc_count >= vpc_limit )); then
     local svn="${SHARED_VPC_NAME:-shared-network}" shared_vpc_id
     shared_vpc_id="$(aws ssm get-parameter --region "$region" --name "/${svn}/${region}/vpc_id" --query 'Parameter.Value' --output text 2>/dev/null || true)"
     if [[ -n "$shared_vpc_id" && "$shared_vpc_id" != "None" ]]; then
-      warnings+=("VPCs in ${region}: ${vpc_count}/5, but shared VPC ${shared_vpc_id} already exists; redeploy can reuse it")
+      warnings+=("VPCs in ${region}: ${vpc_count}/${vpc_limit}, but shared VPC ${shared_vpc_id} already exists; redeploy can reuse it")
     else
-      problems+=("VPCs in ${region}: ${vpc_count}/5 (default limit). New shared VPC creation will fail unless you reuse an existing one")
+      problems+=("VPCs in ${region}: ${vpc_count}/${vpc_limit} (live Service Quotas limit). New shared VPC creation will fail unless you reuse an existing one")
     fi
   fi
 
-  # Elastic IPs (default 5)
-  local eip_count
+  # Elastic IPs — actual quota pulled live from Service Quotas (no hardcode).
+  local eip_count eip_limit
   eip_count="$(aws ec2 describe-addresses --region "$region" --query 'length(Addresses)' --output text 2>/dev/null || echo '?')"
-  if [[ "$eip_count" =~ ^[0-9]+$ ]] && (( eip_count >= 5 )); then
+  eip_limit="$(_pf_resolve_quota "$region" ec2 L-0263D0A3)"
+  if [[ -z "$eip_limit" ]]; then
+    warnings+=("Could not read the EC2-VPC Elastic IPs quota (ec2/L-0263D0A3) from Service Quotas in ${region}; skipping the EIP headroom check")
+  elif [[ "$eip_count" =~ ^[0-9]+$ ]] && (( eip_count >= eip_limit )); then
     local pn="${PROJECT_NAME:-}" env_="${ENVIRONMENT:-dev}" project_eip_count
     project_eip_count="$(aws ec2 describe-addresses \
       --region "$region" \
       --filters "Name=tag:Project,Values=${pn}" "Name=tag:Environment,Values=${env_}" \
       --query 'length(Addresses)' --output text 2>/dev/null || echo '0')"
     if [[ "$project_eip_count" =~ ^[0-9]+$ ]] && (( project_eip_count > 0 )); then
-      warnings+=("Elastic IPs in ${region}: ${eip_count}/5, but ${pn}/${env_} already has ${project_eip_count} EIP(s); redeploy should not allocate another")
+      warnings+=("Elastic IPs in ${region}: ${eip_count}/${eip_limit}, but ${pn}/${env_} already has ${project_eip_count} EIP(s); redeploy should not allocate another")
     else
-      problems+=("Elastic IPs in ${region}: ${eip_count}/5 (default limit). New project EIP / NAT gateway allocation may fail")
+      problems+=("Elastic IPs in ${region}: ${eip_count}/${eip_limit} (live Service Quotas limit). New project EIP / NAT gateway allocation may fail")
     fi
   fi
 
@@ -1275,7 +1331,7 @@ pf_check_aws_service_limits() {
     if (( ${#warnings[@]} > 0 )); then
       for w in "${warnings[@]}"; do _pf_warn "$w"; done
     fi
-    _pf_pass pf_check_aws_service_limits "VPCs=${vpc_count} EIPs=${eip_count} (no new quota blocker detected)"
+    _pf_pass pf_check_aws_service_limits "VPCs=${vpc_count}/${vpc_limit:-?} EIPs=${eip_count}/${eip_limit:-?} (live Service Quotas; no new quota blocker detected)"
     return 0
   fi
   local -a args=(--summary "Account-level service quotas at risk"
@@ -1305,7 +1361,20 @@ pf_advise_cost_and_duration() {
   _pf_log "    est. cost  : ~\$240–320 / month (see docs/estimate.md for breakdown)"
   _pf_log "    est. time  : 25–40 min (Atlas M10 cold start ~10 min, AgentCore Runtimes ~5 min,"
   _pf_log "                 Voyage SageMaker endpoint ~15 min)"
-  _pf_log "    teardown   : ./deploy/scripts/destroy.sh --mode ec2 (per-project, ~10 min)"
+  local nm="${NETWORK_MODE:-privatelink}"
+  local project_destroy shared_destroy
+  case "$nm" in
+    peering)
+      project_destroy="destroy-project-with-vpc-peering.sh"
+      shared_destroy="destroy-shared-with-vpc-peering.sh"
+      ;;
+    *)
+      project_destroy="destroy-project-with-privatelink.sh"
+      shared_destroy="destroy-shared-with-privatelink.sh"
+      ;;
+  esac
+  _pf_log "    teardown   : ./deploy/destroy/${project_destroy} (per-project, ~10 min)"
+  _pf_log "                 ./deploy/destroy/${shared_destroy} (shared + network, after all projects)"
   echo ""
   # Treat as informational pass (does not affect exit code)
   _pf_pass pf_advise_cost_and_duration "deploy preview shown"
@@ -1664,23 +1733,55 @@ pf_check_network_egress() {
     "https://s3.amazonaws.com"
   )
   local -a unreachable=()
-  local url status
+  local -a dns_unreachable=()
+  local url status _err_file emsg
   for url in "${endpoints[@]}"; do
-    status="$(curl -sI --max-time 5 -o /dev/null -w '%{http_code}' "$url" 2>/dev/null || echo '000')"
+    _err_file="$(mktemp)"
+    status="$(curl -sI --max-time 5 -o /dev/null -w '%{http_code}' "$url" 2>"$_err_file" || echo '000')"
     if [[ "$status" == "000" ]]; then
-      unreachable+=("$url (no response in 5s)")
+      emsg="$(cat "$_err_file" 2>/dev/null || true)"
+      if deploy_error_is_transient_dns "$emsg"; then
+        dns_unreachable+=("$url (DNS: ${emsg})")
+      else
+        unreachable+=("$url (no response in 5s)")
+      fi
     fi
+    rm -f "$_err_file"
   done
-  if (( ${#unreachable[@]} == 0 )); then
+  if (( ${#unreachable[@]} == 0 && ${#dns_unreachable[@]} == 0 )); then
     _pf_pass pf_check_network_egress "${#endpoints[@]} egress endpoints reachable"
     return 0
   fi
-  local -a args=(--summary "${#unreachable[@]} required endpoints unreachable from this machine"
+  # All failures are local DNS resolution blips — classify as transient, not a
+  # corp-proxy block, and tell the operator to rerun.
+  if (( ${#unreachable[@]} == 0 )); then
+    # Variable MUST be named `args` to match the self-test Test 11 allow-list
+    # pattern ("${args[@]}") for splatted _pf_fail call sites.
+    local -a args=(--summary "${#dns_unreachable[@]} endpoint(s) failed DNS resolution from this machine"
+                   --shortcoming "external (local DNS resolver / VPN)"
+                   --observed "${dns_unreachable[*]}")
+    local d
+    for d in "${dns_unreachable[@]}"; do args+=(--fix "Local DNS could not resolve: ${d}"); done
+    args+=(--fix "This is a local resolver/VPN/proxy blip — NOT a Terraform/IAM/AWS-side problem. Reconnect VPN or flush DNS, then rerun the deploy.")
+    args+=(--hint "doc:docs/deployment-preflight-checks.md#network-egress")
+    args+=(--doc "docs/deployment-preflight-checks.md#network-egress")
+    args+=(--exit-class external)
+    _pf_fail pf_check_network_egress "${args[@]}"
+    return 0
+  fi
+  # Merge with empty-array-safe appends (bash 3.2 + set -u).
+  local -a all_unreachable=()
+  (( ${#unreachable[@]} )) && all_unreachable+=("${unreachable[@]}")
+  (( ${#dns_unreachable[@]} )) && all_unreachable+=("${dns_unreachable[@]}")
+  local -a args=(--summary "${#all_unreachable[@]} required endpoints unreachable from this machine"
                  --shortcoming "external (corp proxy / firewall)"
-                 --observed "${unreachable[*]}")
+                 --observed "${all_unreachable[*]}")
   local u
-  for u in "${unreachable[@]}"; do args+=(--fix "Investigate egress to: ${u}"); done
+  for u in "${all_unreachable[@]}"; do args+=(--fix "Investigate egress to: ${u}"); done
   args+=(--fix "Most common cause: corporate proxy. Set HTTPS_PROXY / HTTP_PROXY before re-running")
+  if (( ${#dns_unreachable[@]} > 0 )); then
+    args+=(--fix "Some failures look like local DNS resolution errors — if a rerun fixes them, it was a transient resolver/VPN blip, not an AWS-side problem")
+  fi
   args+=(--hint "doc:docs/deployment-preflight-checks.md#network-egress")
   args+=(--doc "docs/deployment-preflight-checks.md#network-egress")
   args+=(--exit-class external)
@@ -1697,13 +1798,20 @@ pf_check_atlas_api_health() {
     _pf_skip pf_check_atlas_api_health "no Atlas project id"
     return 0
   fi
-  local out1 out2 s1 s2
+  local out1 out2 s1 s2 err1 err2 last_err
   out1="$(mktemp)"
   out2="$(mktemp)"
+  _PF_CURL_STDERR_FILE="$(mktemp)"
+  : >"$_PF_CURL_STDERR_FILE"
   s1="$(_pf_atlas_api "$out1" "/groups/${proj}")"
+  err1="$(cat "$_PF_CURL_STDERR_FILE" 2>/dev/null || true)"
   sleep 1
+  : >"$_PF_CURL_STDERR_FILE"
   s2="$(_pf_atlas_api "$out2" "/groups/${proj}")"
-  rm -f "$out1" "$out2"
+  err2="$(cat "$_PF_CURL_STDERR_FILE" 2>/dev/null || true)"
+  rm -f "$out1" "$out2" "$_PF_CURL_STDERR_FILE"
+  unset _PF_CURL_STDERR_FILE
+  last_err="${err2:-$err1}"
   if [[ "$s1" =~ ^2 ]] || [[ "$s2" =~ ^2 ]]; then
     _pf_pass pf_check_atlas_api_health "Atlas API responsive (HTTP ${s1} → ${s2})"
     return 0
@@ -1713,15 +1821,21 @@ pf_check_atlas_api_health() {
     _pf_pass pf_check_atlas_api_health "Atlas API up (auth handled separately)"
     return 0
   fi
-  _pf_fail pf_check_atlas_api_health \
-    --summary "Atlas Admin API not healthy on two probes 1s apart" \
-    --shortcoming "external (Atlas)" \
-    --observed "HTTP ${s1} then ${s2}" \
-    --fix "Check Atlas service status: https://status.mongodb.com" \
-    --fix "If Atlas is up but you're seeing transient timeouts, retry in 5 minutes" \
-    --hint "console:https://status.mongodb.com" \
-    --doc "docs/deployment-preflight-checks.md#atlas-api-health" \
-    --exit-class external
+  # If the last probe failed to get any HTTP response due to a local DNS
+  # resolver blip, say so explicitly — it is NOT an Atlas-side outage.
+  local -a args=(--summary "Atlas Admin API not healthy on two probes 1s apart"
+                 --shortcoming "external (Atlas)"
+                 --observed "HTTP ${s1} then ${s2}${last_err:+ (curl: ${last_err})}")
+  if [[ "$s1" == "000" || "$s2" == "000" ]] && deploy_error_is_transient_dns "${last_err}"; then
+    args+=(--fix "Local DNS resolver failure reaching cloud.mongodb.com (${last_err}) — NOT an Atlas/Terraform/IAM problem. Check VPN/proxy/resolver and simply rerun.")
+  fi
+  args+=(--fix "Check Atlas service status: https://status.mongodb.com")
+  args+=(--fix "If Atlas is up but you're seeing transient timeouts, retry in 5 minutes")
+  args+=(--hint "console:https://status.mongodb.com")
+  args+=(--doc "docs/deployment-preflight-checks.md#atlas-api-health")
+  args+=(--exit-class external)
+  _pf_fail pf_check_atlas_api_health "${args[@]}"
+  return 0
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -2057,6 +2171,19 @@ pf_check_atlas_api_key_scope() {
       return 0
       ;;
     403)
+      if echo "$body" | grep -qE 'IP_ADDRESS_NOT_ON_ACCESS_LIST|is not allowed to access this resource'; then
+        local _ip_hint
+        _ip_hint="$(_pf_operator_ip_cidr_hint)"
+        _pf_fail pf_check_atlas_api_key_scope \
+          --summary "Atlas API returned 403 — operator IP not on API key access list" \
+          --shortcoming "config" \
+          --observed "GET /groups/${proj} → 403 (IP_ADDRESS_NOT_ON_ACCESS_LIST)" \
+          --fix "Add the IP from OPERATOR_IP_CIDR (${_ip_hint}) in Atlas → Organization → Access Manager → API Keys → your key → Access List" \
+          --fix "Set OPERATOR_IP_CIDR in .env to your laptop /32 (auto-detected via checkip on source .env)" \
+          --hint "console:https://cloud.mongodb.com/v2#/account/access/apiKeys" \
+          --doc "docs/deployment-preflight-checks.md#atlas-api-key-scope"
+        return 0
+      fi
       _pf_fail pf_check_atlas_api_key_scope \
         --summary "Atlas API returned 403 (key has wrong role)" \
         --shortcoming "config" \
@@ -2162,6 +2289,47 @@ PY
       ;;
   esac
   _pf_pass pf_check_atlas_cluster_tier "cluster ${cluster_name} tier=${tier:-?}"
+}
+
+# pf:check: pf_check_atlas_no_public_ip_access_list
+# pf:catches: "Atlas project IP access list contains 0.0.0.0/0 (public-internet path to the DB)"
+# Post-apply guard for the security requirement: Atlas must be reachable only
+# from where it was created (operator IP) or the peered VPC — NEVER the open
+# internet. This catches BOTH a Terraform regression and stale/manually-added
+# 0.0.0.0/0 (or 0.0.0.0/1) entries that Terraform does not manage.
+pf_check_atlas_no_public_ip_access_list() {
+  _pf_prereq pf_check_atlas_api_key_scope || \
+    { _pf_skip pf_check_atlas_no_public_ip_access_list "prereq pf_check_atlas_api_key_scope failed"; return 0; }
+  local proj="${TF_VAR_atlas_project_id:-${TF_VAR_mongodb_atlas_project_id:-}}"
+  local out status body
+  out="$(mktemp)"
+  status="$(_pf_atlas_api "$out" "/groups/${proj}/accessList")"
+  body="$(cat "$out")"
+  rm -f "$out"
+  if [[ ! "$status" =~ ^2 ]]; then
+    _pf_skip pf_check_atlas_no_public_ip_access_list "could not read project IP access list (HTTP ${status})"
+    return 0
+  fi
+  # Match an open allowlist entry: cidrBlock 0.0.0.0/0 or 0.0.0.0/1, or an
+  # ipAddress 0.0.0.0. Whitespace-tolerant for both compact + pretty JSON.
+  local open_entries
+  open_entries="$(echo "$body" \
+    | grep -oE '"(cidrBlock|ipAddress)"[[:space:]]*:[[:space:]]*"0\.0\.0\.0(/[01])?"' \
+    | sort -u | tr '\n' ' ')"
+  if [[ -z "$open_entries" ]]; then
+    _pf_pass pf_check_atlas_no_public_ip_access_list "Atlas IP access list has no 0.0.0.0/0 (no public-internet path)"
+    return 0
+  fi
+  local _ip_hint
+  _ip_hint="$(_pf_operator_ip_cidr_hint)"
+  _pf_fail pf_check_atlas_no_public_ip_access_list \
+    --summary "Atlas project IP access list is open to the public internet (0.0.0.0/0)" \
+    --shortcoming "config (Atlas network access)" \
+    --observed "GET /groups/${proj}/accessList contains: ${open_entries}" \
+    --fix "Remove the open entry in Atlas → Network Access → IP Access List (Terraform now scopes it to the deploy machine / VPC; a leftover 0.0.0.0/0 was likely added manually or by an older deploy)" \
+    --fix "Re-run the deploy so the mongodb-atlas module re-applies its scoped entry (privatelink → ${_ip_hint}; peering → VPC CIDR)" \
+    --hint "console:https://cloud.mongodb.com/v2/${proj}#/security/network/accessList" \
+    --doc "docs/deployment-preflight-checks.md#atlas-no-public-ip-access-list"
 }
 
 # pf:check: pf_check_atlas_privatelink_no_orphans
@@ -2303,8 +2471,8 @@ pf_check_voyage_marketplace_subscribed() {
       --shortcoming "config" \
       --observed "VOYAGE_MODEL_PACKAGE_ARN=" \
       --fix "Subscribe to Voyage AI on AWS Marketplace and set VOYAGE_MODEL_PACKAGE_ARN in .env" \
-      --fix "Run helper: ./deploy/scripts/setup-voyage-marketplace.sh" \
-      --hint "run:./deploy/scripts/setup-voyage-marketplace.sh" \
+      --fix "Set VOYAGE_MARKETPLACE_MODEL=voyage-multimodal-3 in .env" \
+      --hint "edit:.env:VOYAGE_MODEL_PACKAGE_ARN" \
       --doc "docs/deployment-preflight-checks.md#voyage-marketplace"
     return 0
   fi
@@ -2319,7 +2487,7 @@ pf_check_voyage_marketplace_subscribed() {
       --observed "$(echo "$out" | head -1)" \
       --fix "Open https://aws.amazon.com/marketplace and subscribe to Voyage AI in ${region}" \
       --fix "After subscribing, copy the model package ARN for ${region} into .env (VOYAGE_MODEL_PACKAGE_ARN)" \
-      --hint "run:./deploy/scripts/setup-voyage-marketplace.sh" \
+      --hint "edit:.env:VOYAGE_MODEL_PACKAGE_ARN" \
       --doc "docs/deployment-preflight-checks.md#voyage-marketplace"
     return 0
   fi
@@ -2335,7 +2503,7 @@ pf_check_voyage_marketplace_subscribed() {
 # pf:source:  field-reported (voyage-multimodal-3-dev endpoint silently served a
 #             text-only voyage-3* package; seed-embeddings hit 400s on every row).
 #
-# Multimodal-only: voyage-multimodal-3 / voyage-multimodal-3.5 are the only
+# Multimodal-only: voyage-multimodal-3 is the only
 # supported Voyage listings. The bash SSOT (`voyage_assert_multimodal_or_die`
 # + `voyage_supported_models`, sourced from `_voyage-config.sh`) is the single
 # place where the supported list lives. This check asserts that both the
@@ -2359,10 +2527,10 @@ pf_check_voyage_marketplace_model_matches_arn() {
       --summary "VOYAGE_MARKETPLACE_MODEL is unset but VOYAGE_MODEL_PACKAGE_ARN is set" \
       --shortcoming "config" \
       --observed "VOYAGE_MARKETPLACE_MODEL='' VOYAGE_MODEL_PACKAGE_ARN='${arn}'" \
-      --fix "Set VOYAGE_MARKETPLACE_MODEL in .env to voyage-multimodal-3 or voyage-multimodal-3.5 (this stack only supports multimodal listings)" \
-      --fix "Easiest: re-run ./deploy/scripts/setup-voyage-marketplace.sh --model voyage-multimodal-3 — it rewrites VOYAGE_MARKETPLACE_MODEL + TF_VAR_voyage_endpoint_name_suffix consistently" \
+      --fix "Set VOYAGE_MARKETPLACE_MODEL in .env to voyage-multimodal-3 (this stack only supports multimodal listings)" \
+      --fix "Set TF_VAR_voyage_endpoint_name_suffix if you need a custom endpoint suffix; deploy scripts normalize it before SageMaker endpoint creation" \
       --hint "edit:.env:VOYAGE_MARKETPLACE_MODEL" \
-      --hint "run:./deploy/scripts/setup-voyage-marketplace.sh" \
+      --hint "edit:.env:TF_VAR_voyage_endpoint_name_suffix" \
       --doc "docs/deployment-preflight-checks.md#voyage-marketplace-model-matches-arn"
     return 0
   fi
@@ -2375,9 +2543,8 @@ pf_check_voyage_marketplace_model_matches_arn() {
       --summary "VOYAGE_MARKETPLACE_MODEL='${model_decl}' is not a supported multimodal Voyage listing" \
       --shortcoming "config" \
       --observed "supported (from voyage_supported_models): ${supported}" \
-      --fix "Re-run ./deploy/scripts/setup-voyage-marketplace.sh --model voyage-multimodal-3 (or voyage-multimodal-3.5)" \
+      --fix "Set VOYAGE_MARKETPLACE_MODEL to voyage-multimodal-3" \
       --hint "edit:.env:VOYAGE_MARKETPLACE_MODEL" \
-      --hint "run:./deploy/scripts/setup-voyage-marketplace.sh" \
       --doc "docs/deployment-preflight-checks.md#voyage-marketplace-model-matches-arn"
     return 0
   fi
@@ -2390,8 +2557,8 @@ pf_check_voyage_marketplace_model_matches_arn() {
   # Tolerate the three known Voyage spelling variants for "multimodal" in the
   # resource-id tail:
   #   - `multimodal` — canonical (voyage-multimodal-3-v1-…)
-  #   - `multimodel` — AWS Marketplace package-group typo. setup-voyage-marketplace.sh
-  #                    explicitly probes the `voyage-multimodel-3-updated` group.
+  #   - `multimodel` — AWS Marketplace package-group typo seen in some
+  #                    `voyage-multimodel-3-updated` listings.
   #   - `miltimodal` — voyageai-aws repo's `model_arn_resource_id` table typo for 3.5.
   local _rid_lower
   _rid_lower="$(printf '%s' "$resource_id" | tr '[:upper:]' '[:lower:]')"
@@ -2402,8 +2569,8 @@ pf_check_voyage_marketplace_model_matches_arn() {
         --summary "VOYAGE_MODEL_PACKAGE_ARN resource-id '${resource_id}' is not a multimodal listing" \
         --shortcoming "config" \
         --observed "ARN does not contain 'multimodal' (or known spelling variants); this stack only supports multimodal Voyage models" \
-        --fix "Re-run ./deploy/scripts/setup-voyage-marketplace.sh --model voyage-multimodal-3 (subscribe at https://aws.amazon.com/marketplace/pp/prodview-hrid2zxusacxy)" \
-        --hint "run:./deploy/scripts/setup-voyage-marketplace.sh" \
+        --fix "Subscribe to the voyage-multimodal-3 Marketplace listing and set the matching VOYAGE_MODEL_PACKAGE_ARN in .env" \
+        --hint "edit:.env:VOYAGE_MODEL_PACKAGE_ARN" \
         --doc "docs/deployment-preflight-checks.md#voyage-marketplace-model-matches-arn"
       return 0
       ;;
@@ -2441,14 +2608,18 @@ pf_check_voyage_endpoint_live_smoke() {
   fi
   _pf_ensure_aws_auth || { _pf_skip pf_check_voyage_endpoint_live_smoke "AWS auth not validated"; return 0; }
 
-  # Endpoint name — same resolution order as runtime + e2e harnesses. The
-  # canonical TF-managed name is `${TF_VAR_voyage_endpoint_name_suffix}-${ENVIRONMENT}`.
+  # Endpoint name — same resolution order as runtime + e2e harnesses. When only
+  # the suffix is available, normalize it the same way deploy-shared/Terraform do.
   local endpoint="${VOYAGE_SAGEMAKER_ENDPOINT:-}"
   if [[ -z "$endpoint" ]]; then
     local suffix="${TF_VAR_voyage_endpoint_name_suffix:-${VOYAGE_ENDPOINT_NAME_SUFFIX:-}}"
     local env_name="${ENVIRONMENT:-dev}"
     if [[ -n "$suffix" ]]; then
-      endpoint="${suffix}-${env_name}"
+      local suffix_safe
+      suffix_safe="$(voyage_sagemaker_endpoint_suffix "$suffix")"
+      if [[ -n "$suffix_safe" ]]; then
+        endpoint="${suffix_safe}-${env_name}"
+      fi
     fi
   fi
   if [[ -z "$endpoint" ]]; then
@@ -2500,8 +2671,8 @@ pf_check_voyage_endpoint_live_smoke() {
       --observed "aws sagemaker-runtime invoke-endpoint → ${first_err:-rc=$rc}${schema_diag:+ — ${schema_diag}}"
       --fix "Run pf_check_voyage_marketplace_model_matches_arn first — if it passed, the ARN says multimodal but the deployed package may be text-only"
       --fix "Verify what package is behind the endpoint: aws sagemaker describe-endpoint --endpoint-name ${endpoint} --query 'EndpointConfigName' → describe-endpoint-config → describe-model → PrimaryContainer.ModelPackageName"
-      --fix "Re-run ./deploy/scripts/setup-voyage-marketplace.sh --model voyage-multimodal-3 then ./deploy/scripts/deploy-shared.sh (Terraform will replace the SageMaker model + endpoint config)"
-      --hint "run:./deploy/scripts/setup-voyage-marketplace.sh"
+      --fix "Set VOYAGE_MODEL_PACKAGE_ARN to a supported multimodal listing, then run ./deploy/scripts/deploy-shared.sh so Terraform replaces the SageMaker model + endpoint config"
+      --hint "edit:.env:VOYAGE_MODEL_PACKAGE_ARN"
       --doc "docs/deployment-preflight-checks.md#voyage-endpoint-live-smoke"
     )
     _pf_fail pf_check_voyage_endpoint_live_smoke "${args[@]}"
@@ -2540,9 +2711,9 @@ PY
         _pf_fail pf_check_voyage_endpoint_live_smoke \
           --summary "Voyage SageMaker endpoint '${endpoint}' returned dim=${dim}, expected ${expected_dim}" \
           --shortcoming "config" \
-          --observed "VOYAGE_EMBEDDING_DIMS=${expected_dim} (api/src/adapters/voyage-embedding.ts) does not match endpoint output" \
-          --fix "Confirm the subscribed model is voyage-multimodal-3 or voyage-multimodal-3.5 (both emit 1024-d)" \
-          --fix "Re-run ./deploy/scripts/setup-voyage-marketplace.sh --model voyage-multimodal-3" \
+          --observed "resolved embedding dim=${expected_dim} (getVoyageEmbeddingDims() in api/src/adapters/voyage-embedding.ts; VOYAGE_OUTPUT_DIM or default 1024) does not match endpoint output" \
+          --fix "Confirm the subscribed model emits the resolved dim (voyage-multimodal-3 is 1024-only; voyage-multimodal-3.5 supports 256/512/1024/2048 via VOYAGE_OUTPUT_DIM)" \
+          --fix "Align VOYAGE_OUTPUT_DIM with the deployed model, or set VOYAGE_MODEL_PACKAGE_ARN to the matching multimodal Marketplace model package and redeploy the shared stack" \
           --doc "docs/deployment-preflight-checks.md#voyage-endpoint-live-smoke"
         return 0
       fi
@@ -2933,7 +3104,7 @@ print(",".join(k for k,v in needed.items() if not v))' < "$out" 2>/dev/null || e
 # Single source of truth for the canonical MongoDB database name inside the
 # preflight module. Matches the project convention used by `.env.sample`,
 # `deploy/scripts/deploy-project.sh`, `deploy/scripts/deploy-local.sh`,
-# `deploy/scripts/destroy.sh`, and `deploy/scripts/setup-troubleshooting-infra.sh`:
+# and `deploy/scripts/destroy.sh`:
 #
 #     ATLAS_DB_NAME = "${PROJECT_NAME//-/_}_${ENVIRONMENT}"
 #
@@ -3344,6 +3515,10 @@ pf_check_kb_ingestion_complete() {
     _pf_skip pf_check_kb_ingestion_complete "BEDROCK_KB_ID not set (deploy without KB)"
     return 0
   fi
+  if [[ "${NETWORK_MODE:-}" == "peering" && "${TF_VAR_enable_kb_peering:-true}" != "false" ]]; then
+    _pf_skip pf_check_kb_ingestion_complete "peering-NLB KB ingestion is experimental and non-blocking in VPC peering mode"
+    return 0
+  fi
   _pf_ensure_aws_auth || { _pf_skip pf_check_kb_ingestion_complete "AWS auth not validated"; return 0; }
   local region="${AWS_REGION:-us-east-1}"
 
@@ -3367,7 +3542,7 @@ pf_check_kb_ingestion_complete() {
     --data-source-id "$ds_id" \
     --sort-by 'attribute=STARTED_AT,order=DESCENDING' \
     --max-results 1 \
-    --query 'ingestionJobSummaries[0].[status,statistics.numberOfNewDocumentsIndexed,statistics.numberOfModifiedDocumentsIndexed]' \
+    --query 'ingestionJobSummaries[0].[status,statistics.numberOfDocumentsScanned,statistics.numberOfDocumentsFailed,statistics.numberOfNewDocumentsIndexed,statistics.numberOfModifiedDocumentsIndexed]' \
     --output text 2>/dev/null || echo '')"
 
   if [[ -z "$probe" ]]; then
@@ -3376,10 +3551,14 @@ pf_check_kb_ingestion_complete() {
   fi
 
   # AWS CLI text output uses TAB delimiters; bash 3.2 read into array.
-  local status=""; local new_count=""; local mod_count=""
-  IFS=$'\t' read -r status new_count mod_count <<<"$probe"
+  local status=""; local scanned_count=""; local failed_count=""; local new_count=""; local mod_count=""
+  IFS=$'\t' read -r status scanned_count failed_count new_count mod_count <<<"$probe"
+  scanned_count="${scanned_count:-0}"
+  failed_count="${failed_count:-0}"
   new_count="${new_count:-0}"
   mod_count="${mod_count:-0}"
+  [[ "$scanned_count" == "None" ]] && scanned_count=0
+  [[ "$failed_count" == "None" ]] && failed_count=0
   [[ "$new_count" == "None" ]] && new_count=0
   [[ "$mod_count" == "None" ]] && mod_count=0
 
@@ -3387,7 +3566,7 @@ pf_check_kb_ingestion_complete() {
     _pf_fail pf_check_kb_ingestion_complete \
       --summary "KB ingestion job status='${status}' (want 'COMPLETE')" \
       --shortcoming "config (data)" \
-      --observed "status=${status} new=${new_count} mod=${mod_count}" \
+      --observed "status=${status} scanned=${scanned_count} failed=${failed_count} new=${new_count} mod=${mod_count}" \
       --fix "Inspect the job: aws bedrock-agent list-ingestion-jobs --knowledge-base-id ${kb_id} --data-source-id ${ds_id}" \
       --fix "Re-run terraform apply on module bedrock-kb to retry the ingestion" \
       --hint "run:aws bedrock-agent list-ingestion-jobs --knowledge-base-id ${kb_id} --data-source-id ${ds_id}" \
@@ -3395,19 +3574,30 @@ pf_check_kb_ingestion_complete() {
     return 0
   fi
 
-  local indexed=$(( new_count + mod_count ))
-  if (( indexed < 1 )); then
+  if (( scanned_count < 1 )); then
     _pf_fail pf_check_kb_ingestion_complete \
-      --summary "KB ingestion COMPLETE but zero documents indexed" \
+      --summary "KB ingestion COMPLETE but no source documents were scanned" \
       --shortcoming "config (data)" \
-      --observed "new=${new_count} mod=${mod_count}" \
+      --observed "scanned=${scanned_count} failed=${failed_count} new=${new_count} mod=${mod_count}" \
       --fix "Verify KB source bucket has docs: aws s3 ls s3://<bucket>/<prefix>" \
       --fix "Re-trigger ingestion via terraform apply on module bedrock-kb" \
       --doc "docs/deployment-preflight-checks.md#kb-ingestion-complete"
     return 0
   fi
 
-  _pf_pass pf_check_kb_ingestion_complete "ingestion COMPLETE (new=${new_count} mod=${mod_count})"
+  if (( failed_count > 0 )); then
+    _pf_fail pf_check_kb_ingestion_complete \
+      --summary "KB ingestion COMPLETE but ${failed_count} source document(s) failed" \
+      --shortcoming "config (data)" \
+      --observed "scanned=${scanned_count} failed=${failed_count} new=${new_count} mod=${mod_count}" \
+      --fix "Inspect the job: aws bedrock-agent list-ingestion-jobs --knowledge-base-id ${kb_id} --data-source-id ${ds_id}" \
+      --fix "Check APPLICATION_LOGS for per-document failure reasons: /aws/bedrock/knowledgebase/${kb_id}" \
+      --fix "Re-trigger ingestion via terraform apply on module bedrock-kb" \
+      --doc "docs/deployment-preflight-checks.md#kb-ingestion-complete"
+    return 0
+  fi
+
+  _pf_pass pf_check_kb_ingestion_complete "ingestion COMPLETE (scanned=${scanned_count} failed=${failed_count} new=${new_count} mod=${mod_count})"
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -3948,16 +4138,11 @@ PY
   local _txt_arn="arn:aws:sagemaker:us-east-1:865070037744:model-package/voyage-3-5-lite-aaaaaaaaaaaaaa"
 
   # Aligned multimodal configurations — must PASS. This stack only supports
-  # voyage-multimodal-3 / voyage-multimodal-3.5.
+  # voyage-multimodal-3.
   _pf_t18_run "aligned multimodal-3"           pass \
     EMBEDDINGS_PROVIDER=voyage \
     VOYAGE_MARKETPLACE_MODEL=voyage-multimodal-3 \
     VOYAGE_MODEL_PACKAGE_ARN="$_mm_arn"
-
-  _pf_t18_run "aligned multimodal-3.5"         pass \
-    EMBEDDINGS_PROVIDER=voyage \
-    VOYAGE_MARKETPLACE_MODEL=voyage-multimodal-3.5 \
-    VOYAGE_MODEL_PACKAGE_ARN="$_mm_typo_i_arn"
 
   _pf_t18_run "marketplace-group typo 'multimodel'" pass \
     EMBEDDINGS_PROVIDER=voyage \
@@ -3995,6 +4180,21 @@ PY
     fail=1
   fi
 
+  local _suffix_fail=0
+  if [[ "$(voyage_sagemaker_endpoint_suffix "voyage-multimodal-3.5")" != "voyage-multimodal-3-5" ]]; then
+    echo "  ✗ voyage_sagemaker_endpoint_suffix did not normalize dotted model name"
+    _suffix_fail=1
+  fi
+  if [[ "$(voyage_sagemaker_endpoint_suffix "  Voyage.Multimodal_3.5  ")" != "voyage-multimodal-3-5" ]]; then
+    echo "  ✗ voyage_sagemaker_endpoint_suffix did not normalize mixed punctuation/case"
+    _suffix_fail=1
+  fi
+  if (( _suffix_fail == 0 )); then
+    echo "  ✓ voyage_sagemaker_endpoint_suffix normalizes SageMaker endpoint fragments"
+  else
+    fail=1
+  fi
+
   # ── Bash-side companion to api/tests/unit/voyage-ssot-guard.test.ts ────────
   # Three grep-style assertions on the deploy tree. The TS guard test covers
   # the same surface and is the authoritative source; this bash mirror runs
@@ -4004,9 +4204,23 @@ PY
   _ssot_repo="$(cd "${BASH_SOURCE%/*}/../.." && pwd)"
   local _bad
 
-  # (a) No `VOYAGE_REQUEST_FORMAT` / `VOYAGE_OUTPUT_DIM` reads anywhere in deploy/.
-  _bad="$(grep -rln -E 'VOYAGE_REQUEST_FORMAT|VOYAGE_OUTPUT_DIM' "${_ssot_repo}/deploy" 2>/dev/null \
+  # (a) `VOYAGE_REQUEST_FORMAT` is dead everywhere in deploy/. `VOYAGE_OUTPUT_DIM`
+  #     is allowed only as controlled derivation in deploy-project.sh /
+  #     deploy-local.sh, as controlled env pass-through in _env-live.sh /
+  #     _agents-common.sh, and as the legitimate mirror in Terraform `.tf` files
+  #     (var.voyage_output_dim wiring into the seed null_resource). All other
+  #     deploy shell references are forbidden; deploy logic must resolve dims
+  #     through the SSOT bridge `voyage_embedding_dims`.
+  _bad="$(grep -rln -E 'VOYAGE_REQUEST_FORMAT' "${_ssot_repo}/deploy" 2>/dev/null \
     | grep -v '_preflight-checks.sh' || true)"
+  _bad="${_bad}${_bad:+$'\n'}$(grep -rln -E 'VOYAGE_OUTPUT_DIM' "${_ssot_repo}/deploy" 2>/dev/null \
+    | grep -v '\.tf$' \
+    | grep -v 'deploy-local.sh' \
+    | grep -v 'deploy-project.sh' \
+    | grep -v '_env-live.sh' \
+    | grep -v '_agents-common.sh' \
+    | grep -v '_preflight-checks.sh' || true)"
+  _bad="$(printf '%s' "$_bad" | sed '/^$/d')"
   if [[ -n "$_bad" ]]; then
     echo "  ✗ pf_check_voyage_ssot_only_source: stale Voyage env refs in:"
     printf '      %s\n' $_bad

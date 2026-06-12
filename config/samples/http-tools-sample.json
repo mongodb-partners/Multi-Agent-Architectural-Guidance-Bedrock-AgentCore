@@ -1,0 +1,19 @@
+{
+  "security": {
+    "allowedHosts": ["xxxxxxxxxx.execute-api.us-east-1.amazonaws.com"],
+    "allowedHostSuffixes": [".lambda-url.us-east-1.on.aws"]
+  },
+  "tools": [
+    {
+      "name": "echo_lambda",
+      "description": "Echo a JSON payload back via the test Lambda. Returns { ok, receivedAt, echo }.",
+      "method": "POST",
+      "url": "https://xxxxxxxxxx.execute-api.us-east-1.amazonaws.com/",
+      "timeoutMs": 15000,
+      "headers": { "Content-Type": "application/json" },
+      "parameters": [
+        { "name": "message", "type": "string", "description": "Free-form text to echo back.", "required": true }
+      ]
+    }
+  ]
+}

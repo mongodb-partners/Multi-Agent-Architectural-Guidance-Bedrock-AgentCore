@@ -21,6 +21,7 @@ import { type Span, SpanStatusCode, trace as otelTrace } from "@opentelemetry/ap
 import { enrichVectorSearchTraceEvents } from "../adapters/mongodb-mcp-client.ts";
 import { costOfUsage } from "./model-pricing.ts";
 import { recordMongoQuery } from "./cw-metrics.ts";
+import { PII_ARG_KEYS, summariseValue, maskPiiInString } from "./logger.ts";
 import type {
   ChatTurnSummary,
   Trace,
@@ -109,6 +110,32 @@ function approxBytes(ev: TraceEvent): number {
 
 // PII redaction keys (lower-case match).
 const PII_KEYS = new Set(["email", "phone", "address", "name", "dob", "ssn"]);
+
+// ---------------------------------------------------------------------------
+// Span-attribute redaction (CloudWatch /aws/spans).
+//
+// `flattenAttrs` builds OTel span attributes from the RAW event payload (the
+// PII-aware `redactPayload` below only runs on the in-memory `events` array
+// inside `emit()`, not on the OTel path). Without redaction here, MongoDB tool
+// args and returned documents leak into `/aws/spans` under keys like
+// `multiagent.payload.args.filter.customerEmail` or
+// `...result.documents.0.email`.
+//
+// `SENSITIVE_PAYLOAD_KEYS` are the carriers of raw MongoDB args + returned
+// documents: the shared `PII_ARG_KEYS` (filter/document/queryVector/…) plus
+// the result-side keys (`normalizedFilter`, `result`, `sampleDocs`,
+// `documentPreviews`). When `flattenAttrs` hits one of these keys it emits a
+// single shape summary instead of recursing. A second value-level backstop
+// (`maskPiiInString`) masks email/phone patterns in every remaining leaf
+// string so PII hiding under an arbitrary key is still caught.
+// ---------------------------------------------------------------------------
+const SENSITIVE_PAYLOAD_KEYS: ReadonlySet<string> = new Set<string>([
+  ...PII_ARG_KEYS,
+  "normalizedFilter",
+  "result",
+  "sampleDocs",
+  "documentPreviews",
+]);
 
 /**
  * Per-event-type allow-list of field names that look like PII (`name`,
@@ -480,21 +507,35 @@ export class TraceCollector {
 
   private flattenAttrs(prefix: string, value: unknown, out: Record<string, string | number | boolean>, depth = 0): void {
     if (depth > 3 || value == null) return;
-    if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+    if (typeof value === "string") {
+      // Layer B backstop: mask email/phone in every leaf string so PII hiding
+      // under an unexpected key never reaches /aws/spans (self-gates on
+      // MCP_LOG_RAW_ARGS).
+      out[prefix] = maskPiiInString(value);
+      return;
+    }
+    if (typeof value === "number" || typeof value === "boolean") {
       out[prefix] = value;
       return;
     }
     if (Array.isArray(value)) {
-      if (value.every((v) => typeof v === "string" || typeof v === "number" || typeof v === "boolean")) {
-        // primitive array — flatten as JSON for OTel compat
-        out[prefix] = safeStringify(value);
-      } else {
-        out[prefix] = safeStringify(value);
-      }
+      // Stringified arrays can still carry PII (e.g. an array of emails), so
+      // run the same value backstop over the serialized form.
+      out[prefix] = maskPiiInString(safeStringify(value));
       return;
     }
     if (typeof value === "object") {
+      const rawArgsOptIn = process.env.MCP_LOG_RAW_ARGS === "true";
       for (const [k, v] of Object.entries(value)) {
+        // Layer A: collapse raw MongoDB arg / returned-doc carriers to a shape
+        // summary so the span never expands `...filter.customerEmail` etc.
+        // Useful sibling scalars (collection, op, status, docCount, …) still
+        // flatten normally.
+        if (!rawArgsOptIn && SENSITIVE_PAYLOAD_KEYS.has(k)) {
+          const summary = summariseValue(v);
+          if (summary !== null) out[`${prefix}.${k}`] = summary;
+          continue;
+        }
         this.flattenAttrs(`${prefix}.${k}`, v, out, depth + 1);
       }
     }

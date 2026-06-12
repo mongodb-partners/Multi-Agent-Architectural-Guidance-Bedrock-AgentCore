@@ -29,11 +29,12 @@ Checks:
 - `deploy-manifest.json` aligns with the env (`embeddings_provider`, Voyage Marketplace ARN, default model).
 - SageMaker endpoint `InService` when `EMBEDDINGS_PROVIDER=voyage`.
 - Terraform outputs for Voyage endpoint + Bedrock KB connectivity.
-- Bedrock KB in `ACTIVE` state with the correct Atlas endpoint service.
+- Bedrock KB in `ACTIVE` state with the correct Atlas endpoint service and a latest ingestion job that scanned exactly the local `deploy/kb-docs/*.txt` source count with `0` failures.
 - **AgentCore Runtime env wiring** — every runtime (orchestrator + 3 specialists) has its full env set (≥ 18 vars on specialists, ≥ 22 on orchestrator). Catches the post-apply env-drift class permanently. See `docs/status/debugging.md` "AgentCore Runtime env vars get reset…".
 - **Authenticated `/chat` flows** for `orchestrator`, `order-management`, `product-recommendation`, `troubleshooting`. Each turn must yield `token`, `done`, **no `stream_error`**, a `trace_id`, and either a `trace` event or a `handoff`. `product-recommendation` must also emit a real `mongo.vector_search` trace event; `troubleshooting` and `orchestrator` must emit `tool.mcp` (proves the AgentCore Gateway → MongoDB MCP path is live, with `_meta` passthrough working).
 - **LTM cross-session recall** — plant turn writes a uniquely-tokened fact (e.g. `HELIOTROPE-LANTERN`), a second session in a fresh chat must surface that token. Verifies `agent_memory_facts` write + hybrid retrieval end-to-end.
 - **CloudWatch trace_id join** — picks the live `x-trace-id` from the smoke chat and confirms `/multiagent/<env>/api` log streams contain ≥ 1 matching event in the smoke window. Validates `_trace` propagation from API → CloudWatch (the parallel scan against `/aws/bedrock-agentcore/runtimes/*` log groups is best-effort and warns rather than fails when AgentCore-side propagation is still in progress).
+- **CloudWatch retention** — confirms shared log groups keep the expected retention split: API 30 days; UI, MCP, and shared AgentCore 7 days.
 - The Phase 9b deterministic backend smoke (`deploy/scripts/backend-smoke.py`, invoked by `deploy-project.sh`) wraps two chat turns in a **3-attempt retry with 15s × attempt back-off** so a freshly-restarted API container doesn't fail the gate on cold-start latency.
 
 Useful overrides:

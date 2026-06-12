@@ -209,7 +209,7 @@ Test coverage:
 | `/ui` | `aux_retention_days` (default **7**) | `multiagent-ui.service` → `/var/log/multiagent-ui.log` → CW agent | `modules/cloudwatch` |
 | `/mcp` | `aux_retention_days` (default **7**) | Reserved (MongoDB MCP runs as an AgentCore Runtime; its logs land under `/aws/bedrock-agentcore/...`). | `modules/cloudwatch` |
 | `/agentcore` | `aux_retention_days` (default **7**) | Reserved — AgentCore Runtime logs are AWS-managed at `/aws/bedrock-agentcore/runtimes/<id>/`. | `modules/cloudwatch` |
-| `/<SHARED_RESOURCE_PREFIX>/<env>/otel` | `log_retention_days` (default **30**) | ADOT Collector sidecar's `awscloudwatchlogs` exporter — receives OTLP application logs from API + Streamlit. | `modules/adot-collector` |
+| `/<SHARED_RESOURCE_PREFIX>/<env>/otel` | `otel_log_retention_days` (default **30**) | ADOT Collector sidecar's `awscloudwatchlogs` exporter — receives OTLP application logs from API + Streamlit. | `modules/adot-collector` |
 | `aws/spans` | `span_retention_days` (default **14**) | X-Ray Transaction Search ingest. Receives OTLP spans signed by the ADOT sidecar + the AgentCore Runtime's own service-vended spans. | `modules/cloudwatch-genai` |
 | `/aws/vendedlogs/bedrock-agentcore/memory/APPLICATION_LOGS/<id>` | `agentcore_log_retention_days` (default **7**) | AgentCore Memory service-vended `APPLICATION_LOGS`. | `modules/cloudwatch-genai` |
 | `/aws/vendedlogs/bedrock-agentcore/gateway/APPLICATION_LOGS/<id>` | `agentcore_log_retention_days` (default **7**) | AgentCore Gateway service-vended `APPLICATION_LOGS`. | `modules/cloudwatch-genai` |

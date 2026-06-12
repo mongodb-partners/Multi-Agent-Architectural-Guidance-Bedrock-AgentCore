@@ -101,28 +101,28 @@ data "aws_ssm_parameter" "shared_network_mode" {
 # with ParameterNotFound. for_each on a mode-gated set keeps the read off
 # when peering is active.
 data "aws_ssm_parameter" "shared_atlas_pl_vpce_id" {
-  for_each = local.is_privatelink_mode ? toset(["pl"]) : toset([])
+  for_each = local.is_privatelink_mode && !var.allow_network_mode_mismatch_on_destroy ? toset(["pl"]) : toset([])
   name     = "${local.ssm_prefix}/atlas_pl_vpce_id"
 }
 
 data "aws_ssm_parameter" "shared_atlas_pl_vpce_dns_name" {
-  for_each = local.is_privatelink_mode ? toset(["pl"]) : toset([])
+  for_each = local.is_privatelink_mode && !var.allow_network_mode_mismatch_on_destroy ? toset(["pl"]) : toset([])
   name     = "${local.ssm_prefix}/atlas_pl_vpce_dns_name"
 }
 
 # ── Peering-only SSM reads — gated to peering mode ──────────────────────────
 data "aws_ssm_parameter" "shared_atlas_peering_id" {
-  for_each = local.is_peering_mode ? toset(["peering"]) : toset([])
+  for_each = local.is_peering_mode && !var.allow_network_mode_mismatch_on_destroy ? toset(["peering"]) : toset([])
   name     = "${local.ssm_prefix}/atlas_peering_id"
 }
 
 data "aws_ssm_parameter" "shared_atlas_container_id" {
-  for_each = local.is_peering_mode ? toset(["peering"]) : toset([])
+  for_each = local.is_peering_mode && !var.allow_network_mode_mismatch_on_destroy ? toset(["peering"]) : toset([])
   name     = "${local.ssm_prefix}/atlas_container_id"
 }
 
 data "aws_ssm_parameter" "shared_atlas_peering_cidr" {
-  for_each = local.is_peering_mode ? toset(["peering"]) : toset([])
+  for_each = local.is_peering_mode && !var.allow_network_mode_mismatch_on_destroy ? toset(["peering"]) : toset([])
   name     = "${local.ssm_prefix}/atlas_peering_cidr"
 }
 
@@ -194,12 +194,18 @@ locals {
 
   # Mode-gated reads: only populated in the matching mode (the data source is
   # for_each-gated so it doesn't try to read non-existent SSM keys in the
-  # other mode).
-  shared_atlas_pl_vpce_id   = local.is_privatelink_mode ? nonsensitive(data.aws_ssm_parameter.shared_atlas_pl_vpce_id["pl"].value) : ""
-  shared_vpce_dns_name      = local.is_privatelink_mode ? nonsensitive(data.aws_ssm_parameter.shared_atlas_pl_vpce_dns_name["pl"].value) : ""
-  shared_atlas_peering_id   = local.is_peering_mode ? nonsensitive(data.aws_ssm_parameter.shared_atlas_peering_id["peering"].value) : ""
-  shared_atlas_container_id = local.is_peering_mode ? nonsensitive(data.aws_ssm_parameter.shared_atlas_container_id["peering"].value) : ""
-  shared_atlas_peering_cidr = local.is_peering_mode ? nonsensitive(data.aws_ssm_parameter.shared_atlas_peering_cidr["peering"].value) : ""
+  # other mode). Destroy-only mismatch cleanup deliberately skips these reads
+  # because the target resources may be unrelated leftovers and the live SSM
+  # canary can point at the other connectivity mode.
+  shared_atlas_pl_vpce_id   = local.is_privatelink_mode && !var.allow_network_mode_mismatch_on_destroy ? nonsensitive(data.aws_ssm_parameter.shared_atlas_pl_vpce_id["pl"].value) : ""
+  shared_vpce_dns_name      = local.is_privatelink_mode && !var.allow_network_mode_mismatch_on_destroy ? nonsensitive(data.aws_ssm_parameter.shared_atlas_pl_vpce_dns_name["pl"].value) : ""
+  shared_atlas_peering_id   = local.is_peering_mode && !var.allow_network_mode_mismatch_on_destroy ? nonsensitive(data.aws_ssm_parameter.shared_atlas_peering_id["peering"].value) : ""
+  shared_atlas_container_id = local.is_peering_mode && !var.allow_network_mode_mismatch_on_destroy ? nonsensitive(data.aws_ssm_parameter.shared_atlas_container_id["peering"].value) : ""
+  shared_atlas_peering_cidr = (
+    local.is_peering_mode && !var.allow_network_mode_mismatch_on_destroy
+    ? nonsensitive(data.aws_ssm_parameter.shared_atlas_peering_cidr["peering"].value)
+    : (local.is_peering_mode ? var.atlas_peering_cidr : "")
+  )
 
   # Shared-stack lookups — see comment block above. Treat the "_empty_"
   # sentinel as a real empty value so consumers can keep using
@@ -234,7 +240,7 @@ locals {
 check "network_mode_matches_shared" {
   assert {
     condition     = local.shared_network_mode == var.network_mode
-    error_message = "NETWORK MODE MISMATCH — envs/ec2 tfvars say '${var.network_mode}' but the network stack at ${local.ssm_prefix}/network_mode says '${local.shared_network_mode}'. Switching connectivity modes requires destroy + redeploy: run ./deploy/scripts/destroy.sh --mode ec2, --mode shared (optional), --mode network in that order, then redeploy with the desired NETWORK_MODE."
+    error_message = "NETWORK MODE MISMATCH — envs/ec2 tfvars say '${var.network_mode}' but the network stack at ${local.ssm_prefix}/network_mode says '${local.shared_network_mode}'. Switching connectivity modes requires destroy + redeploy: run ./deploy/destroy/destroy-project-with-${local.shared_network_mode == "peering" ? "vpc-peering" : "privatelink"}.sh then ./deploy/destroy/destroy-shared-with-${local.shared_network_mode == "peering" ? "vpc-peering" : "privatelink"}.sh, then redeploy with the desired NETWORK_MODE."
   }
 }
 
@@ -257,6 +263,10 @@ module "mongodb_atlas" {
   privatelink_endpoint_id = local.shared_atlas_pl_vpce_id
   network_mode            = var.network_mode
   vpc_cidr                = local.shared_vpc_cidr
+  # WHY: forward the deploy-machine /32 so the module scopes the Atlas IP access
+  # list to it instead of 0.0.0.0/0 (privatelink mode). Omitting this would
+  # leave the cluster open to the public internet, failing the security UAT.
+  operator_ip_cidr = var.operator_ip_cidr
 }
 
 # Atlas Search indexes that belong to application data (`products`,
@@ -277,11 +287,14 @@ resource "null_resource" "seed_mongodb_indexes" {
     environment = {
       MONGODB_URI = module.mongodb_atlas.connection_string
       MONGODB_DB  = var.atlas_db_name
-      # NOTE: must match VOYAGE_EMBEDDING_DIMS in
-      # api/src/adapters/voyage-embedding.ts. Terraform can't shell out to
-      # voyage-print.ts here, so the literal is pinned by the bun guard test
+      # Embedding dim is driven by VOYAGE_OUTPUT_DIM (default 1024 ==
+      # VOYAGE_DEFAULT_EMBEDDING_DIMS in api/src/adapters/voyage-embedding.ts).
+      # seed-indexes.ts reads VOYAGE_OUTPUT_DIM via getVoyageEmbeddingDims().
+      # Terraform can't shell out to voyage-print.ts, so var.voyage_output_dim's
+      # default is pinned by the bun guard test
       # `voyage SSOT — terraform <-> TS parity for embedding dim`.
-      EMBEDDING_DIMENSIONS          = "1024"
+      VOYAGE_OUTPUT_DIM             = tostring(var.voyage_output_dim)
+      EMBEDDING_DIMENSIONS          = tostring(var.voyage_output_dim)
       WAIT_FOR_ATLAS_SEARCH_INDEXES = "1"
     }
   }
@@ -392,8 +405,9 @@ module "bedrock_kb" {
   project_name = var.project_name
   environment  = var.environment
 
-  shared_bucket_name = data.aws_s3_bucket.shared.id
-  shared_bucket_arn  = data.aws_s3_bucket.shared.arn
+  shared_bucket_name  = data.aws_s3_bucket.shared.id
+  shared_bucket_arn   = data.aws_s3_bucket.shared.arn
+  kb_docs_bucket_name = var.kb_docs_bucket_name
 
   atlas_project_id   = var.atlas_project_id
   atlas_cluster_name = module.mongodb_atlas.cluster_name
@@ -407,6 +421,7 @@ module "bedrock_kb" {
   embed_model_id           = var.embed_model_id
   kb_docs_path             = "${path.module}/../../../kb-docs"
   ensure_collection_script = "${path.module}/../../../../db-seeding/ensure-collection.ts"
+  ingestion_required       = !local.use_kb_peering_nlb
 
   endpoint_service_name = local.kb_endpoint_service_name
 
@@ -554,6 +569,7 @@ module "agentcore_memory" {
 resource "aws_ecr_repository" "mongodb_mcp_runtime" {
   name                 = "${var.project_name}-mongodb-mcp-${var.environment}"
   image_tag_mutability = "MUTABLE"
+  force_delete         = true
   image_scanning_configuration { scan_on_push = true }
 }
 
@@ -859,36 +875,43 @@ resource "null_resource" "existing_agentcore_vpce_access" {
 locals {
   mongodb_mcp_runtime_image = "${aws_ecr_repository.mongodb_mcp_runtime.repository_url}:latest"
 
-  # MONGODB_URI selection — mode-aware with NO public-SRV fallback in peering
-  # mode (HARD privacy constraint). PrivateLink mode keeps its existing
-  # behavior (privatelink_connection_string is always populated when envs/network
-  # PL module is applied; the ternary is preserved for back-compat).
-  # Peering mode: prefer the SRV form (when Atlas Private DNS for Peering is
-  # on) and fall back to the multi-host non-SRV form. Both are -pri.mongodb.net
-  # — see precondition below.
+  # MONGODB_URI selection — runtime paths must use direct multi-host private
+  # URIs only. Do not fall back to SRV: SRV/TXT discovery is slower on cold
+  # AgentCore/MCP paths, and public SRV would violate the private-runtime
+  # boundary. Phase 5c in deploy-project.sh applies the same rule before
+  # re-syncing AgentCore runtime env vars.
   _mcp_uri_peering = coalesce(
-    module.mongodb_atlas.peering_connection_srv_string,
     module.mongodb_atlas.peering_connection_string,
     # Sentinel — caught by the precondition. Picked to be obviously broken.
     "PEERING_URI_UNAVAILABLE"
   )
-  _mcp_uri_privatelink = module.mongodb_atlas.privatelink_connection_string != "" ? module.mongodb_atlas.privatelink_connection_string : module.mongodb_atlas.connection_string
-  mcp_mongodb_uri      = local.is_peering_mode ? local._mcp_uri_peering : local._mcp_uri_privatelink
+  _mcp_uri_privatelink = coalesce(
+    module.mongodb_atlas.privatelink_connection_string,
+    # Sentinel — caught by the precondition. Picked to be obviously broken.
+    "PRIVATELINK_URI_UNAVAILABLE"
+  )
+  mcp_mongodb_uri = local.is_peering_mode ? local._mcp_uri_peering : local._mcp_uri_privatelink
 }
 
-# Privacy guardrail — fail-loud if peering mode somehow lands on a public-SRV
-# URI (Atlas hostname without the -pri token). Catches API regressions in the
-# mongodb-atlas module outputs before they ship to runtime env vars.
-check "mcp_uri_is_private_in_peering_mode" {
+# Privacy + latency guardrail — fail-loud if runtime Mongo ever lands on SRV or
+# the wrong private hostname family. Catches Atlas/provider races before they
+# ship to AgentCore runtime env vars.
+check "mcp_uri_is_direct_private_runtime_uri" {
   assert {
     condition = (
-      !local.is_peering_mode ||
+      local.is_peering_mode ?
       (
         local.mcp_mongodb_uri != "PEERING_URI_UNAVAILABLE"
+        && startswith(local.mcp_mongodb_uri, "mongodb://")
         && can(regex("-pri\\.", local.mcp_mongodb_uri))
+      ) :
+      (
+        local.mcp_mongodb_uri != "PRIVATELINK_URI_UNAVAILABLE"
+        && startswith(local.mcp_mongodb_uri, "mongodb://")
+        && can(regex("-pl-", local.mcp_mongodb_uri))
       )
     )
-    error_message = "Peering-mode MONGODB_URI does not look private (missing '-pri.' peering host token). Check that module.mongodb_atlas.peering_connection_string or peering_connection_srv_string is populated — the cluster's connection_strings[0].private should be populated whenever a mongodbatlas_network_peering exists for this project+region."
+    error_message = "Runtime MONGODB_URI must be a direct multi-host private URI. Peering requires module.mongodb_atlas.peering_connection_string with '-pri.' hosts; PrivateLink requires module.mongodb_atlas.privatelink_connection_string with '-pl-' hosts. SRV/public fallback is intentionally disabled."
   }
 }
 
@@ -981,6 +1004,7 @@ resource "aws_ecr_repository" "agent_runtime" {
   count                = var.agentcore_runtime_deployment_mode == "container" ? 1 : 0
   name                 = "${var.project_name}-agent-runtime-${var.environment}"
   image_tag_mutability = "MUTABLE"
+  force_delete         = true
   image_scanning_configuration { scan_on_push = true }
 }
 
@@ -1103,12 +1127,13 @@ module "cloudwatch_genai" {
   count  = var.enable_genai_observability ? 1 : 0
   source = "../../modules/cloudwatch-genai"
 
-  project_name                     = var.project_name
-  environment                      = var.environment
-  span_retention_days              = var.span_retention_days
-  span_sampling_percent            = var.span_sampling_percent
-  enable_transaction_search_toggle = var.enable_transaction_search_toggle
-  agentcore_log_retention_days     = var.agentcore_vended_log_retention_days
+  project_name                             = var.project_name
+  environment                              = var.environment
+  span_retention_days                      = var.span_retention_days
+  span_sampling_percent                    = var.span_sampling_percent
+  enable_transaction_search_toggle         = var.enable_transaction_search_toggle
+  agentcore_log_retention_days             = var.agentcore_vended_log_retention_days
+  enable_agentcore_vended_application_logs = var.enable_agentcore_vended_application_logs
   # Pass { id, arn } via STATIC keys ("main"). The id is used inside the
   # AWS-mandated log-group path (/aws/vendedlogs/bedrock-agentcore/memory/
   # APPLICATION_LOGS/<memory-id>) so console auto-discovery still works;

@@ -66,6 +66,8 @@ export type TraceEventType =
   | "orchestrator.multi_route_decision"
   | "orchestrator.specialist_draft"
   | "orchestrator.synthesis"
+  | "orchestrator.clarification_route"
+  | "orchestrator.clarification"
   | "latency.checkpoint"
   | "dev.environment"
   | "dev.byte_cap_hit"

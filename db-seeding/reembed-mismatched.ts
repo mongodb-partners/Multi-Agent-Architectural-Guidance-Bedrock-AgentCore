@@ -58,8 +58,6 @@ import {
 const args = new Set(process.argv.slice(2));
 const APPLY = args.has("--apply");
 const DECLARED_PROVIDER = (process.env.EMBEDDINGS_PROVIDER ?? "").trim().toLowerCase();
-const VOYAGE_ENDPOINT = getVoyageEndpoint();
-const BEDROCK_MODEL_ID = process.env.EMBEDDING_MODEL_ID?.trim();
 const region = process.env.AWS_REGION ?? "us-east-1";
 
 let BATCH_SIZE = 100;
@@ -76,6 +74,10 @@ if (DECLARED_PROVIDER !== "voyage" && DECLARED_PROVIDER !== "titan") {
   );
   process.exit(1);
 }
+
+const VOYAGE_ENDPOINT =
+  DECLARED_PROVIDER === "voyage" ? getVoyageEndpoint() : undefined;
+const BEDROCK_MODEL_ID = process.env.EMBEDDING_MODEL_ID?.trim();
 
 if (DECLARED_PROVIDER === "voyage" && !VOYAGE_ENDPOINT) {
   console.error("ERROR: EMBEDDINGS_PROVIDER=voyage but VOYAGE_SAGEMAKER_ENDPOINT is empty.");

@@ -36,6 +36,11 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 TF_ROOT="$REPO_ROOT/deploy/terraform"
 BOOTSTRAP_DIR="$TF_ROOT/bootstrap"
 REPORTS_DIR="$REPO_ROOT/destroy-reports"
+# Manifest of security groups we deliberately left in AWS (and removed from
+# Terraform state) because service-managed AgentCore ENIs still pinned them at
+# destroy time. A mode-specific deferred reaper under deploy/destroy/ reads this
+# file and deletes them once AWS releases the ENIs.
+ORPHAN_SG_MANIFEST="$REPORTS_DIR/orphan-security-groups.tsv"
 
 ENV_FILE="$REPO_ROOT/.env"
 MODE=""
@@ -88,6 +93,230 @@ sep()  { echo "─────────────────────�
 # shellcheck source=deploy/scripts/_sg-cleanup.sh
 source "$SCRIPT_DIR/_sg-cleanup.sh"
 
+cleanup_agentcore_gateway_targets() {
+  [[ "$MODE" == "ec2" ]] || return 0
+
+  local gateway_id target_ids target_id
+  gateway_id="$(terraform output -raw agentcore_gateway_id 2>/dev/null || true)"
+  if [[ -z "$gateway_id" || "$gateway_id" == "null" || "$gateway_id" == "None" ]]; then
+    log "No AgentCore Gateway output found; skipping gateway target pre-clean."
+    return 0
+  fi
+
+  target_ids="$(aws bedrock-agentcore-control list-gateway-targets \
+    --gateway-identifier "$gateway_id" \
+    --region "$AWS_REGION" \
+    --query "items[].targetId" \
+    --output text 2>/dev/null || true)"
+
+  if [[ -z "$target_ids" || "$target_ids" == "None" ]]; then
+    ok "AgentCore Gateway has no targets to pre-clean"
+    return 0
+  fi
+
+  warn "Pre-cleaning AgentCore Gateway targets for $gateway_id before gateway destroy..."
+  for target_id in $target_ids; do
+    [[ -n "$target_id" && "$target_id" != "None" ]] || continue
+    log "Deleting AgentCore Gateway target: $target_id"
+    aws bedrock-agentcore-control delete-gateway-target \
+      --gateway-identifier "$gateway_id" \
+      --region "$AWS_REGION" \
+      --target-id "$target_id" \
+      --output text >/dev/null 2>&1 || true
+  done
+
+  local attempts sleep_seconds attempt remaining
+  attempts="${AGENTCORE_GATEWAY_TARGET_WAIT_ATTEMPTS:-24}"
+  sleep_seconds="${AGENTCORE_GATEWAY_TARGET_WAIT_SECONDS:-5}"
+  attempt=1
+  while (( attempt <= attempts )); do
+    remaining="$(aws bedrock-agentcore-control list-gateway-targets \
+      --gateway-identifier "$gateway_id" \
+      --region "$AWS_REGION" \
+      --query "length(items)" \
+      --output text 2>/dev/null || echo "0")"
+    if [[ "$remaining" == "0" ]]; then
+      ok "AgentCore Gateway targets deleted"
+      return 0
+    fi
+    log "Waiting for AgentCore Gateway targets to delete ($remaining remaining, attempt $attempt/$attempts)..."
+    sleep "$sleep_seconds"
+    attempt=$((attempt + 1))
+  done
+
+  warn "AgentCore Gateway targets still present after wait; Terraform destroy will retry or report the dependency."
+  return 0
+}
+
+# Service-managed AgentCore ENIs (interface-type=agentic_ai) keep runtime
+# security groups "in-use" for a while after the runtime itself is gone. AWS
+# forbids detaching/deleting those ENIs by hand, so we cannot force the SG free
+# during this destroy. Instead of blocking the foreground for up to an hour, we
+# DECOUPLE: remove the still-pinned SGs from Terraform state (so the rest of the
+# destroy completes now) and record them to a manifest. The deferred reaper
+# (chosen below from NETWORK_MODE, or ORPHAN_SG_REAPER_SCRIPT) deletes them
+# later, once AWS has released the ENIs.
+defer_blocked_runtime_sgs() {
+  [[ "$MODE" == "ec2" ]] || return 0
+
+  # If AgentCore runtimes are still in state, Terraform must destroy them first
+  # in this same run; there is nothing orphaned to defer yet.
+  if grep -q "aws_bedrockagentcore_agent_runtime" "$TF_STATE_BEFORE" 2>/dev/null; then
+    return 0
+  fi
+
+  local sg_addresses=(
+    "aws_security_group.mongodb_mcp_runtime"
+    "aws_security_group.agentcore_runtime_vpce"
+  )
+  local address sg_id eni_count eni_ids deferred=0
+
+  for address in "${sg_addresses[@]}"; do
+    grep -qx "$address" "$TF_STATE_BEFORE" 2>/dev/null || continue
+
+    sg_id="$(terraform state show -no-color "$address" 2>/dev/null | awk -F'= ' '$1 ~ /^[[:space:]]*id[[:space:]]*$/ { print $2; exit }' || true)"
+    sg_id="${sg_id%\"}"
+    sg_id="${sg_id#\"}"
+    [[ -n "$sg_id" ]] || continue
+
+    eni_count="$(aws ec2 describe-network-interfaces \
+      --region "$AWS_REGION" \
+      --filters "Name=group-id,Values=${sg_id}" "Name=interface-type,Values=agentic_ai" \
+      --query "length(NetworkInterfaces)" --output text 2>/dev/null || echo "0")"
+
+    if [[ "$eni_count" == "0" ]]; then
+      # Not pinned by service ENIs — let Terraform delete it normally.
+      continue
+    fi
+
+    eni_ids="$(aws ec2 describe-network-interfaces \
+      --region "$AWS_REGION" \
+      --filters "Name=group-id,Values=${sg_id}" "Name=interface-type,Values=agentic_ai" \
+      --query "NetworkInterfaces[].NetworkInterfaceId" --output text 2>/dev/null || echo "")"
+
+    warn "${address} (${sg_id}) is still pinned by ${eni_count} AgentCore ENI(s): ${eni_ids:-unknown}"
+    warn "Removing ${address} from Terraform state and deferring its deletion to the reaper."
+
+    if terraform state rm "$address" >/dev/null 2>&1; then
+      mkdir -p "$REPORTS_DIR"
+      # TSV columns: sg_id  region  name  vpc_id  recorded_at
+      printf '%s\t%s\t%s\t%s\t%s\n' \
+        "$sg_id" \
+        "$AWS_REGION" \
+        "${address#aws_security_group.}" \
+        "${SHARED_VPC_NAME:-unknown}" \
+        "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+        >> "$ORPHAN_SG_MANIFEST"
+      deferred=$((deferred + 1))
+      ok "Deferred ${sg_id} -> ${ORPHAN_SG_MANIFEST}"
+    else
+      warn "terraform state rm failed for ${address}; Terraform destroy may report the dependency."
+    fi
+  done
+
+  if (( deferred > 0 )); then
+    warn "${deferred} security group(s) left in AWS and recorded for deferred cleanup."
+    warn "Run the reaper after AWS releases the ENIs (typically ~1 hour):"
+    warn "    ${ORPHAN_SG_REAPER_CMD} --watch"
+  fi
+  return 0
+}
+
+empty_project_ecr_repositories() {
+  [[ "$MODE" == "ec2" ]] || return 0
+
+  local repositories=(
+    "${PROJECT_NAME}-api-${ENVIRONMENT}"
+    "${PROJECT_NAME}-ui-${ENVIRONMENT}"
+    "${PROJECT_NAME}-mongodb-mcp-${ENVIRONMENT}"
+    "${PROJECT_NAME}-agent-runtime-${ENVIRONMENT}"
+  )
+  local repo image_ids count
+  for repo in "${repositories[@]}"; do
+    aws ecr describe-repositories \
+      --region "$AWS_REGION" \
+      --repository-names "$repo" >/dev/null 2>&1 || continue
+
+    log "Emptying ECR repository before destroy: $repo"
+    while true; do
+      image_ids="$(aws ecr list-images \
+        --region "$AWS_REGION" \
+        --repository-name "$repo" \
+        --max-items 100 \
+        --query "imageIds" --output json 2>/dev/null || echo "[]")"
+      count="$(python3 -c 'import json,sys; print(len(json.load(sys.stdin) or []))' <<<"$image_ids" 2>/dev/null || echo "0")"
+      [[ "$count" == "0" ]] && break
+      aws ecr batch-delete-image \
+        --region "$AWS_REGION" \
+        --repository-name "$repo" \
+        --image-ids "$image_ids" >/dev/null 2>&1 || true
+    done
+  done
+}
+
+delete_cloudwatch_log_group_if_exists() {
+  local group="$1"
+  [[ -n "$group" ]] || return 0
+
+  local found
+  found="$(aws logs describe-log-groups \
+    --region "$AWS_REGION" \
+    --log-group-name-prefix "$group" \
+    --query "logGroups[?logGroupName=='${group}'].logGroupName | [0]" \
+    --output text 2>/dev/null || echo "None")"
+  [[ -n "$found" && "$found" != "None" ]] || return 0
+
+  log "Deleting CloudWatch log group: $group"
+  if aws logs delete-log-group \
+    --region "$AWS_REGION" \
+    --log-group-name "$group" >/dev/null 2>&1; then
+    ok "Deleted CloudWatch log group: $group"
+  else
+    warn "Failed to delete CloudWatch log group: $group"
+  fi
+}
+
+cleanup_shared_cloudwatch_log_groups() {
+  [[ "$MODE" == "shared" ]] || return 0
+
+  local prefix="/${SHARED_RESOURCE_PREFIX}/${ENVIRONMENT}"
+  local groups=(
+    "${prefix}/api"
+    "${prefix}/ui"
+    "${prefix}/mcp"
+    "${prefix}/agentcore"
+    "${prefix}/otel"
+    "${prefix}/otel-atlas"
+    "/aws/bedrock/invocations"
+    "/aws/bedrock/invocations-audit"
+  )
+  local group
+  for group in "${groups[@]}"; do
+    delete_cloudwatch_log_group_if_exists "$group"
+  done
+}
+
+cleanup_project_agentcore_runtime_log_groups() {
+  [[ "$MODE" == "ec2" ]] || return 0
+
+  # AgentCore auto-creates runtime log groups and appends an opaque suffix:
+  # /aws/bedrock-agentcore/runtimes/<normalized-runtime-name>-<suffix>-DEFAULT
+  # Runtime names normalize '-' -> '_' and are capped at 48 chars by Terraform.
+  local normalized_project prefix groups group
+  normalized_project="${PROJECT_NAME//-/_}"
+  prefix="/aws/bedrock-agentcore/runtimes/${normalized_project}_"
+  groups="$(aws logs describe-log-groups \
+    --region "$AWS_REGION" \
+    --log-group-name-prefix "$prefix" \
+    --query "logGroups[].logGroupName" \
+    --output text 2>/dev/null || true)"
+
+  [[ -n "$groups" && "$groups" != "None" ]] || return 0
+  for group in $groups; do
+    delete_cloudwatch_log_group_if_exists "$group"
+  done
+}
+
 # ══════════════════════════════════════════════════════════════════════════════
 # Prerequisites
 # ══════════════════════════════════════════════════════════════════════════════
@@ -115,7 +344,7 @@ export TF_VAR_atlas_project_id="${TF_VAR_atlas_project_id:-${TF_VAR_mongodb_atla
 export TF_VAR_atlas_public_key="${MONGODB_ATLAS_PUBLIC_KEY:-}"
 export TF_VAR_atlas_private_key="${MONGODB_ATLAS_PRIVATE_KEY:-}"
 
-DEPLOY_DIAG_LABEL="destroy:${MODE}"
+export DEPLOY_DIAG_LABEL="destroy:${MODE}"
 # shellcheck source=deploy/scripts/_deploy-diagnostics.sh
 source "$SCRIPT_DIR/_deploy-diagnostics.sh"
 deploy_diag_install_error_trap
@@ -135,12 +364,26 @@ SHARED_BUCKET="${PROJECT_NAME}-${ENVIRONMENT}-${ACCOUNT_ID}"
 # variables so a .env override of ENVIRONMENT / AWS_REGION / SHARED_VPC_NAME
 # is honored. Same for NETWORK_MODE (drives tfvars + SSM cleanup branches).
 SHARED_VPC_NAME="${SHARED_VPC_NAME:-shared-network}"
+SHARED_RESOURCE_PREFIX="${SHARED_RESOURCE_PREFIX:-${TF_VAR_shared_resource_prefix:-multiagent}}"
 NETWORK_MODE="${NETWORK_MODE:-privatelink}"
 ATLAS_PEERING_CIDR="${ATLAS_PEERING_CIDR:-192.168.248.0/21}"
 case "$NETWORK_MODE" in
   privatelink|peering) ;;
   *) err "Invalid NETWORK_MODE='${NETWORK_MODE}' — must be 'privatelink' or 'peering'" ;;
 esac
+
+case "$NETWORK_MODE" in
+  peering) _ORPHAN_SG_REAPER_DEFAULT="deploy/destroy/reap-orphan-security-groups-vpc-peering.sh" ;;
+  privatelink) _ORPHAN_SG_REAPER_DEFAULT="deploy/destroy/reap-orphan-security-groups-privatelink.sh" ;;
+esac
+ORPHAN_SG_REAPER_SCRIPT="${ORPHAN_SG_REAPER_SCRIPT:-$_ORPHAN_SG_REAPER_DEFAULT}"
+ORPHAN_SG_REAPER_CMD="$ORPHAN_SG_REAPER_SCRIPT"
+case "$ORPHAN_SG_REAPER_CMD" in
+  /*|./*) ;;
+  *) ORPHAN_SG_REAPER_CMD="./$ORPHAN_SG_REAPER_CMD" ;;
+esac
+unset _ORPHAN_SG_REAPER_DEFAULT
+
 [[ "$MODE" == "ec2" || "$MODE" == "network" ]] && ok "Network mode: ${NETWORK_MODE}"
 case "$MODE" in
   local)   STATE_KEY="${ENVIRONMENT}/terraform.tfstate" ;;
@@ -237,6 +480,7 @@ shared_bucket_name = "${SHARED_BUCKET}"
 atlas_project_id   = "${TF_VAR_atlas_project_id}"
 atlas_db_user      = "${ATLAS_DB_USER}"
 atlas_db_name      = "${ATLAS_DB_NAME}"
+kb_docs_bucket_name = "${KB_DOCS_BUCKET:-}"
 EOF
     ;;
   ec2)
@@ -250,6 +494,9 @@ atlas_project_id   = "${TF_VAR_atlas_project_id}"
 atlas_db_user      = "${ATLAS_DB_USER}"
 atlas_db_name      = "${ATLAS_DB_NAME}"
 network_mode       = "${NETWORK_MODE}"
+allow_network_mode_mismatch_on_destroy = true
+atlas_peering_cidr = "${ATLAS_PEERING_CIDR}"
+kb_docs_bucket_name = "${KB_DOCS_BUCKET:-}"
 EOF
     ;;
   shared)
@@ -299,6 +546,9 @@ log "Found $_RESOURCE_COUNT resource(s) in state"
 _DESTROY_START="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 log "Running terraform destroy..."
 if [[ "$MODE" == "ec2" ]]; then
+  cleanup_agentcore_gateway_targets || true
+  defer_blocked_runtime_sgs || true
+  empty_project_ecr_repositories || true
   log "Pre-cleaning external security-group references for project SGs..."
   cleanup_project_security_group_references || true
 fi
@@ -311,6 +561,20 @@ else
 fi
 _DESTROY_END="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 ok "envs/$MODE destroyed"
+
+if [[ "$MODE" == "ec2" ]]; then
+  cleanup_project_agentcore_runtime_log_groups || true
+elif [[ "$MODE" == "shared" ]]; then
+  cleanup_shared_cloudwatch_log_groups || true
+fi
+
+# Remind operators if we deferred any ENI-pinned security groups this run.
+if [[ "$MODE" == "ec2" && -s "$ORPHAN_SG_MANIFEST" ]]; then
+  sep
+  warn "Deferred orphan security group(s) recorded in: $ORPHAN_SG_MANIFEST"
+  warn "AgentCore ENIs usually clear within ~1 hour. Then reap them with:"
+  warn "    ${ORPHAN_SG_REAPER_CMD} --watch"
+fi
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Bootstrap destroy (opt-in, shared across envs)
@@ -371,6 +635,8 @@ _RES_shared_vpc=""
 _RES_atlas_vpc_peering=""
 _RES_atlas_peering_ssm=""
 _RES_bedrock_invocation_logging=""
+_RES_cloudwatch_log_groups=""
+_RES_agentcore_runtime_log_groups=""
 _RES_legacy_lambda_mcp=""
 _RES_legacy_orphans=""
 
@@ -412,6 +678,18 @@ if [[ "$MODE" == "ec2" ]]; then
   else
     _RES_ec2_instances="DELETED"
   fi
+
+  _AGENTCORE_LOG_PREFIX="/aws/bedrock-agentcore/runtimes/${PROJECT_NAME//-/_}_"
+  _AGENTCORE_LOG_LEFTOVER=$(aws logs describe-log-groups \
+    --region "$AWS_REGION" \
+    --log-group-name-prefix "$_AGENTCORE_LOG_PREFIX" \
+    --query "logGroups[].logGroupName" \
+    --output text 2>/dev/null || echo "")
+  if [[ -n "$_AGENTCORE_LOG_LEFTOVER" && "$_AGENTCORE_LOG_LEFTOVER" != "None" ]]; then
+    _RES_agentcore_runtime_log_groups="RESIDUE — AgentCore runtime log groups: $_AGENTCORE_LOG_LEFTOVER"
+  else
+    _RES_agentcore_runtime_log_groups="DELETED"
+  fi
 fi
 
 # SageMaker endpoints (now owned by envs/shared — endpoint name is
@@ -428,6 +706,30 @@ fi
 
 # Shared mode — verify SSM canary keys + dashboards actually went away
 if [[ "$MODE" == "shared" ]]; then
+  _SHARED_LOG_PREFIX="/${SHARED_RESOURCE_PREFIX}/${ENVIRONMENT}"
+  _SHARED_LOG_LEFTOVER=""
+  for _lg in \
+    "${_SHARED_LOG_PREFIX}/api" \
+    "${_SHARED_LOG_PREFIX}/ui" \
+    "${_SHARED_LOG_PREFIX}/mcp" \
+    "${_SHARED_LOG_PREFIX}/agentcore" \
+    "${_SHARED_LOG_PREFIX}/otel" \
+    "${_SHARED_LOG_PREFIX}/otel-atlas" \
+    "/aws/bedrock/invocations" \
+    "/aws/bedrock/invocations-audit"; do
+    _found_lg=$(aws logs describe-log-groups \
+      --region "$AWS_REGION" \
+      --log-group-name-prefix "$_lg" \
+      --query "logGroups[?logGroupName=='${_lg}'].logGroupName | [0]" \
+      --output text 2>/dev/null || echo "None")
+    [[ -n "$_found_lg" && "$_found_lg" != "None" ]] && _SHARED_LOG_LEFTOVER="${_SHARED_LOG_LEFTOVER} ${_found_lg}"
+  done
+  if [[ -n "$_SHARED_LOG_LEFTOVER" ]]; then
+    _RES_cloudwatch_log_groups="RESIDUE — shared CloudWatch log groups:${_SHARED_LOG_LEFTOVER}"
+  else
+    _RES_cloudwatch_log_groups="DELETED"
+  fi
+
   _SHARED_CANARY=$(aws ssm get-parameter \
     --region "$AWS_REGION" \
     --name "/${SHARED_VPC_NAME}/${AWS_REGION}/cw_api_log_group" \
@@ -517,7 +819,7 @@ if [[ "$MODE" == "ec2" ]]; then
   fi
 fi
 
-# Legacy orphans from pre-rename runs of setup-troubleshooting-infra.sh.
+# Legacy orphans from the old standalone troubleshooting bootstrap.
 # Terraform's project+env-derived resources can't see these (different
 # names), so they would otherwise sit indefinitely. The legacy names
 # below are no longer created by any current code path; if they exist
@@ -603,7 +905,8 @@ fi
 sep
 REPORT_FILE="$REPORTS_DIR/destroy-${MODE}-$(date +%Y%m%d-%H%M%S).json"
 
-export _DR_TS="$(date -u +"%Y-%m-%dT%H:%M:%SZ")" _DR_MODE="$MODE"
+_DR_TS="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+export _DR_TS _DR_MODE="$MODE"
 export _DR_START="$_DESTROY_START" _DR_END="$_DESTROY_END"
 export _DR_ACCOUNT="$ACCOUNT_ID" _DR_REGION="$AWS_REGION" _DR_ENV="$ENVIRONMENT"
 export _DR_BUCKET="$SHARED_BUCKET" _DR_BOOTSTRAP="$WITH_BOOTSTRAP"
@@ -616,6 +919,8 @@ export _DR_RES_LEGACY="${_RES_legacy_orphans:-N/A}"
 export _DR_RES_SHARED_VPC="${_RES_shared_vpc:-N/A (not network mode)}"
 export _DR_RES_SHARED_SSM="${_RES_shared_ssm_params:-N/A (not network/shared mode)}"
 export _DR_RES_BEDROCK_INV="${_RES_bedrock_invocation_logging:-N/A (not shared mode)}"
+export _DR_RES_CW_LOGS="${_RES_cloudwatch_log_groups:-N/A (not shared mode)}"
+export _DR_RES_AGENTCORE_LOGS="${_RES_agentcore_runtime_log_groups:-N/A (not ec2 mode)}"
 export _TF_STATE_BEFORE_FILE="$TF_STATE_BEFORE"
 
 python3 - <<'PYEOF' > "$REPORT_FILE"
@@ -629,7 +934,8 @@ except Exception:
     pass
 has_residues = any("RESIDUE" in v(k) for k in
     ["_DR_RES_S3","_DR_RES_EC2","_DR_RES_SAGE","_DR_RES_LAMBDA","_DR_RES_LEGACY",
-     "_DR_RES_SHARED_VPC","_DR_RES_SHARED_SSM","_DR_RES_BEDROCK_INV"])
+     "_DR_RES_SHARED_VPC","_DR_RES_SHARED_SSM","_DR_RES_BEDROCK_INV",
+     "_DR_RES_CW_LOGS","_DR_RES_AGENTCORE_LOGS"])
 print(json.dumps({
   "destroy_completed_at": v("_DR_TS"),
   "mode":                 v("_DR_MODE"),
@@ -650,6 +956,8 @@ print(json.dumps({
     "shared_vpc":          v("_DR_RES_SHARED_VPC"),
     "shared_ssm_params":   v("_DR_RES_SHARED_SSM"),
     "bedrock_invocation_logging": v("_DR_RES_BEDROCK_INV"),
+    "cloudwatch_log_groups": v("_DR_RES_CW_LOGS"),
+    "agentcore_runtime_log_groups": v("_DR_RES_AGENTCORE_LOGS"),
     "legacy_orphans":      v("_DR_RES_LEGACY"),
   }
 }, indent=2))

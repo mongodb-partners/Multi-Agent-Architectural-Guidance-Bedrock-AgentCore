@@ -1,6 +1,8 @@
 # Deploy Scripts — Reference
 
-Every shell script under [`deploy/`](../../deploy/) and [`deploy/scripts/`](../../deploy/scripts/) — what it does, its flags, prerequisites, and what it writes.
+Every shell script under [`deploy/`](../../deploy/), [`deploy/destroy/`](../../deploy/destroy/) (mode-specific teardown wrappers), and [`deploy/scripts/`](../../deploy/scripts/) — what it does, its flags, prerequisites, and what it writes.
+
+**Layout:** `deploy/deploy-*.sh` and `deploy/deploy-full-*.sh` provision or update stacks; `deploy/destroy/destroy-*.sh` tear them down with the correct `NETWORK_MODE`; `deploy/scripts/destroy.sh` is the low-level `terraform destroy` engine those wrappers call.
 
 ## At a glance
 
@@ -14,15 +16,14 @@ Every shell script under [`deploy/`](../../deploy/) and [`deploy/scripts/`](../.
 | [`deploy/deploy-api.sh`](../../deploy/deploy-api.sh) | App image | both | yes | API image + `.env.live` only |
 | [`deploy/deploy-ui.sh`](../../deploy/deploy-ui.sh) | App image | both | yes | UI image only |
 | [`deploy/deploy-agents.sh`](../../deploy/deploy-agents.sh) | AgentCore | both | yes | Targeted apply of `acr_specialists` + `acr_orchestrator` + code artifact |
-| [`deploy/scripts/destroy.sh`](../../deploy/scripts/destroy.sh) | Teardown | both | yes | `terraform destroy` for one env |
+| [`deploy/destroy/destroy-project-with-privatelink.sh`](../../deploy/destroy/destroy-project-with-privatelink.sh) | Teardown | PrivateLink | yes | Project-only `envs/ec2` destroy |
+| [`deploy/destroy/destroy-project-with-vpc-peering.sh`](../../deploy/destroy/destroy-project-with-vpc-peering.sh) | Teardown | Peering | yes | Project-only `envs/ec2` destroy |
+| [`deploy/destroy/destroy-shared-with-privatelink.sh`](../../deploy/destroy/destroy-shared-with-privatelink.sh) | Teardown | PrivateLink | yes | Shared + network singleton destroy |
+| [`deploy/destroy/destroy-shared-with-vpc-peering.sh`](../../deploy/destroy/destroy-shared-with-vpc-peering.sh) | Teardown | Peering | yes | Shared + network singleton destroy |
+| [`deploy/destroy/reap-orphan-security-groups-privatelink.sh`](../../deploy/destroy/reap-orphan-security-groups-privatelink.sh) | Deferred teardown cleanup | PrivateLink | yes | AgentCore runtime security groups left behind by service-managed ENIs |
+| [`deploy/destroy/reap-orphan-security-groups-vpc-peering.sh`](../../deploy/destroy/reap-orphan-security-groups-vpc-peering.sh) | Deferred teardown cleanup | Peering | yes | AgentCore runtime security groups left behind by service-managed ENIs |
+| [`deploy/scripts/destroy.sh`](../../deploy/scripts/destroy.sh) | Teardown engine | both | yes | `terraform destroy` for one env |
 | [`deploy/scripts/deploy-local.sh`](../../deploy/scripts/deploy-local.sh) | Laptop | n/a | yes | Atlas + KB + Cognito + local API/UI |
-| [`deploy/scripts/probe-resources.sh`](../../deploy/scripts/probe-resources.sh) | Diagnostic | n/a | yes | CRUD smoke against AWS IAM perms |
-| [`deploy/scripts/list-resources.sh`](../../deploy/scripts/list-resources.sh) | Diagnostic | n/a | yes | Tag-based inventory by service |
-| [`deploy/scripts/setup-voyage-marketplace.sh`](../../deploy/scripts/setup-voyage-marketplace.sh) | Bootstrap | n/a | yes | Subscribe + write Voyage Marketplace ARN |
-| [`deploy/scripts/setup-troubleshooting-infra.sh`](../../deploy/scripts/setup-troubleshooting-infra.sh) | Legacy | n/a | yes | Minimum infra for troubleshooting agent — superseded |
-| [`deploy/scripts/teardown-troubleshooting-infra.sh`](../../deploy/scripts/teardown-troubleshooting-infra.sh) | Legacy | n/a | yes | Reverse of the above |
-| [`deploy/scripts/docker-build.sh`](../../deploy/scripts/docker-build.sh) | Helper | n/a | yes | Build API + UI images locally |
-| [`deploy/scripts/docker-push-ecr.sh`](../../deploy/scripts/docker-push-ecr.sh) | Helper | n/a | yes | Tag + push API + UI images to ECR |
 | [`deploy/scripts/_aws-auth.sh`](../../deploy/scripts/_aws-auth.sh) | Helper | both | yes | `validate_aws_auth` — sourced by every deploy script |
 | [`deploy/scripts/_agents-common.sh`](../../deploy/scripts/_agents-common.sh) | Helper | both | yes | Agent discovery + tfvars + code artifact build |
 
@@ -102,7 +103,7 @@ Applies the shared observability + embeddings stack. Singleton per `(account, re
 4. Generate `backend.hcl` + `terraform.tfvars`. State key: `${SHARED_VPC_NAME}/${AWS_REGION}/<env>/shared/terraform.tfstate`.
 5. `terraform init` + plan + apply. Provisions:
    - Voyage SageMaker endpoint (when `VOYAGE_MODEL_PACKAGE_ARN` set).
-   - CloudWatch log groups: `api`, `ui`, `mcp`, `agentcore`, `otel`, `otel-atlas`.
+   - CloudWatch log groups: `api`, `ui`, `mcp`, `agentcore`, `otel`, `otel-atlas`. Retention defaults are 30 days for API/OTel and 7 days for UI/MCP/shared AgentCore (`API_LOG_RETENTION_DAYS`, `AUX_LOG_RETENTION_DAYS`, `OTEL_LOG_RETENTION_DAYS`).
    - Bedrock invocation logging (account-scoped singleton).
    - Fleet + Mongo + cost dashboards + 7 alarms.
    - Atlas dashboard + 2 alarms (when `enable_atlas_metrics=true`).
@@ -204,17 +205,66 @@ Agent-only redeploy. Use when only `config/agents/*.agent.md` or `config/skills/
 
 ## 4. Teardown
 
+All mode-specific wrappers live under [`deploy/destroy/`](../../deploy/destroy/) (separate from `deploy/deploy-*.sh` entrypoints).
+
+### Mode-specific destroy wrappers
+Use these for normal teardown. Project scripts delete only the per-project `envs/ec2` stack. Shared scripts delete the singleton `envs/shared` stack and then the `envs/network` stack, and refuse to run while project EC2 instances are still present unless `--force` is supplied. Each wrapper hard-sets `NETWORK_MODE` and delegates to [`destroy.sh`](#destroysh).
+
+**Usage:**
+```bash
+./deploy/destroy/destroy-project-with-privatelink.sh [--auto-approve] [--env-file <path>] [--force]
+./deploy/destroy/destroy-project-with-vpc-peering.sh [--auto-approve] [--env-file <path>] [--force]
+
+./deploy/destroy/destroy-shared-with-privatelink.sh [--auto-approve] [--env-file <path>] [--with-bootstrap] [--force]
+./deploy/destroy/destroy-shared-with-vpc-peering.sh [--auto-approve] [--env-file <path>] [--with-bootstrap] [--force]
+```
+
+**Ordering — REQUIRED:** project wrapper first, then shared wrapper. Per-project EC2 envs read SSM published by shared + network; destroying shared/network first leaves orphan refs.
+
+**`--with-bootstrap`** is accepted only by the shared wrappers and is passed to the final `network` destroy step. It also empties + destroys the shared S3 state bucket. Only use when no other env uses it — this deletes ALL Terraform state.
+
+### `reap-orphan-security-groups-{privatelink|vpc-peering}.sh`
+Deferred cleanup for project runtime security groups that `destroy.sh --mode ec2` had to leave in AWS because service-managed AgentCore ENIs (`interface-type=agentic_ai`) were still attached. AWS does not allow manual detach/delete of those ENIs, so the project destroy records the security group ids in `destroy-reports/orphan-security-groups.tsv` and lets the matching mode-specific reaper delete them later.
+
+**Usage:**
+```bash
+./deploy/destroy/reap-orphan-security-groups-privatelink.sh [--watch] [--interval <seconds>] [--max-attempts <n>]
+                                                  [--env-file <path>] [--region <region>]
+./deploy/destroy/reap-orphan-security-groups-vpc-peering.sh [--watch] [--interval <seconds>] [--max-attempts <n>]
+                                                [--env-file <path>] [--region <region>]
+```
+
+**Behavior:**
+- Sources `.env` by default and validates AWS auth via `deploy/scripts/_aws-auth.sh`.
+- Targets security groups from `destroy-reports/orphan-security-groups.tsv`.
+- Also self-discovers `<PROJECT_NAME>-sg-mcp-runtime-<ENVIRONMENT>` and `<PROJECT_NAME>-sg-agentcore-vpce-<ENVIRONMENT>` in the shared VPC, so it can clean up even if the manifest was pruned or not present.
+- Skips security groups that still have `agentic_ai` ENIs or another dependent object and returns exit code `2` when work remains.
+- Prunes the manifest as security groups are deleted; removes it when empty.
+
+**Typical use after project destroy:**
+```bash
+source .env
+
+# Run once after waiting roughly an hour for AWS to release AgentCore ENIs.
+./deploy/destroy/reap-orphan-security-groups-privatelink.sh
+# or
+./deploy/destroy/reap-orphan-security-groups-vpc-peering.sh
+
+# Or keep polling, 5 minutes between passes for up to about 2 hours.
+./deploy/destroy/reap-orphan-security-groups-privatelink.sh --watch --interval 300 --max-attempts 24
+# or
+./deploy/destroy/reap-orphan-security-groups-vpc-peering.sh --watch --interval 300 --max-attempts 24
+```
+
 ### `destroy.sh`
-Tear down one Terraform env.
+Low-level destroy engine used by the wrappers. Keep using it directly for `--mode local` or one-off manual teardown of an individual Terraform env.
 
 **Usage:**
 ```bash
 ./deploy/scripts/destroy.sh --mode {local|ec2|shared|network} [--auto-approve] [--with-bootstrap] [--env-file <path>]
 ```
 
-**Ordering — REQUIRED:** `ec2 → shared → network`. Per-project EC2 envs read SSM published by shared + network; destroying earlier stacks first leaves orphan refs.
-
-**`--with-bootstrap`** also empties + destroys the shared S3 state bucket. Only use when no other env uses it — this deletes ALL Terraform state.
+For `--mode ec2`, the engine pre-cleans AgentCore Gateway targets and non-empty ECR repositories. If runtime security groups are still pinned by service-managed AgentCore ENIs after the runtimes are gone, it removes only those SG resources from Terraform state, records them in `destroy-reports/orphan-security-groups.tsv`, and prints the mode-specific reaper follow-up command instead of blocking the foreground destroy indefinitely.
 
 **State keys:**
 - `envs/local`: `<env>/terraform.tfstate`
@@ -224,50 +274,7 @@ Tear down one Terraform env.
 
 ---
 
-## 5. Diagnostic + bootstrap helpers
-
-### `probe-resources.sh`
-Combined local + EC2 permission smoke test. For every resource defined in `envs/local` and `envs/ec2`, attempts CREATE → VALIDATE → DELETE and prints an access matrix.
-
-```bash
-bash deploy/scripts/probe-resources.sh                # fast probes (~5 min)
-bash deploy/scripts/probe-resources.sh --with-ec2     # + full VPC+EC2 CRUD
-bash deploy/scripts/probe-resources.sh --with-cluster # + Atlas M10 CRUD (~20 min)
-bash deploy/scripts/probe-resources.sh --with-bedrock-kb
-bash deploy/scripts/probe-resources.sh --with-sagemaker
-bash deploy/scripts/probe-resources.sh --all          # everything
-```
-
-Use this before the first deploy on a new AWS account.
-
-### `list-resources.sh`
-Tag-based inventory by service. Reads `resourcegroupstaggingapi` plus direct calls to AgentCore (Memory + Gateway don't show up in tagging API yet).
-
-```bash
-./deploy/scripts/list-resources.sh
-./deploy/scripts/list-resources.sh --project my-project --region us-east-2
-```
-
-### `setup-voyage-marketplace.sh`
-One-time bootstrap for the Voyage AI Marketplace subscription. Discovers the model package ARN after EULA acceptance and rewrites `VOYAGE_MODEL_PACKAGE_ARN` in `.env` (and pushes it to GitHub Secrets when `gh` is logged in).
-
-```bash
-./deploy/scripts/setup-voyage-marketplace.sh                       # interactive
-./deploy/scripts/setup-voyage-marketplace.sh --model voyage-multimodal-3
-./deploy/scripts/setup-voyage-marketplace.sh --skip-env --skip-gh
-```
-
-Idempotent — re-runs do not duplicate `.env` lines.
-
-### `setup-troubleshooting-infra.sh` / `teardown-troubleshooting-infra.sh`
-**Legacy.** Provisions a minimum-viable infrastructure for the troubleshooting agent (Atlas M10 + KB + S3 + IAM + OpenSearch Serverless). Superseded by the canonical `deploy-project.sh` path. Kept for backward compatibility with older runbooks; the production path is `./deploy/deploy-full-with-privatelink.sh`.
-
-### `docker-build.sh` / `docker-push-ecr.sh`
-Manual image helpers. `docker-build.sh` builds `multi-agent-api:<TAG>` (context = repo root) and `multi-agent-streamlit:<TAG>` (context = `ui/`). `docker-push-ecr.sh` tags + pushes to ECR. Both are convenience wrappers; the canonical path is `deploy-project.sh` Phase 6.
-
----
-
-## 6. Helpers (sourced, not run directly)
+## 5. Helpers (sourced, not run directly)
 
 ### `_aws-auth.sh`
 Sourced by every deploy script. Validates `AUTH_MODE` (`iam` default; `sts` for assumed-role / SSO / OIDC), runs `aws sts get-caller-identity`, asserts the resolved caller matches the declared mode, and exports `AWS_AUTH_ACCOUNT_ID` + `AWS_AUTH_CALLER_ARN`. See [`deploy/iam/README.md`](../../deploy/iam/README.md) for IAM/STS setup.
@@ -282,4 +289,4 @@ Shared helpers used by `deploy-project.sh` + `deploy-agents.sh`:
 
 ---
 
-*Last verified: 2026-05-20 against `deploy/*.sh` + `deploy/scripts/*.sh`.*
+*Last verified: 2026-06-02 against `deploy/*.sh` + `deploy/scripts/*.sh`.*

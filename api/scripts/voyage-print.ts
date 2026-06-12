@@ -16,7 +16,8 @@
  *     -> space-separated list of SUPPORTED_VOYAGE_MODELS
  *
  *   bun api/scripts/voyage-print.ts dims
- *     -> VOYAGE_EMBEDDING_DIMS as a bare integer
+ *     -> resolved embedding dim as a bare integer (getVoyageEmbeddingDims():
+ *        VOYAGE_OUTPUT_DIM if set, else VOYAGE_DEFAULT_EMBEDDING_DIMS)
  *
  * Exit codes: 0 success, 1 usage error, 2 SSOT validation error.
  *
@@ -26,13 +27,13 @@
  *
  * Drift prevention: `api/tests/unit/voyage-ssot-guard.test.ts` asserts
  *   - bash `voyage_supported_models` matches `SUPPORTED_VOYAGE_MODELS`
- *   - bash `voyage_embedding_dims` matches `VOYAGE_EMBEDDING_DIMS`
+ *   - bash `voyage_embedding_dims` matches `getVoyageEmbeddingDims()`
  *   - bash `voyage_canonical_body` matches `buildVoyageRequestBody`
  */
 
 import {
   SUPPORTED_VOYAGE_MODELS,
-  VOYAGE_EMBEDDING_DIMS,
+  getVoyageEmbeddingDims,
   buildVoyageRequestBody,
   textToMultimodal,
   type VoyageInputType,
@@ -85,7 +86,12 @@ switch (cmd) {
     break;
   }
   case "dims": {
-    process.stdout.write(String(VOYAGE_EMBEDDING_DIMS));
+    try {
+      process.stdout.write(String(getVoyageEmbeddingDims()));
+    } catch (err) {
+      process.stderr.write(`voyage-print dims: ${err instanceof Error ? err.message : String(err)}\n`);
+      process.exit(2);
+    }
     break;
   }
   case undefined:

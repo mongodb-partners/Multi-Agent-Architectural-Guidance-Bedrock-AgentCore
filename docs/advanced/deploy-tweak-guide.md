@@ -76,7 +76,7 @@ Controls **how** the deploy scripts and Terraform stacks wire MongoDB Atlas conn
 | Value | Effect |
 |---|---|
 | `privatelink` (default) | `envs/network` provisions an Atlas Interface VPCE; `envs/ec2` adds a per-cluster Route 53 private zone; `MONGODB_URI` is the Atlas `awsPrivateLink` multi-host non-SRV URI |
-| `peering` | `envs/network` provisions VPC peering + Atlas Private DNS for Peering; `envs/ec2` uses `connectionStrings.privateSrv` for `MONGODB_URI`. **KB ingestion via peering NLB is EXPERIMENTAL.** |
+| `peering` | `envs/network` provisions VPC peering + Atlas Private DNS for Peering; `envs/ec2` uses the direct multi-host `connectionStrings.private` URI for `MONGODB_URI`. **KB ingestion via peering NLB is EXPERIMENTAL.** |
 
 See [`docs/deployment-guide.md` § VPC peering mode](../deployment-guide.md#vpc-peering-mode).
 
@@ -113,7 +113,7 @@ These are typically set in `.env.live` by `deploy-project.sh`. For local dev wit
 |---|---|---|
 | `MONGODB_URI` | `mongodb+srv://...` (local) or `mongodb://...:1024,...:1025/?ssl=true` (AgentCore Runtime PrivateLink) | Atlas connection string |
 | `MONGODB_DB` | `<project>_<env>` (e.g. `mongodb_multiagent_dev`) | Database name; project+env-derived (underscored) by `.env` |
-| `MONGODB_ALLOW_WRITE` | `1` or `true` | Required for `updateOne` against real Atlas. Default off (read-only). |
+| `MONGODB_ALLOW_WRITE` | `1` or `true` | Required for `insertOne` / `updateOne` against real Atlas. Default off (read-only). Set it in `.env` and run a full redeploy (`deploy-full-with-*` → `deploy-project.sh`): the script derives `TF_VAR_mongodb_allow_write` from it for first-create Terraform config, and Phase 6 runtime-env sync pushes `MONGODB_ALLOW_WRITE` to existing mongodb-mcp AgentCore Runtimes. Destructive ops (`delete*`, `drop*`, `replaceOne`) stay refused regardless. |
 | `SHORT_TERM_MEMORY_BACKEND` | `agentcore` (EC2 deploy default) | `agentcore` makes AgentCore Memory the short-term conversation backend when authenticated. This is the production deployment default. |
 | `PERSIST_CHAT_SESSIONS` | unset (default-on when `MONGODB_URI` is set), `0`/`false` to opt out | Mirror session history to MongoDB `chat_sessions` for the Sessions page, audit/debug history, and cold-read fallback. This does not make MongoDB the primary short-term memory backend in deployed AWS. |
 | `MEMORY_TTL_DAYS` | `30` in EC2 `.env.live` (`90` code fallback if unset) | TTL for `agent_memory_facts` long-term facts collection |
@@ -182,9 +182,12 @@ Text-only Voyage listings (`voyage-3*`, `voyage-4*`, `voyage-code-*`, …) are u
    - Search `ml.g6.xlarge for endpoint usage`. If 0, request increase to 1. Usually instant.
 3. **Discover the region-specific Product ARN and persist it to `.env`:**
    ```bash
-   ./deploy/scripts/setup-voyage-marketplace.sh --model voyage-multimodal-3
+   aws sagemaker list-model-packages \
+     --region "$AWS_REGION" \
+     --query "ModelPackageSummaryList[?contains(ModelPackageGroupName, 'voyage-multimodal-3')].ModelPackageArn | [0]" \
+     --output text
    ```
-   This appends/updates `EMBEDDINGS_PROVIDER`, `VOYAGE_MODEL_PACKAGE_ARN`, `VOYAGE_MARKETPLACE_MODEL`, and the endpoint suffix settings in `.env` (and pushes the ARN to GitHub Secrets if `gh auth status` is OK). Refuses non-multimodal models — see `voyage_assert_multimodal_or_die` in [`deploy/scripts/_voyage-config.sh`](../../deploy/scripts/_voyage-config.sh).
+   Set `EMBEDDINGS_PROVIDER=voyage`, `VOYAGE_MODEL_PACKAGE_ARN`, `VOYAGE_MARKETPLACE_MODEL`, and `TF_VAR_voyage_endpoint_name_suffix` in `.env`. The endpoint suffix may be model-derived; deploy scripts and Terraform normalize invalid SageMaker endpoint-name characters to hyphens before endpoint creation. Non-multimodal models are refused by `voyage_assert_multimodal_or_die` in [`deploy/scripts/_voyage-config.sh`](../../deploy/scripts/_voyage-config.sh).
 
 ### Enable on a deployed environment
 
@@ -240,8 +243,9 @@ unset VOYAGE_MODEL_PACKAGE_ARN   # in .env
 ### Verify it's active
 
 ```bash
-# 1. SageMaker endpoint InService (name is now env-scoped, not project-scoped)
-aws sagemaker describe-endpoint --endpoint-name "${TF_VAR_voyage_endpoint_name_suffix:-voyage-multimodal-3}-${ENVIRONMENT}" \
+# 1. SageMaker endpoint InService (name is normalized by the shared stack)
+VOYAGE_ENDPOINT_NAME="$(terraform -chdir=deploy/terraform/envs/shared output -raw voyage_endpoint_name)"
+aws sagemaker describe-endpoint --endpoint-name "$VOYAGE_ENDPOINT_NAME" \
   --query EndpointStatus
 
 # 2. EC2 API has the env var

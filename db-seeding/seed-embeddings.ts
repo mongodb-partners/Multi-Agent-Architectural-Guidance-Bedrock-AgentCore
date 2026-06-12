@@ -64,8 +64,6 @@ import {
 } from "../api/src/adapters/voyage-embedding.ts";
 
 const DECLARED_PROVIDER = (process.env.EMBEDDINGS_PROVIDER ?? "").trim().toLowerCase();
-const VOYAGE_ENDPOINT = getVoyageEndpoint();
-const BEDROCK_MODEL_ID = process.env.EMBEDDING_MODEL_ID?.trim();
 const REWIRE = process.env.REWIRE_EMBEDDINGS === "1";
 const BATCH_DELAY_MS = Number(process.env.EMBED_BATCH_DELAY_MS ?? 200);
 const region = process.env.AWS_REGION ?? "us-east-1";
@@ -77,6 +75,10 @@ if (DECLARED_PROVIDER !== "voyage" && DECLARED_PROVIDER !== "titan") {
   );
   process.exit(1);
 }
+
+const VOYAGE_ENDPOINT =
+  DECLARED_PROVIDER === "voyage" ? getVoyageEndpoint() : undefined;
+const BEDROCK_MODEL_ID = process.env.EMBEDDING_MODEL_ID?.trim();
 
 if (DECLARED_PROVIDER === "voyage" && !VOYAGE_ENDPOINT) {
   console.error(

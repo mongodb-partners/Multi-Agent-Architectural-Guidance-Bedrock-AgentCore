@@ -187,9 +187,9 @@ PY
   fi
   export DOCKER_CONFIG="$DOCKER_CONFIG_DIR"
 
-  aws ecr get-login-password --region "$AWS_REGION" \
-    | docker login --username AWS --password-stdin "$ECR_REGISTRY" >/dev/null
   source "$SCRIPT_DIR/scripts/_docker-build.sh"
+  ecr_login_with_retry "$AWS_REGION" "$ECR_REGISTRY" \
+    || err "ECR login failed after retries (transient DNS/network did not clear)"
   docker_build_push_image linux/amd64 \
     "$REPO_ROOT/ui/Dockerfile" \
     "$REPO_ROOT/ui" \
@@ -206,10 +206,14 @@ aws ec2 wait instance-status-ok --region "$AWS_REGION" --instance-ids "$EC2_INST
 if [[ "$SKIP_DOCKER" == "true" ]]; then
   RESTART_CMD="systemctl daemon-reload && systemctl restart multiagent-ui"
 else
-  RESTART_CMD="aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${ECR_REGISTRY} \
+  # Retry the remote ECR login + image pull (network-facing steps) so a
+  # transient DNS/network blip on the EC2 host does not abort the restart.
+  # The `ok` flag gates the restart so an exhausted retry budget still fails
+  # the SSM command rather than restarting against a stale/missing image.
+  RESTART_CMD="ok=0; for i in 1 2 3 4; do aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${ECR_REGISTRY} \
     && docker pull ${ECR_UI_IMAGE} \
-    && systemctl daemon-reload \
-    && systemctl restart multiagent-ui"
+    && ok=1 && break; echo ecr-login-pull attempt \$i failed, retrying in 10s; sleep 10; done; \
+    [ \$ok -eq 1 ] && systemctl daemon-reload && systemctl restart multiagent-ui"
 fi
 
 RESTART_CMD_ID=$(send_ssm_command_retry \

@@ -49,6 +49,8 @@ aws sts get-caller-identity
 
 Full env catalog: [`.env.sample`](.env.sample) and [`docs/reference/env-vars.md`](docs/reference/env-vars.md). Role-based getting started: [`docs/README.md`](docs/README.md).
 
+Ready to deploy? Jump to [Deployment](#deployment).
+
 ---
 
 ## Configure agents and skills
@@ -67,6 +69,11 @@ Specialists live in `config/agents/<name>.agent.md`. The reference ships **1 orc
 | Troubleshooting | Claude Sonnet 4.6 | RAG over `troubleshooting_docs` + Bedrock KB |
 
 **Add or change an agent:** edit or add `.agent.md`, then run `./deploy/deploy-agents.sh --auto-approve` (see below). Authoring guide: [`docs/agent-authoring-guide.md`](docs/agent-authoring-guide.md).
+
+**Looking for examples?** Check `config/samples/` before editing live config. Files under
+`config/samples/agents/` are reference-only templates and smoke-test examples; the API
+and deploy scripts do **not** load or deploy them unless you copy one into
+`config/agents/`.
 
 Enable long-term memory per agent:
 
@@ -159,7 +166,7 @@ Open the **UI URL** from the deploy summary (Streamlit on EC2, port 8501). Sign 
 ./deploy/deploy-full-with-vpc-peering.sh --auto-approve
 ```
 
-Optional IAM pre-check: `bash deploy/scripts/probe-resources.sh` (`--all` for full matrix).
+Deploy scripts run centralized preflight checks before applying infrastructure.
 
 ### `deploy-agents.sh`
 
@@ -198,7 +205,11 @@ Use `deploy-api.sh` first if Cognito, Atlas, or OTel env vars changed.
 ```bash
 ./deploy/scripts/deploy-local.sh --auto-approve    # Atlas + KB only — NOT a full chat stack
 ./deploy/scripts/deploy-shared.sh --auto-approve
-./deploy/scripts/destroy.sh --mode ec2 --auto-approve
+
+# Teardown (project first, then shared/network — match your NETWORK_MODE)
+./deploy/destroy/destroy-project-with-privatelink.sh --auto-approve
+./deploy/destroy/destroy-shared-with-privatelink.sh --auto-approve
+# Peering variants: destroy-project-with-vpc-peering.sh / destroy-shared-with-vpc-peering.sh
 ```
 
 Full runbook: [`docs/deployment-guide.md`](docs/deployment-guide.md). Script reference: [`docs/reference/deploy-scripts.md`](docs/reference/deploy-scripts.md).
@@ -283,6 +294,7 @@ ui/              — Streamlit (Chat, Sessions, Trace Viewer)
 mcp-runtimes/    — MongoDB MCP AgentCore Runtime
 config/
   agents/        — .agent.md specialists
+  samples/       — reference-only config examples (not loaded/deployed)
   skills/        — SKILL.md domain packages
 deploy/          — Terraform + deploy scripts
 db-seeding/      — Atlas demo data + indexes
@@ -336,3 +348,16 @@ Design: [`deploy/terraform/.design.md`](deploy/terraform/.design.md). Modules: [
 - [Agent Skills](https://agentskills.io/specification) — skill format
 - [Streamlit](https://streamlit.io/) — chat + Trace Viewer
 - [OpenTelemetry](https://opentelemetry.io/) + ADOT — tracing
+
+---
+
+## Troubleshooting
+
+### `session-manager-plugin not on PATH` (preflight `pf_check_session_manager_plugin` fails)
+
+Deploy preflight (and any post-deploy `aws ssm start-session`) fails when the AWS Session Manager plugin is missing. Install it, then re-run the deploy:
+
+```bash
+# macOS
+brew install --cask session-manager-plugin
+```

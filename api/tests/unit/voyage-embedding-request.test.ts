@@ -97,3 +97,65 @@ describe("buildVoyageRequestBody — single multimodal envelope", () => {
     );
   });
 });
+
+describe("buildVoyageRequestBody — VOYAGE_OUTPUT_DIM override", () => {
+  const saved = {
+    dim: process.env.VOYAGE_OUTPUT_DIM,
+    model: process.env.VOYAGE_MARKETPLACE_MODEL,
+    legacyModel: process.env.VOYAGE_MODEL_NAME,
+  };
+
+  function restore() {
+    if (saved.dim === undefined) delete process.env.VOYAGE_OUTPUT_DIM;
+    else process.env.VOYAGE_OUTPUT_DIM = saved.dim;
+    if (saved.model === undefined) delete process.env.VOYAGE_MARKETPLACE_MODEL;
+    else process.env.VOYAGE_MARKETPLACE_MODEL = saved.model;
+    if (saved.legacyModel === undefined) delete process.env.VOYAGE_MODEL_NAME;
+    else process.env.VOYAGE_MODEL_NAME = saved.legacyModel;
+  }
+
+  test("default dim (1024) omits output_dimension", () => {
+    delete process.env.VOYAGE_OUTPUT_DIM;
+    try {
+      const body = JSON.parse(buildVoyageRequestBody([textToMultimodal("hi")], "query"));
+      expect(body.output_dimension).toBeUndefined();
+    } finally {
+      restore();
+    }
+  });
+
+  test("non-default dim on voyage-multimodal-3.5 emits output_dimension", () => {
+    process.env.VOYAGE_MARKETPLACE_MODEL = "voyage-multimodal-3.5";
+    process.env.VOYAGE_OUTPUT_DIM = "512";
+    try {
+      const body = JSON.parse(buildVoyageRequestBody([textToMultimodal("hi")], "query"));
+      expect(body.output_dimension).toBe(512);
+    } finally {
+      restore();
+    }
+  });
+
+  test("non-default dim on voyage-multimodal-3 (1024-only) is rejected", () => {
+    process.env.VOYAGE_MARKETPLACE_MODEL = "voyage-multimodal-3";
+    process.env.VOYAGE_OUTPUT_DIM = "512";
+    try {
+      expect(() => buildVoyageRequestBody([textToMultimodal("hi")], "query")).toThrow(
+        /voyage-multimodal-3/,
+      );
+    } finally {
+      restore();
+    }
+  });
+
+  test("unsupported dim value is rejected", () => {
+    process.env.VOYAGE_MARKETPLACE_MODEL = "voyage-multimodal-3.5";
+    process.env.VOYAGE_OUTPUT_DIM = "999";
+    try {
+      expect(() => buildVoyageRequestBody([textToMultimodal("hi")], "query")).toThrow(
+        /not a supported Voyage output dimension/,
+      );
+    } finally {
+      restore();
+    }
+  });
+});

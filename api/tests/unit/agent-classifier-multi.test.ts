@@ -25,6 +25,7 @@ describe("agent-classifier — multi-select default behavior", () => {
     delete process.env.CLASSIFIER_MULTI_MIN_SCORE;
     delete process.env.CLASSIFIER_MULTI_RELATIVE_MARGIN;
     delete process.env.CLASSIFIER_MULTI_MAX_AGENTS;
+    delete process.env.CLASSIFIER_MULTI_ESCALATE_MIN_SCORE;
     resetAgentClassifierCacheForTests();
   });
 
@@ -74,8 +75,11 @@ describe("agent-classifier — multi-select default behavior", () => {
 
   test("threshold knob: tightening multi-min-score collapses any multi-selection back to single", async () => {
     // Use an explicit multi-domain prompt; raise the absolute floor sky-high
-    // so the runner-up never qualifies — selection collapses to one.
+    // so the runner-up never qualifies — selection collapses to one. Disable
+    // multi-intent escalation here so we isolate the multi-min-score knob from
+    // the runner-up escalation gate (which would otherwise defer to Haiku).
     process.env.CLASSIFIER_MULTI_MIN_SCORE = "999";
+    process.env.CLASSIFIER_MULTI_ESCALATE_MIN_SCORE = "999";
     resetAgentClassifierCacheForTests();
     const r = await classifyAgents({
       message:
@@ -85,12 +89,46 @@ describe("agent-classifier — multi-select default behavior", () => {
   });
 
   test("threshold knob: tightening multi-relative-margin collapses to single", async () => {
-    // Force the runner-up to be considered "too far" from the leader.
+    // Force the runner-up to be considered "too far" from the leader. Disable
+    // escalation to isolate the relative-margin knob from the escalation gate.
     process.env.CLASSIFIER_MULTI_RELATIVE_MARGIN = "0.01";
+    process.env.CLASSIFIER_MULTI_ESCALATE_MIN_SCORE = "999";
     resetAgentClassifierCacheForTests();
     const r = await classifyAgents({
       message:
         "track my order shipment AND recommend a replacement laptop",
+    });
+    expect(r?.selections.length).toBe(1);
+  });
+
+  test("multi-intent escalation: a runner-up with a real second-domain signal defers to Haiku instead of collapsing to one specialist", async () => {
+    // Genuine two-domain prompt. The runner-up (order-management) scores a
+    // real signal (~1.79) but below the strict multi-select floor (3.0), so
+    // the heuristic would otherwise collapse to a single specialist. With
+    // escalation enabled (default), it abstains so the Haiku tier can
+    // multi-select. Under CLASSIFIER_BACKEND=heuristic, abstain surfaces as
+    // undefined (no Haiku call in the test).
+    const r = await classifyAgents({
+      message: "Track order ORD-1005 and recommend a replacement laptop with similar specs.",
+    });
+    expect(r).toBeUndefined();
+  });
+
+  test("multi-intent escalation does NOT fire for single-domain prompts (runner-up scores 0)", async () => {
+    // A clean single-domain prompt has a zero-scoring runner-up, so escalation
+    // never triggers and the heuristic still returns exactly one specialist.
+    const r = await classifyAgents({
+      message: "Recommend a budget gaming laptop for me",
+    });
+    expect(r?.selections.length).toBe(1);
+    expect(r?.selections[0].agentId).toBe("product-recommendation");
+  });
+
+  test("escalation can be disabled via CLASSIFIER_MULTI_ESCALATE_MIN_SCORE to restore legacy collapse-to-single", async () => {
+    process.env.CLASSIFIER_MULTI_ESCALATE_MIN_SCORE = "999";
+    resetAgentClassifierCacheForTests();
+    const r = await classifyAgents({
+      message: "Track order ORD-1005 and recommend a replacement laptop with similar specs.",
     });
     expect(r?.selections.length).toBe(1);
   });

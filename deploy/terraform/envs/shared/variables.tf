@@ -52,15 +52,33 @@ variable "voyage_instance_type" {
 
 variable "voyage_endpoint_name_suffix" {
   type        = string
-  description = "Identifier baked into the SageMaker endpoint name. Use voyage-multimodal-3 for voyage-multimodal-3 or voyage-3-5-lite for the supported legacy text-only listing."
+  description = "Identifier baked into the SageMaker endpoint name. Dotted model names such as voyage-multimodal-3.5 are normalized to SageMaker-safe names such as voyage-multimodal-3-5."
   default     = "voyage-multimodal-3"
 }
 
 # ── CloudWatch retention ──────────────────────────────────────────────────────
 variable "log_retention_days" {
   type        = number
-  description = "Retention (days) applied to the shared API / UI / MCP / AgentCore / OTel log groups."
-  default     = 30
+  description = "Deprecated compatibility fallback for API + OTel log retention. UI, MCP, and AgentCore use aux_log_retention_days."
+  default     = null
+}
+
+variable "api_log_retention_days" {
+  type        = number
+  description = "Retention (days) for the shared API log group."
+  default     = null
+}
+
+variable "aux_log_retention_days" {
+  type        = number
+  description = "Retention (days) for short-lived shared UI, MCP, and AgentCore placeholder log groups."
+  default     = 7
+}
+
+variable "otel_log_retention_days" {
+  type        = number
+  description = "Retention (days) for shared OTel log groups. Defaults to the API retention window."
+  default     = null
 }
 
 # ── Fleet dashboards + alarms ─────────────────────────────────────────────────

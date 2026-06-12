@@ -62,6 +62,11 @@ def _load_gate(mock_st: MagicMock, mock_auth_cls=None, mock_hosted_cls=None):
     Returns the reloaded gate module.
     """
     sys.modules["streamlit"] = mock_st
+    # cognito_gate does `import streamlit.components.v1 as components`, which needs
+    # the submodules resolvable in sys.modules when `streamlit` is a MagicMock.
+    mock_components = MagicMock()
+    sys.modules["streamlit.components"] = mock_components
+    sys.modules["streamlit.components.v1"] = mock_st.components.v1
     mock_sca = MagicMock()
     mock_sca.CognitoAuthenticator = mock_auth_cls or MagicMock()
     mock_sca.CognitoHostedUIAuthenticator = mock_hosted_cls or MagicMock()
@@ -79,6 +84,8 @@ def _restore_modules():
         sys.modules["streamlit"] = _REAL_STREAMLIT
     else:
         sys.modules.pop("streamlit", None)
+    sys.modules.pop("streamlit.components", None)
+    sys.modules.pop("streamlit.components.v1", None)
     if _REAL_SCA is not None:
         sys.modules["streamlit_cognito_auth"] = _REAL_SCA
     else:
@@ -287,3 +294,24 @@ class TestRenderCognitoLogout:
         mock_auth.logout.assert_called_once()
         assert "_streamlit_cognito_auth" not in mock_st.session_state
         mock_st.rerun.assert_called_once()
+
+    def test_logout_wipes_chat_state_and_url(self):
+        mock_st = _make_mock_st(
+            {
+                "_streamlit_cognito_auth": True,
+                "session_id": "sess_old",
+                "prev_session_pick": "sess_old",
+                "messages": [{"role": "user", "content": "hi"}],
+                "_hydrated_session_id": "sess_old",
+            }
+        )
+        mock_st.button.return_value = True
+        mock_st.rerun.side_effect = SystemExit(0)
+        mock_auth = MagicMock()
+        gate = _load_gate(mock_st, mock_auth_cls=MagicMock(return_value=mock_auth))
+        with pytest.raises(SystemExit):
+            gate.render_cognito_logout(_make_settings())
+        # All per-user chat state is gone so the next user can't inherit it.
+        assert mock_st.session_state == {}
+        # URL query params (e.g. ?sessionId=…) are cleared.
+        mock_st.query_params.clear.assert_called_once()
