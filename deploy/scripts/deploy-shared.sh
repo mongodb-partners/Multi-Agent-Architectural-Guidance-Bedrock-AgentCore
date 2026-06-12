@@ -11,7 +11,7 @@
 #   Phase 4 — Generate backend.hcl + terraform.tfvars for envs/shared.
 #             State key:  ${SHARED_VPC_NAME}/${AWS_REGION}/shared/terraform.tfstate
 #   Phase 5 — terraform init + plan + apply (envs/shared):
-#               • Voyage SageMaker endpoint (when VOYAGE_MODEL_PACKAGE_ARN set)
+#               • Voyage SageMaker endpoint (when EMBEDDINGS_PROVIDER=voyage)
 #               • CloudWatch log groups: API / UI / MCP / AgentCore / OTel / OTel-Atlas
 #               • Bedrock invocation logging (account-scoped singleton)
 #               • Fleet + mongo + cost dashboards + 7 alarms
@@ -60,6 +60,56 @@ err()  { echo "  [shared] ✗ $*" >&2; exit 1; }
 warn() { echo "  [shared] ⚠ $*"; }
 sep()  { echo "────────────────────────────────────────────────"; }
 
+# shellcheck source=deploy/scripts/_voyage-config.sh
+source "$SCRIPT_DIR/_voyage-config.sh"
+
+# Shared transient-error classifier (DNS resolver + network/transport blips).
+# shellcheck source=deploy/scripts/_transient-errors.sh
+source "$SCRIPT_DIR/_transient-errors.sh"
+
+# Wrap `terraform apply` with retry-on-transient-error, mirroring
+# deploy-network.sh / deploy-project.sh. envs/shared provisions the Voyage
+# SageMaker endpoint + observability resources; a transient local DNS resolver
+# blip or Atlas/AWS i/o timeout mid-apply should re-plan and retry, not abort
+# the whole shared stack. Any non-transient error is a hard failure.
+apply_with_retry() {
+  local plan_file="$1"
+  local max_attempts=3
+  local attempt=1
+  local log_file rc
+  log_file=$(mktemp -t tf-shared-apply.XXXXXX)
+
+  while (( attempt <= max_attempts )); do
+    if (( attempt > 1 )); then
+      log "Retry $((attempt - 1))/$((max_attempts - 1)) — sleeping 30s, then re-planning..."
+      sleep 30
+      deploy_diag_checkpoint "terraform retry plan attempt ${attempt}/${max_attempts}: terraform plan -input=false -out=${plan_file}"
+      terraform plan -input=false -out="$plan_file"
+      ok "re-plan complete"
+    fi
+    log "Apply attempt ${attempt}/${max_attempts}..."
+    deploy_diag_checkpoint "terraform apply attempt ${attempt}/${max_attempts}: terraform apply -input=false ${plan_file}"
+    set +e
+    terraform apply -input=false "$plan_file" 2>&1 | tee "$log_file"
+    rc=${PIPESTATUS[0]}
+    set -e
+    if (( rc == 0 )); then
+      rm -f "$log_file"
+      return 0
+    fi
+    if deploy_log_has_transient_error "$log_file" \
+       || grep -qE 'Saved plan is stale' "$log_file"; then
+      warn "Transient Atlas/network error on attempt ${attempt} — will re-plan and retry"
+      attempt=$((attempt + 1))
+      continue
+    fi
+    rm -f "$log_file"
+    err "terraform apply failed with a non-transient error (see output above)"
+  done
+  rm -f "$log_file"
+  err "terraform apply failed after ${max_attempts} attempts — transient errors did not clear"
+}
+
 # ══════════════════════════════════════════════════════════════════════════════
 # PHASE 1 — Prerequisites
 # ══════════════════════════════════════════════════════════════════════════════
@@ -86,13 +136,40 @@ PROJECT_NAME="${PROJECT_NAME:-multiagent-mongodb-framework}"
 SHARED_VPC_NAME="${SHARED_VPC_NAME:-shared-network}"
 SHARED_RESOURCE_PREFIX="${SHARED_RESOURCE_PREFIX:-multiagent}"
 
-# Voyage knobs — optional; empty disables the SageMaker module
+# Voyage knobs — provider-gated; Titan ignores any leftover ARN placeholder.
+EMBEDDINGS_PROVIDER="${EMBEDDINGS_PROVIDER:-}"
 VOYAGE_MODEL_PACKAGE_ARN="${VOYAGE_MODEL_PACKAGE_ARN:-}"
 VOYAGE_INSTANCE_TYPE="${VOYAGE_INSTANCE_TYPE:-ml.g6.xlarge}"
-VOYAGE_ENDPOINT_NAME_SUFFIX="${TF_VAR_voyage_endpoint_name_suffix:-voyage-multimodal-3}"
+VOYAGE_ENDPOINT_NAME_SUFFIX_RAW="${TF_VAR_voyage_endpoint_name_suffix:-${VOYAGE_MARKETPLACE_MODEL:-voyage-multimodal-3}}"
+VOYAGE_ENDPOINT_NAME_SUFFIX="$(voyage_sagemaker_endpoint_suffix "$VOYAGE_ENDPOINT_NAME_SUFFIX_RAW")"
+
+case "$EMBEDDINGS_PROVIDER" in
+  voyage)
+    if [[ -z "$VOYAGE_ENDPOINT_NAME_SUFFIX" ]]; then
+      err "Voyage endpoint suffix resolved to an empty SageMaker name from '${VOYAGE_ENDPOINT_NAME_SUFFIX_RAW}'"
+    fi
+    if [[ "$VOYAGE_ENDPOINT_NAME_SUFFIX_RAW" != "$VOYAGE_ENDPOINT_NAME_SUFFIX" ]]; then
+      warn "Normalized Voyage endpoint suffix '${VOYAGE_ENDPOINT_NAME_SUFFIX_RAW}' -> '${VOYAGE_ENDPOINT_NAME_SUFFIX}' for SageMaker"
+    fi
+    ;;
+  titan)
+    if [[ -n "$VOYAGE_MODEL_PACKAGE_ARN" ]]; then
+      warn "EMBEDDINGS_PROVIDER=titan — ignoring VOYAGE_MODEL_PACKAGE_ARN for shared Terraform"
+    fi
+    VOYAGE_MODEL_PACKAGE_ARN=""
+    ;;
+  "")
+    # preflight_validate reports the missing required provider before Terraform runs.
+    ;;
+  *)
+    err "EMBEDDINGS_PROVIDER='$EMBEDDINGS_PROVIDER' is not recognised. Use 'voyage' or 'titan'."
+    ;;
+esac
 
 # Dashboards + invocation logging + retention — all optional with safe defaults
-LOG_RETENTION_DAYS="${LOG_RETENTION_DAYS:-30}"
+API_LOG_RETENTION_DAYS="${API_LOG_RETENTION_DAYS:-${LOG_RETENTION_DAYS:-30}}"
+AUX_LOG_RETENTION_DAYS="${AUX_LOG_RETENTION_DAYS:-7}"
+OTEL_LOG_RETENTION_DAYS="${OTEL_LOG_RETENTION_DAYS:-${LOG_RETENTION_DAYS:-$API_LOG_RETENTION_DAYS}}"
 ENABLE_FLEET_DASHBOARDS="${ENABLE_FLEET_DASHBOARDS:-true}"
 ENABLE_ATLAS_METRICS="${ENABLE_ATLAS_METRICS:-false}"
 ENABLE_BEDROCK_INVOCATION_LOGGING="${ENABLE_BEDROCK_INVOCATION_LOGGING:-true}"
@@ -127,7 +204,7 @@ ok "Region: $AWS_REGION / Environment: $ENVIRONMENT"
 if [[ -n "$VOYAGE_MODEL_PACKAGE_ARN" ]]; then
   ok "Voyage SageMaker: $VOYAGE_ENDPOINT_NAME_SUFFIX on $VOYAGE_INSTANCE_TYPE"
 else
-  warn "VOYAGE_MODEL_PACKAGE_ARN unset — SageMaker endpoint will NOT be provisioned"
+  warn "Voyage SageMaker disabled — EMBEDDINGS_PROVIDER=${EMBEDDINGS_PROVIDER:-<unset>}"
 fi
 
 SHARED_BUCKET="${PROJECT_NAME}-${ENVIRONMENT}-${ACCOUNT_ID}"
@@ -171,9 +248,9 @@ encrypt = true
 EOF
 ok "backend.hcl written (state key: ${SHARED_VPC_NAME}/${AWS_REGION}/${ENVIRONMENT}/shared/terraform.tfstate)"
 
-# Build tfvars. Voyage block only emitted when ARN is non-empty so the
+# Build tfvars. Voyage block only emitted for the Voyage provider so the
 # voyage_model_package_arn validation in envs/shared/variables.tf doesn't fire
-# on dev-only deployments that skip SageMaker.
+# on Titan deployments that keep a placeholder ARN in .env.
 {
   echo "# envs/shared — generated by deploy-shared.sh"
   echo "aws_region              = \"${AWS_REGION}\""
@@ -182,7 +259,9 @@ ok "backend.hcl written (state key: ${SHARED_VPC_NAME}/${AWS_REGION}/${ENVIRONME
   echo "shared_vpc_name         = \"${SHARED_VPC_NAME}\""
   echo "shared_bucket_name      = \"${SHARED_BUCKET}\""
   echo "shared_resource_prefix  = \"${SHARED_RESOURCE_PREFIX}\""
-  echo "log_retention_days      = ${LOG_RETENTION_DAYS}"
+  echo "api_log_retention_days  = ${API_LOG_RETENTION_DAYS}"
+  echo "aux_log_retention_days  = ${AUX_LOG_RETENTION_DAYS}"
+  echo "otel_log_retention_days = ${OTEL_LOG_RETENTION_DAYS}"
   if [[ -n "$VOYAGE_MODEL_PACKAGE_ARN" ]]; then
     echo "voyage_model_package_arn    = \"${VOYAGE_MODEL_PACKAGE_ARN}\""
     echo "voyage_instance_type        = \"${VOYAGE_INSTANCE_TYPE}\""
@@ -199,6 +278,21 @@ ok "backend.hcl written (state key: ${SHARED_VPC_NAME}/${AWS_REGION}/${ENVIRONME
   echo "log_embedding_bodies               = ${LOG_EMBEDDING_BODIES}"
   echo "invocation_retention_days          = ${INVOCATION_RETENTION_DAYS}"
 } > "$TF_DIR/terraform.tfvars"
+
+TFVARS_CONTENT="$(<"$TF_DIR/terraform.tfvars")"
+case "$EMBEDDINGS_PROVIDER" in
+  voyage)
+    if [[ "$TFVARS_CONTENT" != *"voyage_model_package_arn"* ]]; then
+      err "Internal error: EMBEDDINGS_PROVIDER=voyage but terraform.tfvars omitted voyage_model_package_arn"
+    fi
+    ;;
+  titan)
+    if [[ "$TFVARS_CONTENT" == *"voyage_model_package_arn"* ]]; then
+      err "Internal error: EMBEDDINGS_PROVIDER=titan but terraform.tfvars includes voyage_model_package_arn"
+    fi
+    ;;
+esac
+
 ok "terraform.tfvars written"
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -218,19 +312,21 @@ terraform plan -input=false -out="$TF_DIR/.tfplan"
 ok "plan complete"
 
 sep
-log "NOTE: First apply provisions the SageMaker endpoint — this takes ~6–10 min."
-log "      Subsequent applies are fast (log group / dashboard updates only)."
+if [[ -n "$VOYAGE_MODEL_PACKAGE_ARN" ]]; then
+  log "NOTE: First apply provisions the SageMaker endpoint — this takes ~6–10 min."
+  log "      Subsequent applies are fast (log group / dashboard updates only)."
+else
+  log "NOTE: Voyage SageMaker is disabled; apply only updates shared observability resources."
+fi
 
 if [[ "$AUTO_APPROVE" == "true" ]]; then
   log "Applying..."
-  deploy_diag_checkpoint "terraform apply start: terraform apply -input=false ${TF_DIR}/.tfplan"
-  terraform apply -input=false "$TF_DIR/.tfplan"
+  apply_with_retry "$TF_DIR/.tfplan"
 else
   echo ""
   read -r -p "  Apply? [y/N] " CONFIRM
   [[ "$CONFIRM" =~ ^[Yy]$ ]] || { log "Cancelled."; exit 0; }
-  deploy_diag_checkpoint "terraform apply start: terraform apply -input=false ${TF_DIR}/.tfplan"
-  terraform apply -input=false "$TF_DIR/.tfplan"
+  apply_with_retry "$TF_DIR/.tfplan"
 fi
 ok "Terraform apply complete"
 
@@ -294,7 +390,7 @@ echo "  Resource prefix : ${SHARED_RESOURCE_PREFIX}"
 echo "  Environment     : ${ENVIRONMENT}"
 echo "  Region          : ${AWS_REGION}"
 echo ""
-echo "  Voyage endpoint : ${VOYAGE_NAME:-<disabled — VOYAGE_MODEL_PACKAGE_ARN was unset>}"
+echo "  Voyage endpoint : ${VOYAGE_NAME:-<disabled — EMBEDDINGS_PROVIDER=${EMBEDDINGS_PROVIDER:-unset}>}"
 echo "  API log group   : ${API_LG}"
 echo ""
 echo "  Fleet dashboard : ${FLEET_URL}"

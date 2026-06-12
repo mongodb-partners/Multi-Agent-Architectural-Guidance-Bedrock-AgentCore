@@ -36,6 +36,7 @@ import {
   runMultiSpecialistFlow,
   type SpecialistInvoker,
 } from "../lib/multi-specialist-orchestrator.ts";
+import { runOrchestratorClarification } from "../lib/orchestrator-clarify.ts";
 import type { TraceEvent } from "../lib/trace-types.ts";
 
 const bodySchema = z.object({
@@ -336,6 +337,10 @@ chatRoutes.post("/chat", async (c) => {
        */
       let finalAgentId = routeAgentId;
       let streamFailed: { code: string; message: string } | undefined;
+      // True once the orchestrator has streamed a clarification reply (vague
+      // message path). The clarification text is accumulated directly into
+      // `fullReply`, so the generator's empty `finalAnswer` must not overwrite it.
+      let clarificationEmitted = false;
       const handoffsSeen: string[] = [];
       const nestedTraceEvents: TraceEvent[] = [];
       let nestedTraceId: string | undefined;
@@ -451,6 +456,12 @@ chatRoutes.post("/chat", async (c) => {
             const next = await flow.next();
             if (next.done) {
               const result = next.value;
+              // On the clarification path the reply was already accumulated into
+              // `fullReply` and `finalAgentId` set to "orchestrator"; the
+              // generator returns an empty `finalAnswer`, so don't clobber it.
+              if (clarificationEmitted) {
+                break;
+              }
               fullReply = result.finalAnswer;
               // The persisted assistant agentId is `"orchestrator"` on the
               // synthesis path (the user-visible final answer agent) and
@@ -572,6 +583,41 @@ chatRoutes.post("/chat", async (c) => {
               }
             } else if (ev.kind === "synthesis_ended") {
               // Trace already emitted by helper; nothing UI-visible here.
+            } else if (ev.kind === "needs_clarification") {
+              // Vague / low-signal message: the classifier abstained. The
+              // orchestrator asks the customer to clarify instead of
+              // force-routing to a specialist. This is a normal (non-error)
+              // turn — the orchestrator's reply IS the persisted answer.
+              clarificationEmitted = true;
+              finalAgentId = "orchestrator";
+              await stream.writeSSE({
+                event: "agent_active",
+                data: JSON.stringify({
+                  agentId: "orchestrator",
+                  agentName: requestedAgent.name,
+                }),
+              });
+              for await (const part of runOrchestratorClarification({
+                userMessage: body.message,
+                priorTurns,
+                memoryContext,
+              })) {
+                if (part.type === "token") {
+                  fullReply += part.text;
+                  if (collector && !firstClientTokenSent) {
+                    firstClientTokenSent = true;
+                    collector.event("latency.checkpoint", {
+                      name: "api.client.first_token",
+                      elapsedMs: Date.now() - collector.startTs,
+                      agentId: "orchestrator",
+                    });
+                  }
+                  await stream.writeSSE({
+                    event: "token",
+                    data: JSON.stringify({ text: part.text }),
+                  });
+                }
+              }
             } else if (ev.kind === "stream_error") {
               streamFailed = { code: ev.code, message: ev.message };
               await stream.writeSSE({

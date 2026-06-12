@@ -1,6 +1,6 @@
 # CloudWatch Dashboards — Reference Guide
 
-> **Note on screenshots.** The PNGs embedded below are illustrative — they were captured against the dev account where the framework was developed and show example traffic shapes. Your dashboards will look identical structurally but with different values. Regenerate by following [§ Regenerating screenshots](#regenerating-screenshots) at the bottom.
+> **Note on screenshots.** The PNGs embedded below were captured from the live CloudWatch dashboards for the Monday-through-Thursday window. Your dashboards will look identical structurally but with account-specific values. Regenerate by following [§ Regenerating screenshots](#regenerating-screenshots) at the bottom.
 >
 > **Console URLs.** The dashboards are named `<SHARED_RESOURCE_PREFIX>-{fleet,mongo,cost,atlas}-<env>`. With the default prefix `multiagent` and environment `dev` they resolve to:
 >
@@ -184,7 +184,7 @@ The built-in **Agents** and **Model Invocations** tabs in CloudWatch Generative 
 
 ## 7. Regenerating screenshots
 
-Screenshots are generated via `aws cloudwatch get-metric-widget-image` (no browser required). Run after smoke tests so data is present.
+Screenshots are generated via `aws cloudwatch get-metric-widget-image` (no browser required). Run after smoke tests so data is present. The checked-in screenshots use `2026-06-08T00:00:00Z` through `2026-06-11T14:14:31Z`.
 
 ```bash
 source .env
@@ -192,8 +192,8 @@ source .env
 # 1. Turn latency (fleet aggregate, SEARCH)
 aws cloudwatch get-metric-widget-image --region us-east-1 \
   --metric-widget '{
-    "title":"Turn latency p50/p95/p99 (all agents, 6h)",
-    "width":600,"height":400,"start":"-PT6H","end":"PT0H",
+    "title":"Turn latency p50/p95/p99 (all agents, Mon-Thu live)",
+    "width":1000,"height":600,"start":"2026-06-08T00:00:00Z","end":"2026-06-11T14:14:31Z",
     "metrics":[
       [{"expression":"SUM(SEARCH('"'"'{Multiagent/Chat,agentId} TurnLatencyMs'"'"','"'"'p50'"'"',300))","label":"p50","id":"e1"}],
       [{"expression":"SUM(SEARCH('"'"'{Multiagent/Chat,agentId} TurnLatencyMs'"'"','"'"'p95'"'"',300))","label":"p95","id":"e2"}],
@@ -204,8 +204,8 @@ aws cloudwatch get-metric-widget-image --region us-east-1 \
 # 2. Bedrock invocations (native, no dimensions needed)
 aws cloudwatch get-metric-widget-image --region us-east-1 \
   --metric-widget '{
-    "title":"Bedrock invocations + throttles (6h)",
-    "width":600,"height":400,"start":"-PT6H","end":"PT0H",
+    "title":"Bedrock invocations + throttles (Mon-Thu live)",
+    "width":1000,"height":600,"start":"2026-06-08T00:00:00Z","end":"2026-06-11T14:14:31Z",
     "metrics":[
       ["AWS/Bedrock","Invocations",{"stat":"Sum"}],
       ["AWS/Bedrock","InvocationThrottles",{"stat":"Sum","yAxis":"right"}]
@@ -215,8 +215,8 @@ aws cloudwatch get-metric-widget-image --region us-east-1 \
 # 3. Fleet rollup latency (alarm source, no SEARCH needed)
 aws cloudwatch get-metric-widget-image --region us-east-1 \
   --metric-widget '{
-    "title":"FleetRollup TurnLatencyMs (alarm source, 6h)",
-    "width":600,"height":400,"start":"-PT6H","end":"PT0H",
+    "title":"FleetRollup TurnLatencyMs (alarm source, Mon-Thu live)",
+    "width":1000,"height":600,"start":"2026-06-08T00:00:00Z","end":"2026-06-11T14:14:31Z",
     "metrics":[
       ["Multiagent/FleetRollup","TurnLatencyMs",{"stat":"p50","label":"p50"}],
       ["Multiagent/FleetRollup","TurnLatencyMs",{"stat":"p99","label":"p99"}]

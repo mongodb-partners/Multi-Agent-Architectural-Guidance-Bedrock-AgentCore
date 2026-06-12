@@ -49,6 +49,10 @@ def render_session_and_agent_sidebar(api_base: str, token: str | None) -> str:
         clear_session_id_query_param()
         st.rerun()
 
+    current_session_id = st.session_state.get("session_id")
+    if current_session_id:
+        st.caption(f"Current session: `{current_session_id}`")
+
     return pick_agent
 
 

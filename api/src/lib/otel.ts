@@ -20,20 +20,130 @@
  * context manipulation, not exporter-dependent.
  */
 
-import { context, propagation, trace, type Context } from "@opentelemetry/api";
+import { context, propagation, trace, type AttributeValue, type Context } from "@opentelemetry/api";
 import { AsyncLocalStorageContextManager } from "@opentelemetry/context-async-hooks";
 import { W3CTraceContextPropagator } from "@opentelemetry/core";
-import { BatchSpanProcessor } from "@opentelemetry/sdk-trace-base";
+import { BatchSpanProcessor, type ReadableSpan, type SpanProcessor } from "@opentelemetry/sdk-trace-base";
 import { NodeTracerProvider } from "@opentelemetry/sdk-trace-node";
+import { AWSXRayIdGenerator } from "@opentelemetry/id-generator-aws-xray";
 import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-http";
 import { Resource } from "@opentelemetry/resources";
 import { ATTR_SERVICE_NAME } from "@opentelemetry/semantic-conventions";
+import { PII_ARG_KEYS, summariseValue, maskPiiInString } from "./logger.ts";
 
 let bootstrapped = false;
 
 export type InitOtelOptions = {
   serviceName: string;
 };
+
+// ---------------------------------------------------------------------------
+// Span-attribute PII scrubber (CloudWatch /aws/spans).
+//
+// `TraceCollector.flattenAttrs` already redacts our own `multiagent.*` span
+// attributes, but the Strands TS SDK auto-attaches to this same global tracer
+// provider and emits its OWN `gen_ai.*` (Cycle / Model invoke / Tool) spans —
+// and a gen_ai Tool span can carry the raw MongoDB tool-call arguments / result
+// in its attributes or events. Those never pass through `flattenAttrs`, so we
+// add a SpanProcessor that scrubs EVERY span (regardless of emitter) right
+// before the BatchSpanProcessor exports it. This is the single choke point
+// that guarantees no MongoDB arg/returned-doc PII reaches `/aws/spans`.
+//
+// Two layers, mirroring the log + TraceCollector paths (shared `logger.ts`
+// helpers), gated off by `MCP_LOG_RAW_ARGS=true`:
+//   A. Attribute keys whose final dotted segment names a sensitive carrier
+//      (filter/document/queryVector/result/arguments/input/…) are summarised.
+//   B. Every remaining string attribute value is run through `maskPiiInString`
+//      so an email/phone hiding under an arbitrary key is still masked.
+// ---------------------------------------------------------------------------
+
+const SENSITIVE_SPAN_ATTR_SEGMENTS: ReadonlySet<string> = new Set<string>([
+  ...[...PII_ARG_KEYS].map((k) => k.toLowerCase()),
+  "normalizedfilter",
+  "result",
+  "sampledocs",
+  "documentpreviews",
+  // Strands / OTel gen_ai tool-call carriers (attribute or event keys).
+  "arguments",
+  "toolarguments",
+  "tool_arguments",
+  "input",
+  "output",
+  // gen_ai message-content carriers. Strands emits tool args, tool results,
+  // prompts, and conversation messages as JSON blobs under these span/event
+  // attribute keys (see @strands-agents/sdk telemetry/tracer.js:
+  // gen_ai.tool.message{content}, gen_ai.choice{message},
+  // gen_ai.client.inference.operation.details{gen_ai.input.messages,
+  // gen_ai.output.messages, gen_ai.system_instructions}, system_prompt).
+  // Summarising the whole blob is the only way to guarantee free-text PII
+  // (names / addresses with no detectable pattern) never reaches /aws/spans.
+  "content",
+  "message",
+  "messages",
+  "system_instructions",
+  "system_prompt",
+]);
+
+function lastSegment(key: string): string {
+  const i = key.lastIndexOf(".");
+  return (i === -1 ? key : key.slice(i + 1)).toLowerCase();
+}
+
+/**
+ * Redact a mutable OTel attributes bag in place. Exported for unit tests.
+ * No-op when `MCP_LOG_RAW_ARGS=true`. Wrapped callers must still try/catch —
+ * redaction is best-effort and must never break span export.
+ */
+export function redactSpanAttributes(attrs: Record<string, AttributeValue | undefined>): void {
+  if (process.env.MCP_LOG_RAW_ARGS === "true") return;
+  for (const key of Object.keys(attrs)) {
+    const v = attrs[key];
+    if (v == null) continue;
+    if (SENSITIVE_SPAN_ATTR_SEGMENTS.has(lastSegment(key))) {
+      const summary = summariseValue(v);
+      if (summary !== null) attrs[key] = summary;
+      continue;
+    }
+    if (typeof v === "string") {
+      attrs[key] = maskPiiInString(v);
+    } else if (Array.isArray(v)) {
+      attrs[key] = v.map((item) => (typeof item === "string" ? maskPiiInString(item) : item)) as AttributeValue;
+    }
+  }
+}
+
+/**
+ * SpanProcessor that scrubs span + span-event attributes on end, before the
+ * BatchSpanProcessor serializes and exports them. Register it BEFORE the batch
+ * processor so the mutation is in place by export time.
+ */
+export class RedactingSpanProcessor implements SpanProcessor {
+  onStart(): void {
+    // No-op: tool args/results are set during the span's life, so we scrub at
+    // end when the attribute bag is complete.
+  }
+
+  onEnd(span: ReadableSpan): void {
+    try {
+      redactSpanAttributes(span.attributes as Record<string, AttributeValue | undefined>);
+      for (const ev of span.events) {
+        if (ev.attributes) {
+          redactSpanAttributes(ev.attributes as Record<string, AttributeValue | undefined>);
+        }
+      }
+    } catch {
+      // Redaction must never destabilize the export pipeline.
+    }
+  }
+
+  shutdown(): Promise<void> {
+    return Promise.resolve();
+  }
+
+  forceFlush(): Promise<void> {
+    return Promise.resolve();
+  }
+}
 
 /** Returns the resolved OTLP traces endpoint or undefined if export is disabled. */
 function resolveTracesEndpoint(): string | undefined {
@@ -57,10 +167,19 @@ export function initOtel(opts: InitOtelOptions): void {
       "service.version": process.env.GIT_SHA?.trim() || "dev",
       "deployment.environment": process.env.ENVIRONMENT?.trim() || "dev",
     }),
+    // X-Ray-native ids (first 8 hex = epoch). Required so OTLP-exported traces
+    // are ingestible by X-Ray / CloudWatch Transaction Search and the console
+    // `#xray:traces/1-<8hex>-<24hex>` deep-links resolve. Ids stay valid W3C
+    // 32-hex, so traceparent propagation / log correlation are unaffected.
+    idGenerator: new AWSXRayIdGenerator(),
   });
 
   const tracesEndpoint = resolveTracesEndpoint();
   if (tracesEndpoint) {
+    // Scrub PII from EVERY span (ours + Strands gen_ai) before it leaves the
+    // process. Registered first so the in-place redaction is applied before
+    // the BatchSpanProcessor serializes/exports the same span objects.
+    provider.addSpanProcessor(new RedactingSpanProcessor());
     // BatchSpanProcessor batches span exports — gentler on the sidecar than
     // SimpleSpanProcessor and matches AWS reference architecture for ADOT.
     provider.addSpanProcessor(

@@ -119,6 +119,7 @@ def validate_chat_smoke(api: str, session_id: str, id_token: str) -> None:
         elif "event: error" in first or "event: error" in second:
             last_err = "SSE smoke validation failed: error event present"
         else:
+            first_summary = parse_turn_end(first)
             summary = parse_turn_end(second)
             if not summary:
                 last_err = "SSE smoke validation failed: chat.turn.end summary missing for second turn"
@@ -139,14 +140,18 @@ def validate_chat_smoke(api: str, session_id: str, id_token: str) -> None:
                     "order question (expected Hono -> specialist, or legacy "
                     "Hono -> orchestrator -> specialist when USE_ORCHESTRATOR_RUNTIME=1)."
                 )
-            elif (summary.get("mongoQueries") or 0) <= 0:
+            # The second turn is intentionally a follow-up. A healthy agent may
+            # answer it from the order data fetched during the first turn rather
+            # than querying MongoDB again, so require Mongo/MCP evidence across
+            # the two-turn conversation instead of only on the second response.
+            elif ((first_summary.get("mongoQueries") or 0) + (summary.get("mongoQueries") or 0)) <= 0:
                 last_err = (
-                    "SSE smoke validation failed: mongoQueries == 0 - "
+                    "SSE smoke validation failed: mongoQueries == 0 across both turns - "
                     "counter rollup or Mongo path broken"
                 )
-            elif (summary.get("mcpCalls") or 0) <= 0:
+            elif ((first_summary.get("mcpCalls") or 0) + (summary.get("mcpCalls") or 0)) <= 0:
                 last_err = (
-                    "SSE smoke validation failed: mcpCalls == 0 - "
+                    "SSE smoke validation failed: mcpCalls == 0 across both turns - "
                     "gateway MCP path or counter rollup broken"
                 )
             elif not has_order_data(second):

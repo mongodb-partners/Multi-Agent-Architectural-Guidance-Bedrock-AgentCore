@@ -38,6 +38,8 @@ config/agents/
 - Filename must match the `id` field in the frontmatter
 - The API rescans this directory **on each request** — edits hot-reload without restarting
 
+Reference-only examples live under `config/samples/agents/`. Check that folder before writing a new agent from scratch. Samples are not loaded by the app or deployed to AgentCore until you copy one into `config/agents/` and redeploy agents.
+
 ---
 
 ## .agent.md Format

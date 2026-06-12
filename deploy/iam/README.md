@@ -225,7 +225,9 @@ Explorer and you can enumerate/clean up after each policy-testing pass.
 source .env && ./deploy/deploy-full-with-privatelink.sh --auto-approve
 
 # 3. verify what was created (filters by Project tag)
-./deploy/scripts/list-resources.sh
+aws resourcegroupstaggingapi get-resources \
+  --region "$AWS_REGION" \
+  --tag-filters "Key=Project,Values=${PROJECT_NAME}"
 
 # 4. if a step failed with AccessDenied, read the exact action from the error,
 #    add it to policy.json, publish a new policy version on the IAM user/role,

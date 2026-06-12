@@ -98,7 +98,11 @@ def render_cognito_logout(settings: UISettings) -> None:
     if st.button("Sign out (Cognito)", key="cognito_logout", use_container_width=True):
         auth = _make_authenticator(cfg)
         auth.logout()
-        st.session_state.pop("_streamlit_cognito_auth", None)
+        # Wipe per-user chat state + URL so the next user signing in on the same
+        # browser tab doesn't inherit the previous session's id/transcript
+        # (use_cookies=False means session_state otherwise survives logout).
+        st.session_state.clear()
+        st.query_params.clear()
         st.rerun()
 
     # JavaScript-based sticky footer — finds the Sign Out button by text,

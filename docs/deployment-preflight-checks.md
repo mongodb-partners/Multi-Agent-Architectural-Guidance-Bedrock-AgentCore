@@ -156,11 +156,6 @@ Each check below corresponds to a `pf_check_*` (or `pf_advise_*`) function. The 
 **Catches:** < 10 GB free on `/`, or Docker daemon running with < 4 GB memory (multi-platform builds OOM).
 **Fix:** Free disk; raise Docker Desktop's memory in Settings → Resources.
 
-#### aws-service-limits
-**Function:** `pf_check_aws_service_limits`
-**Catches:** Account-level service quotas at floor (VPC 5/region default, Elastic IP 5/region default). Does **not** cover SageMaker — see [`sagemaker-endpoint-quota`](#sagemaker-endpoint-quota) for the Voyage GPU endpoint quota check.
-**Fix:** Request a quota increase via Service Quotas console.
-
 #### shell-runtime-safe
 **Function:** `pf_check_shell_runtime_safe`
 **Profiles:** `orchestrator-privatelink`, `orchestrator-peering` (inherited), `shared`.
@@ -181,7 +176,7 @@ Each check below corresponds to a `pf_check_*` (or `pf_advise_*`) function. The 
 **Fix on failure:** the failure envelope walks you through re-sourcing `_preflight-checks.sh` (in case a downstream wrapper monkey-patched `preflight_validate`) and falling back to `/bin/bash` explicitly if the operator is on a non-bash shell. The self-test (`bash deploy/scripts/_preflight-checks.sh --self-test`) covers both fix prongs and will catch any regression in CI before deploy.
 
 #### deploy preview (`pf_advise_cost_and_duration`)
-Advisory only — never fails. Prints expected resources, ~$240–320/month estimate, ~25–40 min build time, and the teardown command. Silence with `PREFLIGHT_NO_COST_PREVIEW=1`.
+Advisory only — never fails. Prints expected resources, ~$240–320/month estimate, ~25–40 min build time, and the mode-matched teardown wrappers under [`deploy/destroy/`](../deploy/destroy/) (`destroy-project-with-*.sh`, then `destroy-shared-with-*.sh`). Silence with `PREFLIGHT_NO_COST_PREVIEW=1`.
 
 ### Tools / network / API health
 
@@ -247,6 +242,12 @@ Advisory only — never fails. Prints expected resources, ~$240–320/month esti
 **Catches:** A pre-existing cluster on **M0 / M2 / M5** — these tiers don't accept PrivateLink and don't support vector indexes. Only fails if the cluster already exists; first-time deploys (where Terraform creates the cluster) pass.
 **Fix:** Atlas → Cluster → Edit configuration → Cluster Tier ≥ M10, **or** destroy and let Terraform recreate at the configured tier.
 
+#### atlas-no-public-ip-access-list
+**Function:** `pf_check_atlas_no_public_ip_access_list`
+**Profiles:** `project-post-apply`, `local-post-apply`.
+**Catches:** The Atlas project IP access list contains a public-internet entry (`0.0.0.0/0`, `0.0.0.0/1`, or `ipAddress 0.0.0.0`). Atlas must be reachable only from where it was created (the operator/deploy machine `/32` in privatelink + local modes) or the peered VPC CIDR (peering mode) — never the open internet. Catches both a Terraform regression and stale/manually-added open entries that Terraform does not manage. Reads `GET /groups/<project>/accessList` via the Atlas Admin API; non-2xx is treated as a skip (transient).
+**Fix:** Remove the open entry in Atlas → Network Access → IP Access List, then re-run the deploy so the `mongodb-atlas` module re-applies its scoped entry (privatelink → `OPERATOR_IP_CIDR`; peering → VPC CIDR). The `mongodb-atlas` module never emits `0.0.0.0/0`; a leftover entry was added manually or by an older deploy.
+
 #### atlas-privatelink-orphans
 **Function:** `pf_check_atlas_privatelink_no_orphans`
 **Catches:** Stale PrivateLink endpoints in `DELETING` / `FAILED` state from a previous deploy that didn't fully clean up. Atlas refuses to create a new endpoint while orphans linger.
@@ -277,15 +278,15 @@ Advisory only — never fails. Prints expected resources, ~$240–320/month esti
 #### kb-ingestion-complete
 **Function:** `pf_check_kb_ingestion_complete` *(post-apply only)*
 **Profiles:** `project-post-apply`, `local-post-apply` (skipped when `BEDROCK_KB_ID` empty).
-**Catches:** The latest Bedrock KB ingestion job is not `COMPLETE`, OR completed with `0` documents indexed. Uses `aws bedrock-agent list-ingestion-jobs` (authoritative, schema-independent — survives Bedrock chunk-shape changes).
-**Fix:** Inspect with `aws bedrock-agent list-ingestion-jobs --knowledge-base-id <kb-id> --data-source-id <ds-id>`; re-trigger by running `terraform apply` on the `bedrock-kb` module.
+**Catches:** The latest Bedrock KB ingestion job is not `COMPLETE`, scanned `0` source documents, OR completed with `numberOfDocumentsFailed > 0`. This explicitly catches Bedrock's partial-success shape where job status is `COMPLETE` but one source file failed to index. Healthy no-op syncs with `0` new/modified documents pass when scanned documents are present and failed documents are `0`.
+**Fix:** Inspect with `aws bedrock-agent list-ingestion-jobs --knowledge-base-id <kb-id> --data-source-id <ds-id>` and the KB APPLICATION_LOGS group (`/aws/bedrock/knowledgebase/<kb-id>`); re-trigger by running `terraform apply` on the `bedrock-kb` module.
 
 ### Voyage (Marketplace)
 
 #### voyage-marketplace
 **Function:** `pf_check_voyage_marketplace_subscribed`
 **Catches:** `EMBEDDINGS_PROVIDER=voyage` but `VOYAGE_MODEL_PACKAGE_ARN` is unset, **or** `aws sagemaker describe-model-package` returns an error (not subscribed in this region).
-**Fix:** `./deploy/scripts/setup-voyage-marketplace.sh` walks you through the Marketplace subscription, then prints the per-region ARN to paste into `.env`.
+**Fix:** Subscribe to the supported Voyage AI Marketplace listing, then copy the region-specific SageMaker model-package ARN into `VOYAGE_MODEL_PACKAGE_ARN` in `.env`.
 
 #### voyage-marketplace-model-matches-arn
 **Function:** `pf_check_voyage_marketplace_model_matches_arn`
@@ -301,7 +302,7 @@ The check gates on two things:
 
 **Skipped when:** `EMBEDDINGS_PROVIDER != voyage`, or `VOYAGE_MODEL_PACKAGE_ARN` is empty (handled by `pf_check_voyage_marketplace_subscribed`).
 
-**Fix:** Re-run `./deploy/scripts/setup-voyage-marketplace.sh --model voyage-multimodal-3` (subscribe at https://aws.amazon.com/marketplace/pp/prodview-hrid2zxusacxy). The helper rewrites `VOYAGE_MODEL_PACKAGE_ARN`, `VOYAGE_MARKETPLACE_MODEL`, and `TF_VAR_voyage_endpoint_name_suffix` consistently. If you need text-only embeddings, switch `EMBEDDINGS_PROVIDER=titan`.
+**Fix:** Set `VOYAGE_MODEL_PACKAGE_ARN` and `VOYAGE_MARKETPLACE_MODEL` consistently for `voyage-multimodal-3` or `voyage-multimodal-3.5` (subscribe at https://aws.amazon.com/marketplace/pp/prodview-hrid2zxusacxy). `TF_VAR_voyage_endpoint_name_suffix` may be model-derived; deploy scripts and Terraform normalize invalid SageMaker endpoint-name characters to hyphens before endpoint creation. If you need text-only embeddings, switch `EMBEDDINGS_PROVIDER=titan`.
 
 #### voyage-endpoint-live-smoke
 **Function:** `pf_check_voyage_endpoint_live_smoke`
@@ -319,7 +320,7 @@ endpoint rejected the multimodal envelope (sent 'inputs', expected 'input').
 The deployed model package is text-only — this stack only supports multimodal Voyage listings.
 ```
 
-A 200 OK is additionally cross-checked against `voyage_embedding_dims` (1024 today, sourced from `VOYAGE_EMBEDDING_DIMS` in the TS SSOT). Any dim drift fails the check.
+A 200 OK is additionally cross-checked against `voyage_embedding_dims` (the resolved dim — `VOYAGE_OUTPUT_DIM` if set, else the 1024 default — sourced via `getVoyageEmbeddingDims()` in the TS SSOT). Any dim drift fails the check.
 
 **Skipped when:** `EMBEDDINGS_PROVIDER != voyage`, or the endpoint name cannot yet be resolved (`VOYAGE_SAGEMAKER_ENDPOINT` / `TF_VAR_voyage_endpoint_name_suffix` both unset — `shared-post-apply` exports the Terraform output before invoking), or `bun` is unavailable on the host (the SSOT body cannot be built without it).
 
@@ -334,7 +335,7 @@ aws sagemaker describe-model --model-name "$MODEL" --region "$AWS_REGION" \
   --query 'PrimaryContainer.ModelPackageName' --output text
 ```
 
-Re-run `./deploy/scripts/setup-voyage-marketplace.sh --model voyage-multimodal-3` then `./deploy/scripts/deploy-shared.sh` to let Terraform replace the SageMaker model + endpoint config.
+Set `VOYAGE_MODEL_PACKAGE_ARN` to a supported multimodal listing, then run `./deploy/scripts/deploy-shared.sh` to let Terraform replace the SageMaker model + endpoint config.
 
 #### sagemaker-endpoint-quota
 **Function:** `pf_check_sagemaker_endpoint_quota`
@@ -342,7 +343,13 @@ Re-run `./deploy/scripts/setup-voyage-marketplace.sh --model voyage-multimodal-3
 **Catches:** `EMBEDDINGS_PROVIDER=voyage` but the account has **0** quota for the chosen Voyage GPU instance type (`VOYAGE_INSTANCE_TYPE`, default `ml.g6.xlarge`) under the Service Quotas key `"<instance-type> for endpoint usage"`. New AWS accounts default to 0 for many `ml.g5.*` / `ml.g6.*` types; without an explicit quota grant `envs/shared` fails ~6 min into `terraform apply` with `ResourceLimitExceeded` at `module.voyage_sagemaker`. The check first queries customer-applied quotas (`list-service-quotas`); if absent it falls back to `list-aws-default-service-quotas` so brand-new accounts still see a precise pre-flight failure instead of a 6-minute terraform regression.
 **Skipped when:** `EMBEDDINGS_PROVIDER != voyage` (Titan deploys don't need SageMaker), or the chosen instance type has no matching Service Quotas entry (rare — the inline terraform apply still catches it).
 **Fix:** Open Service Quotas → SageMaker → search for `"<instance-type> for endpoint usage"` → Request quota increase → value ≥ 1. Approval is usually 0–60 min on accounts with payment history, up to 24 h on brand-new accounts. Alternatively set `EMBEDDINGS_PROVIDER=titan` in `.env` to skip Voyage entirely.
-**Why this isn't covered by `aws-service-limits`:** that check is region-default sanity (VPCs + EIPs) and doesn't introspect SageMaker; this one specifically resolves the per-instance-type endpoint quota.
+
+#### aws-service-limits
+**Function:** `pf_check_aws_service_limits`
+**Profiles:** `orchestrator-privatelink`, `orchestrator-peering` (inherited), `project-pre-apply`.
+**Catches:** No free **VPCs-per-Region** or **EC2-VPC Elastic IPs** capacity for a new deploy. The limit is **not hardcoded** — it is read live from Service Quotas (`get-service-quota`, falling back to `get-aws-default-service-quota`) for `vpc/L-F678F1CE` (VPCs per Region) and `ec2/L-0263D0A3` (EC2-VPC Elastic IPs). When in-use count ≥ the account's actual quota and no reusable shared VPC / project EIP exists, the new shared-VPC or NAT-gateway/EIP allocation would fail. If a quota increase is granted, the check honours the higher limit automatically; if a quota cannot be retrieved at all, that sub-check is downgraded to a warning instead of guessing a constant.
+**Skipped when:** AWS auth is not validated. Individual sub-checks self-skip (warn) when their Service Quotas value cannot be read.
+**Fix:** Reuse the existing shared VPC (redeploy detects it via `/<SHARED_VPC_NAME>/<region>/vpc_id`), release unused VPCs/EIPs, or request a quota increase: `https://<region>.console.aws.amazon.com/servicequotas/home`. IAM for the lookup (`servicequotas:GetServiceQuota` + `GetAWSDefaultServiceQuota`) is granted by `deploy/iam/policy.json` → `ServiceQuotasForSageMakerAndVoyageSetup`.
 
 ### Network / VPC / SSM
 

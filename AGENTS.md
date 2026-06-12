@@ -84,7 +84,7 @@ When the script finishes, open the **UI URL** it prints (Streamlit on EC2, port 
 
 Alternative connectivity: `./deploy/deploy-full-with-vpc-peering.sh --auto-approve` (mutually exclusive with PrivateLink).
 
-Optional IAM pre-check: `bash deploy/scripts/probe-resources.sh` (add `--all` for the full matrix).
+Deploy scripts run centralized preflight checks before mutating AWS resources.
 
 #### Run API + UI on your laptop (after a full EC2 deploy)
 
@@ -141,13 +141,16 @@ Deploy scripts write runtime ARNs, Cognito JWKS, and memory store IDs into `.env
 | `config/environment.yaml` | API defaults (port, CORS) |
 | `config/demo-prompts.yaml` | Sidebar "Try a prompt" entries for Streamlit |
 | `db-seeding/` | Atlas demo data + vector/BM25 index seed scripts (`seed-all.ts`, `seed-indexes.ts`, …) |
-| `deploy/` | Terraform (`envs/`, `modules/`, `bootstrap/`), shell scripts, IAM policy, KB doc sources |
+| `deploy/` | Terraform (`envs/`, `modules/`, `bootstrap/`), deploy/destroy shell scripts, IAM policy, KB doc sources |
 | `deploy/deploy-full-with-privatelink.sh` | Orchestrator — network → shared → project (PrivateLink) |
 | `deploy/deploy-full-with-vpc-peering.sh` | Orchestrator — same phases (VPC peering mode) |
+| `deploy/destroy/` | Mode-specific teardown wrappers (`destroy-project-with-*.sh`, `destroy-shared-with-*.sh`) — separate from `deploy-*.sh` entrypoints |
+| `deploy/destroy/destroy-project-with-privatelink.sh` / `deploy/destroy/destroy-project-with-vpc-peering.sh` | Project-only teardown wrappers for `envs/ec2` |
+| `deploy/destroy/destroy-shared-with-privatelink.sh` / `deploy/destroy/destroy-shared-with-vpc-peering.sh` | Shared teardown wrappers for `envs/shared` then `envs/network` |
 | `deploy/deploy-api.sh` | API image-only redeploy |
 | `deploy/deploy-ui.sh` | UI image-only redeploy |
 | `deploy/deploy-agents.sh` | Agent config + AgentCore runtime code artifact only |
-| `deploy/scripts/` | `deploy-network.sh`, `deploy-shared.sh`, `deploy-project.sh`, `deploy-local.sh`, `destroy.sh`, `probe-resources.sh`, `docker-build.sh`, … |
+| `deploy/scripts/` | `deploy-network.sh`, `deploy-shared.sh`, `deploy-project.sh`, `deploy-local.sh`, `destroy.sh` (low-level destroy engine), `docker-build-push.sh`, shared helpers |
 | `deploy/terraform/` | **Four live root configs:** [`envs/network`](deploy/terraform/envs/network) (shared VPC + Atlas connectivity, singleton per account+region), [`envs/shared`](deploy/terraform/envs/shared) (Voyage SageMaker + CloudWatch log groups + dashboards + Bedrock invocation logging, singleton per account+region+env), [`envs/ec2`](deploy/terraform/envs/ec2) (per-project EC2 + ECR + Cognito + KB + AgentCore), [`envs/local`](deploy/terraform/envs/local) (laptop — Atlas + KB + Cognito, no EC2). Network + shared publish SSM under `/<SHARED_VPC_NAME>/<region>/`; `ec2` reads them. |
 | `e2e/` | Playwright API specs — run against a **live** API (`API_URL=… bun run test`) |
 | `e2e-smoke/` | Python post-deploy live-AWS smoke + `memory-recall-diagnostic.py` |
@@ -324,10 +327,15 @@ source .env
 # Shared observability + embeddings only (singleton per account+region+env)
 ./deploy/scripts/deploy-shared.sh --auto-approve
 
-# Tear down (order matters: ec2 → shared → network → local)
-./deploy/scripts/destroy.sh --mode ec2     --auto-approve
-./deploy/scripts/destroy.sh --mode shared  --auto-approve
-./deploy/scripts/destroy.sh --mode network --auto-approve
+# Tear down PrivateLink (project first, then shared/network singletons)
+./deploy/destroy/destroy-project-with-privatelink.sh --auto-approve
+./deploy/destroy/destroy-shared-with-privatelink.sh --auto-approve
+
+# Tear down VPC peering (project first, then shared/network singletons)
+./deploy/destroy/destroy-project-with-vpc-peering.sh --auto-approve
+./deploy/destroy/destroy-shared-with-vpc-peering.sh --auto-approve
+
+# Low-level/local teardown
 ./deploy/scripts/destroy.sh --mode local   --auto-approve
 ```
 
@@ -336,7 +344,6 @@ source .env
 ```bash
 docker compose up --build    # needs .env with JWKS + AgentCore ARNs
 # or: make docker-up
-# or: ./deploy/scripts/docker-build.sh && docker compose up
 ```
 
 ---

@@ -9,12 +9,13 @@ terraform {
 
 locals {
   # Endpoint name carries the model variant so swapping listings
-  # (voyage-multimodal-3 ↔ voyage-3-5-lite) creates a new endpoint instead
+  # (voyage-multimodal-3 vs voyage-multimodal-3.5) creates a new endpoint instead
   # of confusingly reusing the previous one. project_name is intentionally
   # NOT in the name — this module is instantiated by envs/shared once per
   # (account, region, environment) and consumed by multiple per-project
   # envs/ec2 stacks via SSM.
-  endpoint_name = "${var.endpoint_name_suffix}-${var.environment}"
+  endpoint_name_suffix = trim(replace(lower(var.endpoint_name_suffix), "/[^a-z0-9-]+/", "-"), "-")
+  endpoint_name        = "${local.endpoint_name_suffix}-${var.environment}"
 }
 
 # =============================================================================

@@ -118,8 +118,8 @@ If `network_mode` returns `ParameterNotFound`, the shared network stack has neve
 
 To switch a `(account, region, SHARED_VPC_NAME)` from one connectivity mode to another:
 
-1. Tear down every consumer: `./deploy/scripts/destroy.sh --mode ec2` (per project), then `--mode shared`.
-2. Tear down the network: `./deploy/scripts/destroy.sh --mode network`. This deletes the `network_mode` canary and all mode-specific SSM keys.
+1. Tear down every consumer with the matching project wrapper under [`deploy/destroy/`](../deploy/destroy/) (e.g. `./deploy/destroy/destroy-project-with-privatelink.sh --auto-approve` per `envs/ec2` stack).
+2. Tear down shared + network with the matching shared wrapper (e.g. `./deploy/destroy/destroy-shared-with-privatelink.sh --auto-approve`). This runs `envs/shared` then `envs/network` and deletes the `network_mode` canary and all mode-specific SSM keys.
 3. Update `.env` (`NETWORK_MODE=…`, `ATLAS_PEERING_CIDR=…` if switching to peering).
 4. Re-run the matching orchestrator (`deploy-full-with-privatelink.sh` or `deploy-full-with-vpc-peering.sh`).
 
@@ -127,4 +127,4 @@ The `--allow-mode-switch` flag on `deploy-network.sh` is an escape hatch for for
 
 ---
 
-*Last verified: 2026-05-20 against `deploy/terraform/envs/{network,shared,ec2}/main.tf`.*
+*Last verified: 2026-06-02 against `deploy/terraform/envs/{network,shared,ec2}/main.tf`.*

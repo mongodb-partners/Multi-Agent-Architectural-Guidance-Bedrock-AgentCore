@@ -18,9 +18,10 @@
  *   MEMORY_TTL_DAYS=90          — TTL for agent_memory_facts + chat_messages (default 90)
  *   VECTOR_SIMILARITY=cosine    — cosine | euclidean | dotProduct (default cosine)
  *
- * Embedding dimension is pinned by VOYAGE_EMBEDDING_DIMS in
- * api/src/adapters/voyage-embedding.ts — no env override (the dim is a code
- * change enforced by api/tests/unit/voyage-ssot-guard.test.ts).
+ * Embedding dimension defaults to 1024 (VOYAGE_DEFAULT_EMBEDDING_DIMS) and is
+ * configurable via VOYAGE_OUTPUT_DIM — resolved by getVoyageEmbeddingDims() in
+ * api/src/adapters/voyage-embedding.ts. The default + parity are enforced by
+ * api/tests/unit/voyage-ssot-guard.test.ts.
  */
 
 import { getConfig } from "./connect.ts";

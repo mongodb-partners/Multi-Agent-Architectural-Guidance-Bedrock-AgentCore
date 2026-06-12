@@ -784,8 +784,13 @@ def render_agentcore(events: list[dict]) -> None:
         )
     for o in obs:
         op = o.get("payload") or {}
+        chunks = []
         if op.get("xrayUrl"):
-            st.markdown(f"[X-Ray]({op['xrayUrl']})  ·  [CloudWatch logs]({op.get('cloudwatchLogStreamUrl') or '#'})")
+            chunks.append(f"[X-Ray]({op['xrayUrl']})")
+        if op.get("cloudwatchLogStreamUrl"):
+            chunks.append(f"[CloudWatch logs]({op['cloudwatchLogStreamUrl']})")
+        if chunks:
+            st.markdown("  ·  ".join(chunks))
     for g in gw:
         gp = g.get("payload") or {}
         st.caption(f"Gateway: target={gp.get('targetName')} · routing={gp.get('routingDecision')}")

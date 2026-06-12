@@ -132,9 +132,9 @@ def main() -> int:
             hint = (
                 " — endpoint rejected the multimodal envelope; the deployed "
                 "model package is text-only. This stack only supports "
-                "voyage-multimodal-3 / voyage-multimodal-3.5. Re-run "
-                "./deploy/scripts/setup-voyage-marketplace.sh --model "
-                "voyage-multimodal-3 then ./deploy/scripts/deploy-shared.sh."
+                "voyage-multimodal-3 / voyage-multimodal-3.5. Set "
+                "VOYAGE_MODEL_PACKAGE_ARN to a supported multimodal package, "
+                "then run ./deploy/scripts/deploy-shared.sh."
             )
         print(json.dumps({"error": f"invoke_endpoint failed: {msg}{hint}"}))
         return 1

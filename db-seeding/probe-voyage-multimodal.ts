@@ -35,12 +35,14 @@
 import {
   buildVoyageRequestBody,
   type MultimodalItem,
-  VOYAGE_EMBEDDING_DIMS,
+  getVoyageEmbeddingDims,
   voyageGenerateEmbeddings,
   getVoyageEndpoint,
   isVoyageConfigured,
   assertExpectedEmbeddingDims,
 } from "../api/src/adapters/voyage-embedding.ts";
+
+const VOYAGE_EMBEDDING_DIMS = getVoyageEmbeddingDims();
 
 // 1×1 transparent PNG, base64-encoded with the canonical `data:image/png;base64,`
 // header retained per the Voyage SDK contract.
@@ -194,8 +196,8 @@ if (!result.ok) {
     `\nprobe-voyage-multimodal: FAIL code=${result.code}` +
       (result.code === "schema_rejected"
         ? " — STOP. The deployed model package is not accepting the canonical " +
-          "multimodal envelope. Re-run ./deploy/scripts/setup-voyage-marketplace.sh " +
-          "with --model voyage-multimodal-3 (or voyage-multimodal-3.5) before " +
+          "multimodal envelope. Set VOYAGE_MODEL_PACKAGE_ARN to a supported " +
+          "voyage-multimodal-3 or voyage-multimodal-3.5 package before " +
           "shipping any consumer change."
         : "") +
       (result.code === "dim_mismatch"

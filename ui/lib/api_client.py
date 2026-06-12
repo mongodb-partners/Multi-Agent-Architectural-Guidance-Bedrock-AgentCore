@@ -312,6 +312,29 @@ def get_http_tools(api_base: str, access_token: str | None = None, request_id: s
     return r.json()
 
 
+def invoke_http_tool(
+    api_base: str,
+    name: str,
+    tool_input: dict[str, Any],
+    access_token: str | None = None,
+    request_id: str | None = None,
+    timeout: float = 30.0,
+) -> tuple[int, dict[str, Any]]:
+    """POST /http-tools/:name/invoke — call a configured HTTP tool directly (no agent).
+
+    Returns ``(http_status, body)``. The body is returned even on non-2xx so the
+    Debug page can surface validation / SSRF / upstream errors verbatim.
+    """
+    url = f"{api_base.rstrip('/')}/http-tools/{name}/invoke"
+    headers = _http_headers(access_token, request_id)
+    headers["Content-Type"] = "application/json"
+    r = requests.post(url, headers=headers, json={"input": tool_input}, timeout=timeout)
+    try:
+        return r.status_code, r.json()
+    except Exception:
+        return r.status_code, {"error": "non_json_response", "text": r.text}
+
+
 def get_health(api_base: str, access_token: str | None = None, request_id: str | None = None) -> dict[str, Any]:
     """GET /health — API health and dependency status."""
     url = f"{api_base.rstrip('/')}/health"

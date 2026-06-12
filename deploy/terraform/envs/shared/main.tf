@@ -31,6 +31,9 @@ locals {
     ManagedBy   = "terraform"
     Layer       = "shared"
   }
+
+  api_log_retention_days  = coalesce(var.api_log_retention_days, var.log_retention_days, 30)
+  otel_log_retention_days = coalesce(var.otel_log_retention_days, local.api_log_retention_days)
 }
 
 provider "aws" {
@@ -70,8 +73,8 @@ module "cloudwatch" {
   project_name           = var.project_name
   shared_resource_prefix = var.shared_resource_prefix
   environment            = var.environment
-  api_retention_days     = var.log_retention_days
-  aux_retention_days     = var.log_retention_days
+  api_retention_days     = local.api_log_retention_days
+  aux_retention_days     = var.aux_log_retention_days
 }
 
 # ── OTel log groups owned by the shared stack so the per-project ADOT sidecar
@@ -82,7 +85,7 @@ module "cloudwatch" {
 #    "${otel_log_group_name}-atlas" — we must own both.
 resource "aws_cloudwatch_log_group" "otel" {
   name              = local.otel_log_group_name
-  retention_in_days = var.log_retention_days
+  retention_in_days = local.otel_log_retention_days
 
   tags = merge(local.common_tags, {
     Name = local.otel_log_group_name
@@ -91,7 +94,7 @@ resource "aws_cloudwatch_log_group" "otel" {
 
 resource "aws_cloudwatch_log_group" "otel_atlas" {
   name              = local.otel_atlas_log_group_name
-  retention_in_days = var.log_retention_days
+  retention_in_days = local.otel_log_retention_days
 
   tags = merge(local.common_tags, {
     Name = local.otel_atlas_log_group_name

@@ -20,9 +20,8 @@ Text-only Voyage listings (`voyage-3`, `voyage-3-lite`, `voyage-3-large`,
 `voyage-3-5-lite`, `voyage-4` family, `voyage-code-*`, `voyage-large-2`,
 `voyage-multilingual-2`, `voyage-finance-2`, `voyage-law-2`) are **not
 supported**. The legacy `{ "input": [...] }` request branch was deleted in
-the multimodal-only migration. `setup-voyage-marketplace.sh` and
-`pf_check_voyage_marketplace_model_matches_arn` both refuse non-multimodal
-models at preflight.
+the multimodal-only migration. Deploy preflight refuses non-multimodal models
+through `pf_check_voyage_marketplace_model_matches_arn`.
 
 If you need text-only embeddings, switch `EMBEDDINGS_PROVIDER=titan`
 (Bedrock Titan, no SageMaker provisioning, no Marketplace subscription).
@@ -87,7 +86,7 @@ fails CI if you introduce one.
 
 | Layer | File | Exports |
 |---|---|---|
-| TypeScript | [`api/src/adapters/voyage-embedding.ts`](../../api/src/adapters/voyage-embedding.ts) | `SUPPORTED_VOYAGE_MODELS`, `VOYAGE_EMBEDDING_DIMS`, `buildVoyageRequestBody`, `textToMultimodal`, `multimodalItemSchema`, env getters (`isVoyageConfigured`, `getVoyageEndpoint`, `getVoyageModelName`), assertions (`assertSupportedVoyageModel`, `assertExpectedEmbeddingDims`), and the `voyageGenerateEmbedding(s)` HTTP client. |
+| TypeScript | [`api/src/adapters/voyage-embedding.ts`](../../api/src/adapters/voyage-embedding.ts) | `SUPPORTED_VOYAGE_MODELS`, `VOYAGE_DEFAULT_EMBEDDING_DIMS`, `getVoyageEmbeddingDims()` (the only `VOYAGE_OUTPUT_DIM` reader), `buildVoyageRequestBody`, `textToMultimodal`, `multimodalItemSchema`, env getters (`isVoyageConfigured`, `getVoyageEndpoint`, `getVoyageModelName`), assertions (`assertSupportedVoyageModel`, `assertExpectedEmbeddingDims`), and the `voyageGenerateEmbedding(s)` HTTP client. |
 | CLI bridge | [`api/scripts/voyage-print.ts`](../../api/scripts/voyage-print.ts) | `bun api/scripts/voyage-print.ts body <text> [query\|document]` → canonical JSON body. `models` and `dims` subcommands print the supported list / dim. |
 | Bash | [`deploy/scripts/_voyage-config.sh`](../../deploy/scripts/_voyage-config.sh) | `voyage_canonical_body`, `voyage_supported_models`, `voyage_embedding_dims`, `voyage_model_family`, `voyage_assert_multimodal_or_die`. Cached per-shell so the bun shell-out runs once per invocation. |
 
@@ -101,16 +100,25 @@ hand-roll the body. The SSOT guard test enforces this.
 | Knob | Meaning | Source |
 |---|---|---|
 | `EMBEDDINGS_PROVIDER` | `voyage` or `titan`. Mandatory at API boot. | `.env` |
-| `VOYAGE_MARKETPLACE_MODEL` | `voyage-multimodal-3` or `voyage-multimodal-3.5`. | `.env` (set by `setup-voyage-marketplace.sh`) |
-| `VOYAGE_MODEL_PACKAGE_ARN` | Region+subscription-scoped Marketplace ARN. | `.env` (discovered) |
+| `VOYAGE_MARKETPLACE_MODEL` | `voyage-multimodal-3` or `voyage-multimodal-3.5`. | `.env` |
+| `VOYAGE_MODEL_PACKAGE_ARN` | Region+subscription-scoped Marketplace ARN. | `.env` |
 | `VOYAGE_INSTANCE_TYPE` | Default `ml.g6.xlarge`. Must be GPU. | `.env` |
-| `TF_VAR_voyage_endpoint_name_suffix` | Default `voyage-multimodal-3`. | `.env` |
+| `TF_VAR_voyage_endpoint_name_suffix` | Default `voyage-multimodal-3`. May be model-derived, including `voyage-multimodal-3.5`; deploy scripts and Terraform normalize invalid SageMaker name characters to hyphens before endpoint creation. | `.env` |
 | `VOYAGE_SAGEMAKER_ENDPOINT` | Resolved endpoint name (written by Terraform). | `.env.live` |
-| `VOYAGE_EMBEDDING_DIMS` | 1024. Code constant — there is no env override. | `api/src/adapters/voyage-embedding.ts` |
+| `VOYAGE_OUTPUT_DIM` | Embedding output dimension. Default `1024` (`VOYAGE_DEFAULT_EMBEDDING_DIMS`). Allowed: `256/512/1024/2048` — **only** `voyage-multimodal-3.5` emits non-1024 (`voyage-multimodal-3` is 1024-only). Read once in `getVoyageEmbeddingDims()`; bash/Python and deploy-time Terraform derivation use the same SSOT value. When non-default, `buildVoyageRequestBody` adds `output_dimension` to the SageMaker envelope. | `.env` |
 
-There is **no** `VOYAGE_REQUEST_FORMAT` and **no** `VOYAGE_OUTPUT_DIM`. Both
-were removed in the multimodal-only migration. The CI guard test lights up
-if either reappears in `deploy/`.
+There is **no** `VOYAGE_REQUEST_FORMAT` (removed in the multimodal-only
+migration; the CI guard test lights up if it reappears in `deploy/`).
+`VOYAGE_OUTPUT_DIM` is allowed in `.env`, Terraform `.tf` files, deploy
+entrypoints that derive `var.voyage_output_dim`, and env-writer scripts that
+pass it into API / AgentCore runtimes. Deploy shell logic must not parse or
+validate it directly — use the `voyage_embedding_dims` SSOT bridge there.
+
+**Changing the dim is not hot-swappable.** It re-sizes the Atlas vector index
+(`db-seeding/seed-indexes.ts`) and requires re-embedding existing rows. The next
+`deploy/scripts/_seed-embeddings.sh` run auto-detects the drift (SSM
+`/<SHARED_VPC_NAME>/<region>/embeddings/dim` + an in-Mongo fingerprint) and
+rewires; manual fallback is `bun db-seeding/reembed-mismatched.ts --apply`.
 
 ---
 
@@ -140,7 +148,8 @@ sed -i '' 's/^export EMBEDDINGS_PROVIDER=.*/export EMBEDDINGS_PROVIDER="titan"/'
 bun db-seeding/reembed-mismatched.ts --apply
 
 # Switch back to Voyage (multimodal)
-./deploy/scripts/setup-voyage-marketplace.sh --model voyage-multimodal-3
+# Set EMBEDDINGS_PROVIDER=voyage, VOYAGE_MODEL_PACKAGE_ARN, and
+# VOYAGE_MARKETPLACE_MODEL in .env before redeploying shared.
 ./deploy/scripts/deploy-shared.sh --auto-approve   # provisions SageMaker
 ./deploy/deploy-api.sh
 ./deploy/deploy-agents.sh --auto-approve

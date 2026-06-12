@@ -23,8 +23,13 @@ EOT
 
 variable "endpoint_name_suffix" {
   type        = string
-  description = "Suffix appended to the SageMaker endpoint name (e.g. \"voyage-multimodal-3\" or \"voyage-3-5-lite\"). Defaults to voyage-multimodal-3."
+  description = "Model-derived suffix appended to the SageMaker endpoint name. Dots and other invalid SageMaker name characters are normalized to hyphens."
   default     = "voyage-multimodal-3"
+
+  validation {
+    condition     = length(trim(replace(lower(var.endpoint_name_suffix), "/[^a-z0-9-]+/", "-"), "-")) > 0
+    error_message = "endpoint_name_suffix must contain at least one alphanumeric character after SageMaker name normalization."
+  }
 }
 
 variable "instance_type" {

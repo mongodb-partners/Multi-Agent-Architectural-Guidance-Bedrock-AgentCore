@@ -330,8 +330,32 @@ if (!out.name || !out.message) process.exit(1);
 process.exit(0);
 EOJS"
 
-run_test "server.ts dispatch uses redactArgsForLog (not raw args) in console.log" \
-  "grep -n 'redactArgsForLog' '$REPO_ROOT/mcp-runtimes/mongodb-mcp/src/server.ts' | grep -q 'console.log'"
+run_test "server.ts dispatch uses redactArgsForLog (not raw args) in its log call" \
+  "grep -q 'redactArgsForLog(handlerArgs)' '$REPO_ROOT/mcp-runtimes/mongodb-mcp/src/server.ts'"
+
+run_test "API [mcp] callTool audit log routes args through redactMongoArgsForLog" \
+  "grep -q 'redactMongoArgsForLog(scopedArgs)' '$API_DIR/src/adapters/mongodb-mcp-client.ts'"
+
+run_test "trace-collector flattenAttrs summarises SENSITIVE_PAYLOAD_KEYS (spans /aws/spans)" \
+  "grep -q 'SENSITIVE_PAYLOAD_KEYS' '$API_DIR/src/lib/trace-collector.ts'"
+
+run_test "trace-collector flattenAttrs masks email/phone in leaf strings (maskPiiInString backstop)" \
+  "grep -q 'maskPiiInString' '$API_DIR/src/lib/trace-collector.ts'"
+
+run_test "otel.ts scrubs ALL spans (incl. Strands gen_ai) via RedactingSpanProcessor before export" \
+  "grep -q 'RedactingSpanProcessor' '$API_DIR/src/lib/otel.ts' && grep -q 'redactSpanAttributes' '$API_DIR/src/lib/otel.ts'"
+
+run_test "otel.ts summarises gen_ai content carriers (content/message/messages — free-text PII backstop)" \
+  "grep -q '\"content\"' '$API_DIR/src/lib/otel.ts' && grep -q '\"message\"' '$API_DIR/src/lib/otel.ts' && grep -q '\"messages\"' '$API_DIR/src/lib/otel.ts'"
+
+run_test "AgentCore vended APPLICATION_LOGS are opt-in (raw request/response payloads)" \
+  "grep -q 'variable \"enable_agentcore_vended_application_logs\"' '$REPO_ROOT/deploy/terraform/envs/ec2/variables.tf' && grep -A4 'variable \"enable_agentcore_vended_application_logs\"' '$REPO_ROOT/deploy/terraform/envs/ec2/variables.tf' | grep -q 'default     = false'"
+
+run_test "Full otel-span-redaction unit suite passes (gen_ai span backstop)" \
+  "cd '$API_DIR' && AUTH_JWKS_URI=https://test.example.com/.well-known/jwks.json AUTH_ISSUER=https://test.example.com bun test tests/unit/otel-span-redaction.test.ts --bail 2>&1 | grep -q '0 fail'"
+
+run_test "Full log-pii-redact unit suite passes (logger + span redactors)" \
+  "cd '$API_DIR' && AUTH_JWKS_URI=https://test.example.com/.well-known/jwks.json AUTH_ISSUER=https://test.example.com bun test tests/unit/log-pii-redact.test.ts tests/unit/trace-collector-pii-spans.test.ts --bail 2>&1 | grep -q '0 fail'"
 
 run_test "Full mongodb-mcp-redact unit suite passes" \
   "cd '$API_DIR' && AUTH_JWKS_URI=https://test.example.com/.well-known/jwks.json AUTH_ISSUER=https://test.example.com bun test tests/unit/mongodb-mcp-redact.test.ts --bail 2>&1 | grep -q '0 fail'"

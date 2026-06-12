@@ -16,6 +16,7 @@ A per-folder map of the repository as it ships today. Each entry explains **what
 │   └── mongodb-mcp/        MongoDB MCP server as an AgentCore Runtime (ARM64 container)
 ├── config/
 │   ├── agents/             *.agent.md — runtime LLM agent definitions
+│   ├── samples/            reference-only config examples (not loaded/deployed)
 │   ├── skills/             SKILL.md folders — domain knowledge + scripts + http-tools
 │   ├── environment.yaml    API defaults (port, CORS, etc.)
 │   ├── demo-prompts.yaml   Sidebar "Try a prompt" entries
@@ -139,6 +140,9 @@ config/
 │   ├── order-management.agent.md     Haiku 4.5
 │   ├── product-recommendation.agent.md   Sonnet 4.6
 │   └── troubleshooting.agent.md      Sonnet 4.6
+├── samples/
+│   ├── agents/                         Example .agent.md files to copy from
+│   └── http-tools-sample.json          Example HTTP tool declaration
 ├── skills/
 │   ├── order-management/
 │   │   ├── SKILL.md
@@ -180,6 +184,11 @@ deploy/
 ├── deploy-api.sh                     Rebuild + push API image, refresh .env.live, restart multiagent-api
 ├── deploy-ui.sh                      Rebuild + push UI image, restart multiagent-ui
 ├── deploy-agents.sh                  Re-bundle agent code, targeted apply on runtime modules
+├── destroy/                          Mode-specific teardown wrappers (call scripts/destroy.sh)
+│   ├── destroy-project-with-privatelink.sh
+│   ├── destroy-project-with-vpc-peering.sh
+│   ├── destroy-shared-with-privatelink.sh
+│   └── destroy-shared-with-vpc-peering.sh
 ├── scripts/
 │   ├── _aws-auth.sh                  Shared AUTH_MODE=iam/sts validator
 │   ├── _agents-common.sh             Shared helpers for deploy-agents.sh + deploy-project.sh agent phase
@@ -188,11 +197,7 @@ deploy/
 │   ├── deploy-project.sh             per-project EC2 + ECR + AgentCore + KB
 │   ├── deploy-local.sh               localhost API+UI against Atlas + Bedrock KB
 │   ├── destroy.sh                    Teardown — --mode {network,shared,ec2,local}
-│   ├── docker-build.sh / docker-push-ecr.sh / docker-build-push.sh
-│   ├── probe-resources.sh            Pre-flight permission check (30 resources)
-│   ├── list-resources.sh             Inventory deployed resources
-│   ├── setup-voyage-marketplace.sh   One-time Voyage AI Marketplace subscription
-│   ├── setup-troubleshooting-infra.sh / teardown-troubleshooting-infra.sh
+│   ├── docker-build-push.sh          Build + push deployment images
 │   └── backend-smoke.py              Backend smoke check (used by deploy-api.sh)
 ├── iam/
 │   ├── policy.json                   Consolidated deploy policy (scoped, no iam:*)
@@ -313,4 +318,5 @@ Documented in [`docs/deployment-guide.md` § CI/CD](docs/deployment-guide.md).
 | **`AGENTS.md`** at the repo root | Instructions for **coding agents / human contributors** |
 | **`PROJECT_STRUCTURE.md`** (this file) | Per-folder map of the repo |
 | **`config/agents/*.agent.md`** | Runtime LLM agent personas (orchestrator, order, product, troubleshoot) |
+| **`config/samples/`** | Reference-only config examples. Not loaded by the app or deployed until copied into a live config directory |
 | **`config/skills/<name>/SKILL.md`** | Runtime skill instructions for a domain |

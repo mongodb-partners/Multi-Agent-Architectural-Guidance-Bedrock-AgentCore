@@ -5,7 +5,8 @@
  *   - Read any `process.env.VOYAGE_*` variable.
  *   - Know which Voyage models are supported.
  *   - Construct the SageMaker request body.
- *   - Know the canonical embedding dimension (`VOYAGE_EMBEDDING_DIMS`).
+ *   - Know the embedding dimension (`VOYAGE_DEFAULT_EMBEDDING_DIMS` /
+ *     `getVoyageEmbeddingDims()`, configurable via `VOYAGE_OUTPUT_DIM`).
  *   - Validate model names or response dimensions.
  *
  * Every other TS file imports from here. Non-TS consumers (bash, python,
@@ -59,10 +60,48 @@ export const SUPPORTED_VOYAGE_MODELS = [
 
 export type SupportedVoyageModel = (typeof SUPPORTED_VOYAGE_MODELS)[number];
 
-/** Canonical embedding dimension for the Voyage multimodal family.
- *  Both `voyage-multimodal-3` and `voyage-multimodal-3.5` return 1024-d
- *  vectors. Atlas vector indexes are sized to match. */
-export const VOYAGE_EMBEDDING_DIMS = 1024 as const;
+/** Default embedding dimension for the Voyage multimodal family. Both
+ *  `voyage-multimodal-3` and `voyage-multimodal-3.5` emit 1024-d vectors by
+ *  default, and Atlas vector indexes are sized to match. This is the value
+ *  used when `VOYAGE_OUTPUT_DIM` is unset; it also pins the Terraform <-> TS
+ *  and bash <-> TS parity guards in `voyage-ssot-guard.test.ts`. */
+export const VOYAGE_DEFAULT_EMBEDDING_DIMS = 1024 as const;
+
+/** Output dimensions the Voyage multimodal family can emit (Matryoshka).
+ *  `voyage-multimodal-3.5` supports all four; `voyage-multimodal-3` is
+ *  1024-only (enforced in `getVoyageEmbeddingDims`). */
+const VOYAGE_ALLOWED_DIMS = [256, 512, 1024, 2048] as const;
+
+/** Resolved embedding dimension. Reads `VOYAGE_OUTPUT_DIM` (the ONLY env read
+ *  of this knob in the entire codebase — every other consumer derives from
+ *  here via `voyage-print.ts dims` / the bash SSOT). Defaults to
+ *  `VOYAGE_DEFAULT_EMBEDDING_DIMS` when unset.
+ *
+ *  Validation:
+ *    - must be one of `VOYAGE_ALLOWED_DIMS`;
+ *    - `voyage-multimodal-3` only emits 1024 — any other value is refused so
+ *      the operator gets a clear boot error instead of a SageMaker 4xx or a
+ *      silent Atlas dim mismatch. */
+export function getVoyageEmbeddingDims(): number {
+  const raw = process.env.VOYAGE_OUTPUT_DIM?.trim();
+  if (!raw) return VOYAGE_DEFAULT_EMBEDDING_DIMS;
+  const n = Number(raw);
+  if (!Number.isInteger(n) || !(VOYAGE_ALLOWED_DIMS as readonly number[]).includes(n)) {
+    throw new Error(
+      `VOYAGE_OUTPUT_DIM='${raw}' is not a supported Voyage output dimension. ` +
+        `Allowed: ${VOYAGE_ALLOWED_DIMS.join(", ")}. Leave unset to use the default ${VOYAGE_DEFAULT_EMBEDDING_DIMS}.`,
+    );
+  }
+  const model = getVoyageModelName();
+  if (model === "voyage-multimodal-3" && n !== VOYAGE_DEFAULT_EMBEDDING_DIMS) {
+    throw new Error(
+      `VOYAGE_OUTPUT_DIM=${n} is invalid for model 'voyage-multimodal-3' (1024-d only). ` +
+        "Set VOYAGE_MARKETPLACE_MODEL=voyage-multimodal-3.5 to use Matryoshka dimensions " +
+        `(${VOYAGE_ALLOWED_DIMS.join(", ")}), or unset VOYAGE_OUTPUT_DIM.`,
+    );
+  }
+  return n;
+}
 
 /** Per-text-segment truncation budget. Voyage's documented multimodal limit
  *  is ~32k characters per text piece; we enforce a hard slice so a long
@@ -226,25 +265,27 @@ export function assertSupportedVoyageModel(name: string): void {
     throw new Error(
       `Voyage model '${trimmed}' is not supported. ` +
         `This stack is multimodal-only. Allowed: ${SUPPORTED_VOYAGE_MODELS.join(", ")}. ` +
-        "Re-run ./deploy/scripts/setup-voyage-marketplace.sh --model voyage-multimodal-3.",
+        "Set VOYAGE_MARKETPLACE_MODEL to voyage-multimodal-3 or voyage-multimodal-3.5.",
     );
   }
 }
 
-/** Throws if `actual` ≠ `VOYAGE_EMBEDDING_DIMS`. Called inside
+/** Throws if `actual` ≠ the resolved embedding dim (`getVoyageEmbeddingDims()`,
+ *  i.e. `VOYAGE_OUTPUT_DIM` or the 1024 default). Called inside
  *  `voyageGenerateEmbedding` immediately after the SageMaker response is
  *  parsed — catches mid-stream container/model swaps that silently return
  *  a different dim (the failure mode the legacy EMBEDDING_DIMENSIONS
  *  preflight existed to catch). */
 export function assertExpectedEmbeddingDims(actual: number): void {
-  if (actual !== VOYAGE_EMBEDDING_DIMS) {
+  const expected = getVoyageEmbeddingDims();
+  if (actual !== expected) {
     throw new Error(
-      `Voyage embedding dimension mismatch: got ${actual}, expected ${VOYAGE_EMBEDDING_DIMS}. ` +
+      `Voyage embedding dimension mismatch: got ${actual}, expected ${expected}. ` +
         "The deployed model is returning a vector that does not match the Atlas vector index. " +
         "Likely causes: (a) endpoint serves a non-multimodal Voyage package despite the name, " +
         "(b) Atlas index was reseeded for a different provider. " +
-        "Re-run ./deploy/scripts/setup-voyage-marketplace.sh --model voyage-multimodal-3 " +
-        "then ./deploy/deploy-api.sh && ./deploy/deploy-agents.sh --auto-approve.",
+        "Set VOYAGE_MODEL_PACKAGE_ARN to a supported multimodal package, then run " +
+        "./deploy/scripts/deploy-shared.sh && ./deploy/deploy-api.sh && ./deploy/deploy-agents.sh --auto-approve.",
     );
   }
 }
@@ -278,11 +319,18 @@ export function buildVoyageRequestBody(
     };
   });
 
+  // Resolved output dimension. When it equals the family default (1024) we
+  // omit `output_dimension` entirely so the default `voyage-multimodal-3`
+  // envelope stays byte-identical to the legacy wire shape (and the
+  // body-parity guard). Only an explicit non-default `VOYAGE_OUTPUT_DIM`
+  // (voyage-multimodal-3.5 Matryoshka) adds the field.
+  const dims = getVoyageEmbeddingDims();
   const envelope = {
     inputs: validated.map(({ content }) => ({ content })),
     input_type: inputType,
     truncation: true,
     output_encoding: null as null,
+    ...(dims !== VOYAGE_DEFAULT_EMBEDDING_DIMS ? { output_dimension: dims } : {}),
   };
 
   const body = JSON.stringify(envelope);

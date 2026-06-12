@@ -16,6 +16,11 @@
  * flip), this test stays green automatically because the bash side delegates
  * to the same builder. If somebody re-introduces a hand-rolled literal in
  * the shell file, `voyage-ssot-guard.test.ts` catches that separately.
+ *
+ * Note: `output_dimension` is only emitted when VOYAGE_OUTPUT_DIM resolves to
+ * a non-default dim (voyage-multimodal-3.5 Matryoshka). The default path
+ * (unset / 1024) stays byte-identical to the legacy envelope, which is what
+ * these tests pin (they unset VOYAGE_OUTPUT_DIM for determinism).
  */
 
 import { describe, expect, test } from "bun:test";
@@ -32,16 +37,23 @@ const PROBE_TEXT = "preflight ping" as const;
 describe("voyage preflight body parity (deploy-time vs runtime)", () => {
   test("voyage_canonical_body matches buildVoyageRequestBody byte-for-byte", () => {
     const bashOut = execSync(
-      `bash -c 'source deploy/scripts/_voyage-config.sh && voyage_canonical_body "${PROBE_TEXT}" document'`,
+      `bash -c 'unset VOYAGE_OUTPUT_DIM; source deploy/scripts/_voyage-config.sh && voyage_canonical_body "${PROBE_TEXT}" document'`,
       { cwd: REPO_ROOT },
     ).toString();
-    const tsOut = buildVoyageRequestBody([textToMultimodal(PROBE_TEXT)], "document");
-    expect(bashOut).toBe(tsOut);
+    const savedDim = process.env.VOYAGE_OUTPUT_DIM;
+    delete process.env.VOYAGE_OUTPUT_DIM;
+    try {
+      const tsOut = buildVoyageRequestBody([textToMultimodal(PROBE_TEXT)], "document");
+      expect(bashOut).toBe(tsOut);
+    } finally {
+      if (savedDim === undefined) delete process.env.VOYAGE_OUTPUT_DIM;
+      else process.env.VOYAGE_OUTPUT_DIM = savedDim;
+    }
   });
 
   test("voyage_canonical_body uses the canonical multimodal shape, never a legacy text-only literal", () => {
     const bashOut = execSync(
-      `bash -c 'source deploy/scripts/_voyage-config.sh && voyage_canonical_body "${PROBE_TEXT}" query'`,
+      `bash -c 'unset VOYAGE_OUTPUT_DIM; source deploy/scripts/_voyage-config.sh && voyage_canonical_body "${PROBE_TEXT}" query'`,
       { cwd: REPO_ROOT },
     ).toString();
     expect(bashOut).toMatch(/^\{"inputs":\[/);

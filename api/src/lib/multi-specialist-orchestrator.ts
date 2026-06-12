@@ -142,6 +142,15 @@ export type MultiSpecialistFlowEvent =
       outputBytes: number;
       latencyMs: number;
     }
+  /**
+   * The classifier abstained (no specialist fits — vague / low-signal input).
+   * The caller should stream an orchestrator clarification reply instead of
+   * surfacing an error. Terminal: no specialist/synthesis events follow.
+   */
+  | {
+      kind: "needs_clarification";
+      inputMessage: string;
+    }
   /** Terminal failure. Caller emits SSE error + done with error. */
   | {
       kind: "stream_error";
@@ -195,14 +204,18 @@ export async function* runMultiSpecialistFlow(
     priorTurns: options.priorTurns,
   });
 
-  // No specialist confidently selected — emit a clear stream_error so the
-  // caller surfaces it in SSE. The orchestrator persona is a router, not
-  // an answerer; we never fall back to it.
+  // No specialist confidently selected — the message is vague / low-signal.
+  // Instead of erroring, signal the caller to stream an orchestrator
+  // clarification reply (the orchestrator is a router, never a domain answerer,
+  // so the clarification is produced by a dedicated helper, not a specialist).
   if (!classification || classification.selections.length === 0) {
+    collector?.event("orchestrator.clarification_route", {
+      inputMessage: options.message.slice(0, 500),
+      latencyMs: Date.now() - decisionStartTs,
+    });
     yield {
-      kind: "stream_error",
-      code: "NO_SPECIALIST_ROUTE",
-      message: "Could not classify your message to a specialist; please rephrase.",
+      kind: "needs_clarification",
+      inputMessage: options.message,
     };
     return {
       pathTaken: "single",

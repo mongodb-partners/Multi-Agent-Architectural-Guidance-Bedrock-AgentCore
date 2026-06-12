@@ -13,6 +13,7 @@ The API is a Hono server (TypeScript on Bun) listening on port `3000`. It expose
 | Method | Path | Purpose |
 |---|---|---|
 | GET | `/health` | Liveness + dependency status |
+| GET | `/health/deep` | Authenticated end-to-end MCP tool-path probe |
 | POST | `/chat` | Stream a chat reply (SSE) |
 | GET | `/sessions` | List sessions for the calling user |
 | GET | `/sessions/:id` | Fetch one session |
@@ -61,6 +62,37 @@ Each `dependencies.*` value is the result of a **live probe** (or `not_configure
 | `bedrockKnowledgeBase` | `connected` / `not_configured` / `unreachable` | `BEDROCK_KB_ID` set and a minimal Bedrock Agent Runtime `Retrieve` probe returns `{ status: "ok" }`. `unreachable` usually means IAM (`bedrock-agent-runtime:Retrieve` on the KB ARN) or KB not `ACTIVE` — check API logs for `[health] bedrock KB probe`. |
 
 Returns `503` with `status: degraded` when `mongodb` is `unreachable` only. Other dependencies may be `unreachable` or `inactive` while `status` stays `ok` (informational; does not fail liveness).
+
+---
+
+## 2b. `GET /health/deep`
+
+Authenticated end-to-end probe of the **MCP tool path**. Issues a real `mongodb_query` (`products.findOne`) through the AgentCore Gateway — the same code path a chat-driven tool call takes, but without an LLM. Used by the deploy-time smoke (Phase 9a3) so a broken MCP runtime / Gateway target wiring fails the deploy with a precise diagnosis before the LLM-dependent chat smoke runs.
+
+**Auth:** requires a Bearer JWT (same Cognito pool as the rest of the API). Unlike `/health`, this route is **not** public — without a token the Gateway authorizer rejects the call.
+
+**Response (connected):**
+
+```json
+{
+  "mcpProbe": "connected",
+  "latencyMs": 142,
+  "gatewayUrl": "https://...gateway.../mcp"
+}
+```
+
+| Field | Possible values | Meaning |
+|---|---|---|
+| `mcpProbe` | `connected` / `unreachable` / `timeout` | Outcome of the live `mongodb_query` round-trip via Gateway MCP |
+| `latencyMs` | number | Probe round-trip duration |
+| `gatewayUrl` | string | Resolved MCP server / Gateway URL that was probed |
+| `error` | string (optional) | Failure detail when `mcpProbe` is not `connected` |
+
+Status codes:
+
+- `200` when `mcpProbe === "connected"`.
+- `503` when the probe is `unreachable` / `timeout`.
+- `401` (with `mcpProbe: "unreachable"`) when no Bearer token is supplied.
 
 ---
 

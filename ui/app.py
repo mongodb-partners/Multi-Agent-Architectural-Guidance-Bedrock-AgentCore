@@ -50,6 +50,10 @@ with st.sidebar:
     render_suggested_prompts(settings.api_base, api_token)
     st.markdown("---")
     render_metrics_block(settings.api_base, api_token)
+    st.markdown("---")
+    st.markdown("**Debug**")
+    if st.button("HTTP Tool Test", key="debug_http_tool_test", use_container_width=True):
+        st.switch_page("pages/3_HTTP_Tool_Test.py")
     render_cognito_logout(settings)
 
 render_message_history()

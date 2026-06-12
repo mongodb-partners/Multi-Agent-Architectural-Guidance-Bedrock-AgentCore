@@ -6,7 +6,7 @@ Use this for **live screen share** demos against the running local stack or a de
 
 **Audience:** technical buyers, platform engineers, or leadership who care that **new behavior ships by editing markdown** (`config/agents/`, `config/skills/`) rather than forking JavaScript.
 
-**Runtime:** ~10–12 minutes for the full arc; ~5 minutes for a tight cut (scenes 1 + 3 + 5).
+**Runtime:** ~12–14 minutes for the full arc; ~5 minutes for a tight cut (scenes 1 + 3 + 6).
 
 ---
 
@@ -115,7 +115,36 @@ I need to cancel order ORD-1002 for blake@example.com. I no longer need it.
 
 ---
 
-## Scene 5 — Config is the product (~2 min)
+## Scene 5 — Multi-intent: order status + recommendation in one prompt (~2 min)
+
+New session, **orchestrator**.
+
+```text
+What's my order status and recommend a similar product?
+```
+
+*(agent asks for order details — show it collecting context)*
+
+```text
+Order ORD-1001 for alex@example.com.
+```
+
+**Call out while it streams:**
+- The orchestrator recognises **two distinct intents** in a single message
+- 🔀 **Parallel dispatch: orchestrator → order-management** queries Atlas, returns shipped status + tracking **TRK-9001-US**
+- 🔀 **Parallel dispatch: orchestrator → product-recommendation** queries the catalog, returns a complementary product suggestion (e.g. **Widget Care Kit, SKU-12, $12.99**)
+- Both specialist responses are **collated into a single coherent reply** — the user also sees two separate handoffs
+
+**What to show in Trace Viewer:**
+- Two `agent.handoff` events with different `targetAgent` values in the same turn
+- Each specialist emits its own `mongo.query` tool event
+- A final `orchestrator.collate` step assembles the merged answer
+
+**Presenter line:** *"One prompt, two specialists, one answer. The orchestrator fans out automatically because each intent maps to a different `handoffs` entry in `orchestrator.agent.md` — no code, no conditional routing table."*
+
+---
+
+## Scene 6 — Config is the product (~2 min)
 
 Switch to the **repo** (IDE or GitHub):
 
@@ -132,7 +161,7 @@ Switch to the **repo** (IDE or GitHub):
 1. Scene 0 — orient UI (30 s)
 2. Scene 1 — ORD-1001 order track (2 min)
 3. Scene 3 — outdoor product recommendation (1.5 min)
-4. Scene 5 — show `config/` (1 min)
+4. Scene 6 — show `config/` (1 min)
 
 ---
 

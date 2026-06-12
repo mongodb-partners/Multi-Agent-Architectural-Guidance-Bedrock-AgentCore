@@ -70,37 +70,65 @@ resource "mongodbatlas_database_user" "app" {
 }
 
 # =============================================================================
-# IP Access List — mode-aware
+# IP Access List — mode-aware, and NEVER 0.0.0.0/0 (no public-internet path)
+#
+# Goal: Atlas is reachable only from where it was created from / the deployment
+# fabric — not the open internet. We never add a 0.0.0.0/0 entry.
 #
 # privatelink mode (default):
-#   - Keeps the open 0.0.0.0/0 entry so Bedrock KB ingestion can use public
-#     SRV when enable_kb_privatelink=false (Option B, documented exception).
-#     PrivateLink itself enforces the actual network boundary for runtime.
+#   - Scope the public-SRV allowlist to the deploy machine's public IP
+#     (var.operator_ip_cidr — "anywhere it was created from"). Runtime traffic
+#     reaches Atlas over the PrivateLink endpoint, which BYPASSES the project IP
+#     access list entirely, so the only public-SRV consumers are operator-run
+#     local-exec provisioners (db-seeding, ensure-collection, KB ingestion-status
+#     polls, post-deploy smoke). No 0.0.0.0/0 entry is created.
+#   - Caveat: enable_kb_privatelink=false (Option B — KB ingestion over public
+#     SRV) is no longer reachable through this allowlist because Bedrock's source
+#     IPs are AWS-managed/variable. Keep enable_kb_privatelink=true (the default,
+#     partner-validated path), which routes KB ingestion through the VPCE.
 #
 # peering mode:
-#   - Replaces the open entry with the customer's vpc_cidr. KB ingestion in
-#     peering mode uses the NLB-over-peering path (or hybrid PL), so no
-#     public source is required. Defense-in-depth: only the peered VPC can
-#     reach Atlas at the network layer, not just at TLS+auth.
+#   - Scope the allowlist to the customer's vpc_cidr (defense-in-depth: only the
+#     peered VPC can reach Atlas at the network layer). KB ingestion uses the
+#     NLB-over-peering path, so no public source is required. The operator
+#     laptop /32 is added separately by modules/atlas-vpc-peering.
 #
-# Atlas IP access list is per-entry, NOT bulk-replace — flipping the cidr_block
-# on this single resource preserves other entries created by other Terraform
-# states or other clusters in the same Atlas project.
+# Atlas IP access list is per-entry, NOT bulk-replace — these single entries
+# preserve other entries created by other Terraform states or other clusters in
+# the same Atlas project.
 # =============================================================================
 
-resource "mongodbatlas_project_ip_access_list" "open" {
+resource "mongodbatlas_project_ip_access_list" "peering_vpc" {
+  count      = var.network_mode == "peering" ? 1 : 0
   project_id = var.atlas_project_id
-  cidr_block = var.network_mode == "peering" ? var.vpc_cidr : "0.0.0.0/0"
-  comment = (
-    var.network_mode == "peering"
-    ? "Peering mode — restrict Atlas access to customer VPC CIDR"
-    : "POC - allow Bedrock + all clients"
-  )
+  cidr_block = var.vpc_cidr
+  # NOTE: Atlas caps access-list comments at 80 chars; keep short + ASCII.
+  comment = "Peering mode: restrict Atlas access to customer VPC CIDR"
 
   lifecycle {
     precondition {
-      condition     = var.network_mode != "peering" || var.vpc_cidr != ""
+      condition     = var.vpc_cidr != ""
       error_message = "mongodb-atlas: network_mode='peering' requires var.vpc_cidr to be set (the IP access list needs the customer VPC CIDR to scope access)."
     }
+  }
+}
+
+resource "mongodbatlas_project_ip_access_list" "operator" {
+  count      = var.network_mode == "privatelink" && var.operator_ip_cidr != "" ? 1 : 0
+  project_id = var.atlas_project_id
+  cidr_block = var.operator_ip_cidr
+  # NOTE: Atlas rejects access-list comments longer than 80 characters
+  # (HTTP 400 INVALID_NETWORK_PERMISSION_COMMENT). Keep this short + ASCII.
+  comment = "PrivateLink: Atlas allowed only from deploy machine (operator IP)"
+}
+
+# Guard (warning, non-fatal): in privatelink mode with no operator IP the
+# project would have NO public-SRV allowlist entry, so operator-run local-exec
+# provisioners can't reach Atlas. Deploy scripts auto-detect the operator IP,
+# so this should only surface on hand-rolled applies.
+check "atlas_privatelink_has_operator_ip" {
+  assert {
+    condition     = var.network_mode != "privatelink" || var.operator_ip_cidr != ""
+    error_message = "mongodb-atlas: network_mode='privatelink' but operator_ip_cidr is empty — the Atlas IP access list will have NO public-SRV entry, so operator-run local-exec provisioners (db-seeding, KB ingestion-status polls, post-deploy smoke) cannot reach Atlas. Set OPERATOR_IP_CIDR (deploy-project.sh / deploy-local.sh auto-detect it via checkip.amazonaws.com)."
   }
 }

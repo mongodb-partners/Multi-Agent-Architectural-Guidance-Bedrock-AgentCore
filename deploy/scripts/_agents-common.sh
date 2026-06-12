@@ -40,6 +40,11 @@
 [[ -n "${_AGENTS_COMMON_SOURCED:-}" ]] && return 0
 _AGENTS_COMMON_SOURCED=1
 
+# Shared transient-error classifier (DNS resolver + network/transport blips).
+# Resolve relative to THIS file, not the caller's SCRIPT_DIR (callers vary).
+# shellcheck source=deploy/scripts/_transient-errors.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_transient-errors.sh"
+
 # ─── Tiny helpers (safe to redefine — callers already define compatible ones) ──
 _ac_log()  { echo "  [agents] $*"; }
 _ac_ok()   { echo "  [agents] ✓ $*"; }
@@ -117,8 +122,11 @@ apply_with_retry() {
       rm -f "$log_file"
       return 0
     fi
-    if grep -qE 'cloud\.mongodb\.com.*(i/o timeout|connection reset|connection refused|EOF|TLS handshake timeout)|Saved plan is stale' "$log_file"; then
-      _ac_warn "Transient Terraform apply error on attempt ${attempt} — will retry"
+    # Transient = local DNS resolver / network blip (shared classifier) OR
+    # Terraform saved-plan staleness after state changed between plan and apply.
+    if deploy_log_has_transient_error "$log_file" \
+       || grep -qE 'Saved plan is stale' "$log_file"; then
+      _ac_warn "Transient Terraform apply error on attempt ${attempt} — will re-plan and retry"
       attempt=$((attempt + 1))
       continue
     fi
@@ -205,6 +213,7 @@ def parse_yaml_simple(text):
 
 orchestrator = None
 specialists  = []
+test_only_agent_ids = {"http-tool-test"}
 
 for fname in sorted(os.listdir(agents_dir)):
     if not fname.endswith('.agent.md'):
@@ -215,6 +224,10 @@ for fname in sorted(os.listdir(agents_dir)):
         continue
     fm = parse_yaml_simple(fm_text)
     agent_id = fm.get('id', fname.replace('.agent.md', ''))
+    if agent_id in test_only_agent_ids:
+        # Kept under config/agents for local/schema exercises only. It is not
+        # one of the deployed AgentCore specialist runtimes.
+        continue
     # runtime_name must match the existing naming convention so existing
     # AgentCore Runtime resources are not accidentally recreated.
     safe_name = re.sub(r'[^a-zA-Z0-9_]', '_', f"{project}_{agent_id}_{environment}")[:48]
@@ -397,10 +410,11 @@ env = {
   'EMBEDDINGS_PROVIDER':       os.environ.get('EMBEDDINGS_PROVIDER', ''),
   'VOYAGE_SAGEMAKER_ENDPOINT': os.environ.get('VOYAGE_ENDPOINT', ''),
   # Voyage configuration is intentionally minimal here. The runtime adapter
-  # (api/src/adapters/voyage-embedding.ts) hard-codes the canonical multimodal
-  # envelope and VOYAGE_EMBEDDING_DIMS=1024. The legacy text-only envelope and
-  # its companion env vars were removed in the multimodal-only migration —
-  # see docs/reference/voyage.md.
+  # (api/src/adapters/voyage-embedding.ts) owns the canonical multimodal
+  # envelope and resolves VOYAGE_OUTPUT_DIM (default 1024). The legacy
+  # text-only envelope and request-format override were removed in the
+  # multimodal-only migration — see docs/reference/voyage.md.
+  'VOYAGE_OUTPUT_DIM':         os.environ.get('VOYAGE_OUTPUT_DIM', ''),
   # LTM trace-value gating — sourced from operator .env so flips are
   # captured by ./deploy/deploy-agents.sh and never hand-edited on EC2.
   # 0 (default) = redacted; 1 = raw text in trace events.
@@ -522,7 +536,10 @@ print(json.dumps(env))")
 # at apply time. Phase 5c then normalizes the API URI (retryWrites, PL flags).
 # This helper re-syncs the MCP runtime env to the same URI the API uses so
 # pf_check_mcp_runtime_env_complete and /health/deep see identical connection
-# strings. Preserves all other runtime env vars and container config.
+# strings. Preserves all other runtime env vars and container config. Also
+# re-syncs MONGODB_ALLOW_WRITE because existing AgentCore runtimes intentionally
+# ignore Terraform environment-variable drift and rely on this phase for live
+# runtime env updates.
 #
 # Args:
 #   $1 runtime_id   mongodb-mcp AgentCore runtime id
@@ -556,6 +573,7 @@ update_mcp_runtime_mongodb_env() {
   RUNTIME_ID="$runtime_id" \
   MONGO_URI="$mongodb_uri" \
   MONGO_DB="$mongodb_db" \
+  MONGO_ALLOW_WRITE="${MONGODB_ALLOW_WRITE:-${TF_VAR_mongodb_allow_write:-}}" \
   python3 - <<'PY' > "$update_args_file"
 import json, os
 
@@ -563,6 +581,9 @@ cfg = json.loads(os.environ["CFG_JSON"])
 env = dict(cfg.get("environmentVariables") or {})
 env["MONGODB_URI"] = os.environ["MONGO_URI"]
 env["MONGODB_DB"] = os.environ["MONGO_DB"]
+allow_write_raw = os.environ.get("MONGO_ALLOW_WRITE", "")
+allow_write = allow_write_raw.strip().lower() in {"1", "true", "yes", "on"}
+env["MONGODB_ALLOW_WRITE"] = "1" if allow_write else "0"
 out = {
     "agentRuntimeId": os.environ["RUNTIME_ID"],
     "roleArn": cfg["roleArn"],
@@ -586,7 +607,7 @@ PY
     _ac_err "mongodb-mcp runtime ${runtime_id}: update-agent-runtime (MONGODB_URI) failed"
   fi
   rm -f "$update_args_file"
-  _ac_ok "mongodb-mcp runtime env synced (MONGODB_URI + MONGODB_DB)"
+  _ac_ok "mongodb-mcp runtime env synced (MONGODB_URI + MONGODB_DB + MONGODB_ALLOW_WRITE)"
 
   local runtime_status attempt
   for attempt in $(seq 1 36); do

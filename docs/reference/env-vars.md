@@ -40,6 +40,10 @@ After `validate_aws_auth` succeeds the script exports `AWS_AUTH_MODE`, `AWS_AUTH
 | `SHARED_VPC_NAME` | — | SSM prefix + shared-network state-key identifier — multiple `envs/ec2` deploys in the same region read SSM under `/<SHARED_VPC_NAME>/<region>/` | Always | [`deploy/scripts/deploy-network.sh`](../../deploy/scripts/deploy-network.sh), [`envs/ec2/main.tf`](../../deploy/terraform/envs/ec2/main.tf) |
 | `SHARED_RESOURCE_PREFIX` | `multiagent` | Drives shared CloudWatch log-group names (`/<prefix>/<env>/{api,ui,mcp,agentcore,otel}`), dashboard names (`<prefix>-{fleet,mongo,cost,atlas}-<env>`), alarms, metric filters, query definitions | Always (cooperative across projects sharing one shared stack) | [`envs/shared/main.tf`](../../deploy/terraform/envs/shared/main.tf) |
 | `TF_VAR_shared_resource_prefix` | mirrors `SHARED_RESOURCE_PREFIX` | Same value, passed to Terraform | Always | Terraform |
+| `API_LOG_RETENTION_DAYS` | `30` | Retention for `/<SHARED_RESOURCE_PREFIX>/<env>/api` | `deploy-shared.sh` | [`deploy/scripts/deploy-shared.sh`](../../deploy/scripts/deploy-shared.sh), [`envs/shared/main.tf`](../../deploy/terraform/envs/shared/main.tf) |
+| `AUX_LOG_RETENTION_DAYS` | `7` | Retention for short-lived `ui`, `mcp`, and shared `agentcore` log groups | `deploy-shared.sh` | `deploy-shared.sh`, `envs/shared/main.tf` |
+| `OTEL_LOG_RETENTION_DAYS` | mirrors API retention | Retention for `otel` and `otel-atlas` log groups | `deploy-shared.sh` | `deploy-shared.sh`, `envs/shared/main.tf` |
+| `LOG_RETENTION_DAYS` | — | Deprecated compatibility fallback for API + OTel retention only; auxiliary groups stay controlled by `AUX_LOG_RETENTION_DAYS` | Legacy env files | `deploy-shared.sh`, `envs/shared/main.tf` |
 
 ---
 
@@ -56,6 +60,8 @@ The stack supports two **mutually exclusive per account** connectivity modes for
 | `TF_VAR_enable_kb_peering` | `true` | KB ingestion through peering NLB whose targets are Atlas private peering IPs | Consulted only when `NETWORK_MODE=peering`. **EXPERIMENTAL — TLS not partner-validated; see [`modules/bedrock-kb-peering/README.md`](../../deploy/terraform/modules/bedrock-kb-peering/README.md)** | `envs/ec2/main.tf` |
 
 > **Public Atlas SRV for KB is NOT a default and NOT recommended.** It is reached only by explicitly setting the matching flag to `=false`. Doing so is a deliberate privacy regression (KB ingestion leaves the private fabric, though TLS + Atlas auth still apply). The one place this opt-out is documented as a risk-managed alternative is the `bedrock-kb-peering` README — for environments that cannot accept the experimental TLS path, `TF_VAR_enable_kb_peering=false` keeps runtime traffic on peering while degrading KB to public SRV.
+>
+> **Atlas is never opened to `0.0.0.0/0`.** The Atlas project IP access list is scoped to the deploy machine (`OPERATOR_IP_CIDR`) in privatelink mode and to the VPC CIDR in peering mode. A side effect: the public-SRV KB ingestion opt-out (`TF_VAR_enable_kb_privatelink=false`) is no longer reachable, because Bedrock's source IPs are AWS-managed/variable and cannot be allowlisted by a single CIDR. Keep `TF_VAR_enable_kb_privatelink=true` (the default, VPCE path).
 
 ---
 
@@ -72,13 +78,14 @@ The stack supports two **mutually exclusive per account** connectivity modes for
 | `ATLAS_DB_NAME` | `${PROJECT_NAME//-/_}_${ENVIRONMENT}` (derived) | Atlas DB name (Mongo identifiers can't contain `-`) | Always | `deploy-project.sh`, seeding scripts |
 | `TF_VAR_atlas_db_password` | — | DB user password (canonical) | Always | `envs/{ec2,local}/main.tf` |
 | `TF_VAR_mongodb_password` | mirrors `TF_VAR_atlas_db_password` | Legacy alias | Same | Legacy modules |
-| `TF_VAR_my_ip` | `$(curl -s https://checkip.amazonaws.com)/32` | Developer IP added to Atlas access list (laptop access via public SRV) | Local mode / Atlas access debugging | `envs/local/main.tf`, `envs/ec2/main.tf` |
-| `MONGODB_URI` | — | Atlas connection URI used by the API + MCP runtime. **Set in `.env.live`** by `deploy-project.sh` / `deploy-api.sh`; never hand-edited. Mode-aware: PL multi-host with `tlsAllowInvalidHostnames=true` in privatelink mode; `connectionStrings.privateSrv` (or multi-host non-SRV fallback) in peering mode | API short-term + LTM + chat-message mirror; MCP runtime | [`api/src/lib/mongo-client.ts`](../../api/src/lib/mongo-client.ts), [`mcp-runtimes/mongodb-mcp/src/`](../../mcp-runtimes/mongodb-mcp/src/) |
+| `OPERATOR_IP_CIDR` | auto-detected via `checkip.amazonaws.com` (`/32`) | Deploy-machine public IP — the ONLY public-SRV Atlas IP access list entry in `privatelink` + local modes ("anywhere it was created from"; replaces the former `0.0.0.0/0`). Atlas is never opened to the public internet. Override to pin a specific `/32` | Always (auto-detected; required in privatelink + local) | [`deploy/scripts/_operator-ip.sh`](../../deploy/scripts/_operator-ip.sh), `deploy-project.sh`, `deploy-local.sh`, `deploy-network.sh`, `envs/{ec2,local,network}/main.tf` |
+| `TF_VAR_my_ip` | mirrors `OPERATOR_IP_CIDR` | Legacy alias for `OPERATOR_IP_CIDR` (kept in sync in `.env.sample`); resolved first if `OPERATOR_IP_CIDR` is unset | Local mode / Atlas access debugging | `_operator-ip.sh`, `envs/{local,ec2}/main.tf` |
+| `MONGODB_URI` | — | Atlas connection URI used by the API + MCP runtime. **Set in `.env.live`** by `deploy-project.sh` / `deploy-api.sh`; never hand-edited. Mode-aware direct multi-host URI: PL with `tlsAllowInvalidHostnames=true` in privatelink mode; `connectionStrings.private` (`-pri` hosts, non-SRV) in peering mode | API short-term + LTM + chat-message mirror; MCP runtime | [`api/src/lib/mongo-client.ts`](../../api/src/lib/mongo-client.ts), [`mcp-runtimes/mongodb-mcp/src/`](../../mcp-runtimes/mongodb-mcp/src/) |
 | `MONGODB_URI_PUBLIC` | — | Public SRV form of `MONGODB_URI`, written to `.env.live` for off-VPC tooling. Used by `e2e-smoke/memory-recall-diagnostic.py` so harnesses can write to `chat_messages` from a laptop | Memory diagnostic harness | `e2e-smoke/memory-recall-diagnostic.py` |
 | `MONGODB_DB` | `bedrock_agents` | Database name override | Always (set in `.env.live`) | `api/src/lib/mongo-client.ts` |
 | `MONGODB_MCP_RUNTIME_ARN` | — | ARN of the dedicated MongoDB MCP AgentCore Runtime | Terraform/deploy wiring for the AgentCore Gateway target | `deploy/terraform/envs/ec2`, `deploy/scripts/deploy-project.sh` |
 | `MONGODB_MCP_RUNTIME_ENDPOINT` | — | Streamable-HTTP endpoint for the MongoDB MCP runtime | Terraform/deploy wiring for the AgentCore Gateway target | `deploy/terraform/envs/ec2`, `deploy/scripts/deploy-project.sh` |
-| `MONGODB_ALLOW_WRITE` | `false` | MCP write gate. When false, the MCP runtime rejects `updateOne`/`insertOne`/`replaceOne`/`deleteOne` | Set to `true` for explicit write workloads | MCP runtime |
+| `MONGODB_ALLOW_WRITE` | `false` | MCP write gate. When false, the MCP runtime rejects `updateOne`/`insertOne`/`replaceOne`/`deleteOne`. Set it in `.env`; `deploy-project.sh` derives `TF_VAR_mongodb_allow_write` from it for first-create Terraform config, and Phase 6 runtime-env sync pushes `MONGODB_ALLOW_WRITE` to existing mongodb-mcp AgentCore Runtimes. `replaceOne`/`deleteOne` stay refused even when `true` | Set to `true` (or `1`) for explicit write workloads (enables `insertOne`/`updateOne`) | MCP runtime |
 | `MONGODB_MAX_LIMIT` | `200` | Cap on `mongodb_query` result size | Always | MCP runtime |
 | `MONGODB_PUBLIC_COLLECTIONS` | — (all collections allowed) | Comma-separated allow-list of collection names the MCP runtime is permitted to read | Tenant isolation | `api/src/adapters/mongodb-mcp-client.ts` |
 | `MCP_LOG_RAW_ARGS` | `false` | Disable PII redaction of MCP tool args in logs | Debug only — leave OFF in prod | MCP runtime |
@@ -116,16 +123,18 @@ The default chat path classifies the user message in the API (`api/src/lib/agent
 | `CLASSIFIER_MODEL_ID` | `us.anthropic.claude-haiku-4-5-20251001-v1:0` | Override the Bedrock model used by the Haiku fallback | `agent-classifier.ts` |
 | `CLASSIFIER_HEURISTIC_MIN_SCORE` | `1.5` | Top-score threshold below which we fall through to Haiku | `agent-classifier.ts` |
 | `CLASSIFIER_HEURISTIC_MARGIN` | `0.75` | Required margin between top and runner-up before the heuristic accepts | `agent-classifier.ts` |
+| `ORCHESTRATOR_CLARIFY_ON_VAGUE` | `1` (on) | When on, vague/low-signal messages make the orchestrator ask a clarifying question instead of force-routing to a specialist. Two deterministic gates run before Haiku: **A1** abstains when the message has no content tokens (e.g. "Can you help me?", "what can you do?"); **A2** abstains when the only surviving tokens are content-free filler with no domain signal (e.g. "I need help with **something**", "can you do **anything**") — Haiku does not reliably abstain on these, so the deterministic gate handles them. The Haiku fallback may also abstain (`abstain` tool field, `agentIds` allowed empty). Set `0`/`false` to restore the legacy forced-pick behavior (Haiku always picks the closest specialist; tool schema `minItems: 1`). The **A1** gate is always on; the **A2** filler gate respects this flag. | `agent-classifier.ts`, `orchestrator-clarify.ts` |
 
 ### Multi-specialist orchestration
 
-`classifyAgents(...)` (the multi-select API used by the orchestrator route) defaults to **one** specialist per turn — multi-select fires only when there is strong evidence the message spans multiple distinct domains. Three knobs gate the multi path:
+`classifyAgents(...)` (the multi-select API used by the orchestrator route) defaults to **one** specialist per turn — multi-select fires only when there is strong evidence the message spans multiple distinct domains. Four knobs gate the multi path:
 
 | Variable | Default | Effect | Reader |
 |---|---|---|---|
 | `CLASSIFIER_MULTI_MIN_SCORE` | `3.0` | Absolute floor — runner-up specialist's heuristic score must clear this before multi-select is even considered. Tighten to bias toward single-specialist routing. | `agent-classifier.ts` |
 | `CLASSIFIER_MULTI_RELATIVE_MARGIN` | `1.5` | Close-tie window — runner-up must be within this many points of the leader to count as multi-domain. Tighten to require closer ties before fanning out. | `agent-classifier.ts` |
 | `CLASSIFIER_MULTI_MAX_AGENTS` | `2` | Hard cap on the number of specialists selected per turn. The Haiku tool schema also enforces `maxItems = CLASSIFIER_MULTI_MAX_AGENTS`. | `agent-classifier.ts` |
+| `CLASSIFIER_MULTI_ESCALATE_MIN_SCORE` | `CLASSIFIER_HEURISTIC_MIN_SCORE` (`1.5`) | Multi-intent escalation floor. When the heuristic picks a single leader but a runner-up clears this score (a plausible *second* domain that just missed the strict multi-select gates above), the heuristic **abstains** so the Haiku tier can adjudicate single-vs-multi — instead of silently collapsing a genuine two-domain request to one specialist. Single-domain prompts score `0` on the runner-up, so they never escalate. Set very high (e.g. `999`) to restore the legacy collapse-to-single behavior. | `agent-classifier.ts` |
 | `MULTI_SYNTHESIS_MODEL_ID` | inherits orchestrator persona model | Override the Bedrock model id used by the in-process **synthesizer agent** (`api/src/lib/specialist-answer-synthesizer.ts`). The synthesizer agent reuses the cached model from `resolveModel(getAgent("orchestrator"))` by default, so this should only be set when you want a different (typically smaller/faster) model for the collation pass. | `specialist-answer-synthesizer.ts` |
 
 CI guard: `bun run validate:multi-classifier` runs every existing single-domain prompt through `classifyAgents(...)` heuristic-only and **fails** if any one fans out to >1 specialist. Run before changing any of the three thresholds above.
@@ -180,10 +189,11 @@ re-embeds those rows once the provider is healthy again.
 |---|---|---|---|---|
 | `EMBEDDINGS_PROVIDER` | — (mandatory) | `voyage` or `titan`. Boot-fails if empty / unrecognised. Strict — no cross-provider fallback at runtime. | API boot, every env | [`api/src/lib/assert-embeddings-provider.ts`](../../api/src/lib/assert-embeddings-provider.ts), [`api/src/lib/embed-query.ts`](../../api/src/lib/embed-query.ts) |
 | `VOYAGE_MODEL_PACKAGE_ARN` | — | Marketplace ARN for a Voyage model package. The validator requires a `model-package/voyage-...` ARN; The reference stack uses the `voyage-multimodal-3` family, which AWS may expose as `voyage-multimodel-3-updated-*` | `EMBEDDINGS_PROVIDER=voyage` | `deploy-project.sh`, [`modules/voyage-sagemaker/`](../../deploy/terraform/modules/voyage-sagemaker/) |
-| `VOYAGE_MARKETPLACE_MODEL` | `voyage-multimodal-3` | Pinned model; override only with written deviation | Default-on | `setup-voyage-marketplace.sh` |
+| `VOYAGE_MARKETPLACE_MODEL` | `voyage-multimodal-3` | Pinned model; override only with written deviation | `EMBEDDINGS_PROVIDER=voyage` | `deploy-project.sh`, `_preflight-checks.sh` |
 | `VOYAGE_INSTANCE_TYPE` | `ml.g6.xlarge` | SageMaker real-time endpoint instance | Default-on | `modules/voyage-sagemaker` |
 | `VOYAGE_SAGEMAKER_ENDPOINT` | — | SageMaker endpoint name written to `.env.live` by `deploy-project.sh` | `EMBEDDINGS_PROVIDER=voyage` | `voyage-embedding.ts`, `embed-query.ts` |
-| `TF_VAR_voyage_endpoint_name_suffix` | `voyage-multimodal-3` | Naming fragment | Voyage path | `modules/voyage-sagemaker` |
+| `VOYAGE_OUTPUT_DIM` | `1024` | Embedding output dimension. Allowed `256/512/1024/2048`; **only** `voyage-multimodal-3.5` emits non-1024. Read once in `getVoyageEmbeddingDims()`; bash/Python derive via the SSOT bridge. Deploy scripts derive Terraform's internal `var.voyage_output_dim` from the same SSOT value, so users set only this one env var. Non-default adds `output_dimension` to the SageMaker envelope. Changing it re-sizes the Atlas index and triggers re-embedding (auto-detected by `_seed-embeddings.sh`). | Voyage path | `voyage-embedding.ts`, `seed-indexes.ts`, `envs/ec2`, `envs/local` |
+| `TF_VAR_voyage_endpoint_name_suffix` | `voyage-multimodal-3` | Model-derived endpoint naming fragment. Invalid SageMaker endpoint-name characters are normalized to hyphens before endpoint creation. | Voyage path | `modules/voyage-sagemaker` |
 | `EMBEDDING_MODEL_ID` | — | Bedrock embedding model id (Titan v2 = `amazon.titan-embed-text-v2:0`) | `EMBEDDINGS_PROVIDER=titan` | `assert-embeddings-provider.ts`, `embed-query.ts` |
 
 ---
@@ -269,6 +279,7 @@ Per-turn trace events live in MongoDB `traces` (TTL-controlled) and in a ring bu
 | Variable | Default | Effect | Reader |
 |---|---|---|---|
 | `BEDROCK_KB_ID` | — | Default KB id for `bedrock_kb_retrieve` and the `/health` `bedrockKnowledgeBase` probe (`Retrieve` with query `"health"`) | [`api/src/lib/base-tools.ts`](../../api/src/lib/base-tools.ts), [`api/src/lib/health-status.ts`](../../api/src/lib/health-status.ts) |
+| `KB_DOCS_BUCKET` | — (shared bucket) | **Deploy-time.** Optional dedicated S3 bucket for KB source docs. Unset → docs live in the shared bucket under `kb-docs/docs/`; set → Terraform creates/uses this bucket (must be globally unique). Written to `terraform.tfvars` as `kb_docs_bucket_name`. | [`deploy/scripts/deploy-project.sh`](../../deploy/scripts/deploy-project.sh), [`deploy/scripts/deploy-local.sh`](../../deploy/scripts/deploy-local.sh) |
 | `SKILL_RESOURCE_MAX_BYTES` | `500000` (500 KB) | Cap on bytes returned by `read_skill_resource` | [`api/src/lib/skill-loader.ts`](../../api/src/lib/skill-loader.ts) |
 
 ---
@@ -313,7 +324,7 @@ These are set in `deploy-project.sh` from `.env` and rarely overridden by hand.
 
 | Variable | Default | Effect |
 |---|---|---|
-| `TF_VAR_voyage_endpoint_name_suffix` | `voyage-multimodal-3` | Endpoint name fragment |
+| `TF_VAR_voyage_endpoint_name_suffix` | `voyage-multimodal-3` | Model-derived endpoint name fragment; invalid SageMaker endpoint-name characters are normalized to hyphens |
 | `VOYAGE_INSTANCE_TYPE` | `ml.g6.xlarge` | SageMaker endpoint instance type (GPU required — `ml.g6.xlarge` or `ml.g5.xlarge`). Set in `.env`, consumed by `deploy-shared.sh` |
 | `VOYAGE_MARKETPLACE_MODEL` | `voyage-multimodal-3` | One of `voyage-multimodal-3` / `voyage-multimodal-3.5` — the only supported multimodal listings. See [`docs/reference/voyage.md`](voyage.md). |
 

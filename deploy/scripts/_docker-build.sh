@@ -16,14 +16,55 @@
 # build to emit a single-platform manifest sidesteps that bug; see
 # `docs/status/debugging.md` "Known persistent pitfalls" for the failure signature.
 
+# Shared transient-error classifier (DNS resolver + network/transport blips).
+# shellcheck source=deploy/scripts/_transient-errors.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_transient-errors.sh"
+
 DOCKER_PUSH_MAX_ATTEMPTS="${DOCKER_PUSH_MAX_ATTEMPTS:-4}"
 DOCKER_PUSH_RETRY_DELAY_SECONDS="${DOCKER_PUSH_RETRY_DELAY_SECONDS:-15}"
+ECR_LOGIN_MAX_ATTEMPTS="${ECR_LOGIN_MAX_ATTEMPTS:-4}"
+ECR_LOGIN_RETRY_DELAY_SECONDS="${ECR_LOGIN_RETRY_DELAY_SECONDS:-10}"
 
 docker_push_is_transient() {
   local log_file="$1"
-  grep -qE \
-    'connection refused|connection reset|i/o timeout|TLS handshake timeout|EOF|broken pipe|temporary failure|network is unreachable|failed to do request|dial tcp|timeout|Service Unavailable|502 Bad Gateway|503 Service|504 Gateway' \
-    "$log_file"
+  # Shared DNS + network classifier, plus the legacy bare-`timeout` term that
+  # the Docker registry client emits on slow pushes (kept for back-compat).
+  deploy_log_has_transient_error "$log_file" && return 0
+  grep -qiE 'temporary failure|\btimeout\b' "$log_file"
+}
+
+# ecr_login_with_retry <region> <registry>
+#
+# `aws ecr get-login-password | docker login` is the first network call on most
+# deploy paths; a transient local DNS blip resolving ecr/sts/STS endpoints (or
+# the registry host) aborts the whole deploy before the Docker push retry loop
+# can help. Retry the login pipeline on transient DNS / network failures only.
+ecr_login_with_retry() {
+  local region="$1"
+  local registry="$2"
+  local attempt=1
+  local log_file
+  log_file=$(mktemp -t ecr-login.XXXXXX)
+
+  while (( attempt <= ECR_LOGIN_MAX_ATTEMPTS )); do
+    if aws ecr get-login-password --region "$region" 2>"$log_file" \
+        | docker login --username AWS --password-stdin "$registry" >>"$log_file" 2>&1; then
+      rm -f "$log_file"
+      return 0
+    fi
+    if deploy_log_has_transient_error "$log_file" && (( attempt < ECR_LOGIN_MAX_ATTEMPTS )); then
+      echo "  [docker] ⚠ ECR login failed (attempt ${attempt}/${ECR_LOGIN_MAX_ATTEMPTS}) — transient network/DNS, retrying in ${ECR_LOGIN_RETRY_DELAY_SECONDS}s..." >&2
+      cat "$log_file" >&2
+      sleep "$ECR_LOGIN_RETRY_DELAY_SECONDS"
+      attempt=$((attempt + 1))
+      continue
+    fi
+    cat "$log_file" >&2
+    rm -f "$log_file"
+    return 1
+  done
+  rm -f "$log_file"
+  return 1
 }
 
 docker_push_with_retry() {

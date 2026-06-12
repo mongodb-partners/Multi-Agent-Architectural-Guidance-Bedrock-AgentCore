@@ -209,6 +209,9 @@
         "xray:GetTraceSummaries",
         "xray:GetTraceGraph",
         "xray:BatchGetTraces",
+        "xray:StartTraceRetrieval",
+        "xray:ListRetrievedTraces",
+        "xray:GetRetrievedTracesGraph",
         "xray:GetServiceGraph",
         "xray:GetInsightSummaries",
         "xray:GetInsight",
@@ -274,6 +277,25 @@
             "scheduler.amazonaws.com",
             "events.amazonaws.com",
             "apigateway.amazonaws.com"
+          ]
+        }
+      }
+    },
+    {
+      "Sid": "DenyPrivilegeEscalationViaAdminPolicies",
+      "Effect": "Deny",
+      "Action": [
+        "iam:AttachRolePolicy",
+        "iam:AttachUserPolicy",
+        "iam:AttachGroupPolicy"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "ArnEquals": {
+          "iam:PolicyARN": [
+            "arn:aws:iam::aws:policy/AdministratorAccess",
+            "arn:aws:iam::aws:policy/IAMFullAccess",
+            "arn:aws:iam::aws:policy/PowerUserAccess"
           ]
         }
       }

@@ -4,17 +4,15 @@
 # Sourceable bash module. Provides:
 #   run_embedding_seed <db_name> <mongo_uri>
 #
-# Responsibilities (centralised so every caller — deploy-project.sh,
-# deploy-local.sh, setup-troubleshooting-infra.sh — gets the same hardened
-# path):
+# Responsibilities (centralised so every caller gets the same hardened path):
 #   1. Provider env mapping: read EMBEDDINGS_PROVIDER (`voyage` / `titan`) and
 #      export the script-native env vars the TS script reads
 #      (VOYAGE_SAGEMAKER_ENDPOINT / EMBEDDING_MODEL_ID).
 #   2. Multi-signal REWIRE auto-detect (dim comes from voyage_embedding_dims():
 #        a. SSM dim parameter `/${SHARED_VPC_NAME}/${region}/embeddings/dim`
-#           ≠ current VOYAGE_EMBEDDING_DIMS.
+#           ≠ current resolved embedding dim (voyage_embedding_dims).
 #        b. In-Mongo dimension fingerprint: sample one seeder-owned doc and
-#           check embedding.length vs current VOYAGE_EMBEDDING_DIMS.
+#           check embedding.length vs current resolved embedding dim.
 #        c. In-Mongo provider fingerprint: sample one seeder-owned doc and
 #           check embeddingModel substring vs current EMBEDDINGS_PROVIDER.
 #   3. SageMaker InService polling wait (when EMBEDDINGS_PROVIDER=voyage).
@@ -110,7 +108,7 @@ _se_should_rewire() {
   local stored_dim
   stored_dim="$(aws ssm get-parameter --region "$region" --name "/${svn}/${region}/embeddings/dim" --query 'Parameter.Value' --output text 2>/dev/null || echo "")"
   if [[ -n "$stored_dim" && "$stored_dim" != "None" && "$stored_dim" != "$current_dim" ]]; then
-    _se_warn "REWIRE signal: SSM dim=${stored_dim} ≠ current VOYAGE_EMBEDDING_DIMS=${current_dim}" >&2
+    _se_warn "REWIRE signal: SSM dim=${stored_dim} ≠ current resolved embedding dim=${current_dim}" >&2
     echo "yes"
     return 0
   fi
@@ -251,14 +249,25 @@ run_embedding_seed() {
     return 1
   }
 
-  _se_log "Running bun db-seeding/seed-embeddings.ts (provider=${provider})"
+  # Bun's AWS SDK http2 handler drops Bedrock responses on macOS (Smithy
+  # "http2 request did not get a response"); Node is reliable for Titan seeding.
+  local seed_runner="bun"
+  local seed_invocation="db-seeding/seed-embeddings.ts"
+  if [[ "$provider" == "titan" ]]; then
+    command -v node >/dev/null 2>&1 \
+      || { _se_err "EMBEDDINGS_PROVIDER=titan requires node on PATH for seed-embeddings.ts (Bun http2 + Bedrock is broken)"; return 1; }
+    seed_runner="node"
+    seed_invocation="--experimental-strip-types db-seeding/seed-embeddings.ts"
+  fi
+  _se_log "Running ${seed_runner} ${seed_invocation} (provider=${provider})"
   local seed_rc=0
   (
     cd "$repo_root"
     MONGODB_URI="$mongo_uri" \
     MONGODB_DB="$db_name" \
     AWS_REGION="${AWS_REGION:-us-east-1}" \
-    bun db-seeding/seed-embeddings.ts
+    EMBEDDINGS_PROVIDER="$provider" \
+    ${seed_runner} ${seed_invocation}
   ) || seed_rc=$?
   if (( seed_rc != 0 )); then
     _se_err "seed-embeddings.ts exited non-zero (rc=${seed_rc})"

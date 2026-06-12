@@ -443,16 +443,18 @@ dig +short <cluster>-pri.mongodb.net | sort
 
 **Cause:** `envs/network` was applied in one mode but `envs/ec2` tfvars say the other. PrivateLink and VPC peering are mutually exclusive per account — there is no hybrid path.
 
-**Resolution:** do not try to flip the SSM canary manually. Run the full destroy sequence then redeploy with the correct orchestrator:
+**Resolution:** do not try to flip the SSM canary manually. Run the full destroy sequence (mode-specific wrappers under `deploy/destroy/`) then redeploy with the correct orchestrator:
 
 ```bash
-./deploy/scripts/destroy.sh --mode ec2     --auto-approve
-./deploy/scripts/destroy.sh --mode shared  --auto-approve   # optional — usually not needed
-./deploy/scripts/destroy.sh --mode network --auto-approve
+# PrivateLink stack (use *-with-vpc-peering.sh variants for peering stacks)
+./deploy/destroy/destroy-project-with-privatelink.sh --auto-approve
+./deploy/destroy/destroy-shared-with-privatelink.sh --auto-approve
 
 # Set NETWORK_MODE in .env to the desired value, then:
 ./deploy/deploy-full-with-privatelink.sh     # OR
 ./deploy/deploy-full-with-vpc-peering.sh
 ```
+
+Low-level equivalent: `deploy/scripts/destroy.sh --mode ec2|shared|network` (see [`reference/deploy-scripts.md`](reference/deploy-scripts.md)).
 
 `deploy-network.sh --allow-mode-switch` exists as an escape hatch but is **not** a substitute for destroying the old resources — Atlas-side state (peering connection / VPCE binding) from the prior mode will collide with the new mode's apply.

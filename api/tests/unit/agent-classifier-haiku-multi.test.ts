@@ -104,6 +104,30 @@ describe("agent-classifier — Haiku multi-select", () => {
     expect(r!.selections[0].reasoning).toContain("order status");
   });
 
+  test("multi-intent escalation: heuristic-collapsing prompt reaches Haiku and multi-selects", async () => {
+    // This prompt scores a clear single leader (product-recommendation) with a
+    // real-but-sub-threshold runner-up (order-management). Before the
+    // escalation gate the heuristic returned a single specialist and Haiku was
+    // never consulted. Now it abstains, the Haiku tier runs, and both domains
+    // are returned. Proves the bug fix end-to-end.
+    mockSend = mock(async () =>
+      toolUseResponse({
+        agentIds: ["order-management", "product-recommendation"],
+        reasoning: "track the order AND recommend a replacement laptop",
+      }),
+    );
+    const r = await classifyAgents({
+      message: "Track order ORD-1005 and recommend a replacement laptop with similar specs.",
+    });
+    expect(mockSend.mock.calls.length).toBe(1); // heuristic deferred → Haiku ran
+    expect(r).toBeDefined();
+    expect(r!.selections.map((s) => s.agentId)).toEqual([
+      "order-management",
+      "product-recommendation",
+    ]);
+    expect(r!.selections.every((s) => s.source === "haiku")).toBe(true);
+  });
+
   test("tool schema receives agent enum and maxItems=CLASSIFIER_MULTI_MAX_AGENTS", async () => {
     process.env.CLASSIFIER_MULTI_MAX_AGENTS = "3";
     resetAgentClassifierCacheForTests();
@@ -119,9 +143,33 @@ describe("agent-classifier — Haiku multi-select", () => {
     expect(tool?.name).toBe("route_to_specialists");
     const schema = tool?.inputSchema?.json?.properties?.agentIds;
     expect(schema?.maxItems).toBe(3);
-    expect(schema?.minItems).toBe(1);
+    // Abstain is on by default, so an empty agentIds array is permitted.
+    expect(schema?.minItems).toBe(0);
     expect(Array.isArray(schema?.items?.enum)).toBe(true);
     expect(schema.items.enum.length).toBeGreaterThan(0);
+    // The abstain channel is offered to the model.
+    expect(tool?.inputSchema?.json?.properties?.abstain?.type).toBe("boolean");
+  });
+
+  test("Tier B abstain: Haiku sets abstain:true → classifyAgents returns undefined", async () => {
+    mockSend = mock(async () => toolUseResponse({ agentIds: [], abstain: true }));
+    const r = await classifyAgents({ message: "blorple quazzle floom" });
+    expect(r).toBeUndefined();
+  });
+
+  test("ORCHESTRATOR_CLARIFY_ON_VAGUE=0 restores legacy schema (minItems 1, no abstain) and forced pick", async () => {
+    process.env.ORCHESTRATOR_CLARIFY_ON_VAGUE = "0";
+    resetAgentClassifierCacheForTests();
+    _setBedrockClientForTests(makeFakeClient());
+    mockSend = mock(async () => toolUseResponse({ agentIds: ["order-management"] }));
+
+    const r = await classifyAgents({ message: "blorple quazzle floom" });
+    expect(r?.selections[0].agentId).toBe("order-management");
+
+    const cmd = lastInput as { input: { toolConfig?: any } };
+    const schema = cmd.input.toolConfig?.tools?.[0]?.toolSpec?.inputSchema?.json;
+    expect(schema?.properties?.agentIds?.minItems).toBe(1);
+    expect(schema?.properties?.abstain).toBeUndefined();
   });
 
   test("max-agents cap: tool returns 3 but cap=2 → result is sliced to 2", async () => {

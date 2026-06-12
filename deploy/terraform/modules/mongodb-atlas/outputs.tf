@@ -9,7 +9,7 @@ output "srv_address" {
 }
 
 output "connection_string" {
-  value       = "mongodb+srv://${var.db_username}:${var.db_password}@${replace(mongodbatlas_cluster.main.connection_strings[0].standard_srv, "mongodb+srv://", "")}/?retryWrites=true&w=majority"
+  value       = "mongodb+srv://${urlencode(var.db_username)}:${urlencode(var.db_password)}@${replace(mongodbatlas_cluster.main.connection_strings[0].standard_srv, "mongodb+srv://", "")}/?retryWrites=true&w=majority"
   sensitive   = true
   description = "Full Atlas connection string with credentials"
 }
@@ -33,7 +33,8 @@ output "mongo_host" {
 # traverses an AWS-owned PrivateLink (private network, not the public internet).
 #
 # Returns "" when var.privatelink_endpoint_id is empty or no matching endpoint
-# exists — callers should fall back to the SRV `connection_string` in that case.
+# exists. Runtime callers that require private traffic should fail loud rather
+# than falling back to the standard SRV `connection_string`.
 locals {
   _pl_matches = [
     for pe in mongodbatlas_cluster.main.connection_strings[0].private_endpoint : pe.connection_string
@@ -85,8 +86,8 @@ output "privatelink_ports" {
 #     ONLY populated when the Atlas project has "Enable Private DNS for
 #     Peering" toggled on. The atlas-vpc-peering module auto-enables this via
 #     enable-private-dns.sh, but if the API key lacks GROUP_OWNER scope the
-#     toggle fails and this output stays empty — callers fall back to
-#     peering_connection_string (multi-host) which is functionally equivalent.
+#     toggle fails and this output stays empty. Runtime callers intentionally
+#     use peering_connection_string (multi-host) to avoid SRV/TXT DNS lookup.
 #
 # NO `tlsAllowInvalidHostnames=true` here because peering hostnames are in the
 # Atlas TLS SAN list (unlike the PrivateLink `pl-X-…` hostnames which need the
@@ -135,5 +136,5 @@ output "peering_connection_srv_string" {
     local._peering_srv_host
   )
   sensitive   = true
-  description = "SRV-form peering connection string with credentials. Empty when peering_srv_host is empty — callers should coalesce to peering_connection_string in that case."
+  description = "SRV-form peering connection string with credentials. Empty when peering_srv_host is empty. Runtime callers should prefer peering_connection_string to avoid SRV/TXT DNS lookup."
 }

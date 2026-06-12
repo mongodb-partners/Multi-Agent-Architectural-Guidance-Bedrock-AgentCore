@@ -81,6 +81,12 @@ variable "ensure_collection_script" {
   description = "Path to db-seeding/ensure-collection.ts"
 }
 
+variable "ingestion_required" {
+  type        = bool
+  default     = true
+  description = "Whether Bedrock KB ingestion failure should fail Terraform apply. Keep true for supported paths; peering-NLB can set false because the connector path is experimental and may time out even when the rest of the peering deployment is healthy."
+}
+
 # ── IAM ───────────────────────────────────────────────────────────────────────
 variable "kb_iam_role_name" {
   type        = string
@@ -104,6 +110,20 @@ variable "shared_bucket_name" {
 variable "shared_bucket_arn" {
   type        = string
   description = "ARN of the shared S3 bucket. Used in IAM policies and the Bedrock data source config."
+}
+
+variable "kb_docs_bucket_name" {
+  type        = string
+  default     = ""
+  description = "Optional dedicated S3 bucket for KB source docs. Empty = use shared_bucket_name. Must be globally unique."
+
+  validation {
+    # Fast-fail at plan time on names AWS would reject at apply (S3 bucket
+    # naming rules: 3-63 chars, lowercase letters/digits/hyphens/dots, must
+    # start and end with a letter or digit). Empty = use the shared bucket.
+    condition     = var.kb_docs_bucket_name == "" || can(regex("^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$", var.kb_docs_bucket_name))
+    error_message = "kb_docs_bucket_name must be a valid S3 bucket name (3-63 chars, lowercase letters/digits/hyphens/dots, start/end alphanumeric), or empty to use the shared bucket."
+  }
 }
 
 # ── KB docs ───────────────────────────────────────────────────────────────────
