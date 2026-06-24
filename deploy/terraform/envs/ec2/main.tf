@@ -405,9 +405,10 @@ module "bedrock_kb" {
   project_name = var.project_name
   environment  = var.environment
 
-  shared_bucket_name  = data.aws_s3_bucket.shared.id
-  shared_bucket_arn   = data.aws_s3_bucket.shared.arn
-  kb_docs_bucket_name = var.kb_docs_bucket_name
+  shared_bucket_name    = data.aws_s3_bucket.shared.id
+  shared_bucket_arn     = data.aws_s3_bucket.shared.arn
+  kb_docs_bucket_name   = var.kb_docs_bucket_name
+  kb_docs_bucket_create = var.kb_docs_bucket_create
 
   atlas_project_id   = var.atlas_project_id
   atlas_cluster_name = module.mongodb_atlas.cluster_name

@@ -42,24 +42,58 @@ locals {
   kb_docs_prefix = "kb-docs/docs"
 
   # When kb_docs_bucket_name is set (and differs from the shared bucket), this
-  # module creates a dedicated bucket for KB source docs; otherwise docs live in
-  # the shared bucket. Reference the resource attribute (not the raw var) so
-  # Terraform creates the bucket BEFORE uploading objects on first apply.
+  # module uses a dedicated bucket for KB source docs; otherwise docs live in the
+  # shared bucket.
   kb_use_dedicated = var.kb_docs_bucket_name != "" && var.kb_docs_bucket_name != var.shared_bucket_name
-  kb_bucket_name   = local.kb_use_dedicated ? aws_s3_bucket.kb_docs[0].id : var.shared_bucket_name
-  kb_bucket_arn    = local.kb_use_dedicated ? aws_s3_bucket.kb_docs[0].arn : var.shared_bucket_arn
+
+  # Create + own the dedicated bucket only when asked to. When
+  # kb_docs_bucket_create=false, the named bucket already exists and is owned
+  # outside this stack: we reference it via a data source instead of creating it.
+  kb_create_bucket = local.kb_use_dedicated && var.kb_docs_bucket_create
+  kb_use_existing  = local.kb_use_dedicated && !var.kb_docs_bucket_create
+
+  # Only upload the sample docs into buckets we own — the shared bucket or a
+  # Terraform-created dedicated bucket. Never push sample docs into a
+  # client-provided existing bucket (it manages its own corpus).
+  kb_manage_docs = !local.kb_use_existing
+
+  # Reference the created resource attribute when we own the bucket (so Terraform
+  # creates it BEFORE uploading objects on first apply), the data source when the
+  # bucket pre-exists, otherwise the shared bucket.
+  kb_bucket_name = (
+    local.kb_create_bucket ? aws_s3_bucket.kb_docs[0].id :
+    local.kb_use_existing ? data.aws_s3_bucket.kb_docs_existing[0].id :
+    var.shared_bucket_name
+  )
+  kb_bucket_arn = (
+    local.kb_create_bucket ? aws_s3_bucket.kb_docs[0].arn :
+    local.kb_use_existing ? data.aws_s3_bucket.kb_docs_existing[0].arn :
+    var.shared_bucket_arn
+  )
+
+  # Number of source docs this module manages in the bucket. Drives the
+  # ingestion "scanned == expected" assertion. For a client-provided existing
+  # bucket we do not control the corpus, so 0 disables the strict count check
+  # (ingestion still must reach COMPLETE with zero failures).
+  kb_expected_docs = local.kb_manage_docs ? length(fileset(var.kb_docs_path, "*.txt")) : 0
 }
 
 # =============================================================================
 # S3 — optional dedicated bucket for KB source documents.
-# Created only when var.kb_docs_bucket_name is set (and differs from the shared
-# bucket). When unset, KB docs live in the shared bucket (managed by
-# deploy/terraform/bootstrap). Mirrors the bootstrap bucket hardening; uses
-# force_destroy = true because this bucket holds no Terraform state.
+# Created only when var.kb_docs_bucket_name is set, differs from the shared
+# bucket, AND var.kb_docs_bucket_create is true. When unset, KB docs live in the
+# shared bucket (managed by deploy/terraform/bootstrap). Mirrors the bootstrap
+# bucket hardening; uses force_destroy = true because this bucket holds no
+# Terraform state.
+#
+# When kb_docs_bucket_create=false the bucket already exists and is owned outside
+# this stack (e.g. client-provisioned): it is referenced via the
+# data.aws_s3_bucket.kb_docs_existing lookup below — never created, hardened, or
+# populated by this module.
 # =============================================================================
 
 resource "aws_s3_bucket" "kb_docs" {
-  count = local.kb_use_dedicated ? 1 : 0
+  count = local.kb_create_bucket ? 1 : 0
 
   bucket        = var.kb_docs_bucket_name
   force_destroy = true
@@ -67,14 +101,21 @@ resource "aws_s3_bucket" "kb_docs" {
   tags = { Name = var.kb_docs_bucket_name }
 }
 
+# Reference an already-existing, externally-owned dedicated bucket. No create, no
+# settings changes, no doc uploads — we only read its name/ARN to wire the KB.
+data "aws_s3_bucket" "kb_docs_existing" {
+  count  = local.kb_use_existing ? 1 : 0
+  bucket = var.kb_docs_bucket_name
+}
+
 resource "aws_s3_bucket_versioning" "kb_docs" {
-  count  = local.kb_use_dedicated ? 1 : 0
+  count  = local.kb_create_bucket ? 1 : 0
   bucket = aws_s3_bucket.kb_docs[0].id
   versioning_configuration { status = "Enabled" }
 }
 
 resource "aws_s3_bucket_server_side_encryption_configuration" "kb_docs" {
-  count  = local.kb_use_dedicated ? 1 : 0
+  count  = local.kb_create_bucket ? 1 : 0
   bucket = aws_s3_bucket.kb_docs[0].id
   rule {
     apply_server_side_encryption_by_default { sse_algorithm = "AES256" }
@@ -82,7 +123,7 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "kb_docs" {
 }
 
 resource "aws_s3_bucket_public_access_block" "kb_docs" {
-  count                   = local.kb_use_dedicated ? 1 : 0
+  count                   = local.kb_create_bucket ? 1 : 0
   bucket                  = aws_s3_bucket.kb_docs[0].id
   block_public_acls       = true
   ignore_public_acls      = true
@@ -93,11 +134,13 @@ resource "aws_s3_bucket_public_access_block" "kb_docs" {
 # =============================================================================
 # S3 — upload KB source documents under the kb-docs/docs/ prefix.
 # Target bucket is the dedicated bucket above when configured, otherwise the
-# shared bucket created by deploy/terraform/bootstrap.
+# shared bucket created by deploy/terraform/bootstrap. Skipped entirely for a
+# client-provided existing bucket (local.kb_manage_docs = false) so we never
+# overwrite the client's own corpus.
 # =============================================================================
 
 resource "aws_s3_object" "kb_doc" {
-  for_each = fileset(var.kb_docs_path, "*.txt")
+  for_each = local.kb_manage_docs ? fileset(var.kb_docs_path, "*.txt") : toset([])
 
   bucket       = local.kb_bucket_name
   key          = "${local.kb_docs_prefix}/${each.value}"
@@ -425,7 +468,7 @@ resource "null_resource" "ingestion" {
       REGION="${var.aws_region}"
       KB_ID="${aws_bedrockagent_knowledge_base.this.id}"
       DS_ID="${aws_bedrockagent_data_source.s3.data_source_id}"
-      EXPECTED_DOCS="${length(fileset(var.kb_docs_path, "*.txt"))}"
+      EXPECTED_DOCS="${local.kb_expected_docs}"
       INGESTION_REQUIRED="${var.ingestion_required}"
 
       fail_or_warn_ingestion() {
@@ -525,8 +568,11 @@ resource "null_resource" "ingestion" {
 
           echo "  Ingestion: $STATUS scanned=$SCANNED failed=$FAILED new=$NEW_DOCS modified=$MOD_DOCS ($i/30)"
           if [ "$STATUS" = "COMPLETE" ]; then
-            if [ "$FAILED" -eq 0 ] && [ "$SCANNED" -eq "$EXPECTED_DOCS" ]; then
-              echo "Ingestion complete with all source documents indexed."
+            # EXPECTED_DOCS=0 means a client-provided existing bucket whose corpus
+            # this module does not manage — only require zero failures, not an
+            # exact scanned count. Otherwise enforce scanned == expected.
+            if [ "$FAILED" -eq 0 ] && { [ "$EXPECTED_DOCS" -eq 0 ] || [ "$SCANNED" -eq "$EXPECTED_DOCS" ]; }; then
+              echo "Ingestion complete with all source documents indexed (scanned=$SCANNED, expected=$EXPECTED_DOCS)."
               exit 0
             fi
             echo "WARNING: ingestion completed with incomplete document coverage (scanned=$SCANNED expected=$EXPECTED_DOCS failed=$FAILED)."

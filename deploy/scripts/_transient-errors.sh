@@ -38,6 +38,25 @@ if [[ -n "${_TRANSIENT_ERRORS_SH_SOURCED:-}" ]]; then
 fi
 _TRANSIENT_ERRORS_SH_SOURCED=1
 
+# ── Mongo driver spec for deploy-time `bun -e` probes ────────────────────────
+# Single source of truth, consumed by every deploy-time `bun -e` Mongo probe
+# (_mongo-connect.sh, deploy-project.sh seed-state check, _seed-embeddings.sh
+# rewire-detect, _preflight-checks.sh embedding check) via dynamic import of
+# $MONGO_PROBE_DRIVER_SPEC.
+#
+# Why this exists: those probes run a bare `import "mongodb"` from the repo root,
+# where there is no package.json/node_modules, so Bun resolves the NEWEST cached
+# version. bson@7.3.0 (a transitive dep of mongodb@7.3.0) calls
+# `node:v8 startupSnapshot.isBuildingSnapshot()` at module load, which Bun 1.3.13
+# has not implemented → the import throws ERR_NOT_IMPLEMENTED before any network
+# attempt and the deploy aborts with a misleading "mongo connectivity failure".
+# Pin to a Bun-safe 6.x line (matches what api/ ships). Override per-environment
+# by exporting MONGO_PROBE_DRIVER_SPEC before invoking the deploy scripts (e.g.
+# once Bun implements the API or a newer driver is verified safe).
+# See mongo-probe-bun-bson-failure-report.md.
+: "${MONGO_PROBE_DRIVER_SPEC:=mongodb@6.21.0}"
+export MONGO_PROBE_DRIVER_SPEC
+
 # ── Local DNS resolver failures ──────────────────────────────────────────────
 # Covers every tool a deploy shells out to:
 #   • Node.js dns/mongodb SRV: querySrv ETIMEOUT / ENOTFOUND / EAI_AGAIN

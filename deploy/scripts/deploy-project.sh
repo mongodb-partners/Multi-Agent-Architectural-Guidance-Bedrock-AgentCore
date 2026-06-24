@@ -828,6 +828,47 @@ fi
 echo "create_agentcore_runtime_vpc_endpoints = ${CREATE_AGENTCORE_VPCE}" >> "$TF_DIR/terraform.tfvars"
 ok "create_agentcore_runtime_vpc_endpoints=${CREATE_AGENTCORE_VPCE} appended to terraform.tfvars"
 
+# ── Phase 5b — Resolve kb_docs_bucket_create (POST-INIT) ──────────────────────
+# Decide whether Terraform creates/owns the dedicated KB bucket (KB_DOCS_BUCKET)
+# or references an already-existing, externally-owned one. Runs after
+# `terraform init` so `terraform state list` reflects the real remote state.
+#
+# Fail-closed contract: any ambiguity (state unreadable) keeps create=true.
+# create=false is destructive-adjacent — if this stack already manages the
+# bucket, flipping to false would plan to DESTROY/unmanage it. So we choose
+# false (reuse) ONLY when state was readable, confirms this stack does NOT manage
+# the bucket, AND the bucket already exists in AWS. create=true on an existing
+# unmanaged bucket merely fails non-destructively (BucketAlreadyExists), which is
+# the safer default under uncertainty.
+sep
+log "Phase 5b — Resolving kb_docs_bucket_create (post-init)..."
+KB_BUCKET_CREATE="${TF_VAR_kb_docs_bucket_create:-auto}"
+if [[ -z "${KB_DOCS_BUCKET:-}" ]]; then
+  KB_BUCKET_CREATE="true"
+  log "No dedicated KB bucket configured (KB_DOCS_BUCKET empty) — KB docs live in the shared bucket; kb_docs_bucket_create=true"
+elif [[ "$KB_BUCKET_CREATE" == "true" || "$KB_BUCKET_CREATE" == "false" ]]; then
+  log "Using explicit TF_VAR_kb_docs_bucket_create=${KB_BUCKET_CREATE}"
+else
+  KB_BUCKET_CREATE="true"
+  KB_TF_STATE_OK=true
+  if ! KB_TF_STATE_OUT="$(terraform -chdir="$TF_DIR" state list 2>/dev/null)"; then
+    KB_TF_STATE_OK=false
+    KB_TF_STATE_OUT=""
+    warn "terraform state list failed after init — forcing kb_docs_bucket_create=true (fail-closed: never unmanage/destroy a managed KB bucket on an ambiguous read)"
+  fi
+  if printf '%s\n' "$KB_TF_STATE_OUT" | grep -q '^module\.bedrock_kb\.aws_s3_bucket\.kb_docs\['; then
+    KB_BUCKET_CREATE="true"
+    log "KB bucket ${KB_DOCS_BUCKET} is already in this Terraform state — keeping ownership (create=true)"
+  elif [[ "$KB_TF_STATE_OK" == "true" ]] && aws s3api head-bucket --bucket "${KB_DOCS_BUCKET}" --region "$AWS_REGION" >/dev/null 2>&1; then
+    KB_BUCKET_CREATE="false"
+    log "KB bucket ${KB_DOCS_BUCKET} already exists and is NOT managed by this stack — reusing it (no create, no sample-doc upload)"
+  else
+    log "KB bucket ${KB_DOCS_BUCKET} not found (or read ambiguous) — Terraform will create it (create=true)"
+  fi
+fi
+echo "kb_docs_bucket_create = ${KB_BUCKET_CREATE}" >> "$TF_DIR/terraform.tfvars"
+ok "kb_docs_bucket_create=${KB_BUCKET_CREATE} appended to terraform.tfvars"
+
 if [[ "$SKIP_DOCKER" != "true" ]]; then
   sep
   log "Phase 4d — Ensuring mongodb-mcp runtime ECR repo, then push image..."
@@ -1061,11 +1102,18 @@ unset MONGODB_MCP_RUNTIME_ID_POST GATEWAY_ID_POST _MCP_RUNTIME_ID_PRE
 [[ -n "$MONGODB_MCP_RUNTIME_ARN" ]] || err "MongoDB MCP runtime ARN output is empty after apply/refresh."
 [[ -n "$MONGODB_MCP_RUNTIME_ENDPOINT" ]] || err "MongoDB MCP runtime endpoint output is empty after apply/refresh."
 # Validate each discovered specialist has a runtime ARN in the map outputs.
-for _spec_id in "${SPECIALIST_IDS[@]:-}"; do
-  [[ -n "$(specialist_runtime_arn "$_spec_id")" ]] \
-    || err "AgentCore runtime ARN for specialist '${_spec_id}' is empty after apply/refresh."
-done
-unset _spec_id
+# Guard the iteration: with an orchestrator-only roster SPECIALIST_IDS is an
+# empty array and "${SPECIALIST_IDS[@]:-}" would expand to a single empty-string
+# element under `set -u`, falsely failing on specialist ''. Only iterate when
+# at least one specialist was discovered, and skip any empty id defensively.
+if [[ ${#SPECIALIST_IDS[@]} -gt 0 ]]; then
+  for _spec_id in "${SPECIALIST_IDS[@]}"; do
+    [[ -n "$_spec_id" ]] || continue
+    [[ -n "$(specialist_runtime_arn "$_spec_id")" ]] \
+      || err "AgentCore runtime ARN for specialist '${_spec_id}' is empty after apply/refresh."
+  done
+  unset _spec_id
+fi
 
 if [[ "$EMBEDDINGS_PROVIDER" == "voyage" ]]; then
   [[ -n "$VOYAGE_ENDPOINT" ]] || err "EMBEDDINGS_PROVIDER=voyage but Terraform output voyage_endpoint_name is empty."
@@ -1167,7 +1215,7 @@ assert_mongo_reachable "$MONGODB_URI" "$ATLAS_DB_NAME" 300 \
 
 log "Checking MongoDB seed state..."
 SEED_NEEDED="$(MONGODB_URI="$MONGODB_URI" MONGODB_DB="$ATLAS_DB_NAME" bun -e '
-import { MongoClient } from "mongodb";
+const { MongoClient } = await import(process.env.MONGO_PROBE_DRIVER_SPEC || "mongodb"); // spec from _transient-errors.sh; bare import floats to bson@7.3.0 which crashes under Bun 1.3.13 (see mongo-probe-bun-bson-failure-report.md)
 const uri = process.env.MONGODB_URI;
 const dbName = process.env.MONGODB_DB;
 if (!dbName) { console.error("MONGODB_DB env not set"); process.exit(1); }

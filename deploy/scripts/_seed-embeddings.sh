@@ -120,7 +120,7 @@ _se_should_rewire() {
   fi
   local probe_out
   probe_out="$(MONGO_URI="$mongo_uri" MONGO_DB="$db_name" CURRENT_DIM="$current_dim" CURRENT_PROVIDER="$provider" bun -e '
-import { MongoClient } from "mongodb";
+const { MongoClient } = await import(process.env.MONGO_PROBE_DRIVER_SPEC || "mongodb"); // spec from _transient-errors.sh; bare import floats to bson@7.3.0 which crashes under Bun 1.3.13 (see mongo-probe-bun-bson-failure-report.md)
 const uri = process.env.MONGO_URI;
 const dbName = process.env.MONGO_DB;
 const expectedDim = Number(process.env.CURRENT_DIM || "1024");

@@ -212,7 +212,7 @@ Use `deploy-api.sh` first if Cognito, Atlas, or OTel env vars changed.
 # Peering variants: destroy-project-with-vpc-peering.sh / destroy-shared-with-vpc-peering.sh
 ```
 
-Full runbook: [`docs/deployment-guide.md`](docs/deployment-guide.md). Script reference: [`docs/reference/deploy-scripts.md`](docs/reference/deploy-scripts.md).
+Teardown entrypoint: [`deploy/destroy/README.md`](deploy/destroy/README.md). Full runbook: [`docs/deployment-guide.md`](docs/deployment-guide.md). Script reference: [`docs/reference/deploy-scripts.md`](docs/reference/deploy-scripts.md).
 
 ---
 

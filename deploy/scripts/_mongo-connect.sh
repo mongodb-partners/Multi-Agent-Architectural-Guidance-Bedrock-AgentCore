@@ -43,8 +43,11 @@ sanitize_mongo_uri() {
 # Inlined so callers don't need an extra file on disk.
 _mc_run_bun_ping() {
   # URI/DB come from MONGO_URI / MONGO_DB env (set by assert_mongo_reachable caller).
+  # Driver spec resolved from $MONGO_PROBE_DRIVER_SPEC (single source of truth in
+  # _transient-errors.sh) — a bare `import "mongodb"` at repo root floats to the
+  # newest cached version, and bson@7.3.0 crashes at module load under Bun 1.3.13.
   bun -e '
-import { MongoClient } from "mongodb";
+const { MongoClient } = await import(process.env.MONGO_PROBE_DRIVER_SPEC || "mongodb");
 const uri = process.env.MONGO_URI;
 const dbName = process.env.MONGO_DB;
 const timeoutMs = Number(process.env.MONGO_TIMEOUT_MS || "8000");

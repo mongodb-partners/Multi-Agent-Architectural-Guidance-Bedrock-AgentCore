@@ -23,6 +23,12 @@ variable "kb_docs_bucket_name" {
   description = "Optional dedicated S3 bucket for KB source docs. Empty = use the shared bucket."
 }
 
+variable "kb_docs_bucket_create" {
+  type        = bool
+  default     = true
+  description = "Whether Terraform creates/owns the dedicated KB bucket (true) or references an already-existing, externally-owned bucket of that name (false: no create, no settings change, no sample-doc upload). Auto-resolved by deploy-project.sh (existing-but-unmanaged bucket -> false)."
+}
+
 # ── Shared network (envs/network) ─────────────────────────────────────────────
 variable "shared_vpc_name" {
   type        = string

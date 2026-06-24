@@ -494,6 +494,8 @@ Total time: 3-5 minutes.
 
 ## 6. Tearing it down
 
+Entrypoint for this folder: [`deploy/destroy/README.md`](../deploy/destroy/README.md).
+
 ```bash
 source .env
 
@@ -527,7 +529,9 @@ The shared VPC, Atlas PrivateLink VPCE, and the Atlas-side endpoint binding are 
 ./deploy/destroy/destroy-shared-with-vpc-peering.sh --auto-approve   # envs/shared, then envs/network
 ```
 
-Running these in the wrong order (shared/network before project) leaves the per-project EC2 stack pointing at deleted SSM keys; the next `deploy-project.sh` (or any `terraform plan` in `envs/ec2`) fails immediately with `ParameterNotFound`. The shared destroy wrappers enforce this with an EC2 instance probe unless `--force` is supplied.
+Running these in the wrong order (shared/network before project) leaves the per-project EC2 stack pointing at deleted SSM keys; the next `deploy-project.sh` (or any `terraform plan` in `envs/ec2`) fails immediately with `ParameterNotFound`. The shared destroy wrappers enforce this with an EC2 instance probe (any terraform-managed instance tagged `Environment=<ENVIRONMENT>`) unless `--force` is supplied.
+
+You do **not** need to wait for the reaper before running the shared destroy wrapper — run it right after project destroy. If AgentCore ENIs still pin runtime security groups, `envs/shared` typically still completes and only the final `envs/network` step may fail; then run the reaper and re-run the shared wrapper.
 
 **Deferred AgentCore security-group cleanup:** AgentCore can keep service-managed `agentic_ai` ENIs attached to runtime security groups for a while after the runtime itself is destroyed. AWS does not allow operators to detach or delete those ENIs directly. If `deploy/scripts/destroy.sh --mode ec2` sees one of the runtime security groups still pinned, it removes that security group from Terraform state, records it in `destroy-reports/orphan-security-groups.tsv`, and lets the rest of the project destroy finish. Use the reaper that matches the wrapper you ran: `deploy/destroy/reap-orphan-security-groups-privatelink.sh` or `deploy/destroy/reap-orphan-security-groups-vpc-peering.sh`.
 

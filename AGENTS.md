@@ -144,7 +144,7 @@ Deploy scripts write runtime ARNs, Cognito JWKS, and memory store IDs into `.env
 | `deploy/` | Terraform (`envs/`, `modules/`, `bootstrap/`), deploy/destroy shell scripts, IAM policy, KB doc sources |
 | `deploy/deploy-full-with-privatelink.sh` | Orchestrator — network → shared → project (PrivateLink) |
 | `deploy/deploy-full-with-vpc-peering.sh` | Orchestrator — same phases (VPC peering mode) |
-| `deploy/destroy/` | Mode-specific teardown wrappers (`destroy-project-with-*.sh`, `destroy-shared-with-*.sh`) — separate from `deploy-*.sh` entrypoints |
+| `deploy/destroy/` | Mode-specific teardown wrappers (`destroy-project-with-*.sh`, `destroy-shared-with-*.sh`, `reap-orphan-security-groups-*.sh`) — see [`deploy/destroy/README.md`](deploy/destroy/README.md) |
 | `deploy/destroy/destroy-project-with-privatelink.sh` / `deploy/destroy/destroy-project-with-vpc-peering.sh` | Project-only teardown wrappers for `envs/ec2` |
 | `deploy/destroy/destroy-shared-with-privatelink.sh` / `deploy/destroy/destroy-shared-with-vpc-peering.sh` | Shared teardown wrappers for `envs/shared` then `envs/network` |
 | `deploy/deploy-api.sh` | API image-only redeploy |
