@@ -179,12 +179,19 @@ def check_agents_endpoint(api_url: str, token: str) -> None:
             if isinstance(a, dict)
         ]
     log(f"agents={agent_ids}")
+    runtime_arns = discover_runtime_arns()
     for expected in (
         "orchestrator",
         "order-management",
         "product-recommendation",
         "troubleshooting",
     ):
+        if not runtime_arns.get(expected):
+            log(
+                f"  skip {expected}: {_agent_arn_env_key(expected)} not set "
+                "(agent not deployed in this environment)"
+            )
+            continue
         require(expected in agent_ids, f"/agents missing {expected}")
 
 
@@ -478,9 +485,63 @@ def check_bedrock_kb(resources: dict[str, Any], manifest: dict[str, Any]) -> Non
     status = str(latest_job.get("status") or "")
     scanned = int(latest_job.get("scanned") or 0)
     failed = int(latest_job.get("failed") or 0)
-    kb_doc_files = sorted((ROOT / "deploy" / "kb-docs").glob("*.txt"))
-    kb_doc_names = [path.name for path in kb_doc_files]
-    require(kb_doc_files, "no local KB source documents found under deploy/kb-docs/*.txt")
+
+    # Expected document count comes from the KB's *actual* S3 data source bucket,
+    # not the local deploy/kb-docs sample docs. When KB_DOCS_BUCKET points at an
+    # existing, externally-managed bucket (kb_docs_bucket_create=false) Terraform does
+    # NOT upload the sample docs — the KB ingests whatever was already
+    # placed under the inclusion prefix. Counting live bucket objects works for
+    # both the Terraform-managed and the externally-managed (reuse) bucket paths.
+    ds_cfg_raw = run(
+        [
+            "aws",
+            "bedrock-agent",
+            "get-data-source",
+            "--region",
+            str(region),
+            "--knowledge-base-id",
+            str(kb_id),
+            "--data-source-id",
+            ds_id,
+            "--query",
+            "dataSource.dataSourceConfiguration.s3Configuration",
+            "--output",
+            "json",
+        ],
+        timeout=60,
+    )
+    ds_cfg = json.loads(ds_cfg_raw) if ds_cfg_raw and ds_cfg_raw != "None" else {}
+    bucket_name = str((ds_cfg or {}).get("bucketArn") or "").split(":::")[-1]
+    inclusion_prefixes = (ds_cfg or {}).get("inclusionPrefixes") or [""]
+    expected_keys: set[str] = set()
+    for prefix in inclusion_prefixes:
+        keys_raw = run(
+            [
+                "aws",
+                "s3api",
+                "list-objects-v2",
+                "--region",
+                str(region),
+                "--bucket",
+                bucket_name,
+                "--prefix",
+                str(prefix),
+                "--query",
+                "Contents[?Size>`0`].Key",
+                "--output",
+                "json",
+            ],
+            timeout=120,
+        )
+        for key in (json.loads(keys_raw) if keys_raw and keys_raw != "None" else []) or []:
+            if not str(key).endswith("/"):
+                expected_keys.add(str(key))
+    expected_docs = len(expected_keys)
+    expected_names = sorted(k.rsplit("/", 1)[-1] for k in expected_keys)
+    require(
+        expected_docs > 0,
+        f"KB data source bucket s3://{bucket_name}/ has no source objects under prefixes {inclusion_prefixes}",
+    )
     if kb_conn_mode == "peering-nlb" and (status != "COMPLETE" or failed > 0):
         log(
             "  warning: latest KB ingestion is "
@@ -490,8 +551,9 @@ def check_bedrock_kb(resources: dict[str, Any], manifest: dict[str, Any]) -> Non
     else:
         require(status == "COMPLETE", f"latest KB ingestion job is not COMPLETE: {status}")
         require(
-            scanned == len(kb_doc_files),
-            f"latest KB ingestion job scanned {scanned} source document(s), expected {len(kb_doc_files)}: {kb_doc_names}",
+            scanned == expected_docs,
+            f"latest KB ingestion job scanned {scanned} source document(s), "
+            f"expected {expected_docs} from s3://{bucket_name}/: {expected_names}",
         )
         require(failed == 0, f"latest KB ingestion job completed with {failed} failed source document(s)")
 
@@ -791,6 +853,62 @@ def _read_env_live(path: Path) -> dict[str, str]:
     return out
 
 
+def _agent_id_from_arn_key(key: str) -> str | None:
+    """Map an ``AGENTCORE_<NAME>_ARN`` env key to its agent id.
+
+    ``AGENTCORE_ORCHESTRATOR_ARN``           -> ``orchestrator``
+    ``AGENTCORE_ORDER_MANAGEMENT_ARN``       -> ``order-management``
+    ``AGENTCORE_PRODUCT_RECOMMENDATION_ARN`` -> ``product-recommendation``
+
+    Returns ``None`` for keys that are not per-agent runtime ARNs (the legacy
+    ``AGENTCORE_RUNTIME_ARN`` alias, and ``MONGODB_MCP_RUNTIME_ARN`` which does
+    not carry the ``AGENTCORE_`` prefix and is not a chat agent).
+    """
+    if not key.startswith("AGENTCORE_") or not key.endswith("_ARN"):
+        return None
+    if key == "AGENTCORE_RUNTIME_ARN":
+        return None
+    spec = key[len("AGENTCORE_") : -len("_ARN")].lower().replace("_", "-")
+    return spec or None
+
+
+def _agent_arn_env_key(agent_id: str) -> str:
+    """Inverse of ``_agent_id_from_arn_key`` — used only for human-readable
+    skip messages so operators know which env var to set."""
+    return "AGENTCORE_" + agent_id.upper().replace("-", "_") + "_ARN"
+
+
+def discover_runtime_arns() -> dict[str, str]:
+    """Discover per-agent AgentCore Runtime ARNs from ``.env.live`` (preferred)
+    and the process environment, keyed by agent id.
+
+    Each agent has a dedicated ARN env var (``AGENTCORE_<NAME>_ARN``). When an
+    agent's ARN is absent — e.g. a specialist that simply was not deployed in
+    this environment — per-agent smoke checks SKIP rather than fail. The legacy
+    single-runtime ``AGENTCORE_RUNTIME_ARN`` alias maps to ``orchestrator`` only
+    when the canonical orchestrator ARN is not set. ``MONGODB_MCP_RUNTIME_ARN``
+    is intentionally excluded (it is not a chat agent).
+    """
+    env_live = _read_env_live(ROOT / ".env.live")
+
+    def lookup(key: str) -> str:
+        return (env_live.get(key) or os.environ.get(key) or "").strip()
+
+    arns: dict[str, str] = {}
+    for key in set(env_live) | set(os.environ):
+        agent_id = _agent_id_from_arn_key(key)
+        if not agent_id:
+            continue
+        value = lookup(key)
+        if value:
+            arns[agent_id] = value
+    if "orchestrator" not in arns:
+        legacy = lookup("AGENTCORE_RUNTIME_ARN")
+        if legacy:
+            arns["orchestrator"] = legacy
+    return arns
+
+
 def check_agentcore_runtime_env(resources: dict[str, Any]) -> None:
     """Fail fast when a specialist (or orchestrator) AgentCore Runtime is
     missing MongoDB MCP Gateway wiring env vars. This catches the Terraform-vs-script
@@ -811,19 +929,7 @@ def check_agentcore_runtime_env(resources: dict[str, Any]) -> None:
     region = str(resources.get("aws_region") or os.environ.get("AWS_REGION") or "").strip()
     require(region, "aws_region missing — needed for bedrock-agentcore-control calls")
 
-    env_live = _read_env_live(ROOT / ".env.live")
-    runtime_arns: dict[str, str] = {}
-    if env_live.get("AGENTCORE_ORCHESTRATOR_ARN"):
-        runtime_arns["orchestrator"] = env_live["AGENTCORE_ORCHESTRATOR_ARN"]
-    for key, value in env_live.items():
-        if not key.startswith("AGENTCORE_") or not key.endswith("_ARN"):
-            continue
-        if key in ("AGENTCORE_ORCHESTRATOR_ARN", "AGENTCORE_RUNTIME_ARN"):
-            continue
-        # AGENTCORE_PRODUCT_RECOMMENDATION_ARN -> product-recommendation
-        spec_id = key[len("AGENTCORE_") : -len("_ARN")].lower().replace("_", "-")
-        if spec_id:
-            runtime_arns[spec_id] = value
+    runtime_arns = discover_runtime_arns()
 
     if not runtime_arns:
         log("WARN: no AGENTCORE_*_ARN entries found in .env.live; runtime env check skipped")
@@ -919,9 +1025,41 @@ def check_all_agents(api_url: str, token: str) -> None:
         },
     ]
 
+    runtime_arns = discover_runtime_arns()
+    # Roster awareness: the orchestrator chat case sends an order-return prompt
+    # whose only correct handoff target is order-management. When that specialist
+    # is not deployed (orchestrator-only, or any partial roster missing it) the
+    # orchestrator can only ask a clarifying question (orchestrator.agent.md
+    # rule 5), so requiring a handoff/mongo/mcp trace is a false negative. Accept
+    # the clarification path (and still accept a real handoff, for liveness)
+    # whenever order-management is absent. Mirrors the per-roster skips used for
+    # the specialist cases and the agent-aware logic in
+    # deploy/scripts/backend-smoke.py.
+    specialist_ids = [a for a in runtime_arns if a != "orchestrator"]
+    orchestrator_handoff_target_present = "order-management" in specialist_ids
     for case in cases:
-        agent = case["agent"]
+        agent = str(case["agent"])
+        if not runtime_arns.get(agent):
+            log(
+                f"\n-- {agent} -- skipped: {_agent_arn_env_key(agent)} not set "
+                "(agent not deployed in this environment)"
+            )
+            continue
         log(f"\n-- {agent} --")
+        case_needles = list(case["needles"])
+        case_trace_any = list(case["trace_any"])
+        if agent == "orchestrator" and not orchestrator_handoff_target_present:
+            # order-management is the only valid target for the order-return
+            # prompt; without it the orchestrator clarifies. Accept clarification
+            # traces in addition to the (still-valid) handoff/mongo/mcp signals.
+            case_trace_any = list(case["trace_any"]) + [
+                "orchestrator.clarification",
+                "orchestrator.clarification_route",
+            ]
+            log(
+                "orchestrator case: order-management not deployed — accepting "
+                "clarification path (orchestrator cannot hand off an order request)"
+            )
         last_failure = ""
         max_attempts = chat_attempts()
         for attempt in range(1, max_attempts + 1):
@@ -975,9 +1113,9 @@ def check_all_agents(api_url: str, token: str) -> None:
                 "token": "token" in events and len(flat) > 20,
                 "done": "done" in events,
                 "no_error": not errors,
-                "content": any(n.lower() in flat.lower() for n in case["needles"]),
-                "trace_or_handoff": any(t in traces for t in case["trace_any"])
-                or ("handoff" in case["trace_any"] and bool(handoffs)),
+                "content": any(n.lower() in flat.lower() for n in case_needles),
+                "trace_or_handoff": any(t in traces for t in case_trace_any)
+                or ("handoff" in case_trace_any and bool(handoffs)),
             }
             log(f"events={sorted(set(events))}")
             log(f"traces_sample={sorted(set(traces))[:20]}")
@@ -1014,6 +1152,30 @@ def check_long_term_memory_recall(api_url: str, token: str) -> None:
     log("\n== Long-term memory recall ==")
     if os.environ.get("SKIP_CHAT_CHECKS") == "1" or os.environ.get("SKIP_LTM_CHECK") == "1":
         log("skipped via SKIP_CHAT_CHECKS=1 or SKIP_LTM_CHECK=1")
+        return
+    ltm_arns = discover_runtime_arns()
+    if not ltm_arns.get("orchestrator"):
+        log(
+            f"skipped: {_agent_arn_env_key('orchestrator')} not set "
+            "(orchestrator not deployed in this environment)"
+        )
+        return
+    if "order-management" not in [a for a in ltm_arns if a != "orchestrator"]:
+        # The plant/recall prompts are profile/preference messages that the
+        # orchestrator routes to order-management (verified live: the recall
+        # reply is answered "From your profile on file …" by order-management).
+        # The orchestrator itself is a pure router that never answers content,
+        # and other specialists (e.g. troubleshooting) only clarify for a
+        # profile/preference prompt, so without order-management deployed the
+        # recalled phrase can never be surfaced and the behavioural test is a
+        # false negative. The LTM read/write/embedding paths are still validated
+        # by the "seeded corpus embeddings" and "LTM embedding" checks above.
+        log(
+            f"skipped: {_agent_arn_env_key('order-management')} not set — the "
+            "LTM recall prompt is answered by order-management after handoff; "
+            "without it the orchestrator only clarifies and cannot surface the "
+            "recalled phrase. LTM storage is still covered by the embedding checks."
+        )
         return
 
     needle = "HELIOTROPE-LANTERN"
@@ -1083,6 +1245,12 @@ def check_cloudwatch_join(resources: dict[str, Any], api_url: str, token: str) -
     log("\n== CloudWatch trace_id join ==")
     if os.environ.get("SKIP_CHAT_CHECKS") == "1":
         log("skipped via SKIP_CHAT_CHECKS=1")
+        return
+    if not discover_runtime_arns().get("orchestrator"):
+        log(
+            f"skipped: {_agent_arn_env_key('orchestrator')} not set "
+            "(this check drives a chat through the orchestrator)"
+        )
         return
 
     api_group = (resources.get("cloudwatch_api_log_group") or "").strip()
@@ -1331,10 +1499,25 @@ def _load_env_live_uri() -> str:
 
 def _bun_probe_mongo(uri: str, db: str, script: str) -> str:
     """Run `bun -e` with MONGO_URI / MONGO_DB / SCRIPT in env and return stdout.
-    Bun is preferred over pymongo so we don't need an optional Python dep."""
+    Bun is preferred over pymongo so we don't need an optional Python dep.
+
+    The `script` MUST import the driver via
+    `await import(process.env.MONGO_PROBE_DRIVER_SPEC || 'mongodb')` rather than a
+    bare static `import 'mongodb'`. A bare import resolves to Bun's newest cached
+    version, and bson@7.3.0 crashes at module load under Bun 1.3.13
+    (node:v8 isBuildingSnapshot unimplemented) — the probe then emits no stdout
+    and callers misread the empty result as a data failure. The spec is single-
+    sourced from $MONGO_PROBE_DRIVER_SPEC (exported by deploy/scripts/
+    _transient-errors.sh); when the smoke test runs standalone we fall back to the
+    same Bun-safe 6.x line. See mongo-probe-bun-bson-failure-report.md."""
     bun = subprocess.run(
         ["bun", "-e", script],
-        env={**os.environ, "MONGO_URI": uri, "MONGO_DB": db},
+        env={
+            **os.environ,
+            "MONGO_URI": uri,
+            "MONGO_DB": db,
+            "MONGO_PROBE_DRIVER_SPEC": os.environ.get("MONGO_PROBE_DRIVER_SPEC", "mongodb@6.21.0"),
+        },
         text=True,
         capture_output=True,
         timeout=60,
@@ -1460,7 +1643,7 @@ def check_seeded_corpus_embeddings(resources: dict[str, Any]) -> None:
         slug = re.sub(r"[^a-zA-Z0-9_]", "_", project)
         db = f"{slug}_{env}"
     script = (
-        "import { MongoClient } from 'mongodb';"
+        "const { MongoClient } = await import(process.env.MONGO_PROBE_DRIVER_SPEC || 'mongodb');"
         "const uri = process.env.MONGO_URI; const db = process.env.MONGO_DB;"
         "const c = new MongoClient(uri, { appName: 'post-deploy-corpus-check', serverSelectionTimeoutMS: 8000 });"
         "try { await c.connect();"
@@ -1537,6 +1720,12 @@ def check_long_term_memory_embeddings(
     if os.environ.get("SKIP_CORPUS_EMBEDDING_CHECK") == "1" or os.environ.get("SKIP_LTM_CHECK") == "1":
         log("skipped via SKIP_CORPUS_EMBEDDING_CHECK=1 or SKIP_LTM_CHECK=1")
         return
+    if not discover_runtime_arns().get("product-recommendation"):
+        log(
+            f"skipped: {_agent_arn_env_key('product-recommendation')} not set "
+            "(this check plants a fact via product-recommendation)"
+        )
+        return
     uri = _load_env_live_uri()
     if not uri:
         log("no MONGODB_URI / MONGODB_URI_PUBLIC in .env.live — skipping LTM embedding check")
@@ -1597,7 +1786,7 @@ def check_long_term_memory_embeddings(
     five_min_ago_ms = int((time.time() - 300) * 1000)
     one_hour_ago_ms = int((time.time() - 3600) * 1000)
     script = (
-        "import { MongoClient } from 'mongodb';"
+        "const { MongoClient } = await import(process.env.MONGO_PROBE_DRIVER_SPEC || 'mongodb');"
         "const uri = process.env.MONGO_URI; const db = process.env.MONGO_DB;"
         f"const sinceFacts = new Date({five_min_ago_ms});"
         f"const sinceMsgs = new Date({one_hour_ago_ms}).toISOString();"

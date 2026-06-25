@@ -205,10 +205,12 @@ Agent-only redeploy. Use when only `config/agents/*.agent.md` or `config/skills/
 
 ## 4. Teardown
 
-All mode-specific wrappers live under [`deploy/destroy/`](../../deploy/destroy/) (separate from `deploy/deploy-*.sh` entrypoints).
+All mode-specific wrappers live under [`deploy/destroy/`](../../deploy/destroy/) ([`README`](../../deploy/destroy/README.md); separate from `deploy/deploy-*.sh` entrypoints).
 
 ### Mode-specific destroy wrappers
-Use these for normal teardown. Project scripts delete only the per-project `envs/ec2` stack. Shared scripts delete the singleton `envs/shared` stack and then the `envs/network` stack, and refuse to run while project EC2 instances are still present unless `--force` is supplied. Each wrapper hard-sets `NETWORK_MODE` and delegates to [`destroy.sh`](#destroysh).
+Use these for normal teardown. Project scripts delete only the per-project `envs/ec2` stack. Shared scripts delete the singleton `envs/shared` stack and then the `envs/network` stack, and refuse to run while terraform-managed EC2 instances tagged `Environment=<ENVIRONMENT>` still exist unless `--force` is supplied. Each wrapper hard-sets `NETWORK_MODE` and delegates to [`destroy.sh`](#destroysh).
+
+**Mode canary behavior:** PrivateLink wrappers **error** when SSM `network_mode` disagrees (unless `--force`). VPC peering wrappers **warn** and continue — they always destroy with `NETWORK_MODE=peering`.
 
 **Usage:**
 ```bash
@@ -224,7 +226,7 @@ Use these for normal teardown. Project scripts delete only the per-project `envs
 **`--with-bootstrap`** is accepted only by the shared wrappers and is passed to the final `network` destroy step. It also empties + destroys the shared S3 state bucket. Only use when no other env uses it — this deletes ALL Terraform state.
 
 ### `reap-orphan-security-groups-{privatelink|vpc-peering}.sh`
-Deferred cleanup for project runtime security groups that `destroy.sh --mode ec2` had to leave in AWS because service-managed AgentCore ENIs (`interface-type=agentic_ai`) were still attached. AWS does not allow manual detach/delete of those ENIs, so the project destroy records the security group ids in `destroy-reports/orphan-security-groups.tsv` and lets the matching mode-specific reaper delete them later.
+Deferred cleanup for project runtime security groups that `destroy.sh --mode ec2` had to leave in AWS because service-managed AgentCore ENIs (`interface-type=agentic_ai`) were still attached. AWS does not allow manual detach/delete of those ENIs, so the project destroy records the security group ids in `destroy-reports/orphan-security-groups.tsv` and lets the matching mode-specific reaper delete them later. The two scripts are functionally identical; use the one that matches your destroy wrapper.
 
 **Usage:**
 ```bash

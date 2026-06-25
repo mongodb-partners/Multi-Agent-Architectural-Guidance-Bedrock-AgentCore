@@ -3184,7 +3184,7 @@ pf_check_documents_have_embeddings() {
 
   local probe_script
   IFS= read -r -d '' probe_script <<'JS' || true
-import { MongoClient } from "mongodb";
+const { MongoClient } = await import(process.env.MONGO_PROBE_DRIVER_SPEC || "mongodb"); // spec from _transient-errors.sh; bare import floats to bson@7.3.0 which crashes under Bun 1.3.13 (see mongo-probe-bun-bson-failure-report.md)
 
 const uri = process.env.MONGODB_URI;
 const dbName = process.env.MONGODB_DB;

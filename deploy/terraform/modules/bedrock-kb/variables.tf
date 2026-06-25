@@ -112,6 +112,22 @@ variable "shared_bucket_arn" {
   description = "ARN of the shared S3 bucket. Used in IAM policies and the Bedrock data source config."
 }
 
+variable "kb_docs_bucket_create" {
+  type        = bool
+  default     = true
+  description = <<-EOT
+    Whether Terraform creates and owns the dedicated KB bucket named
+    kb_docs_bucket_name. true (default) = Terraform creates the bucket, applies
+    hardening (versioning/SSE/public-access-block) and uploads the sample docs
+    under kb-docs/docs/. false = the bucket already exists and is owned outside
+    this stack (e.g. client-provisioned): Terraform references it via a data
+    source, does NOT create it, does NOT modify its settings, and does NOT
+    upload sample docs. Only meaningful when kb_docs_bucket_name is a dedicated
+    bucket (different from shared_bucket_name). The deploy script auto-resolves
+    this (existing-but-unmanaged bucket -> false) but it can be set explicitly.
+  EOT
+}
+
 variable "kb_docs_bucket_name" {
   type        = string
   default     = ""
