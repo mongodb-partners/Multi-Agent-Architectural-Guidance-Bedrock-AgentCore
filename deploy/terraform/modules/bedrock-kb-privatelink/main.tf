@@ -90,7 +90,12 @@ resource "aws_lb_target_group" "atlas_kb" {
   # TG cap. Pair with `create_before_destroy` so TF sequences create → update
   # listener → delete.
   name_prefix = "pl${each.key}-"
-  port        = var.atlas_ports[tonumber(each.key)]
+  # try(..., 0) keeps destroy evaluable: on teardown the Atlas connection string
+  # is gone, so var.atlas_ports refreshes to [] and a raw index would throw
+  # `Invalid index` during the plan graph walk — before the precondition (which
+  # is skipped for resources being destroyed) could run. The 0 fallback is inert
+  # on apply because the precondition below still enforces real ports > 0.
+  port        = try(var.atlas_ports[tonumber(each.key)], 0)
   protocol    = "TCP"
   target_type = "ip"
   vpc_id      = var.vpc_id
@@ -131,7 +136,7 @@ resource "null_resource" "register_targets" {
   triggers = {
     target_group_arn = aws_lb_target_group.atlas_kb[each.key].arn
     slot             = each.key
-    port             = var.atlas_ports[tonumber(each.key)]
+    port             = try(var.atlas_ports[tonumber(each.key)], 0)
     atlas_vpce_id    = var.atlas_vpce_id
     aws_region       = var.aws_region
     atlas_ports_sha  = sha1(join(",", [for p in var.atlas_ports : tostring(p)]))
@@ -198,7 +203,7 @@ resource "aws_lb_listener" "atlas_kb" {
   for_each = local.atlas_port_slot_keys
 
   load_balancer_arn = aws_lb.atlas_kb.arn
-  port              = var.atlas_ports[tonumber(each.key)]
+  port              = try(var.atlas_ports[tonumber(each.key)], 0)
   protocol          = "TCP"
 
   default_action {
