@@ -584,11 +584,27 @@ env["MONGODB_DB"] = os.environ["MONGO_DB"]
 allow_write_raw = os.environ.get("MONGO_ALLOW_WRITE", "")
 allow_write = allow_write_raw.strip().lower() in {"1", "true", "yes", "on"}
 env["MONGODB_ALLOW_WRITE"] = "1" if allow_write else "0"
+
+# requireServiceS3Endpoint (nested in networkModeConfig) is immutable after
+# creation for AgentCore runtimes created after 2026-06-11. get-agent-runtime
+# returns it, but replaying it on update-agent-runtime — even unchanged — fails
+# with "cannot modify requireServiceS3Endpoint". Strip it so the replay carries
+# only the mutable network fields (networkMode / subnets / securityGroups).
+def _strip_immutable_net(net):
+    if not isinstance(net, dict):
+        return {"networkMode": "PUBLIC"}
+    nmc = net.get("networkModeConfig")
+    if isinstance(nmc, dict) and "requireServiceS3Endpoint" in nmc:
+        net = dict(net)
+        net["networkModeConfig"] = {k: v for k, v in nmc.items()
+                                    if k != "requireServiceS3Endpoint"}
+    return net
+
 out = {
     "agentRuntimeId": os.environ["RUNTIME_ID"],
     "roleArn": cfg["roleArn"],
     "agentRuntimeArtifact": cfg["agentRuntimeArtifact"],
-    "networkConfiguration": cfg.get("networkConfiguration") or {"networkMode": "PUBLIC"},
+    "networkConfiguration": _strip_immutable_net(cfg.get("networkConfiguration") or {"networkMode": "PUBLIC"}),
     "protocolConfiguration": cfg.get("protocolConfiguration") or {"serverProtocol": "MCP"},
     "environmentVariables": env,
 }
@@ -825,11 +841,27 @@ print((artifact.get('containerConfiguration') or {}).get('containerUri') or '')
 import json, os, sys
 
 cfg = json.loads(os.environ['CFG_JSON'])
+
+# requireServiceS3Endpoint (nested in networkModeConfig) is immutable after
+# creation for AgentCore runtimes created after 2026-06-11. get-agent-runtime
+# returns it, but replaying it on update-agent-runtime — even unchanged — fails
+# with "cannot modify requireServiceS3Endpoint". Strip it so the replay carries
+# only the mutable network fields (networkMode / subnets / securityGroups).
+def _strip_immutable_net(net):
+    if not isinstance(net, dict):
+        return {'networkMode': 'PUBLIC'}
+    nmc = net.get('networkModeConfig')
+    if isinstance(nmc, dict) and 'requireServiceS3Endpoint' in nmc:
+        net = dict(net)
+        net['networkModeConfig'] = {k: v for k, v in nmc.items()
+                                    if k != 'requireServiceS3Endpoint'}
+    return net
+
 out = {
     'agentRuntimeId':     os.environ['RUNTIME_ID'],
     'roleArn':            cfg['roleArn'],
     'agentRuntimeArtifact': cfg['agentRuntimeArtifact'],
-    'networkConfiguration':  cfg.get('networkConfiguration')  or {'networkMode': 'PUBLIC'},
+    'networkConfiguration':  _strip_immutable_net(cfg.get('networkConfiguration') or {'networkMode': 'PUBLIC'}),
     'protocolConfiguration': cfg.get('protocolConfiguration') or {'serverProtocol': 'MCP'},
     'environmentVariables':  cfg.get('environmentVariables', {}),
 }
