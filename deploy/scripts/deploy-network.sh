@@ -142,8 +142,8 @@ ATLAS_PEERING_CIDR="${ATLAS_PEERING_CIDR:-192.168.248.0/21}"
 
 # Validate NETWORK_MODE
 case "$NETWORK_MODE" in
-  privatelink|peering) ;;
-  *) err "Invalid NETWORK_MODE='${NETWORK_MODE}' — must be 'privatelink' or 'peering'" ;;
+  privatelink|peering|public) ;;
+  *) err "Invalid NETWORK_MODE='${NETWORK_MODE}' — must be 'privatelink', 'peering', or 'public'" ;;
 esac
 
 # ── Pre-flight: CIDR overlap check (peering mode only) ──────────────────────
@@ -165,12 +165,18 @@ PY
 fi
 
 export TF_VAR_atlas_project_id="${TF_VAR_atlas_project_id:-${TF_VAR_mongodb_atlas_project_id:-}}"
-[[ -n "${TF_VAR_atlas_project_id:-}" ]] || err "Atlas Project ID not set. Set TF_VAR_mongodb_atlas_project_id in .env"
-
 export TF_VAR_atlas_public_key="${MONGODB_ATLAS_PUBLIC_KEY:-}"
 export TF_VAR_atlas_private_key="${MONGODB_ATLAS_PRIVATE_KEY:-}"
-[[ -n "${TF_VAR_atlas_public_key:-}" ]]  || err "MONGODB_ATLAS_PUBLIC_KEY not set in .env"
-[[ -n "${TF_VAR_atlas_private_key:-}" ]] || err "MONGODB_ATLAS_PRIVATE_KEY not set in .env"
+
+if [[ "$NETWORK_MODE" == "public" ]]; then
+  # public mode provisions no Atlas-side plumbing (atlas modules count=0), so
+  # the Atlas Admin API keys + project ID are not required here.
+  ok "Public mode — skipping Atlas project-id / API-key requirements"
+else
+  [[ -n "${TF_VAR_atlas_project_id:-}" ]] || err "Atlas Project ID not set. Set TF_VAR_mongodb_atlas_project_id in .env"
+  [[ -n "${TF_VAR_atlas_public_key:-}" ]]  || err "MONGODB_ATLAS_PUBLIC_KEY not set in .env"
+  [[ -n "${TF_VAR_atlas_private_key:-}" ]] || err "MONGODB_ATLAS_PRIVATE_KEY not set in .env"
+fi
 
 DEPLOY_DIAG_LABEL="network"
 # shellcheck source=deploy/scripts/_deploy-diagnostics.sh
@@ -321,12 +327,16 @@ sep
 if [[ "$NETWORK_MODE" == "privatelink" ]]; then
   log "NOTE: First apply discovers/creates the Atlas PrivateLink endpoint service"
   log "(reused across all per-project deployments in this Atlas project + region)."
-else
+elif [[ "$NETWORK_MODE" == "peering" ]]; then
   log "NOTE: First apply discovers/creates the Atlas network container for VPC peering"
   log "(reused across all per-project deployments in this Atlas project + region)."
   log "Atlas Private DNS for Peering is auto-enabled via the Admin API. If the API"
   log "key lacks GROUP_OWNER scope the toggle fails (warning only) and the runtime"
   log "URI silently falls back to the multi-host non-SRV form (still private)."
+else
+  log "NOTE: public mode — no Atlas-side plumbing. Provisioning only the shared VPC,"
+  log "subnets and IGW. The MCP runtime reaches the BYO cluster over the public"
+  log "internet; whitelist Atlas access (0.0.0.0/0 for demo) in the Atlas console."
 fi
 
 if [[ "$AUTO_APPROVE" == "true" ]]; then
@@ -362,13 +372,16 @@ if [[ "$NETWORK_MODE" == "privatelink" ]]; then
     "atlas_endpoint_service_name"
     "atlas_private_link_id"
   )
-else
+elif [[ "$NETWORK_MODE" == "peering" ]]; then
   MODE_PARAMS=(
     "atlas_peering_id"
     "atlas_container_id"
     "atlas_peering_cidr"
     "atlas_private_dns_enabled"
   )
+else
+  # public: no Atlas plumbing — only the shared VPC params are published.
+  MODE_PARAMS=()
 fi
 
 REQUIRED_PARAMS=("${SHARED_PARAMS[@]}" "${MODE_PARAMS[@]}")

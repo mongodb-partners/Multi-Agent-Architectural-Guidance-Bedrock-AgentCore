@@ -107,8 +107,8 @@ variable "network_mode" {
   description = "Connectivity mode. In 'peering' mode the EC2 host's Atlas egress is narrowed to var.atlas_peering_cidr for defense-in-depth (matches modules/bedrock-kb-peering NLB target subnet)."
 
   validation {
-    condition     = contains(["privatelink", "peering"], var.network_mode)
-    error_message = "network_mode must be either 'privatelink' or 'peering'."
+    condition     = contains(["privatelink", "peering", "public"], var.network_mode)
+    error_message = "network_mode must be 'privatelink', 'peering', or 'public'."
   }
 }
 

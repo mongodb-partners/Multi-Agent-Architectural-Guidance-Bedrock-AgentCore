@@ -11,7 +11,7 @@ There are four Terraform root configs (and matching deploy scripts):
 - **Local mode** — `envs/local/` + `deploy-local.sh`. Provisions **partial** AWS support infra on your laptop path: Atlas M10, Bedrock KB, AgentCore Memory store, and local-prefixed CloudWatch log groups. Does **not** consume the shared network or shared stack. Does **not** provision EC2, AgentCore runtimes, Cognito, or a runnable chat stack by itself — you still need `AGENTCORE_ORCHESTRATOR_ARN` + JWKS from a full EC2 deploy (see [§ 4](#4-local-mode-partial-infra-only)).
 - **EC2 mode** — full cloud deployment. The frozen baseline. Reads the shared VPC's IDs and the shared SageMaker endpoint + log groups from SSM, then provisions the per-project EC2 / AgentCore Runtime / MongoDB MCP Runtime stack on top, plus a per-cluster Route 53 zone for the Atlas SRV hostname and the AWS service VPC endpoints required by the VPC-mode MongoDB MCP runtime (ECR API, ECR Docker, S3 gateway, CloudWatch Logs). Set `TF_VAR_create_agentcore_runtime_vpc_endpoints=false` when those singleton endpoints already exist in the shared VPC; EC2 mode will reuse them and ensure this deployment's security groups can reach them. The legacy Lambda MongoDB MCP host (and its Terraform module) was deleted in CLIENT_REVIEW Phase 7e. MongoDB MCP is reached through the AgentCore Gateway target.
 
-**Apply order (clean account):** `network → shared → ec2`. The single entrypoints `deploy-full-with-privatelink.sh` (default mode) and `deploy-full-with-vpc-peering.sh` (alternative) both probe SSM canaries for each upstream stack and run the missing ones automatically; pass `--skip-network` / `--skip-shared` to bypass the canary probes when you already know they are applied. Tear down with the matching scripts under [`deploy/destroy/`](../deploy/destroy/): project first, then shared/network (`destroy-project-with-*.sh` → `destroy-shared-with-*.sh` in that folder). **PrivateLink and VPC peering are mutually exclusive per account+region** — switching modes requires destroying everything and re-running the matching orchestrator.
+**Apply order (clean account):** `network → shared → ec2`. The single entrypoints `deploy-full-with-privatelink.sh` (default mode), `deploy-full-with-vpc-peering.sh` (alternative), and `deploy-full-public.sh` (**Bring your own MongoDB Atlas cluster** over the public internet — demo only, see [§ 3 Public mode](#public-byo-mode)) all probe SSM canaries for each upstream stack and run the missing ones automatically; pass `--skip-network` / `--skip-shared` to bypass the canary probes when you already know they are applied. Tear down with the matching scripts under [`deploy/destroy/`](../deploy/destroy/): project first, then shared/network (`destroy-project-with-*.sh` → `destroy-shared-with-*.sh` in that folder). **PrivateLink, VPC peering, and public mode are mutually exclusive per account+region** — switching modes requires destroying everything and re-running the matching orchestrator.
 
 **Migrating an existing pre-2026-05 deployment:** if you already applied `envs/ec2` with the old module layout (SageMaker + log groups + dashboards + Bedrock invocation logging all inside `envs/ec2`), tear down the project layer with `./deploy/destroy/destroy-project-with-privatelink.sh --auto-approve` (or the peering project wrapper for peering stacks) and re-run the orchestrator. The shared-stack split changed resource names, so in-place state surgery would not help anyway; the SSM canaries (`/<SHARED_VPC_NAME>/<region>/cw_api_log_group` etc.) drive the re-create automatically.
 
@@ -260,6 +260,48 @@ The orchestrator hard-exports `NETWORK_MODE=peering` before delegating, runs the
 * **mongod IP drift:** the peering NLB targets are pinned at deploy time. Atlas maintenance / scaling / failover can rotate mongod private IPs and silently break KB ingestion. Recovery: re-run `./deploy/deploy-full-with-vpc-peering.sh --skip-network --skip-shared` to re-`dig` and re-pin targets.
 * **TLS failure recovery:** if the experimental NLB-over-peering KB path fails TLS validation, the ingestion job will fail terraform apply with the driver error in `failureReasons` (we grep for `tls|certificate|ssl|handshake|hostname` and print a remediation banner). The **only** remediation is to destroy the peering stack and redeploy in PrivateLink mode (PL and peering are mutually exclusive). Alternative degradation: set `TF_VAR_enable_kb_peering=false` to keep peering for runtime traffic but use public Atlas SRV for KB ingestion (privacy regression — KB no longer end-to-end private).
 * **CIDR conflicts:** `ATLAS_PEERING_CIDR` must not overlap `VPC_CIDR`. The orchestrator runs a Python pre-flight before plan; `envs/network` has a Terraform `check` block as a second line of defense.
+
+### <a id="public-byo-mode"></a>Public mode — Bring your own MongoDB Atlas cluster (DEMO ONLY)
+
+A third connectivity mode for demos and quick evaluations: instead of provisioning a managed Atlas cluster behind PrivateLink or peering, the stack points at **your own existing MongoDB Atlas cluster**, reached over the **public internet**. Orchestrated by [`deploy/deploy-full-public.sh`](../deploy/deploy-full-public.sh) — sister of the two private orchestrators, same 3-phase flow (network → shared → ec2) and same flag surface.
+
+> **DEMO ONLY.** This mode requires the operator to set the Atlas project IP access list to `0.0.0.0/0` — a public-internet path to the database. Do not use it for anything real. PrivateLink mode is the recommended posture for any shared or production environment.
+
+**Use the orchestrator:**
+
+```bash
+# Set in .env (see the Bring Your Own Atlas block in .env.sample) — the orchestrator also hard-exports
+# NETWORK_MODE=public + ATLAS_CLUSTER_SOURCE=byo before delegating.
+export ATLAS_CLUSTER_SOURCE=byo
+export NETWORK_MODE=public
+export ALLOW_PUBLIC_ATLAS=1
+export MONGODB_BYO_URI='mongodb+srv://<user>:<pass>@<cluster>.xxxxx.mongodb.net/?retryWrites=true&w=majority'
+export EMBEDDINGS_PROVIDER=titan   # recommended for this setup — see below
+
+./deploy/deploy-full-public.sh --auto-approve
+```
+
+**Required `.env` keys:** `ATLAS_CLUSTER_SOURCE=byo`, `NETWORK_MODE=public`, `ALLOW_PUBLIC_ATLAS=1`, `MONGODB_BYO_URI`, `ATLAS_PROJECT_ID`, plus an Atlas DB user (`ATLAS_DB_USER` + `TF_VAR_mongodb_password`) that exists on your own Atlas cluster — the same credentials embedded in `MONGODB_BYO_URI`. Bedrock KB ingestion runs over public SRV and is mandatory, so wrong DB creds fail `terraform apply`.
+
+**What's different vs the private modes:**
+
+| Layer | Private modes (PrivateLink / peering) | Public — Bring your own MongoDB Atlas cluster |
+|---|---|---|
+| Atlas cluster | Provisioned by the stack (`ATLAS_CLUSTER_SOURCE=managed`) | **Not provisioned** — your existing cluster (`ATLAS_CLUSTER_SOURCE=byo`), reached via `MONGODB_BYO_URI` |
+| Atlas networking (`envs/network`) | PrivateLink VPCE or VPC peering primitives | **None** — count-gated Atlas-private resources evaluate to 0; traffic uses the IGW |
+| Runtime `MONGODB_URI` | Private multi-host / `awsPrivateLink` URI | Public SRV URI from `MONGODB_BYO_URI` (no private normalization) |
+| Atlas IP access list | Scoped to the VPC / peering CIDR | **`0.0.0.0/0`** (operator-set — demo only) |
+| AgentCore runtime egress | VPC-attached | **PUBLIC** egress (no VPC attachment, no NAT) |
+| EC2 host public address | Elastic IP | Auto-assigned public IP (**no EIP** — changes on stop/start; re-read `terraform output` after a restart) |
+| Bedrock KB ingestion | PrivateLink (recommended) / experimental peering NLB | Public SRV (`kb_connectivity_mode=public-srv`) |
+
+**Embeddings — Titan recommended for this setup.** Set `EMBEDDINGS_PROVIDER=titan`. Titan uses Bedrock's built-in embedding model, so the deploy needs **no Voyage SageMaker endpoint** (the slowest step in `deploy-shared.sh`, ~6–10 min, plus ongoing endpoint cost) and **no Marketplace subscription**. For a lightweight Bring-your-own-cluster demo that's the simplest, fastest, and cheapest path. Voyage still works in public mode, but its SageMaker endpoint adds time and cost that a demo rarely needs.
+
+**Operational caveats:**
+
+* The instance public IP changes on stop/start (no EIP). Re-read `terraform output` after any restart before hitting the UI/API.
+* `0.0.0.0/0` on the Atlas access list is the whole reason this is demo-only — tear the stack down promptly and remove the allowlist entry when finished.
+* Switching to/from public mode is a destroy + redeploy, same as PrivateLink ↔ peering (the SSM `network_mode` canary guards against silent swaps).
 
 ### 3.0 Agent-only redeployment (partial deploy)
 
@@ -693,6 +735,7 @@ There is currently **no automatic destroy workflow**. Teardown is laptop-only vi
 | [`.env`](../.env) | Live credentials + project identity (fill in before first deploy) |
 | [`.env.live`](../.env.live) | Generated by `deploy-project.sh` Phase 7. Holds runtime config (gitignored). |
 | [`deploy/deploy-full-with-privatelink.sh`](../deploy/deploy-full-with-privatelink.sh) | **Main entrypoint** — provisions network (if needed) then project stack |
+| [`deploy/deploy-full-public.sh`](../deploy/deploy-full-public.sh) | Public-mode entrypoint — **Bring your own MongoDB Atlas cluster** over the public internet (demo only; `NETWORK_MODE=public` + `ATLAS_CLUSTER_SOURCE=byo`) |
 | [`deploy/destroy/destroy-project-with-privatelink.sh`](../deploy/destroy/destroy-project-with-privatelink.sh) / [`deploy/destroy/destroy-project-with-vpc-peering.sh`](../deploy/destroy/destroy-project-with-vpc-peering.sh) | Project-only teardown wrappers for `envs/ec2` |
 | [`deploy/destroy/destroy-shared-with-privatelink.sh`](../deploy/destroy/destroy-shared-with-privatelink.sh) / [`deploy/destroy/destroy-shared-with-vpc-peering.sh`](../deploy/destroy/destroy-shared-with-vpc-peering.sh) | Shared teardown wrappers for `envs/shared` then `envs/network` |
 | [`deploy/destroy/reap-orphan-security-groups-privatelink.sh`](../deploy/destroy/reap-orphan-security-groups-privatelink.sh) | PrivateLink deferred cleanup for AgentCore runtime security groups left behind by service-managed ENIs |

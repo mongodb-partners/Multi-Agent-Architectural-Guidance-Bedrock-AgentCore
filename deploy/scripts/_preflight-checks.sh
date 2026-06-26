@@ -898,6 +898,15 @@ pf_check_env_required_keys_filled() {
       TF_VAR_mongodb_atlas_project_id TF_VAR_atlas_db_password EMBEDDINGS_PROVIDER
     )
   fi
+  # BYO + public (demo): no Atlas Admin API / project / password needed — the
+  # operator supplies the full connection string and acknowledges public egress.
+  if [[ "${ATLAS_CLUSTER_SOURCE:-managed}" == "byo" && "${NETWORK_MODE:-}" == "public" ]]; then
+    if [[ "$auth_mode_normalized" == "sts" ]]; then
+      REQUIRED_KEYS=(AWS_REGION ENVIRONMENT PROJECT_NAME SHARED_VPC_NAME EMBEDDINGS_PROVIDER MONGODB_BYO_URI ALLOW_PUBLIC_ATLAS)
+    else
+      REQUIRED_KEYS=(AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_REGION ENVIRONMENT PROJECT_NAME SHARED_VPC_NAME EMBEDDINGS_PROVIDER MONGODB_BYO_URI ALLOW_PUBLIC_ATLAS)
+    fi
+  fi
   # Voyage path requires VOYAGE_MODEL_PACKAGE_ARN
   if [[ "${EMBEDDINGS_PROVIDER:-}" == "voyage" ]]; then
     REQUIRED_KEYS+=(VOYAGE_MODEL_PACKAGE_ARN)
@@ -1308,7 +1317,10 @@ pf_check_aws_service_limits() {
   fi
 
   # Elastic IPs — actual quota pulled live from Service Quotas (no hardcode).
-  local eip_count eip_limit
+  # ponytail: public mode allocates neither an EIP (instance uses its auto-assigned
+  # public IP) nor a NAT gateway, so EIP headroom can't block the apply — skip it.
+  local eip_count="n/a(public)" eip_limit="n/a"
+  if [[ "${NETWORK_MODE:-}" != "public" ]]; then
   eip_count="$(aws ec2 describe-addresses --region "$region" --query 'length(Addresses)' --output text 2>/dev/null || echo '?')"
   eip_limit="$(_pf_resolve_quota "$region" ec2 L-0263D0A3)"
   if [[ -z "$eip_limit" ]]; then
@@ -1324,6 +1336,7 @@ pf_check_aws_service_limits() {
     else
       problems+=("Elastic IPs in ${region}: ${eip_count}/${eip_limit} (live Service Quotas limit). New project EIP / NAT gateway allocation may fail")
     fi
+  fi
   fi
 
   if (( ${#problems[@]} == 0 )); then
@@ -2958,8 +2971,9 @@ pf_check_concurrent_deploy_lock() {
         --shortcoming "config (state)" \
         --observed "s3://${bucket}/${key} exists: ${body}" \
         --fix "Wait for the other deploy to finish (look for the host/pid in the lock body)" \
-        --fix "If you are sure no other deploy is running, force-break: PREFLIGHT_FORCE_LOCK_BREAK=1 ./deploy/deploy-full-with-privatelink.sh" \
-        --hint "run:PREFLIGHT_FORCE_LOCK_BREAK=1 ./deploy/deploy-full-with-privatelink.sh" \
+        --fix "If you are sure no other deploy is running, force-break by re-running THE SAME deploy command with PREFLIGHT_FORCE_LOCK_BREAK=1 prefixed (use whichever deploy-full-*.sh you started with)" \
+        --fix "Or delete it directly: aws s3 rm s3://${bucket}/${key} --region ${region}" \
+        --hint "run:aws s3 rm s3://${bucket}/${key} --region ${region}" \
         --doc "docs/deployment-preflight-checks.md#concurrent-deploy-lock"
       return 0
     fi

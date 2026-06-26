@@ -135,12 +135,49 @@ variable "enable_kb_privatelink" {
 variable "network_mode" {
   type        = string
   default     = "privatelink"
-  description = "Connectivity mode for Atlas. Must match the value baked into the network stack (envs/network) and the SSM canary at /<shared_vpc_name>/<region>/network_mode. Switching modes requires destroy + redeploy. Privatelink and peering are MUTUALLY EXCLUSIVE — no hybrid path."
+  description = "Connectivity mode for Atlas. Must match the value baked into the network stack (envs/network) and the SSM canary at /<shared_vpc_name>/<region>/network_mode. Switching modes requires destroy + redeploy. 'privatelink'/'peering' are MUTUALLY EXCLUSIVE private paths; 'public' (BYO-only) reaches Atlas over the public internet — see var.cluster_source and var.allow_public_atlas."
 
   validation {
-    condition     = contains(["privatelink", "peering"], var.network_mode)
-    error_message = "network_mode must be either 'privatelink' or 'peering'."
+    condition     = contains(["privatelink", "peering", "public"], var.network_mode)
+    error_message = "network_mode must be 'privatelink', 'peering', or 'public'."
   }
+}
+
+# ── Bring Your Own (BYO) Atlas cluster ────────────────────────────────────────
+variable "cluster_source" {
+  type        = string
+  default     = "managed"
+  description = "'managed' (Terraform creates the Atlas cluster) or 'byo' (use a pre-existing operator cluster). network_mode='public' requires 'byo'."
+
+  validation {
+    condition     = contains(["managed", "byo"], var.cluster_source)
+    error_message = "cluster_source must be 'managed' or 'byo'."
+  }
+}
+
+variable "byo_connection_string" {
+  type        = string
+  default     = ""
+  sensitive   = true
+  description = "BYO only: operator-supplied connection string WITH credentials (mongodb+srv://...). Forwarded to module.mongodb_atlas as the connection_string output."
+}
+
+variable "byo_srv_host" {
+  type        = string
+  default     = ""
+  description = "BYO only: operator cluster SRV hostname without scheme (cluster.xxxxx.mongodb.net)."
+}
+
+variable "byo_cluster_name" {
+  type        = string
+  default     = ""
+  description = "BYO only: real Atlas cluster name for the Admin API (vector-index create). Case-sensitive; the SRV host can't recover it. Empty falls back to the managed synthetic '<project>-<env>' name."
+}
+
+variable "allow_public_atlas" {
+  type        = bool
+  default     = false
+  description = "Must be true to permit network_mode='public'. Explicit acknowledgement that the MCP runtime reaches Atlas over the public internet (PUBLIC AgentCore networking) — a privacy/latency regression vs PrivateLink/peering. Demo only."
 }
 
 variable "allow_network_mode_mismatch_on_destroy" {

@@ -347,12 +347,13 @@ The API and UI run as Docker containers managed by systemd. ECR is the image reg
 <a id="private-atlas-connectivity"></a>
 ### 7.4 Private Atlas connectivity — PrivateLink (default) or VPC peering
 
-MongoDB credentials traversing the public internet would be a security concern, so Atlas access is always private. The framework supports **two mutually-exclusive connectivity modes** selected by `NETWORK_MODE` in `.env` (default `privatelink`):
+MongoDB credentials traversing the public internet would be a security concern, so for any real environment Atlas access is private. The framework supports **three mutually-exclusive connectivity modes** selected by `NETWORK_MODE` in `.env` (default `privatelink`) — two private, plus one **demo-only** public path:
 
 * **PrivateLink mode** (`NETWORK_MODE=privatelink`, default) — Atlas Interface VPCE + per-cluster Route 53 private zone + VPC endpoint. partner-validated, recommended.
 * **VPC peering mode** (`NETWORK_MODE=peering`) — AWS-side VPC peering accepter + route entries in both route tables + Atlas-side `mongodbatlas_network_peering` + Atlas Private DNS for Peering (auto-enabled via Admin API). The `-pri.mongodb.net` SRV resolves directly to private peering IPs.
+* **Public mode — Bring your own MongoDB Atlas cluster** (`NETWORK_MODE=public` + `ATLAS_CLUSTER_SOURCE=byo`, **DEMO ONLY**) — no Atlas cluster is provisioned and no private networking is created; the stack points at your *own* existing cluster over public SRV (`MONGODB_BYO_URI`) with the Atlas IP access list set to `0.0.0.0/0`. AgentCore runs in PUBLIC egress, the EC2 host uses an auto-assigned public IP (no EIP). For demos/evals only — see [`deployment-guide.md` § Public mode](deployment-guide.md#public-byo-mode).
 
-The two modes are **mutually exclusive per account** — there is no hybrid path. Switching modes requires destroy + redeploy (mode-specific wrappers under [`deploy/destroy/`](../deploy/destroy/): project script then shared script, then re-run the matching orchestrator). SSM canary `/{SHARED_VPC_NAME}/{REGION}/network_mode` guards against silent mode swaps; an `envs/ec2` `check` block also fails plan when the tfvars mode disagrees with the SSM canary.
+The three modes are **mutually exclusive per account** — there is no hybrid path. Switching modes requires destroy + redeploy (mode-specific wrappers under [`deploy/destroy/`](../deploy/destroy/): project script then shared script, then re-run the matching orchestrator). SSM canary `/{SHARED_VPC_NAME}/{REGION}/network_mode` guards against silent mode swaps; an `envs/ec2` `check` block also fails plan when the tfvars mode disagrees with the SSM canary.
 
 Use the matching orchestrator:
 
@@ -360,6 +361,7 @@ Use the matching orchestrator:
 |---|---|
 | `privatelink` | [`deploy/deploy-full-with-privatelink.sh`](../deploy/deploy-full-with-privatelink.sh) |
 | `peering` | [`deploy/deploy-full-with-vpc-peering.sh`](../deploy/deploy-full-with-vpc-peering.sh) |
+| `public` (Bring your own MongoDB Atlas cluster, demo) | [`deploy/deploy-full-public.sh`](../deploy/deploy-full-public.sh) |
 
 See [`docs/deployment-guide.md` § VPC peering mode](deployment-guide.md#vpc-peering-mode) for the runtime URI selection, security-group narrowing, KB ingestion caveats (NLB-over-peering is experimental, mongod IP drift recovery), and CIDR pre-flight rules.
 

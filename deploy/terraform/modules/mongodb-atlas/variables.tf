@@ -3,6 +3,35 @@ variable "atlas_project_id" {
   description = "MongoDB Atlas Project ID"
 }
 
+# ── Bring Your Own (BYO) cluster ───────────────────────────────────────────────
+# cluster_source=managed (default): Terraform creates the cluster + DB user + IP
+# access list (today's behaviour). cluster_source=byo: the operator owns a
+# pre-existing cluster; we create nothing in Atlas and instead pass their
+# connection details straight through to the outputs.
+variable "cluster_source" {
+  type        = string
+  default     = "managed"
+  description = "Cluster lifecycle: 'managed' (Terraform creates the M10 cluster, DB user, IP access list) or 'byo' (use a pre-existing cluster; create nothing in Atlas, pass byo_* through to outputs)."
+
+  validation {
+    condition     = contains(["managed", "byo"], var.cluster_source)
+    error_message = "cluster_source must be 'managed' or 'byo'."
+  }
+}
+
+variable "byo_connection_string" {
+  type        = string
+  default     = ""
+  sensitive   = true
+  description = "BYO only: full operator-supplied connection string WITH credentials (e.g. mongodb+srv://user:pass@cluster.xxxxx.mongodb.net/?...). Becomes the module's connection_string output."
+}
+
+variable "byo_srv_host" {
+  type        = string
+  default     = ""
+  description = "BYO only: operator cluster SRV hostname without scheme (e.g. cluster.xxxxx.mongodb.net). Becomes the module's mongo_host output."
+}
+
 variable "cluster_name" {
   type        = string
   description = "Atlas cluster name"
@@ -42,8 +71,8 @@ variable "network_mode" {
   description = "Connectivity mode. 'privatelink' (default) scopes the Atlas IP access list to var.operator_ip_cidr (the deploy machine) — runtime reaches Atlas via the PrivateLink endpoint, which bypasses the IP access list. 'peering' scopes the IP access list to var.vpc_cidr — runtime + Bedrock KB both reach Atlas privately via VPC peering. Neither mode ever opens Atlas to 0.0.0.0/0."
 
   validation {
-    condition     = contains(["privatelink", "peering"], var.network_mode)
-    error_message = "network_mode must be either 'privatelink' or 'peering'."
+    condition     = contains(["privatelink", "peering", "public"], var.network_mode)
+    error_message = "network_mode must be 'privatelink', 'peering', or 'public'."
   }
 }
 

@@ -14,6 +14,9 @@ terraform {
 # =============================================================================
 
 resource "mongodbatlas_cluster" "main" {
+  # BYO: operator owns the cluster — create nothing.
+  count = var.cluster_source == "managed" ? 1 : 0
+
   project_id = var.atlas_project_id
   name       = var.cluster_name
 
@@ -50,6 +53,9 @@ resource "mongodbatlas_cluster" "main" {
 # =============================================================================
 
 resource "mongodbatlas_database_user" "app" {
+  # BYO: operator manages their own DB users.
+  count = var.cluster_source == "managed" ? 1 : 0
+
   project_id         = var.atlas_project_id
   username           = var.db_username
   password           = var.db_password
@@ -99,7 +105,8 @@ resource "mongodbatlas_database_user" "app" {
 # =============================================================================
 
 resource "mongodbatlas_project_ip_access_list" "peering_vpc" {
-  count      = var.network_mode == "peering" ? 1 : 0
+  # BYO: never touch the customer's access list (they own it).
+  count      = var.cluster_source == "managed" && var.network_mode == "peering" ? 1 : 0
   project_id = var.atlas_project_id
   cidr_block = var.vpc_cidr
   # NOTE: Atlas caps access-list comments at 80 chars; keep short + ASCII.
@@ -114,7 +121,8 @@ resource "mongodbatlas_project_ip_access_list" "peering_vpc" {
 }
 
 resource "mongodbatlas_project_ip_access_list" "operator" {
-  count      = var.network_mode == "privatelink" && var.operator_ip_cidr != "" ? 1 : 0
+  # BYO: never touch the customer's access list (they own it).
+  count      = var.cluster_source == "managed" && var.network_mode == "privatelink" && var.operator_ip_cidr != "" ? 1 : 0
   project_id = var.atlas_project_id
   cidr_block = var.operator_ip_cidr
   # NOTE: Atlas rejects access-list comments longer than 80 characters
@@ -128,7 +136,7 @@ resource "mongodbatlas_project_ip_access_list" "operator" {
 # so this should only surface on hand-rolled applies.
 check "atlas_privatelink_has_operator_ip" {
   assert {
-    condition     = var.network_mode != "privatelink" || var.operator_ip_cidr != ""
+    condition     = var.cluster_source != "managed" || var.network_mode != "privatelink" || var.operator_ip_cidr != ""
     error_message = "mongodb-atlas: network_mode='privatelink' but operator_ip_cidr is empty — the Atlas IP access list will have NO public-SRV entry, so operator-run local-exec provisioners (db-seeding, KB ingestion-status polls, post-deploy smoke) cannot reach Atlas. Set OPERATOR_IP_CIDR (deploy-project.sh / deploy-local.sh auto-detect it via checkip.amazonaws.com)."
   }
 }

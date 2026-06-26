@@ -28,6 +28,31 @@ variable "atlas_project_id" {
   type = string
 }
 
+# ── Bring Your Own (BYO) Atlas cluster ────────────────────────────────────────
+variable "cluster_source" {
+  type        = string
+  default     = "managed"
+  description = "'managed' (Terraform creates the cluster) or 'byo' (use a pre-existing operator cluster; pass byo_connection_string through)."
+
+  validation {
+    condition     = contains(["managed", "byo"], var.cluster_source)
+    error_message = "cluster_source must be 'managed' or 'byo'."
+  }
+}
+
+variable "byo_connection_string" {
+  type        = string
+  default     = ""
+  sensitive   = true
+  description = "BYO only: operator-supplied connection string WITH credentials."
+}
+
+variable "byo_srv_host" {
+  type        = string
+  default     = ""
+  description = "BYO only: operator cluster SRV hostname without scheme."
+}
+
 variable "atlas_db_user" {
   type        = string
   description = "MongoDB Atlas database username. Caller must supply a project+env-scoped value, e.g. <PROJECT_NAME>_<ENVIRONMENT>_user."

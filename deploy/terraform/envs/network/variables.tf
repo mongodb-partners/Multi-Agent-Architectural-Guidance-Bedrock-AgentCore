@@ -47,11 +47,11 @@ variable "atlas_private_key" {
 variable "network_mode" {
   type        = string
   default     = "privatelink"
-  description = "Connectivity mode for Atlas. 'privatelink' (default) provisions module.atlas_privatelink (Interface VPCE + Atlas-side endpoint binding); 'peering' provisions module.atlas_vpc_peering (network container + AWS-side accepter + route entries + IP access list). Mutually exclusive. Switching modes requires destroy + redeploy (the SSM /network_mode key guards against accidental flips)."
+  description = "Connectivity mode for Atlas. 'privatelink' (default) provisions module.atlas_privatelink (Interface VPCE + Atlas-side endpoint binding); 'peering' provisions module.atlas_vpc_peering (network container + AWS-side accepter + route entries + IP access list); 'public' (BYO-only) provisions neither — Atlas is reached over the public internet. Mutually exclusive. Switching modes requires destroy + redeploy (the SSM /network_mode key guards against accidental flips)."
 
   validation {
-    condition     = contains(["privatelink", "peering"], var.network_mode)
-    error_message = "network_mode must be either 'privatelink' or 'peering'."
+    condition     = contains(["privatelink", "peering", "public"], var.network_mode)
+    error_message = "network_mode must be 'privatelink', 'peering', or 'public'."
   }
 }
 

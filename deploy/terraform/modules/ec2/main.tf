@@ -4,6 +4,12 @@ locals {
     Environment = var.environment
     ManagedBy   = "terraform"
   }
+
+  # ponytail: public/demo mode skips the EIP and just uses the instance's
+  # auto-assigned public IP (tolerates IP changes on stop/start). Add the EIP
+  # back by switching network_mode off "public" if a stable IP is needed.
+  use_eip       = var.network_mode != "public"
+  app_public_ip = local.use_eip ? aws_eip.app[0].public_ip : aws_instance.app.public_ip
 }
 
 # =============================================================================
@@ -222,10 +228,13 @@ resource "aws_security_group" "ec2" {
   #   * 53/UDP + 53/TCP → 0.0.0.0/0 for DNS resolution
   # Atlas is unreachable from outside the VPC via peering anyway, but
   # restricting egress at the SG layer makes mis-configuration fail loud.
+  # ponytail: public mode (BYO + 0.0.0.0/0 allowlist demo) reuses the privatelink
+  # catch-all — instance reaches AWS endpoints AND Atlas over the public internet
+  # via the IGW. Without this the SG has zero egress and SSM never registers.
   dynamic "egress" {
-    for_each = var.network_mode == "privatelink" ? [1] : []
+    for_each = (var.network_mode == "privatelink" || var.network_mode == "public") ? [1] : []
     content {
-      description = "All outbound (AWS APIs + Atlas) - privatelink mode catch-all"
+      description = "All outbound (AWS APIs + Atlas) - privatelink/public catch-all"
       from_port   = 0
       to_port     = 0
       protocol    = "-1"
@@ -338,6 +347,7 @@ resource "aws_instance" "app" {
 # =============================================================================
 
 resource "aws_eip" "app" {
+  count    = local.use_eip ? 1 : 0
   domain   = "vpc"
   instance = aws_instance.app.id
 

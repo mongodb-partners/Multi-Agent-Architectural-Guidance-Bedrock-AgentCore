@@ -52,6 +52,11 @@ module "mongodb_atlas" {
   # laptop /32 is the only allowlist entry. Forward it here so the module never
   # has to fall back to 0.0.0.0/0.
   operator_ip_cidr = var.operator_ip_cidr
+
+  # BYO passthrough (local mode just proxies the operator URI through).
+  cluster_source        = var.cluster_source
+  byo_connection_string = var.byo_connection_string
+  byo_srv_host          = var.byo_srv_host
 }
 
 # Atlas Search indexes that belong to application data are reconciled through
