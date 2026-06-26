@@ -128,6 +128,7 @@ The API needs `AUTH_JWKS_URI`, `AUTH_ISSUER`, and AgentCore ARNs from `.env.live
 |---|---|
 | **PrivateLink** (recommended) | `./deploy/deploy-full-with-privatelink.sh --auto-approve` |
 | **VPC peering** | `./deploy/deploy-full-with-vpc-peering.sh --auto-approve` |
+| **Public — Bring your own MongoDB Atlas cluster** (demo only) | `./deploy/deploy-full-public.sh --auto-approve` |
 
 ```bash
 source .env
@@ -164,6 +165,12 @@ Open the **UI URL** from the deploy summary (Streamlit on EC2, port 8501). Sign 
 
 ```bash
 ./deploy/deploy-full-with-vpc-peering.sh --auto-approve
+```
+
+**Public — Bring your own MongoDB Atlas cluster** (DEMO ONLY) — point the stack at your *own* existing Atlas cluster reached over the public internet. No Atlas cluster is provisioned and no PrivateLink/peering/EIP/NAT is created. The orchestrator exports `NETWORK_MODE=public` + `ATLAS_CLUSTER_SOURCE=byo`. Requires `MONGODB_BYO_URI`, `ATLAS_PROJECT_ID`, an Atlas DB user, and the operator setting the Atlas IP access list to `0.0.0.0/0` (`ALLOW_PUBLIC_ATLAS=1`) — a public path to the DB, so demo/dev only. **Titan embeddings recommended for this setup** (`EMBEDDINGS_PROVIDER=titan`): Bedrock built-in, no SageMaker endpoint to provision, no Marketplace subscription — the lightest fit for a quick Bring-your-own-cluster demo.
+
+```bash
+./deploy/deploy-full-public.sh --auto-approve
 ```
 
 Deploy scripts run centralized preflight checks before applying infrastructure.

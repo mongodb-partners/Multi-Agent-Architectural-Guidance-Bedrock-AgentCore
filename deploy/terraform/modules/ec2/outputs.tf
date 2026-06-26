@@ -1,6 +1,6 @@
 output "public_ip" {
-  value       = aws_eip.app.public_ip
-  description = "Elastic IP address — stable public IP for the application EC2 instance"
+  value       = local.app_public_ip
+  description = "Public IP for the application EC2 instance (Elastic IP unless network_mode='public', where it's the instance's auto-assigned IP)"
 }
 
 output "instance_id" {
@@ -9,17 +9,17 @@ output "instance_id" {
 }
 
 output "api_url" {
-  value       = "http://${aws_eip.app.public_ip}:3000"
+  value       = "http://${local.app_public_ip}:3000"
   description = "Hono/Bun API base URL"
 }
 
 output "ui_url" {
-  value       = "http://${aws_eip.app.public_ip}:8501"
+  value       = "http://${local.app_public_ip}:8501"
   description = "Streamlit UI URL"
 }
 
 output "ssh_command" {
-  value       = "ssh ec2-user@${aws_eip.app.public_ip}"
+  value       = "ssh ec2-user@${local.app_public_ip}"
   description = "SSH command to connect (requires key pair set in ec2_key_pair_name variable)"
 }
 
@@ -29,7 +29,7 @@ output "ssm_command" {
 }
 
 output "deploy_target" {
-  value       = "ec2-user@${aws_eip.app.public_ip}:/opt/multiagent"
+  value       = "ec2-user@${local.app_public_ip}:/opt/multiagent"
   description = "rsync target for deploy.sh code sync"
 }
 

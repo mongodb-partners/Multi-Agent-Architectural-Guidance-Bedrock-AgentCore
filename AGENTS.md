@@ -84,6 +84,8 @@ When the script finishes, open the **UI URL** it prints (Streamlit on EC2, port 
 
 Alternative connectivity: `./deploy/deploy-full-with-vpc-peering.sh --auto-approve` (mutually exclusive with PrivateLink).
 
+Bring your own MongoDB Atlas cluster (demo only): `./deploy/deploy-full-public.sh --auto-approve` — points at your *own* existing Atlas cluster over the public internet (`NETWORK_MODE=public` + `ATLAS_CLUSTER_SOURCE=byo`, requires `MONGODB_BYO_URI` and a `0.0.0.0/0` Atlas access list). Use `EMBEDDINGS_PROVIDER=titan` for this setup — no SageMaker endpoint to provision.
+
 Deploy scripts run centralized preflight checks before mutating AWS resources.
 
 #### Run API + UI on your laptop (after a full EC2 deploy)
@@ -144,6 +146,7 @@ Deploy scripts write runtime ARNs, Cognito JWKS, and memory store IDs into `.env
 | `deploy/` | Terraform (`envs/`, `modules/`, `bootstrap/`), deploy/destroy shell scripts, IAM policy, KB doc sources |
 | `deploy/deploy-full-with-privatelink.sh` | Orchestrator — network → shared → project (PrivateLink) |
 | `deploy/deploy-full-with-vpc-peering.sh` | Orchestrator — same phases (VPC peering mode) |
+| `deploy/deploy-full-public.sh` | Orchestrator — same phases (public mode, **Bring your own MongoDB Atlas cluster** over the public internet; demo only) |
 | `deploy/destroy/` | Mode-specific teardown wrappers (`destroy-project-with-*.sh`, `destroy-shared-with-*.sh`, `reap-orphan-security-groups-*.sh`) — see [`deploy/destroy/README.md`](deploy/destroy/README.md) |
 | `deploy/destroy/destroy-project-with-privatelink.sh` / `deploy/destroy/destroy-project-with-vpc-peering.sh` | Project-only teardown wrappers for `envs/ec2` |
 | `deploy/destroy/destroy-shared-with-privatelink.sh` / `deploy/destroy/destroy-shared-with-vpc-peering.sh` | Shared teardown wrappers for `envs/shared` then `envs/network` |
@@ -282,6 +285,16 @@ VPC peering mode — **mutually exclusive** with PrivateLink. Same flag surface.
 source .env
 ./deploy/deploy-full-with-vpc-peering.sh --auto-approve
 ./deploy/deploy-full-with-vpc-peering.sh --auto-approve --skip-network --skip-shared
+```
+
+#### `deploy-full-public.sh`
+
+Public mode — **Bring your own MongoDB Atlas cluster** reached over the public internet. **DEMO ONLY** (requires a `0.0.0.0/0` Atlas IP access list). Exports `NETWORK_MODE=public` + `ATLAS_CLUSTER_SOURCE=byo`; provisions no Atlas cluster (uses `MONGODB_BYO_URI`), no PrivateLink/peering, no EIP/NAT. Mutually exclusive with the other two modes. Same flag surface. Recommended: `EMBEDDINGS_PROVIDER=titan` (no SageMaker endpoint).
+
+```bash
+source .env   # ATLAS_CLUSTER_SOURCE=byo, NETWORK_MODE=public, ALLOW_PUBLIC_ATLAS=1, MONGODB_BYO_URI=...
+./deploy/deploy-full-public.sh --auto-approve
+./deploy/deploy-full-public.sh --auto-approve --skip-docker
 ```
 
 #### `deploy-api.sh`

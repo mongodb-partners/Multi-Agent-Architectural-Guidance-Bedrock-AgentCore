@@ -20,12 +20,14 @@ The product goal: **add specialists by editing markdown config**, not by forking
 
 1. **Skim** [`AGENTS.md`](../AGENTS.md), this file, and [`architecture.md`](architecture.md).
 2. **Configure `.env`** from [`.env.sample`](../.env.sample). Decisions to make up front:
-   - `NETWORK_MODE` — `privatelink` (default) or `peering`. **Mutually exclusive per account.** Switching = destroy + redeploy.
-   - `EMBEDDINGS_PROVIDER` — `voyage` (recommended, requires Marketplace subscription) or `titan` (Bedrock built-in).
+   - `NETWORK_MODE` — `privatelink` (default), `peering`, or `public` (Bring your own MongoDB Atlas cluster over the public internet — demo only). **Mutually exclusive per account.** Switching = destroy + redeploy.
+   - `ATLAS_CLUSTER_SOURCE` — `managed` (default, stack provisions the Atlas cluster) or `byo` (Bring your own existing Atlas cluster; pair with `NETWORK_MODE=public` + `MONGODB_BYO_URI`).
+   - `EMBEDDINGS_PROVIDER` — `voyage` (recommended for managed/private modes, requires Marketplace subscription) or `titan` (Bedrock built-in; **recommended for the public Bring-your-own-cluster setup** — no SageMaker endpoint to provision).
    - `AUTH_MODE` — `iam` (long-lived keys) or `sts` (assumed role / SSO).
 3. **Pick the matching orchestrator** and run it; deploy scripts run centralized preflight checks before applying infrastructure:
    - PrivateLink: `./deploy/deploy-full-with-privatelink.sh --auto-approve`
    - VPC peering: `./deploy/deploy-full-with-vpc-peering.sh --auto-approve`
+   - Public — Bring your own MongoDB Atlas cluster (demo only): `./deploy/deploy-full-public.sh --auto-approve`
 4. **Post-deploy smoke:** runs in `deploy-project.sh` Phase 11 (or `source .env && python3 e2e-smoke/post-deploy-smoke.py` to re-run).
 5. **Open the Streamlit UI** (URL printed by the deploy script), log in via the seeded Cognito user, send a chat.
 7. **Open the Trace Viewer** for that turn (link in the chat inline card), toggle **Show developer details**.
@@ -146,7 +148,7 @@ Code beats docs. When in doubt, read:
 | Strands agent construction | [`api/src/lib/create-strands-agent.ts`](../api/src/lib/create-strands-agent.ts) |
 | Long-term memory | [`api/src/lib/long-term-memory.ts`](../api/src/lib/long-term-memory.ts), [`api/src/lib/vector-retrieval.ts`](../api/src/lib/vector-retrieval.ts) |
 | Trace collector | [`api/src/lib/trace-collector.ts`](../api/src/lib/trace-collector.ts) |
-| Deploy entrypoints | [`deploy/deploy-full-with-privatelink.sh`](../deploy/deploy-full-with-privatelink.sh), [`deploy/deploy-full-with-vpc-peering.sh`](../deploy/deploy-full-with-vpc-peering.sh) |
+| Deploy entrypoints | [`deploy/deploy-full-with-privatelink.sh`](../deploy/deploy-full-with-privatelink.sh), [`deploy/deploy-full-with-vpc-peering.sh`](../deploy/deploy-full-with-vpc-peering.sh), [`deploy/deploy-full-public.sh`](../deploy/deploy-full-public.sh) (Bring your own MongoDB Atlas cluster, demo) |
 | Per-project infra | [`deploy/terraform/envs/ec2/main.tf`](../deploy/terraform/envs/ec2/main.tf) |
 | Shared infra | [`deploy/terraform/envs/shared/main.tf`](../deploy/terraform/envs/shared/main.tf) |
 | Network infra | [`deploy/terraform/envs/network/main.tf`](../deploy/terraform/envs/network/main.tf) |

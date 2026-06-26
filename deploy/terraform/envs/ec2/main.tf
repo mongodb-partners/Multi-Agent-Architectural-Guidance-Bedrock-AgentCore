@@ -32,8 +32,19 @@ locals {
   # the operator must run destroy + redeploy.
   is_privatelink_mode = var.network_mode == "privatelink"
   is_peering_mode     = var.network_mode == "peering"
-  use_kb_privatelink  = local.is_privatelink_mode && var.enable_kb_privatelink
-  use_kb_peering_nlb  = local.is_peering_mode && var.enable_kb_peering
+  # BYO-only public path: MCP runtime reaches Atlas over the public internet
+  # (AgentCore PUBLIC networking). No PL/peering plumbing; KB uses public SRV.
+  is_public_mode     = var.network_mode == "public"
+  use_kb_privatelink = local.is_privatelink_mode && var.enable_kb_privatelink
+  use_kb_peering_nlb = local.is_peering_mode && var.enable_kb_peering
+
+  # AgentCore runtime VPC endpoints (ECR/Logs/S3) exist only to feed a VPC-mode
+  # runtime + EC2 docker pulls. In public mode the runtime is AgentCore PUBLIC
+  # (AWS-managed egress) and the EC2 host pulls over the IGW, so the endpoints
+  # are dead weight — create none and look up none. ponytail: three-way gate
+  # because create/lookup are two halves of one switch; public mode is neither.
+  agentcore_vpce_create = var.create_agentcore_runtime_vpc_endpoints && !local.is_public_mode
+  agentcore_vpce_lookup = !var.create_agentcore_runtime_vpc_endpoints && !local.is_public_mode
 
   # Single switch driving downstream wiring of bedrock-kb endpoint_service_name
   # and kb_endpoint_host. "public-srv" means KB ingestion uses Atlas public
@@ -168,12 +179,16 @@ data "aws_ssm_parameter" "shared_cw_otel_atlas_log_group" {
   name = "${local.ssm_prefix}/cw_otel_atlas_log_group"
 }
 
-data "aws_ssm_parameter" "shared_bedrock_invocation_log_group" {
-  name = "${local.ssm_prefix}/bedrock_invocation_log_group"
-}
-
-data "aws_ssm_parameter" "shared_bedrock_audit_log_group" {
-  name = "${local.ssm_prefix}/bedrock_audit_log_group"
+# Bedrock invocation/audit log-group names are OPTIONAL — shared publishes them
+# as "_empty_" when invocation logging is disabled, and an older or half-applied
+# shared stack may not have published them at all. A plain aws_ssm_parameter data
+# source hard-errors on a missing key, so read the prefix with by_path (never
+# errors on absence) and look the two up with an "_empty_" default below.
+# ponytail: tolerant read beats coupling ec2 to shared's apply order — these
+# values only feed passthrough outputs anyway.
+data "aws_ssm_parameters_by_path" "shared_bedrock" {
+  path      = local.ssm_prefix
+  recursive = false
 }
 
 data "aws_vpc" "shared" {
@@ -222,8 +237,12 @@ locals {
   shared_cw_otel_log_group       = nonsensitive(data.aws_ssm_parameter.shared_cw_otel_log_group.value)
   shared_cw_otel_atlas_log_group = nonsensitive(data.aws_ssm_parameter.shared_cw_otel_atlas_log_group.value)
 
-  _bedrock_invocation_log_group_raw   = nonsensitive(data.aws_ssm_parameter.shared_bedrock_invocation_log_group.value)
-  _bedrock_audit_log_group_raw        = nonsensitive(data.aws_ssm_parameter.shared_bedrock_audit_log_group.value)
+  _bedrock_ssm_map = zipmap(
+    data.aws_ssm_parameters_by_path.shared_bedrock.names,
+    nonsensitive(data.aws_ssm_parameters_by_path.shared_bedrock.values)
+  )
+  _bedrock_invocation_log_group_raw   = lookup(local._bedrock_ssm_map, "${local.ssm_prefix}/bedrock_invocation_log_group", "_empty_")
+  _bedrock_audit_log_group_raw        = lookup(local._bedrock_ssm_map, "${local.ssm_prefix}/bedrock_audit_log_group", "_empty_")
   shared_bedrock_invocation_log_group = local._bedrock_invocation_log_group_raw == "_empty_" ? "" : local._bedrock_invocation_log_group_raw
   shared_bedrock_audit_log_group      = local._bedrock_audit_log_group_raw == "_empty_" ? "" : local._bedrock_audit_log_group_raw
 
@@ -255,7 +274,7 @@ module "mongodb_atlas" {
   source = "../../modules/mongodb-atlas"
 
   atlas_project_id        = var.atlas_project_id
-  cluster_name            = "${var.project_name}-${var.environment}"
+  cluster_name            = var.byo_cluster_name != "" ? var.byo_cluster_name : "${var.project_name}-${var.environment}"
   db_name                 = var.atlas_db_name
   db_username             = var.atlas_db_user
   db_password             = var.atlas_db_password
@@ -267,6 +286,12 @@ module "mongodb_atlas" {
   # list to it instead of 0.0.0.0/0 (privatelink mode). Omitting this would
   # leave the cluster open to the public internet, failing the security UAT.
   operator_ip_cidr = var.operator_ip_cidr
+
+  # BYO passthrough: when cluster_source='byo' the module creates nothing in
+  # Atlas and proxies these straight to its outputs.
+  cluster_source        = var.cluster_source
+  byo_connection_string = var.byo_connection_string
+  byo_srv_host          = var.byo_srv_host
 }
 
 # Atlas Search indexes that belong to application data (`products`,
@@ -679,7 +704,7 @@ resource "aws_security_group" "agentcore_runtime_vpce" {
 }
 
 resource "aws_vpc_endpoint" "agentcore_runtime_ecr_api" {
-  count = var.create_agentcore_runtime_vpc_endpoints ? 1 : 0
+  count = local.agentcore_vpce_create ? 1 : 0
 
   vpc_id              = local.shared_vpc_id
   service_name        = "com.amazonaws.${var.aws_region}.ecr.api"
@@ -694,7 +719,7 @@ resource "aws_vpc_endpoint" "agentcore_runtime_ecr_api" {
 }
 
 resource "aws_vpc_endpoint" "agentcore_runtime_ecr_dkr" {
-  count = var.create_agentcore_runtime_vpc_endpoints ? 1 : 0
+  count = local.agentcore_vpce_create ? 1 : 0
 
   vpc_id              = local.shared_vpc_id
   service_name        = "com.amazonaws.${var.aws_region}.ecr.dkr"
@@ -709,7 +734,7 @@ resource "aws_vpc_endpoint" "agentcore_runtime_ecr_dkr" {
 }
 
 resource "aws_vpc_endpoint" "agentcore_runtime_logs" {
-  count = var.create_agentcore_runtime_vpc_endpoints ? 1 : 0
+  count = local.agentcore_vpce_create ? 1 : 0
 
   vpc_id              = local.shared_vpc_id
   service_name        = "com.amazonaws.${var.aws_region}.logs"
@@ -724,7 +749,7 @@ resource "aws_vpc_endpoint" "agentcore_runtime_logs" {
 }
 
 resource "aws_vpc_endpoint" "agentcore_runtime_s3" {
-  count = var.create_agentcore_runtime_vpc_endpoints ? 1 : 0
+  count = local.agentcore_vpce_create ? 1 : 0
 
   vpc_id            = local.shared_vpc_id
   service_name      = "com.amazonaws.${var.aws_region}.s3"
@@ -737,21 +762,21 @@ resource "aws_vpc_endpoint" "agentcore_runtime_s3" {
 }
 
 data "aws_vpc_endpoint" "existing_agentcore_runtime_ecr_api" {
-  count = var.create_agentcore_runtime_vpc_endpoints ? 0 : 1
+  count = local.agentcore_vpce_lookup ? 1 : 0
 
   vpc_id       = local.shared_vpc_id
   service_name = "com.amazonaws.${var.aws_region}.ecr.api"
 }
 
 data "aws_vpc_endpoint" "existing_agentcore_runtime_ecr_dkr" {
-  count = var.create_agentcore_runtime_vpc_endpoints ? 0 : 1
+  count = local.agentcore_vpce_lookup ? 1 : 0
 
   vpc_id       = local.shared_vpc_id
   service_name = "com.amazonaws.${var.aws_region}.ecr.dkr"
 }
 
 data "aws_vpc_endpoint" "existing_agentcore_runtime_logs" {
-  count = var.create_agentcore_runtime_vpc_endpoints ? 0 : 1
+  count = local.agentcore_vpce_lookup ? 1 : 0
 
   vpc_id       = local.shared_vpc_id
   service_name = "com.amazonaws.${var.aws_region}.logs"
@@ -760,14 +785,14 @@ data "aws_vpc_endpoint" "existing_agentcore_runtime_logs" {
 # Static for_each keys — endpoint/source SG IDs can be unknown at plan time when
 # module.ec2 is being created or replaced; resolve them in the provisioner instead.
 locals {
-  existing_agentcore_runtime_vpce_access_rules = var.create_agentcore_runtime_vpc_endpoints ? {} : {
+  existing_agentcore_runtime_vpce_access_rules = local.agentcore_vpce_lookup ? {
     "ecr-api-ec2" = { endpoint = "ecr_api", source = "ec2" }
     "ecr-api-mcp" = { endpoint = "ecr_api", source = "mcp" }
     "ecr-dkr-ec2" = { endpoint = "ecr_dkr", source = "ec2" }
     "ecr-dkr-mcp" = { endpoint = "ecr_dkr", source = "mcp" }
     "logs-ec2"    = { endpoint = "logs", source = "ec2" }
     "logs-mcp"    = { endpoint = "logs", source = "mcp" }
-  }
+  } : {}
 }
 
 resource "null_resource" "existing_agentcore_vpce_access" {
@@ -891,7 +916,13 @@ locals {
     # Sentinel — caught by the precondition. Picked to be obviously broken.
     "PRIVATELINK_URI_UNAVAILABLE"
   )
-  mcp_mongodb_uri = local.is_peering_mode ? local._mcp_uri_peering : local._mcp_uri_privatelink
+  # Public BYO: the runtime dials the operator's SRV URI directly over the
+  # public internet — no -pl-/-pri. private host involved.
+  mcp_mongodb_uri = (
+    local.is_public_mode ? module.mongodb_atlas.connection_string :
+    local.is_peering_mode ? local._mcp_uri_peering :
+    local._mcp_uri_privatelink
+  )
 }
 
 # Privacy + latency guardrail — fail-loud if runtime Mongo ever lands on SRV or
@@ -900,6 +931,12 @@ locals {
 check "mcp_uri_is_direct_private_runtime_uri" {
   assert {
     condition = (
+      # Public BYO (demo): allow an SRV URI, but only behind explicit opt-in.
+      local.is_public_mode ?
+      (
+        var.allow_public_atlas
+        && startswith(local.mcp_mongodb_uri, "mongodb+srv://")
+      ) :
       local.is_peering_mode ?
       (
         local.mcp_mongodb_uri != "PEERING_URI_UNAVAILABLE"
@@ -912,18 +949,30 @@ check "mcp_uri_is_direct_private_runtime_uri" {
         && can(regex("-pl-", local.mcp_mongodb_uri))
       )
     )
-    error_message = "Runtime MONGODB_URI must be a direct multi-host private URI. Peering requires module.mongodb_atlas.peering_connection_string with '-pri.' hosts; PrivateLink requires module.mongodb_atlas.privatelink_connection_string with '-pl-' hosts. SRV/public fallback is intentionally disabled."
+    error_message = "Runtime MONGODB_URI invalid for the active network_mode. public: requires var.allow_public_atlas=true and a 'mongodb+srv://' URI; peering: module.mongodb_atlas.peering_connection_string with '-pri.' hosts; privatelink: module.mongodb_atlas.privatelink_connection_string with '-pl-' hosts."
+  }
+}
+
+# network_mode='public' is BYO-only — the managed cluster default has never
+# opened Atlas to the public internet and we don't regress that.
+check "managed_plus_public_forbidden" {
+  assert {
+    condition     = !local.is_public_mode || var.cluster_source == "byo"
+    error_message = "network_mode='public' is only allowed with cluster_source='byo'. The managed Atlas cluster must use 'privatelink' or 'peering'."
   }
 }
 
 module "mongodb_mcp_runtime" {
   source = "../../modules/agentcore-agent-runtime"
 
-  aws_region             = var.aws_region
-  project_name           = var.project_name
-  environment            = var.environment
-  account_id             = data.aws_caller_identity.current.account_id
-  network_mode           = "VPC"
+  aws_region   = var.aws_region
+  project_name = var.project_name
+  environment  = var.environment
+  account_id   = data.aws_caller_identity.current.account_id
+  # Public BYO: run the MCP runtime in AgentCore PUBLIC networking so it reaches
+  # the operator's cluster over the public internet (no NAT, no VPCE). The
+  # subnet/SG args below are ignored by the module when network_mode=PUBLIC.
+  network_mode           = local.is_public_mode ? "PUBLIC" : "VPC"
   vpc_subnet_ids         = local.shared_private_subnet_ids
   vpc_security_group_ids = [aws_security_group.mongodb_mcp_runtime.id]
   runtime_name           = "${var.project_name}_mongodb_mcp_${var.environment}"

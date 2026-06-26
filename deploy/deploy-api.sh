@@ -170,7 +170,7 @@ ATLAS_PRIVATELINK_ENDPOINT_ID="$(tf_raw atlas_privatelink_endpoint_id)"
 NETWORK_MODE="$(tf_raw network_mode)"
 NETWORK_MODE="${NETWORK_MODE:-${NETWORK_MODE_ENV:-${NETWORK_MODE:-privatelink}}}"
 case "$NETWORK_MODE" in
-  privatelink|peering) ;;
+  privatelink|peering|public) ;;
   *) err "Invalid network_mode='${NETWORK_MODE}' from terraform output" ;;
 esac
 ok "Network mode: ${NETWORK_MODE}"
@@ -255,6 +255,13 @@ PY
   else
     err "Could not compute Atlas awsPrivateLink URI for the API"
   fi
+elif [[ "$NETWORK_MODE" == "public" ]]; then
+  # ── public mode (BYO) ──────────────────────────────────────────────────────
+  # No private URI to compute — the API uses the BYO public SRV URI as-is.
+  # MONGODB_URI already holds it (atlas_connection_string output or constructed
+  # from host above). Mirrors deploy-project.sh Phase 5c public branch.
+  log "Public mode: using BYO public SRV URI for the EC2 API (no private normalization)"
+  ok "API MongoDB URI left as public SRV connection string"
 else
   # ── peering mode ───────────────────────────────────────────────────────────
   log "Computing Atlas peering URI for the EC2 API..."
