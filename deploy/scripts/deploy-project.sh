@@ -1075,6 +1075,49 @@ fi
 MCP_RUNTIME_REPO_NAME="${PROJECT_NAME}-mongodb-mcp-${ENVIRONMENT}"
 _MCP_RUNTIME_ID_PRE=$(tfo -raw mongodb_mcp_runtime_id 2>/dev/null || echo "")
 
+# ── Pre-apply: adopt an orphaned Atlas vector search index ───────────────────
+# A prior apply can create the vector index (POST to the Atlas Admin API
+# succeeds, the index reaches READY) but die before persisting the resource to
+# Terraform state. The next run then re-POSTs the same index name and Atlas
+# rejects it with HTTP 409 ATLAS_SEARCH_DUPLICATE_INDEX. This is especially
+# likely on a BYO cluster, which persists across deploys. If the index already
+# exists in Atlas but not in our state, import it so the plan adopts it instead
+# of recreating a duplicate. Best-effort and idempotent (managed + BYO): any
+# failure here is non-fatal — the plan/apply below surfaces the real error.
+if ! terraform state list 2>/dev/null | grep -qx 'module.bedrock_kb.mongodbatlas_search_index.vector'; then
+  _VEC_CLUSTER="${MONGODB_BYO_CLUSTER_NAME:-${PROJECT_NAME}-${ENVIRONMENT}}"
+  _VEC_COLL="troubleshooting_docs"     # modules/bedrock-kb default atlas_collection
+  _VEC_NAME="troubleshooting-vector-index"  # modules/bedrock-kb default atlas_vector_index
+  if [[ -n "${MONGODB_ATLAS_PUBLIC_KEY:-}" && -n "${MONGODB_ATLAS_PRIVATE_KEY:-}" && -n "${TF_VAR_atlas_project_id:-}" ]]; then
+    _VEC_ID=$(curl -sS --user "${MONGODB_ATLAS_PUBLIC_KEY}:${MONGODB_ATLAS_PRIVATE_KEY}" --digest \
+      -H "Accept: application/vnd.atlas.2024-05-30+json" \
+      "https://cloud.mongodb.com/api/atlas/v2/groups/${TF_VAR_atlas_project_id}/clusters/${_VEC_CLUSTER}/search/indexes/${ATLAS_DB_NAME}/${_VEC_COLL}" 2>/dev/null \
+      | python3 -c 'import json,sys
+try:
+    d=json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+for it in (d if isinstance(d,list) else []):
+    if it.get("name")==sys.argv[1]:
+        print(it.get("indexID",""))
+        break
+' "$_VEC_NAME" 2>/dev/null || echo "")
+    if [[ -n "$_VEC_ID" ]]; then
+      log "Adopting pre-existing Atlas vector index '${_VEC_NAME}' (${_VEC_ID}) into Terraform state…"
+      deploy_diag_checkpoint "terraform import start: module.bedrock_kb.mongodbatlas_search_index.vector ${TF_VAR_atlas_project_id}--${_VEC_CLUSTER}--${_VEC_ID}"
+      if terraform import -input=false \
+        'module.bedrock_kb.mongodbatlas_search_index.vector' \
+        "${TF_VAR_atlas_project_id}--${_VEC_CLUSTER}--${_VEC_ID}" >/dev/null 2>&1; then
+        ok "Imported existing vector index — plan will adopt it, not recreate"
+      else
+        warn "terraform import of vector index failed; if apply hits HTTP 409 ATLAS_SEARCH_DUPLICATE_INDEX, import it manually:"
+        warn "  terraform import 'module.bedrock_kb.mongodbatlas_search_index.vector' '${TF_VAR_atlas_project_id}--${_VEC_CLUSTER}--${_VEC_ID}'"
+      fi
+    fi
+  fi
+  unset _VEC_CLUSTER _VEC_COLL _VEC_NAME _VEC_ID
+fi
+
 sep
 log "Running terraform plan..."
 deploy_diag_checkpoint "terraform plan start: terraform plan -input=false -out=${TF_DIR}/.tfplan"
