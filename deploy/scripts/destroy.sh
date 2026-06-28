@@ -367,15 +367,30 @@ SHARED_VPC_NAME="${SHARED_VPC_NAME:-shared-network}"
 SHARED_RESOURCE_PREFIX="${SHARED_RESOURCE_PREFIX:-${TF_VAR_shared_resource_prefix:-multiagent}}"
 NETWORK_MODE="${NETWORK_MODE:-privatelink}"
 ATLAS_PEERING_CIDR="${ATLAS_PEERING_CIDR:-192.168.248.0/21}"
+ATLAS_CLUSTER_SOURCE="${ATLAS_CLUSTER_SOURCE:-managed}"
 case "$NETWORK_MODE" in
-  privatelink|peering) ;;
-  *) err "Invalid NETWORK_MODE='${NETWORK_MODE}' — must be 'privatelink' or 'peering'" ;;
+  privatelink|peering|public) ;;
+  *) err "Invalid NETWORK_MODE='${NETWORK_MODE}' — must be 'privatelink', 'peering', or 'public'" ;;
 esac
+# public mode is BYO-only: no managed Atlas cluster is provisioned.
+[[ "$NETWORK_MODE" == "public" ]] && ATLAS_CLUSTER_SOURCE="byo"
 
 case "$NETWORK_MODE" in
   peering) _ORPHAN_SG_REAPER_DEFAULT="deploy/destroy/reap-orphan-security-groups-vpc-peering.sh" ;;
   privatelink) _ORPHAN_SG_REAPER_DEFAULT="deploy/destroy/reap-orphan-security-groups-privatelink.sh" ;;
+  public) _ORPHAN_SG_REAPER_DEFAULT="" ;;  # PUBLIC AgentCore egress = no VPC-attached agentic_ai ENIs, no reaper
 esac
+
+# BYO cluster passthrough (network_mode=public / cluster_source=byo). Mirrors
+# deploy-project.sh: byo_* satisfy the same envs/ec2 variables the deploy used.
+# Empty defaults are harmless in managed mode (the vars default to "").
+export TF_VAR_cluster_source="$ATLAS_CLUSTER_SOURCE"
+if [[ "$ATLAS_CLUSTER_SOURCE" == "byo" ]]; then
+  export TF_VAR_byo_connection_string="${MONGODB_BYO_URI:-}"
+  export TF_VAR_byo_srv_host="${MONGODB_BYO_SRV_HOST:-}"
+  export TF_VAR_byo_cluster_name="${MONGODB_BYO_CLUSTER_NAME:-}"
+fi
+[[ "$NETWORK_MODE" == "public" ]] && export TF_VAR_allow_public_atlas=true
 ORPHAN_SG_REAPER_SCRIPT="${ORPHAN_SG_REAPER_SCRIPT:-$_ORPHAN_SG_REAPER_DEFAULT}"
 ORPHAN_SG_REAPER_CMD="$ORPHAN_SG_REAPER_SCRIPT"
 case "$ORPHAN_SG_REAPER_CMD" in
@@ -405,14 +420,24 @@ case "$MODE" in
     warn "  • S3 objects under s3://$SHARED_BUCKET/kb-docs/"
     ;;
   ec2)
-    warn "  • Atlas M10 cluster + DB user"
-    warn "  • EC2 instance + Elastic IP + ECR repos + Cognito pool"
-    warn "  • mongodb-mcp AgentCore Runtime + AgentCore Memory + AgentCore Gateway"
-    warn "  • Per-cluster Route 53 private zone (atlas-privatelink-dns)"
-    warn "  • Bedrock Knowledge Base (Voyage SageMaker now lives in envs/shared)"
-    warn "  • CloudWatch GenAI Observability (Transaction Search + AgentCore log delivery)"
-    warn "  (Shared VPC + Atlas PrivateLink VPCE live in envs/network — not touched.)"
-    warn "  (Shared SageMaker + log groups + dashboards live in envs/shared — not touched.)"
+    if [[ "$NETWORK_MODE" == "public" ]]; then
+      warn "  • EC2 instance (auto-assigned public IP, NO Elastic IP) + ECR repos + Cognito pool"
+      warn "  • mongodb-mcp AgentCore Runtime (PUBLIC egress) + AgentCore Memory + Gateway"
+      warn "  • Bedrock Knowledge Base (ingested over public Atlas SRV)"
+      warn "  • CloudWatch GenAI Observability (Transaction Search + AgentCore log delivery)"
+      warn "  (BYO Atlas cluster is NOT touched — you own it. No managed cluster, EIP,"
+      warn "   PrivateLink VPCE, peering, or atlas-privatelink-dns zone exist in public mode.)"
+      warn "  (Shared SageMaker + log groups + dashboards live in envs/shared — not touched.)"
+    else
+      warn "  • Atlas M10 cluster + DB user"
+      warn "  • EC2 instance + Elastic IP + ECR repos + Cognito pool"
+      warn "  • mongodb-mcp AgentCore Runtime + AgentCore Memory + AgentCore Gateway"
+      warn "  • Per-cluster Route 53 private zone (atlas-privatelink-dns)"
+      warn "  • Bedrock Knowledge Base (Voyage SageMaker now lives in envs/shared)"
+      warn "  • CloudWatch GenAI Observability (Transaction Search + AgentCore log delivery)"
+      warn "  (Shared VPC + Atlas PrivateLink VPCE live in envs/network — not touched.)"
+      warn "  (Shared SageMaker + log groups + dashboards live in envs/shared — not touched.)"
+    fi
     ;;
   shared)
     warn "  • Voyage SageMaker endpoint + endpoint config + model + IAM exec role"
@@ -433,6 +458,8 @@ case "$MODE" in
     if [[ "$NETWORK_MODE" == "privatelink" ]]; then
       warn "  • Atlas Interface VPCE + Atlas-side endpoint binding"
       warn "  • Atlas-PL security group"
+    elif [[ "$NETWORK_MODE" == "public" ]]; then
+      warn "  • (No Atlas connectivity primitive — VPCE/peering are count-gated to 0 in public mode.)"
     else
       warn "  • AWS-side VPC peering accepter + route entries (main + public RT)"
       warn "  • Atlas-side mongodbatlas_network_peering"
@@ -494,6 +521,8 @@ atlas_project_id   = "${TF_VAR_atlas_project_id}"
 atlas_db_user      = "${ATLAS_DB_USER}"
 atlas_db_name      = "${ATLAS_DB_NAME}"
 network_mode       = "${NETWORK_MODE}"
+cluster_source     = "${ATLAS_CLUSTER_SOURCE}"
+allow_public_atlas = ${TF_VAR_allow_public_atlas:-false}
 allow_network_mode_mismatch_on_destroy = true
 atlas_peering_cidr = "${ATLAS_PEERING_CIDR}"
 kb_docs_bucket_name = "${KB_DOCS_BUCKET:-}"
@@ -778,6 +807,8 @@ if [[ "$MODE" == "network" ]]; then
   if [[ "$NETWORK_MODE" == "privatelink" ]]; then
     warn "  Atlas endpoint service is intentionally NOT destroyed (shared resource;"
     warn "  see modules/atlas-privatelink/scripts/discover-or-create-pl.sh)."
+  elif [[ "$NETWORK_MODE" == "public" ]]; then
+    warn "  No Atlas connectivity primitive in public mode — nothing Atlas-side to verify."
   else
     # Peering-side residue: VPC peering connection, peering SSM keys, container.
     _PEERING_LEFTOVER=$(aws ec2 describe-vpc-peering-connections \

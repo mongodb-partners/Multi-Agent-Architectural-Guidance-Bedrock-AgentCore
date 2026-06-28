@@ -2,7 +2,7 @@
 
 Mode-specific wrappers for tearing down Terraform stacks provisioned by [`deploy/`](../). Each wrapper hard-sets `NETWORK_MODE` and delegates to the low-level engine [`deploy/scripts/destroy.sh`](../scripts/destroy.sh).
 
-**PrivateLink and VPC peering are mutually exclusive per account+region.** Use the script family that matches how you deployed (`deploy-full-with-privatelink.sh` vs `deploy-full-with-vpc-peering.sh`).
+**PrivateLink, VPC peering, and public (BYO Atlas) are mutually exclusive per account+region.** Use the script family that matches how you deployed (`deploy-full-with-privatelink.sh` / `deploy-full-with-vpc-peering.sh` / `deploy-full-public.sh`).
 
 **Canonical detail:** [`docs/deployment-guide.md` §6](../../docs/deployment-guide.md#6-tearing-it-down) · [`docs/reference/deploy-scripts.md` §4](../../docs/reference/deploy-scripts.md#4-teardown) · [Known pitfall: AgentCore ENI delay](../../docs/status/debugging.md)
 
@@ -14,8 +14,10 @@ Mode-specific wrappers for tearing down Terraform stacks provisioned by [`deploy
 |---|---|---|
 | `destroy-project-with-privatelink.sh` | Remove **one project** (PrivateLink) | `envs/ec2` |
 | `destroy-project-with-vpc-peering.sh` | Remove **one project** (VPC peering) | `envs/ec2` |
+| `destroy-project-with-public.sh` | Remove **one project** (public / BYO Atlas) | `envs/ec2` |
 | `destroy-shared-with-privatelink.sh` | Remove **shared singletons** after all projects are gone (PrivateLink) | `envs/shared` → `envs/network` |
 | `destroy-shared-with-vpc-peering.sh` | Remove **shared singletons** after all projects are gone (VPC peering) | `envs/shared` → `envs/network` |
+| `destroy-shared-with-public.sh` | Remove **shared singletons** after all projects are gone (public / BYO Atlas) | `envs/shared` → `envs/network` |
 | `reap-orphan-security-groups-privatelink.sh` | **Deferred** cleanup — run **~1 hour after** project destroy, once AWS releases AgentCore `agentic_ai` ENIs from deleted runtimes (PrivateLink) | n/a (EC2 API) |
 | `reap-orphan-security-groups-vpc-peering.sh` | **Deferred** cleanup — run **~1 hour after** project destroy, once AWS releases AgentCore `agentic_ai` ENIs from deleted runtimes (VPC peering) | n/a (EC2 API) |
 
@@ -41,11 +43,38 @@ source .env   # or pass --env-file
 
 - **Project** — AgentCore runtimes + Gateway, EC2, Atlas cluster, Cognito, ECR, KB, Memory, per-project DNS, etc. Does **not** touch the shared VPC, Atlas connectivity primitives, Voyage SageMaker, or shared log groups.
 - **Shared** — Voyage SageMaker endpoint, CloudWatch log groups, dashboards, Bedrock invocation logging (`envs/shared`).
-- **Network** — Shared VPC, Atlas PrivateLink VPCE or VPC peering, SSM canaries (`envs/network`).
+- **Network** — Shared VPC, Atlas PrivateLink VPCE or VPC peering, SSM canaries (`envs/network`). In **public** mode there is no Atlas connectivity primitive (VPCE/peering are count-gated to 0), so `envs/network` removes only the shared VPC + SSM canaries.
+
+---
+
+## Public mode (Bring-your-own Atlas)
+
+Same two-step order, with the `*-public.sh` wrappers:
+
+```bash
+source .env
+
+# 1. Per-project
+./deploy/destroy/destroy-project-with-public.sh --auto-approve
+
+# 2. Shared + network (after every per-project ec2 stack in the region is gone)
+./deploy/destroy/destroy-shared-with-public.sh --auto-approve
+```
+
+What's different vs the private modes:
+
+- **Your BYO Atlas cluster is never touched** — Terraform never created it. Teardown removes only AWS resources (EC2, ECR, Cognito, AgentCore runtimes/Gateway/Memory, KB, etc.).
+- **No orphan-SG reaper.** AgentCore runs PUBLIC egress (no VPC attachment), so there are no service-managed `agentic_ai` ENIs to wait on. `envs/network` destroys cleanly in one pass — there is no deferred reaper step for public mode (the section below applies only to PrivateLink / VPC peering).
+- No Elastic IP, PrivateLink VPCE, peering, or `atlas-privatelink-dns` zone exist in this mode, so none are torn down.
+
+The wrappers hard-set `NETWORK_MODE=public` and `ATLAS_CLUSTER_SOURCE=byo` and refuse to run if the SSM `network_mode` canary says `privatelink`/`peering` (unless `--force`).
 
 ---
 
 ## Deferred security-group cleanup (run after a delay)
+
+> Applies to **PrivateLink / VPC peering only**. Public (BYO) mode has no AgentCore ENIs to reap — skip this section.
+
 
 AgentCore keeps service-managed ENIs (`interface-type=agentic_ai`) attached to runtime security groups for a while after runtimes are destroyed. AWS does not allow operators to detach or delete those ENIs directly.
 
@@ -144,6 +173,10 @@ Normal teardown should use the mode-specific wrappers in this directory so `NETW
 ## Quick decision tree
 
 ```
+Deployed with deploy-full-public.sh (BYO Atlas)?
+  → destroy-project-with-public.sh
+  → destroy-shared-with-public.sh   (no reaper step — public mode has no AgentCore ENIs)
+
 Removing one project only?
   → destroy-project-with-<your-mode>.sh
 

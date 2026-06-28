@@ -569,7 +569,13 @@ The shared VPC, Atlas PrivateLink VPCE, and the Atlas-side endpoint binding are 
 # VPC peering
 ./deploy/destroy/destroy-project-with-vpc-peering.sh --auto-approve  # per-project (run once per envs/ec2 stack)
 ./deploy/destroy/destroy-shared-with-vpc-peering.sh --auto-approve   # envs/shared, then envs/network
+
+# Public — Bring your own MongoDB Atlas cluster
+./deploy/destroy/destroy-project-with-public.sh --auto-approve       # per-project (run once per envs/ec2 stack)
+./deploy/destroy/destroy-shared-with-public.sh --auto-approve        # envs/shared, then envs/network
 ```
+
+**Public (BYO) mode notes:** your own Atlas cluster is never touched — teardown removes only AWS resources. There is **no orphan-SG reaper step** in public mode: AgentCore runs PUBLIC egress (no VPC attachment), so no service-managed `agentic_ai` ENIs pin the runtime security groups, and `envs/network` (which holds only the shared VPC — no Atlas VPCE/peering in this mode) destroys in one pass.
 
 Running these in the wrong order (shared/network before project) leaves the per-project EC2 stack pointing at deleted SSM keys; the next `deploy-project.sh` (or any `terraform plan` in `envs/ec2`) fails immediately with `ParameterNotFound`. The shared destroy wrappers enforce this with an EC2 instance probe (any terraform-managed instance tagged `Environment=<ENVIRONMENT>`) unless `--force` is supplied.
 

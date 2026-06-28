@@ -19,8 +19,10 @@ Every shell script under [`deploy/`](../../deploy/), [`deploy/destroy/`](../../d
 | [`deploy/deploy-agents.sh`](../../deploy/deploy-agents.sh) | AgentCore | both | yes | Targeted apply of `acr_specialists` + `acr_orchestrator` + code artifact |
 | [`deploy/destroy/destroy-project-with-privatelink.sh`](../../deploy/destroy/destroy-project-with-privatelink.sh) | Teardown | PrivateLink | yes | Project-only `envs/ec2` destroy |
 | [`deploy/destroy/destroy-project-with-vpc-peering.sh`](../../deploy/destroy/destroy-project-with-vpc-peering.sh) | Teardown | Peering | yes | Project-only `envs/ec2` destroy |
+| [`deploy/destroy/destroy-project-with-public.sh`](../../deploy/destroy/destroy-project-with-public.sh) | Teardown | Public (BYO Atlas) | yes | Project-only `envs/ec2` destroy |
 | [`deploy/destroy/destroy-shared-with-privatelink.sh`](../../deploy/destroy/destroy-shared-with-privatelink.sh) | Teardown | PrivateLink | yes | Shared + network singleton destroy |
 | [`deploy/destroy/destroy-shared-with-vpc-peering.sh`](../../deploy/destroy/destroy-shared-with-vpc-peering.sh) | Teardown | Peering | yes | Shared + network singleton destroy |
+| [`deploy/destroy/destroy-shared-with-public.sh`](../../deploy/destroy/destroy-shared-with-public.sh) | Teardown | Public (BYO Atlas) | yes | Shared + network singleton destroy |
 | [`deploy/destroy/reap-orphan-security-groups-privatelink.sh`](../../deploy/destroy/reap-orphan-security-groups-privatelink.sh) | Deferred teardown cleanup | PrivateLink | yes | AgentCore runtime security groups left behind by service-managed ENIs |
 | [`deploy/destroy/reap-orphan-security-groups-vpc-peering.sh`](../../deploy/destroy/reap-orphan-security-groups-vpc-peering.sh) | Deferred teardown cleanup | Peering | yes | AgentCore runtime security groups left behind by service-managed ENIs |
 | [`deploy/scripts/destroy.sh`](../../deploy/scripts/destroy.sh) | Teardown engine | both | yes | `terraform destroy` for one env |
@@ -228,15 +230,19 @@ All mode-specific wrappers live under [`deploy/destroy/`](../../deploy/destroy/)
 ### Mode-specific destroy wrappers
 Use these for normal teardown. Project scripts delete only the per-project `envs/ec2` stack. Shared scripts delete the singleton `envs/shared` stack and then the `envs/network` stack, and refuse to run while terraform-managed EC2 instances tagged `Environment=<ENVIRONMENT>` still exist unless `--force` is supplied. Each wrapper hard-sets `NETWORK_MODE` and delegates to [`destroy.sh`](#destroysh).
 
-**Mode canary behavior:** PrivateLink wrappers **error** when SSM `network_mode` disagrees (unless `--force`). VPC peering wrappers **warn** and continue — they always destroy with `NETWORK_MODE=peering`.
+**Mode canary behavior:** PrivateLink and public wrappers **error** when SSM `network_mode` disagrees (unless `--force`). VPC peering wrappers **warn** and continue — they always destroy with `NETWORK_MODE=peering`.
+
+**Public (BYO Atlas) mode:** the `*-public.sh` wrappers hard-set `NETWORK_MODE=public` + `ATLAS_CLUSTER_SOURCE=byo`. Your own Atlas cluster is never touched (Terraform never created it). There is **no orphan-SG reaper** — AgentCore runs PUBLIC egress (no VPC attachment), so no `agentic_ai` ENIs pin the runtime SGs and `envs/network` (shared VPC only, no Atlas VPCE/peering) destroys in one pass.
 
 **Usage:**
 ```bash
 ./deploy/destroy/destroy-project-with-privatelink.sh [--auto-approve] [--env-file <path>] [--force]
 ./deploy/destroy/destroy-project-with-vpc-peering.sh [--auto-approve] [--env-file <path>] [--force]
+./deploy/destroy/destroy-project-with-public.sh [--auto-approve] [--env-file <path>] [--force]
 
 ./deploy/destroy/destroy-shared-with-privatelink.sh [--auto-approve] [--env-file <path>] [--with-bootstrap] [--force]
 ./deploy/destroy/destroy-shared-with-vpc-peering.sh [--auto-approve] [--env-file <path>] [--with-bootstrap] [--force]
+./deploy/destroy/destroy-shared-with-public.sh [--auto-approve] [--env-file <path>] [--with-bootstrap] [--force]
 ```
 
 **Ordering — REQUIRED:** project wrapper first, then shared wrapper. Per-project EC2 envs read SSM published by shared + network; destroying shared/network first leaves orphan refs.
