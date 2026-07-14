@@ -248,3 +248,5 @@ Desktop.ini
 .idea/
 .vscode/
 .claude/
+graphify-out/
+.codegraph/

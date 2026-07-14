@@ -69,10 +69,10 @@ The stack supports two **mutually exclusive per account** connectivity modes for
 
 | Variable | Default | Effect | Required when | Reader |
 |---|---|---|---|---|
-| `MONGODB_ATLAS_PUBLIC_KEY` | — | Atlas API key (Atlas Terraform provider) | All deploys touching Atlas | Atlas provider |
-| `MONGODB_ATLAS_PRIVATE_KEY` | — | Atlas API key secret | All deploys touching Atlas | Atlas provider |
-| `TF_VAR_mongodb_atlas_org_id` | — | Atlas org | All deploys touching Atlas | Atlas provider |
-| `TF_VAR_mongodb_atlas_project_id` | — | Atlas project | All deploys touching Atlas | Atlas provider |
+| `MONGODB_ATLAS_PUBLIC_KEY` | — | Atlas API key (Atlas Terraform provider) | Managed-cluster deploys (privatelink/peering/local). **NOT required in public + BYO mode** — see note below | Atlas provider |
+| `MONGODB_ATLAS_PRIVATE_KEY` | — | Atlas API key secret | Managed-cluster deploys (privatelink/peering/local). **NOT required in public + BYO mode** — see note below | Atlas provider |
+| `TF_VAR_mongodb_atlas_org_id` | — | Atlas org | Managed-cluster deploys. **Optional in public + BYO mode** | Atlas provider |
+| `TF_VAR_mongodb_atlas_project_id` | — | Atlas project | Managed-cluster deploys. **Optional in public + BYO mode** | Atlas provider |
 | `TF_VAR_atlas_project_id` | mirrors `TF_VAR_mongodb_atlas_project_id` | Module-side alias | Same | [`modules/mongodb-atlas/`](../../deploy/terraform/modules/mongodb-atlas/) |
 | `ATLAS_DB_USER` | `${PROJECT_NAME//-/_}_${ENVIRONMENT}_user` (derived) | Atlas DB user | Always | `deploy-project.sh`, seeding scripts |
 | `ATLAS_DB_NAME` | `${PROJECT_NAME//-/_}_${ENVIRONMENT}` (derived) | Atlas DB name (Mongo identifiers can't contain `-`) | Always | `deploy-project.sh`, seeding scripts |
@@ -89,6 +89,18 @@ The stack supports two **mutually exclusive per account** connectivity modes for
 | `MONGODB_MAX_LIMIT` | `200` | Cap on `mongodb_query` result size | Always | MCP runtime |
 | `MONGODB_PUBLIC_COLLECTIONS` | — (all collections allowed) | Comma-separated allow-list of collection names the MCP runtime is permitted to read | Tenant isolation | `api/src/adapters/mongodb-mcp-client.ts` |
 | `MCP_LOG_RAW_ARGS` | `false` | Disable PII redaction of MCP tool args in logs | Debug only — leave OFF in prod | MCP runtime |
+
+> **Atlas API keys are NOT required for public deployment with a bring-your-own (BYO) Atlas cluster.**
+> When `ATLAS_CLUSTER_SOURCE=byo` **and** `NETWORK_MODE=public` (the [`deploy-full-public.sh`](../../deploy/deploy-full-public.sh) path), Terraform creates **no** Atlas cluster and the deploy **never gates on the Atlas Admin API**, so `MONGODB_ATLAS_PUBLIC_KEY` / `MONGODB_ATLAS_PRIVATE_KEY` (and the org/project IDs) are not mandatory. The mechanics:
+> - [`modules/mongodb-atlas/`](../../deploy/terraform/modules/mongodb-atlas/) gates every cluster/user/IP-access-list `mongodbatlas_*` resource on `count = var.cluster_source == "managed" ? 1 : 0`, so BYO provisions no Atlas cluster, DB user, or access-list entry.
+> - [`deploy-project.sh`](../../deploy/scripts/deploy-project.sh) sets `BYO_PUBLIC=true` and, in that branch, makes the API keys + project ID **optional** and **skips** the Atlas Admin-API validation probe (`pf_check_atlas_*` curl). Managed-cluster deploys still hard-require all four.
+> - [`deploy-full-public.sh`](../../deploy/deploy-full-public.sh) additionally lists the Atlas-key preflight checks in `PREFLIGHT_SKIP`, and [`_preflight-checks.sh`](../../deploy/scripts/_preflight-checks.sh) (`pf_check_env_required_keys_filled`) drops the Atlas keys from `REQUIRED_KEYS` for `byo`+`public`.
+>
+> **Data + index seeding does not use Atlas API keys.** [`db-seeding/seed-all.ts`](../../db-seeding/seed-all.ts) (demo data) and [`db-seeding/seed-indexes.ts`](../../db-seeding/seed-indexes.ts) (regular indexes + Atlas **vector** indexes + Atlas **Search/BM25** indexes + TTL) connect via the MongoDB **driver** ([`db-seeding/connect.ts`](../../db-seeding/connect.ts) reads only `MONGODB_URI` / `MONGODB_DB`) and call `createSearchIndex` — i.e. **DB-user auth over the SRV connection**, never the Atlas Admin API. `deploy-project.sh` Phase 5 runs both against the BYO `MONGODB_URI` (= `MONGODB_BYO_URI`), so vector/BM25 index creation and data seeding work in public + BYO mode with no API keys.
+>
+> **One nuance — the Bedrock KB's own vector index.** [`modules/bedrock-kb/`](../../deploy/terraform/modules/bedrock-kb/) declares `mongodbatlas_search_index.vector` (the `troubleshooting-vector-index` on `troubleshooting_docs`) as a native `mongodbatlas` provider resource that is **not** `count`-gated, so a first `terraform apply` creates that one index through the provider. `seed-indexes.ts` creates the **same-named** index over the driver, so on a BYO cluster (which persists across deploys) re-deploys can hit `HTTP 409 ATLAS_SEARCH_DUPLICATE_INDEX`. `deploy-project.sh` self-heals by importing the live index into Terraform state **before** plan — but that import path (`MONGODB_ATLAS_PUBLIC_KEY`/`PRIVATE_KEY` + project ID curl to the Atlas Admin API) is **best-effort and skipped when the keys are absent**. Net effect: public + BYO works without API keys; supplying them only smooths re-deploy idempotency for this single KB index.
+>
+> **What you DO still need in public + BYO mode:** `MONGODB_BYO_URI` (the full `mongodb+srv://USER:PASS@host/...` string — fails fast if unset), `ALLOW_PUBLIC_ATLAS=1`, and valid **DB-user** credentials embedded in that URI (or `ATLAS_DB_USER` + `TF_VAR_atlas_db_password`) because both the seeders and the Bedrock KB connect to your cluster as a database user. These DB credentials are distinct from the Atlas **Admin API** keys.
 
 ---
 
