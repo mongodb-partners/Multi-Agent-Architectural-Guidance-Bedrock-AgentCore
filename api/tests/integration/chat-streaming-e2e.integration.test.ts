@@ -23,17 +23,17 @@ mock.module("../../src/adapters/agentcore-runtime.ts", () => ({
     "arn:aws:bedrock-agentcore:us-east-1:000000000000:runtime/test",
   agentcoreOrchestratorArn: () =>
     "arn:aws:bedrock-agentcore:us-east-1:000000000000:runtime/test",
-  // Direct routing: classifier picks order-management; we expose its ARN.
+  // Direct routing: classifier picks job-match; we expose its ARN.
   agentcoreSpecialistArn: (id: string) =>
-    id === "order-management"
-      ? "arn:aws:bedrock-agentcore:us-east-1:000000000000:runtime/order"
+    id === "job-match"
+      ? "arn:aws:bedrock-agentcore:us-east-1:000000000000:runtime/jobmatch"
       : undefined,
   setAgentcoreSpecialistArnOverrides: () => undefined,
   // Async generator that yields each frame on a separate microtask so the
   // chat route MUST forward incrementally to surface them in order.
   invokeAgentRuntime: async function* () {
     const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-    yield { kind: "stream", part: { type: "agent_active", agentId: "order-management", agentName: "Order Management" } };
+    yield { kind: "stream", part: { type: "agent_active", agentId: "job-match", agentName: "Job Match" } };
     await sleep(5);
     yield { kind: "stream", part: { type: "token", text: "Hello " } };
     await sleep(5);
@@ -54,7 +54,7 @@ mock.module("../../src/adapters/agentcore-runtime.ts", () => ({
     yield {
       kind: "done",
       payload: {
-        agentId: "order-management",
+        agentId: "job-match",
         nestedTraceId: "nested-trace-stub",
         nestedEventsDropped: 0,
       },
@@ -117,7 +117,7 @@ describe("POST /chat — end-to-end streaming through mocked AgentCore Runtime",
       method: "POST",
       headers,
       body: JSON.stringify({
-        message: "Where is my order shipment delivery tracking",
+        message: "Here is my CV, what jobs match my experience and skills",
         sessionId: "stream_sess",
       }),
     });
@@ -141,7 +141,7 @@ describe("POST /chat — end-to-end streaming through mocked AgentCore Runtime",
     expect(agentActives.length).toBeGreaterThanOrEqual(1);
     expect(
       agentActives.some(
-        (a) => (JSON.parse(a.data) as { agentId?: string }).agentId === "order-management",
+        (a) => (JSON.parse(a.data) as { agentId?: string }).agentId === "job-match",
       ),
     ).toBe(true);
 
@@ -149,7 +149,7 @@ describe("POST /chat — end-to-end streaming through mocked AgentCore Runtime",
     expect(handoff).toBeDefined();
     const hp = JSON.parse(handoff!.data) as { from: string; to: string };
     expect(hp.from).toBe("orchestrator");
-    expect(hp.to).toBe("order-management");
+    expect(hp.to).toBe("job-match");
 
     const done = events.filter((e) => e.event === "done").pop();
     expect(done).toBeDefined();

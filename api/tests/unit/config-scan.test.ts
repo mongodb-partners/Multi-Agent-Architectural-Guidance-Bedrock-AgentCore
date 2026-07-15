@@ -16,24 +16,24 @@ describe("config-scan", () => {
     const agents = listAgents();
     const ids = agents.map((a) => a.id).sort();
     expect(ids).toContain("orchestrator");
-    expect(ids).toContain("order-management");
-    expect(ids).toContain("product-recommendation");
-    expect(ids).toContain("troubleshooting");
+    expect(ids).toContain("job-match");
+    expect(ids).toContain("career-coach");
+    expect(ids).toContain("company-intel");
   });
 
-  test("getAgent returns tools for order-management", () => {
-    const a = getAgent("order-management");
+  test("getAgent returns tools for job-match", () => {
+    const a = getAgent("job-match");
     expect(a).toBeDefined();
     expect(a!.tools).toContain("mongodb_query");
-    expect(a!.tools).toContain("run_skill_script");
+    expect(a!.tools).toContain("read_skill_resource");
   });
 
-  test("getAgent returns tools for troubleshooting including run_skill_script", () => {
-    const a = getAgent("troubleshooting");
+  test("getAgent returns tools for company-intel including bedrock_kb_retrieve", () => {
+    const a = getAgent("company-intel");
     expect(a).toBeDefined();
     expect(a!.tools).toContain("mongodb_vector_search");
     expect(a!.tools).toContain("bedrock_kb_retrieve");
-    expect(a!.tools).toContain("run_skill_script");
+    expect(a!.tools).toContain("read_skill_resource");
   });
 
   test("orchestrator handoffs are generated from specialist configs", () => {
@@ -49,15 +49,15 @@ describe("config-scan", () => {
   test("orchestrator persona includes generated specialist roster", () => {
     const persona = loadAgentPersona("orchestrator") ?? "";
     expect(persona).toContain("Available specialist agents (generated from config/agents)");
-    expect(persona).toContain("order-management");
-    expect(persona).toContain("product-recommendation");
-    expect(persona).toContain("troubleshooting");
+    expect(persona).toContain("job-match");
+    expect(persona).toContain("career-coach");
+    expect(persona).toContain("company-intel");
   });
 
   test("listSkills discovers bundled skills from config/skills (config-only)", () => {
     const skills = listSkills();
     const names = skills.map((s) => s.name);
-    for (const id of ["order-management", "product-recommendation", "troubleshooting"] as const) {
+    for (const id of ["job-match", "career-coach", "company-intel"] as const) {
       expect(names).toContain(id);
     }
     expect(skills.every((s) => s.description.length > 0)).toBe(true);

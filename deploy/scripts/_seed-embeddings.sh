@@ -10,9 +10,9 @@
 #      (VOYAGE_SAGEMAKER_ENDPOINT / EMBEDDING_MODEL_ID).
 #   2. Multi-signal REWIRE auto-detect (dim comes from voyage_embedding_dims():
 #        a. SSM dim parameter `/${SHARED_VPC_NAME}/${region}/embeddings/dim`
-#           ≠ current resolved embedding dim (voyage_embedding_dims).
+#           ≠ current VOYAGE_EMBEDDING_DIMS.
 #        b. In-Mongo dimension fingerprint: sample one seeder-owned doc and
-#           check embedding.length vs current resolved embedding dim.
+#           check embedding.length vs current VOYAGE_EMBEDDING_DIMS.
 #        c. In-Mongo provider fingerprint: sample one seeder-owned doc and
 #           check embeddingModel substring vs current EMBEDDINGS_PROVIDER.
 #   3. SageMaker InService polling wait (when EMBEDDINGS_PROVIDER=voyage).
@@ -108,7 +108,7 @@ _se_should_rewire() {
   local stored_dim
   stored_dim="$(aws ssm get-parameter --region "$region" --name "/${svn}/${region}/embeddings/dim" --query 'Parameter.Value' --output text 2>/dev/null || echo "")"
   if [[ -n "$stored_dim" && "$stored_dim" != "None" && "$stored_dim" != "$current_dim" ]]; then
-    _se_warn "REWIRE signal: SSM dim=${stored_dim} ≠ current resolved embedding dim=${current_dim}" >&2
+    _se_warn "REWIRE signal: SSM dim=${stored_dim} ≠ current VOYAGE_EMBEDDING_DIMS=${current_dim}" >&2
     echo "yes"
     return 0
   fi
@@ -120,7 +120,7 @@ _se_should_rewire() {
   fi
   local probe_out
   probe_out="$(MONGO_URI="$mongo_uri" MONGO_DB="$db_name" CURRENT_DIM="$current_dim" CURRENT_PROVIDER="$provider" bun -e '
-const { MongoClient } = await import(process.env.MONGO_PROBE_DRIVER_SPEC || "mongodb"); // spec from _transient-errors.sh; bare import floats to bson@7.3.0 which crashes under Bun 1.3.13 (see mongo-probe-bun-bson-failure-report.md)
+import { MongoClient } from "mongodb";
 const uri = process.env.MONGO_URI;
 const dbName = process.env.MONGO_DB;
 const expectedDim = Number(process.env.CURRENT_DIM || "1024");

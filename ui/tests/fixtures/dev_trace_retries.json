@@ -8,7 +8,7 @@
   "events": [
     { "id": "r1", "ts": 100, "type": "model.retry", "payload": { "provider": "bedrock", "modelId": "anthropic.claude-sonnet-4-5", "attempt": 1, "previousErrorClass": "ThrottlingException", "previousErrorMessage": "rate exceeded", "backoffMs": 100 } },
     { "id": "r2", "ts": 250, "type": "model.retry", "payload": { "provider": "bedrock", "modelId": "anthropic.claude-sonnet-4-5", "attempt": 2, "previousErrorClass": "ThrottlingException", "previousErrorMessage": "rate exceeded", "backoffMs": 400 } },
-    { "id": "r3", "ts": 700, "type": "agentcore.retry", "payload": { "arn": "arn:aws:bedrock-agentcore:us-east-1:111122223333:runtime/order-management", "targetAgentId": "order-management", "mode": "orchestrator_to_specialist", "attempt": 1, "previousErrorClass": "ServiceUnavailableException", "previousErrorMessage": "service unavailable", "backoffMs": 100, "httpStatus": 503 } }
+    { "id": "r3", "ts": 700, "type": "agentcore.retry", "payload": { "arn": "arn:aws:bedrock-agentcore:us-east-1:111122223333:runtime/job-match", "targetAgentId": "job-match", "mode": "orchestrator_to_specialist", "attempt": 1, "previousErrorClass": "ServiceUnavailableException", "previousErrorMessage": "service unavailable", "backoffMs": 100, "httpStatus": 503 } }
   ],
   "summary": {
     "inputTokens": 100,

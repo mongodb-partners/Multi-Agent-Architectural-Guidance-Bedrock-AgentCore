@@ -22,7 +22,7 @@ mock.module("../../src/adapters/agentcore-runtime.ts", () => ({
     yield {
       kind: "done",
       payload: {
-        agentId: "order-management",
+        agentId: "job-match",
         nestedTraceId: "nested-trace-stub",
         nestedEventsDropped: 0,
       },
@@ -88,7 +88,7 @@ describe("POST /chat — SSE trace events", () => {
       body: JSON.stringify({
         message: "hi there",
         sessionId: "trace_sess",
-        agentId: "order-management",
+        agentId: "job-match",
       }),
     });
     expect(res.status).toBe(200);

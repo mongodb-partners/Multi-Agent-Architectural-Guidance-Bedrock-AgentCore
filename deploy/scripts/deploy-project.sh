@@ -61,9 +61,6 @@ PROJECT_NAME="${PROJECT_NAME:-multiagent-mongodb-framework}"
 # Always derive both from PROJECT_NAME + ENVIRONMENT when they're not already
 # exported, so a stale value from a prior shell never silently leaks into
 # terraform.tfvars / .env.live.
-# Remember whether the operator set ATLAS_DB_USER explicitly — the BYO block
-# below derives it from MONGODB_BYO_URI, but only when it wasn't given by hand.
-_ATLAS_DB_USER_EXPLICIT="${ATLAS_DB_USER:+1}"
 _PROJECT_SLUG="${PROJECT_NAME//-/_}"
 ATLAS_DB_USER="${ATLAS_DB_USER:-${_PROJECT_SLUG}_${ENVIRONMENT}_user}"
 ATLAS_DB_NAME="${ATLAS_DB_NAME:-${_PROJECT_SLUG}_${ENVIRONMENT}}"
@@ -248,35 +245,6 @@ wait_for_ssm_online() {
   err "SSM agent did not become online for $instance_id"
 }
 
-# Robust `terraform output` reader.
-# ponytail: a single `terraform output` over a flaky network can draw a half-open
-# socket that stalls ~13min on the OS TCP retransmit timeout, then returns empty —
-# silently corrupting a critical read (e.g. EC2_IP) and failing the deploy far
-# downstream at the `[[ -n "$EC2_IP" ]]` gate. Wrap every read: kill a call
-# stalled >30s and retry on a fresh connection. Drop-in for `terraform output`;
-# callers keep their own `|| echo ""` fallbacks.
-# ponytail: per-call timeout=30s, 5 retries; collapse the ~37 reads into one
-# cached `tfo -json` if read latency on a healthy network matters.
-tfo() {
-  local tmp p w rc
-  tmp=$(mktemp)
-  for _ in 1 2 3 4 5; do
-    terraform output "$@" >"$tmp" 2>/dev/null &
-    p=$!
-    w=0
-    while kill -0 "$p" 2>/dev/null && [ "$w" -lt 30 ]; do sleep 1; w=$((w+1)); done
-    if kill -0 "$p" 2>/dev/null; then
-      kill -KILL "$p" 2>/dev/null || true
-      wait "$p" 2>/dev/null || true
-      continue   # stalled socket — retry on a fresh connection
-    fi
-    rc=0; wait "$p" || rc=$?
-    if [ "$rc" -eq 0 ]; then cat "$tmp"; rm -f "$tmp"; return 0; fi
-    rm -f "$tmp"; return "$rc"   # genuine error (e.g. output absent) — no retry-spin
-  done
-  rm -f "$tmp"; return 1
-}
-
 send_ssm_command_retry() {
   local instance_id="$1"
   local comment="$2"
@@ -364,62 +332,11 @@ source "$ENV_FILE"
 NETWORK_MODE="${NETWORK_MODE:-privatelink}"
 ATLAS_PEERING_CIDR="${ATLAS_PEERING_CIDR:-192.168.248.0/21}"
 case "$NETWORK_MODE" in
-  privatelink|peering|public) ;;
-  *) err "Invalid NETWORK_MODE='${NETWORK_MODE}' — must be 'privatelink', 'peering', or 'public'" ;;
+  privatelink|peering) ;;
+  *) err "Invalid NETWORK_MODE='${NETWORK_MODE}' — must be 'privatelink' or 'peering'" ;;
 esac
 export TF_VAR_network_mode="$NETWORK_MODE"
 ok "Network mode: ${NETWORK_MODE}"
-
-# ── Cluster source (managed | byo) ──────────────────────────────────────────
-# byo: operator owns a pre-existing Atlas cluster — Terraform creates nothing in
-# Atlas and consumes the supplied connection string. network_mode=public is
-# BYO-only and reaches Atlas over the public internet (demo; 0.0.0.0/0 allowlist).
-ATLAS_CLUSTER_SOURCE="${ATLAS_CLUSTER_SOURCE:-managed}"
-case "$ATLAS_CLUSTER_SOURCE" in
-  managed|byo) ;;
-  *) err "Invalid ATLAS_CLUSTER_SOURCE='${ATLAS_CLUSTER_SOURCE}' — must be 'managed' or 'byo'" ;;
-esac
-export TF_VAR_cluster_source="$ATLAS_CLUSTER_SOURCE"
-# Convenience flag: the BYO-over-public demo path (no Atlas API keys, no managed cluster).
-BYO_PUBLIC=false
-if [[ "$ATLAS_CLUSTER_SOURCE" == "byo" && "$NETWORK_MODE" == "public" ]]; then
-  BYO_PUBLIC=true
-fi
-if [[ "$NETWORK_MODE" == "public" && "$ATLAS_CLUSTER_SOURCE" != "byo" ]]; then
-  err "NETWORK_MODE=public requires ATLAS_CLUSTER_SOURCE=byo (managed clusters must use privatelink or peering)."
-fi
-ok "Cluster source: ${ATLAS_CLUSTER_SOURCE}"
-
-if [[ "$ATLAS_CLUSTER_SOURCE" == "byo" ]]; then
-  : "${MONGODB_BYO_URI:?MONGODB_BYO_URI must be set for ATLAS_CLUSTER_SOURCE=byo}"
-  export TF_VAR_byo_connection_string="$MONGODB_BYO_URI"
-  # Derive the SRV host from the URI if not supplied explicitly.
-  export TF_VAR_byo_srv_host="${MONGODB_BYO_SRV_HOST:-$(printf '%s' "$MONGODB_BYO_URI" | sed -E 's#^mongodb(\+srv)?://[^@]*@##; s#[/?].*$##; s#:[0-9]+$##')}"
-  # BYO cluster name for the Atlas Admin API (vector-index create). The SRV host
-  # prefix is lowercased so it CAN'T recover the real name's case — operator must
-  # supply it. Empty => envs/ec2 falls back to the managed synthetic name.
-  export TF_VAR_byo_cluster_name="${MONGODB_BYO_CLUSTER_NAME:-}"
-  # The Bedrock KB + ensure-collection.ts rebuild their OWN connection string from
-  # atlas_db_user/atlas_db_password (urlencode()'d in modules/bedrock-kb), NOT from
-  # MONGODB_BYO_URI. Derive both from the URI userinfo, percent-DECODED so the
-  # module's re-encode round-trips, so creds live in ONE place. Explicit
-  # ATLAS_DB_USER / TF_VAR_atlas_db_password still win (set above / below).
-  _byo_ui="$(python3 - "$MONGODB_BYO_URI" <<'PY' 2>/dev/null || true
-import sys, urllib.parse as u
-p = u.urlsplit(sys.argv[1])
-sys.stdout.write((u.unquote(p.username or "")) + "\n" + (u.unquote(p.password or "")))
-PY
-)"
-  _byo_user="${_byo_ui%%$'\n'*}"
-  _byo_pass="${_byo_ui#*$'\n'}"
-  [[ -z "$_ATLAS_DB_USER_EXPLICIT" && -n "$_byo_user" ]] && ATLAS_DB_USER="$_byo_user"
-  _BYO_DB_PASSWORD_FROM_URI="$_byo_pass"
-  unset _byo_ui _byo_user _byo_pass
-  if [[ "$BYO_PUBLIC" == "true" ]]; then
-    export TF_VAR_allow_public_atlas=true
-    [[ "${ALLOW_PUBLIC_ATLAS:-}" == "1" ]] || err "NETWORK_MODE=public is a public-internet regression. Set ALLOW_PUBLIC_ATLAS=1 in .env to acknowledge (demo only)."
-  fi
-fi
 
 # ── Bedrock KB ingestion path auto-derived from NETWORK_MODE ────────────────
 # envs/ec2 only consults the flag matching the active mode (the other is
@@ -438,49 +355,19 @@ case "$NETWORK_MODE" in
     export TF_VAR_enable_kb_privatelink="${TF_VAR_enable_kb_privatelink:-false}"
     export TF_VAR_enable_kb_peering="${TF_VAR_enable_kb_peering:-true}"
     ;;
-  public)
-    # No private KB plumbing — KB ingestion (if any) goes over Atlas public SRV.
-    export TF_VAR_enable_kb_privatelink="false"
-    export TF_VAR_enable_kb_peering="false"
-    ;;
 esac
 ok "KB ingestion: privatelink=${TF_VAR_enable_kb_privatelink} peering=${TF_VAR_enable_kb_peering}"
 
-export TF_VAR_atlas_db_password="${TF_VAR_atlas_db_password:-${TF_VAR_mongodb_password:-${_BYO_DB_PASSWORD_FROM_URI:-}}}"
+export TF_VAR_atlas_db_password="${TF_VAR_atlas_db_password:-${TF_VAR_mongodb_password:-}}"
+[[ -n "${TF_VAR_atlas_db_password:-}" ]] || err "Atlas DB password not set. Set TF_VAR_mongodb_password in .env"
+
 export TF_VAR_atlas_project_id="${TF_VAR_atlas_project_id:-${TF_VAR_mongodb_atlas_project_id:-}}"
+[[ -n "${TF_VAR_atlas_project_id:-}" ]] || err "Atlas Project ID not set. Set TF_VAR_mongodb_atlas_project_id in .env"
+
 export TF_VAR_atlas_public_key="${MONGODB_ATLAS_PUBLIC_KEY:-}"
 export TF_VAR_atlas_private_key="${MONGODB_ATLAS_PRIVATE_KEY:-}"
-
-if [[ "$BYO_PUBLIC" == "true" ]]; then
-  # BYO + public never calls the Atlas Admin API and never creates a cluster, so
-  # project ID + API keys stay optional. But the Bedrock KB DOES connect to the
-  # cluster as atlas_db_user/atlas_db_password (derived from MONGODB_BYO_URI
-  # above), so those must resolve to real creds or KB ingestion fails auth.
-  [[ -n "$ATLAS_DB_USER" && -n "${TF_VAR_atlas_db_password:-}" ]] || \
-    err "BYO public: no Atlas DB credentials. Embed them in MONGODB_BYO_URI (mongodb+srv://USER:PASS@host) or set ATLAS_DB_USER + TF_VAR_atlas_db_password — the Bedrock KB connects with these."
-  ok "BYO public mode — KB auths as DB user '${ATLAS_DB_USER}' (project-id / API keys optional)"
-else
-  [[ -n "${TF_VAR_atlas_db_password:-}" ]] || err "Atlas DB password not set. Set TF_VAR_mongodb_password in .env"
-  [[ -n "${TF_VAR_atlas_project_id:-}" ]] || err "Atlas Project ID not set. Set TF_VAR_mongodb_atlas_project_id in .env"
-  [[ -n "${TF_VAR_atlas_public_key:-}" ]]  || err "MONGODB_ATLAS_PUBLIC_KEY not set in .env"
-  [[ -n "${TF_VAR_atlas_private_key:-}" ]] || err "MONGODB_ATLAS_PRIVATE_KEY not set in .env"
-fi
-
-# MCP write gate — propagate MONGODB_ALLOW_WRITE from .env into Terraform so the
-# mongodb-mcp AgentCore Runtime is baked with MONGODB_ALLOW_WRITE=1 (insertOne /
-# updateOne). Mirrors parseBoolEnv() truthy set in mongodb-mcp guards.mjs.
-# Normalize to a literal true/false (not 1) to avoid HCL bool-coercion ambiguity.
-case "$(printf '%s' "${MONGODB_ALLOW_WRITE:-}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')" in
-  1|true|yes|on) export TF_VAR_mongodb_allow_write=true ;;
-  *)            export TF_VAR_mongodb_allow_write=false ;;
-esac
-ok "MCP write gate: mongodb_allow_write=${TF_VAR_mongodb_allow_write}"
-
-# Terraform cannot call the TS Voyage SSOT directly. Resolve the optional
-# VOYAGE_OUTPUT_DIM env knob through the bash bridge once, then expose the
-# validated value to envs/ec2 as var.voyage_output_dim.
-export TF_VAR_voyage_output_dim="$(voyage_embedding_dims)"
-ok "Voyage embedding output dim: ${TF_VAR_voyage_output_dim}"
+[[ -n "${TF_VAR_atlas_public_key:-}" ]]  || err "MONGODB_ATLAS_PUBLIC_KEY not set in .env"
+[[ -n "${TF_VAR_atlas_private_key:-}" ]] || err "MONGODB_ATLAS_PRIVATE_KEY not set in .env"
 
 DEPLOY_DIAG_LABEL="ec2"
 # shellcheck source=deploy/scripts/_deploy-diagnostics.sh
@@ -499,13 +386,9 @@ preflight_validate project-pre-apply
 deploy_diag_after_preflight "project-pre-apply" "$ENV_FILE"
 
 ok "AWS account: $ACCOUNT_ID"
+ok "Atlas project: $TF_VAR_atlas_project_id"
 
 # ── Atlas API key validation ─────────────────────────────────────────────────
-# BYO + public never touches the Atlas Admin API — skip the whole probe.
-if [[ "$BYO_PUBLIC" == "true" ]]; then
-  ok "BYO public mode — skipping Atlas Admin API validation"
-else
-ok "Atlas project: $TF_VAR_atlas_project_id"
 log "Verifying Atlas API key access..."
 _ATLAS_HTTP=$(curl -s -o /tmp/.atlas_check.json -w "%{http_code}" \
   --user "${MONGODB_ATLAS_PUBLIC_KEY}:${MONGODB_ATLAS_PRIVATE_KEY}" \
@@ -524,7 +407,6 @@ case "$_ATLAS_HTTP" in
   *)   warn "Atlas API returned HTTP $_ATLAS_HTTP — unexpected. Proceeding cautiously." ;;
 esac
 rm -f /tmp/.atlas_check.json
-fi
 
 SHARED_BUCKET="${PROJECT_NAME}-${ENVIRONMENT}-${ACCOUNT_ID}"
 VOYAGE_ARN="${VOYAGE_MODEL_PACKAGE_ARN:-}"
@@ -667,15 +549,12 @@ if [[ "$NETWORK_MODE" == "privatelink" ]]; then
     "atlas_pl_vpce_id"
     "atlas_pl_vpce_dns_name"
   )
-elif [[ "$NETWORK_MODE" == "peering" ]]; then
+else
   MODE_SSM_PARAMS=(
     "atlas_peering_id"
     "atlas_container_id"
     "atlas_peering_cidr"
   )
-else
-  # public: the network stack provisions no Atlas plumbing, so no mode params.
-  MODE_SSM_PARAMS=()
 fi
 REQUIRED_SSM_PARAMS=("${SHARED_SSM_PARAMS[@]}" "${MODE_SSM_PARAMS[@]}")
 _MISSING=()
@@ -732,20 +611,6 @@ encrypt = true
 EOF
 ok "backend.hcl written (state key: ${ENVIRONMENT}/ec2/terraform.tfstate)"
 
-# ── Operator/deploy-machine IP for the Atlas IP access list ─────────────────
-# Atlas is NEVER opened to 0.0.0.0/0. In privatelink mode the mongodb-atlas
-# module scopes the only public-SRV allowlist entry to this /32 ("anywhere it
-# was created from"); runtime traffic uses PrivateLink and bypasses the list.
-# In peering mode the module uses the VPC CIDR instead and this is ignored.
-# shellcheck source=deploy/scripts/_operator-ip.sh
-source "$SCRIPT_DIR/_operator-ip.sh"
-if [[ "$NETWORK_MODE" == "privatelink" ]]; then
-  resolve_operator_ip_cidr "deploy" || err "Could not determine operator IP for the Atlas IP access list (privatelink mode). Atlas must be reachable from the deploy machine without 0.0.0.0/0. Set OPERATOR_IP_CIDR=A.B.C.D/32 in .env (or TF_VAR_my_ip) and re-run."
-  ok "Atlas IP access list will be scoped to operator IP ${OPERATOR_IP_CIDR}"
-else
-  resolve_operator_ip_cidr "deploy" || true
-fi
-
 cat > "$TF_DIR/terraform.tfvars" <<EOF
 # EC2 mode — generated by deploy.sh
 aws_region         = "${AWS_REGION}"
@@ -767,8 +632,6 @@ atlas_db_name    = "${ATLAS_DB_NAME}"
 # kb_iam_role_name omitted on purpose — bedrock-kb module derives a unique
 # IAM role name from project_name + environment so parallel deploys do not collide.
 embed_model_id   = "amazon.titan-embed-text-v2:0"
-# Optional dedicated S3 bucket for KB source docs. Empty = shared bucket.
-kb_docs_bucket_name = "${KB_DOCS_BUCKET:-}"
 
 # EC2 — SSM Session Manager for shell access (no SSH key required)
 ec2_instance_type = "t3.medium"
@@ -788,28 +651,46 @@ agentcore_code_artifact_prefix    = "${AGENTCORE_CODE_ARTIFACT_PREFIX}"
 # (verified by the SSM canary above and by the \`check "network_mode_matches_shared"\`
 # block in envs/ec2/main.tf). Switching modes requires destroy + redeploy.
 network_mode      = "${NETWORK_MODE}"
-
-# Cluster source — 'byo' skips Terraform cluster creation and uses the
-# operator-supplied connection string (byo_* vars passed via TF_VAR env).
-cluster_source     = "${ATLAS_CLUSTER_SOURCE}"
-allow_public_atlas = ${TF_VAR_allow_public_atlas:-false}
-
-# Operator/deploy-machine public IP — the ONLY public-SRV Atlas IP access list
-# entry in privatelink mode (replaces the former 0.0.0.0/0). Auto-detected by
-# deploy-project.sh; override via OPERATOR_IP_CIDR / TF_VAR_my_ip in .env.
-operator_ip_cidr  = "${OPERATOR_IP_CIDR:-}"
 EOF
 
-# NOTE: the `create_agentcore_runtime_vpc_endpoints` decision is intentionally
-# NOT made here. It is resolved AFTER `terraform init` (Phase 5a below) because
-# the only authoritative "does THIS stack already own the 4 AgentCore VPCEs?"
-# signal is `terraform state list`, which requires an initialized backend.
-# Deciding pre-init is unsafe: a wiped local `.terraform` makes state list
-# return empty, the auto path then sees the endpoints existing in the VPC,
-# picks `false`, and the next apply DESTROYS this project's ECR/Logs/S3/Atlas
-# endpoints. See docs/status/debugging.md "AgentCore VPCE create/reuse probe
-# must run after terraform init".
-ok "terraform.tfvars written (network_mode=${NETWORK_MODE})"
+# AgentCore runtime VPCEs are VPC-scoped singletons. Reuse existing shared-VPC
+# ECR/Logs/S3 endpoints, and copy any explicit TF_VAR override into tfvars
+# because terraform.tfvars has higher precedence than TF_VAR_*.
+SHARED_VPC_ID=$(aws ssm get-parameter --region "$AWS_REGION" \
+  --name "/${SHARED_VPC_NAME}/${AWS_REGION}/vpc_id" \
+  --query Parameter.Value --output text 2>/dev/null || echo "")
+CREATE_AGENTCORE_VPCE="${TF_VAR_create_agentcore_runtime_vpc_endpoints:-auto}"
+if [[ "$CREATE_AGENTCORE_VPCE" == "true" || "$CREATE_AGENTCORE_VPCE" == "false" ]]; then
+  log "Using explicit TF_VAR_create_agentcore_runtime_vpc_endpoints=${CREATE_AGENTCORE_VPCE}"
+elif [[ -n "$SHARED_VPC_ID" && "$SHARED_VPC_ID" != "None" ]]; then
+  CREATE_AGENTCORE_VPCE="true"
+  MANAGED_AGENTCORE_VPCE_COUNT=$(terraform -chdir="$TF_DIR" state list 2>/dev/null \
+    | python3 -c 'import sys
+managed = [line.strip() for line in sys.stdin if line.strip().startswith("aws_vpc_endpoint.agentcore_runtime_")]
+print(len(managed))' 2>/dev/null || echo "0")
+  EXISTING_VPCE_COUNT=$(aws ec2 describe-vpc-endpoints --region "$AWS_REGION" \
+    --filters "Name=vpc-id,Values=${SHARED_VPC_ID}" \
+    --query "length(VpcEndpoints[?ServiceName=='com.amazonaws.${AWS_REGION}.ecr.api' || ServiceName=='com.amazonaws.${AWS_REGION}.ecr.dkr' || ServiceName=='com.amazonaws.${AWS_REGION}.logs'])" \
+    --output text 2>/dev/null || echo "0")
+  EXISTING_S3_VPCE_COUNT=$(aws ec2 describe-vpc-endpoints --region "$AWS_REGION" \
+    --filters "Name=vpc-id,Values=${SHARED_VPC_ID}" "Name=service-name,Values=com.amazonaws.${AWS_REGION}.s3" \
+    --query "length(VpcEndpoints)" \
+    --output text 2>/dev/null || echo "0")
+  if [[ "${MANAGED_AGENTCORE_VPCE_COUNT:-0}" -ge 4 ]]; then
+    CREATE_AGENTCORE_VPCE="true"
+    log "Shared VPC ${SHARED_VPC_ID} has AgentCore VPCEs in this Terraform state — keeping ownership"
+  elif [[ "${MANAGED_AGENTCORE_VPCE_COUNT:-0}" -gt 0 ]]; then
+    err "Terraform state has only ${MANAGED_AGENTCORE_VPCE_COUNT}/4 AgentCore VPCE resources. Resolve partial state or rerun with TF_VAR_create_agentcore_runtime_vpc_endpoints=false after confirming ECR/Logs/S3 endpoints already exist."
+  elif [[ "${EXISTING_VPCE_COUNT:-0}" -ge 3 && "${EXISTING_S3_VPCE_COUNT:-0}" -ge 1 ]]; then
+    CREATE_AGENTCORE_VPCE="false"
+    log "Shared VPC ${SHARED_VPC_ID} already has AgentCore ECR/Logs/S3 VPCEs — reusing"
+  fi
+else
+  CREATE_AGENTCORE_VPCE="true"
+fi
+echo "create_agentcore_runtime_vpc_endpoints = ${CREATE_AGENTCORE_VPCE}" >> "$TF_DIR/terraform.tfvars"
+
+ok "terraform.tfvars written (network_mode=${NETWORK_MODE}, create_agentcore_runtime_vpc_endpoints=${CREATE_AGENTCORE_VPCE})"
 
 # ── Phase 4a — Discover agents + write agents.auto.tfvars.json ────────────────
 sep
@@ -879,115 +760,6 @@ deploy_diag_checkpoint "terraform init start: terraform init -input=false -recon
 terraform init -input=false -reconfigure -backend-config="$TF_DIR/backend.hcl"
 ok "init complete"
 
-# ── Phase 5a — Resolve create_agentcore_runtime_vpc_endpoints (POST-INIT) ─────
-# AgentCore runtime VPCEs (ECR API/DKR, CloudWatch Logs, S3 gateway) are
-# VPC-scoped singletons OWNED BY THIS stack. This decision runs after
-# `terraform init` so `terraform state list` reflects the real remote state and
-# reliably reports whether this stack already owns them.
-#
-# Fail-closed contract: any ambiguity (state list errored, backend unreadable)
-# keeps create=true so a transient read failure can NEVER plan a destroy of
-# live endpoints. `false` (reuse external singletons) is chosen ONLY when state
-# was readable AND confirms this stack owns none of the four.
-sep
-log "Phase 5a — Resolving create_agentcore_runtime_vpc_endpoints (post-init)..."
-CREATE_AGENTCORE_VPCE="${TF_VAR_create_agentcore_runtime_vpc_endpoints:-auto}"
-# public mode: envs/ec2/main.tf forces agentcore_vpce_create AND _lookup both
-# false, so this value is inert — Terraform ignores it. Skip the slow SSM +
-# `terraform state list` (S3 backend) + describe-vpc-endpoints probes entirely.
-# ponytail: false is the cheap honest answer; the result is discarded anyway.
-if [[ "$NETWORK_MODE" == "public" ]]; then
-  CREATE_AGENTCORE_VPCE="false"
-  log "network_mode=public — AgentCore VPCEs neither created nor looked up; skipping resolution probes"
-else
-  SHARED_VPC_ID=$(aws ssm get-parameter --region "$AWS_REGION" \
-    --name "/${SHARED_VPC_NAME}/${AWS_REGION}/vpc_id" \
-    --query Parameter.Value --output text 2>/dev/null || echo "")
-  if [[ "$CREATE_AGENTCORE_VPCE" == "true" || "$CREATE_AGENTCORE_VPCE" == "false" ]]; then
-    log "Using explicit TF_VAR_create_agentcore_runtime_vpc_endpoints=${CREATE_AGENTCORE_VPCE}"
-  elif [[ -n "$SHARED_VPC_ID" && "$SHARED_VPC_ID" != "None" ]]; then
-    CREATE_AGENTCORE_VPCE="true"
-    # Capture `terraform state list` separately from the parse so a non-zero exit
-    # (uninitialized / locked / transient backend error) is detected. On failure
-    # we keep create=true rather than mis-reading "empty output" as "this stack
-    # owns nothing" — the exact bug that destroyed live endpoints after a local
-    # .terraform wipe.
-    TF_STATE_LIST_OK=true
-    if ! TF_STATE_LIST_OUT="$(terraform -chdir="$TF_DIR" state list 2>/dev/null)"; then
-      TF_STATE_LIST_OK=false
-      TF_STATE_LIST_OUT=""
-      warn "terraform state list failed after init — forcing create_agentcore_runtime_vpc_endpoints=true (fail-closed: never destroy live endpoints on an ambiguous read)"
-    fi
-    MANAGED_AGENTCORE_VPCE_COUNT=$(printf '%s\n' "$TF_STATE_LIST_OUT" | python3 -c 'import sys
-managed = [line.strip() for line in sys.stdin if line.strip().startswith("aws_vpc_endpoint.agentcore_runtime_")]
-print(len(managed))' 2>/dev/null || echo "0")
-    EXISTING_VPCE_COUNT=$(aws ec2 describe-vpc-endpoints --region "$AWS_REGION" \
-      --filters "Name=vpc-id,Values=${SHARED_VPC_ID}" \
-      --query "length(VpcEndpoints[?ServiceName=='com.amazonaws.${AWS_REGION}.ecr.api' || ServiceName=='com.amazonaws.${AWS_REGION}.ecr.dkr' || ServiceName=='com.amazonaws.${AWS_REGION}.logs'])" \
-      --output text 2>/dev/null || echo "0")
-    EXISTING_S3_VPCE_COUNT=$(aws ec2 describe-vpc-endpoints --region "$AWS_REGION" \
-      --filters "Name=vpc-id,Values=${SHARED_VPC_ID}" "Name=service-name,Values=com.amazonaws.${AWS_REGION}.s3" \
-      --query "length(VpcEndpoints)" \
-      --output text 2>/dev/null || echo "0")
-    if [[ "${MANAGED_AGENTCORE_VPCE_COUNT:-0}" -ge 4 ]]; then
-      CREATE_AGENTCORE_VPCE="true"
-      log "Shared VPC ${SHARED_VPC_ID} has AgentCore VPCEs in this Terraform state — keeping ownership"
-    elif [[ "${MANAGED_AGENTCORE_VPCE_COUNT:-0}" -gt 0 ]]; then
-      err "Terraform state has only ${MANAGED_AGENTCORE_VPCE_COUNT}/4 AgentCore VPCE resources. Resolve partial state or rerun with TF_VAR_create_agentcore_runtime_vpc_endpoints=false after confirming ECR/Logs/S3 endpoints already exist."
-    elif [[ "$TF_STATE_LIST_OK" == "true" && "${EXISTING_VPCE_COUNT:-0}" -ge 3 && "${EXISTING_S3_VPCE_COUNT:-0}" -ge 1 ]]; then
-      # Reuse ONLY when state was readable and confirms this stack owns none of
-      # them — i.e. they are genuinely externally-owned shared-VPC singletons.
-      CREATE_AGENTCORE_VPCE="false"
-      log "Shared VPC ${SHARED_VPC_ID} already has externally-owned AgentCore ECR/Logs/S3 VPCEs — reusing"
-    fi
-  else
-    CREATE_AGENTCORE_VPCE="true"
-  fi
-fi
-echo "create_agentcore_runtime_vpc_endpoints = ${CREATE_AGENTCORE_VPCE}" >> "$TF_DIR/terraform.tfvars"
-ok "create_agentcore_runtime_vpc_endpoints=${CREATE_AGENTCORE_VPCE} appended to terraform.tfvars"
-
-# ── Phase 5b — Resolve kb_docs_bucket_create (POST-INIT) ──────────────────────
-# Decide whether Terraform creates/owns the dedicated KB bucket (KB_DOCS_BUCKET)
-# or references an already-existing, externally-owned one. Runs after
-# `terraform init` so `terraform state list` reflects the real remote state.
-#
-# Fail-closed contract: any ambiguity (state unreadable) keeps create=true.
-# create=false is destructive-adjacent — if this stack already manages the
-# bucket, flipping to false would plan to DESTROY/unmanage it. So we choose
-# false (reuse) ONLY when state was readable, confirms this stack does NOT manage
-# the bucket, AND the bucket already exists in AWS. create=true on an existing
-# unmanaged bucket merely fails non-destructively (BucketAlreadyExists), which is
-# the safer default under uncertainty.
-sep
-log "Phase 5b — Resolving kb_docs_bucket_create (post-init)..."
-KB_BUCKET_CREATE="${TF_VAR_kb_docs_bucket_create:-auto}"
-if [[ -z "${KB_DOCS_BUCKET:-}" ]]; then
-  KB_BUCKET_CREATE="true"
-  log "No dedicated KB bucket configured (KB_DOCS_BUCKET empty) — KB docs live in the shared bucket; kb_docs_bucket_create=true"
-elif [[ "$KB_BUCKET_CREATE" == "true" || "$KB_BUCKET_CREATE" == "false" ]]; then
-  log "Using explicit TF_VAR_kb_docs_bucket_create=${KB_BUCKET_CREATE}"
-else
-  KB_BUCKET_CREATE="true"
-  KB_TF_STATE_OK=true
-  if ! KB_TF_STATE_OUT="$(terraform -chdir="$TF_DIR" state list 2>/dev/null)"; then
-    KB_TF_STATE_OK=false
-    KB_TF_STATE_OUT=""
-    warn "terraform state list failed after init — forcing kb_docs_bucket_create=true (fail-closed: never unmanage/destroy a managed KB bucket on an ambiguous read)"
-  fi
-  if printf '%s\n' "$KB_TF_STATE_OUT" | grep -q '^module\.bedrock_kb\.aws_s3_bucket\.kb_docs\['; then
-    KB_BUCKET_CREATE="true"
-    log "KB bucket ${KB_DOCS_BUCKET} is already in this Terraform state — keeping ownership (create=true)"
-  elif [[ "$KB_TF_STATE_OK" == "true" ]] && aws s3api head-bucket --bucket "${KB_DOCS_BUCKET}" --region "$AWS_REGION" >/dev/null 2>&1; then
-    KB_BUCKET_CREATE="false"
-    log "KB bucket ${KB_DOCS_BUCKET} already exists and is NOT managed by this stack — reusing it (no create, no sample-doc upload)"
-  else
-    log "KB bucket ${KB_DOCS_BUCKET} not found (or read ambiguous) — Terraform will create it (create=true)"
-  fi
-fi
-echo "kb_docs_bucket_create = ${KB_BUCKET_CREATE}" >> "$TF_DIR/terraform.tfvars"
-ok "kb_docs_bucket_create=${KB_BUCKET_CREATE} appended to terraform.tfvars"
-
 if [[ "$SKIP_DOCKER" != "true" ]]; then
   sep
   log "Phase 4d — Ensuring mongodb-mcp runtime ECR repo, then push image..."
@@ -1042,8 +814,8 @@ if [[ "$SKIP_DOCKER" != "true" ]]; then
     # in normal flow, but Phase 4d runs before the source on first-deploy).
     source "$SCRIPT_DIR/_agents-common.sh"
   fi
-  _MCP_RUNTIME_ID_PRE=$(tfo -raw mongodb_mcp_runtime_id 2>/dev/null || echo "")
-  _GATEWAY_ID_PRE=$(tfo -raw agentcore_gateway_id 2>/dev/null || echo "")
+  _MCP_RUNTIME_ID_PRE=$(terraform output -raw mongodb_mcp_runtime_id 2>/dev/null || echo "")
+  _GATEWAY_ID_PRE=$(terraform output -raw agentcore_gateway_id 2>/dev/null || echo "")
   force_mcp_runtime_image_sync \
     "$_MCP_RUNTIME_ID_PRE" \
     "$MCP_RUNTIME_REPO_NAME" \
@@ -1073,50 +845,7 @@ fi
 # MCP ECR repo name + pre-apply runtime id (for R.0 first-deploy Gateway refresh).
 # Must be set even when --skip-docker: Phase 4d only runs inside the docker block.
 MCP_RUNTIME_REPO_NAME="${PROJECT_NAME}-mongodb-mcp-${ENVIRONMENT}"
-_MCP_RUNTIME_ID_PRE=$(tfo -raw mongodb_mcp_runtime_id 2>/dev/null || echo "")
-
-# ── Pre-apply: adopt an orphaned Atlas vector search index ───────────────────
-# A prior apply can create the vector index (POST to the Atlas Admin API
-# succeeds, the index reaches READY) but die before persisting the resource to
-# Terraform state. The next run then re-POSTs the same index name and Atlas
-# rejects it with HTTP 409 ATLAS_SEARCH_DUPLICATE_INDEX. This is especially
-# likely on a BYO cluster, which persists across deploys. If the index already
-# exists in Atlas but not in our state, import it so the plan adopts it instead
-# of recreating a duplicate. Best-effort and idempotent (managed + BYO): any
-# failure here is non-fatal — the plan/apply below surfaces the real error.
-if ! terraform state list 2>/dev/null | grep -qx 'module.bedrock_kb.mongodbatlas_search_index.vector'; then
-  _VEC_CLUSTER="${MONGODB_BYO_CLUSTER_NAME:-${PROJECT_NAME}-${ENVIRONMENT}}"
-  _VEC_COLL="troubleshooting_docs"     # modules/bedrock-kb default atlas_collection
-  _VEC_NAME="troubleshooting-vector-index"  # modules/bedrock-kb default atlas_vector_index
-  if [[ -n "${MONGODB_ATLAS_PUBLIC_KEY:-}" && -n "${MONGODB_ATLAS_PRIVATE_KEY:-}" && -n "${TF_VAR_atlas_project_id:-}" ]]; then
-    _VEC_ID=$(curl -sS --user "${MONGODB_ATLAS_PUBLIC_KEY}:${MONGODB_ATLAS_PRIVATE_KEY}" --digest \
-      -H "Accept: application/vnd.atlas.2024-05-30+json" \
-      "https://cloud.mongodb.com/api/atlas/v2/groups/${TF_VAR_atlas_project_id}/clusters/${_VEC_CLUSTER}/search/indexes/${ATLAS_DB_NAME}/${_VEC_COLL}" 2>/dev/null \
-      | python3 -c 'import json,sys
-try:
-    d=json.load(sys.stdin)
-except Exception:
-    sys.exit(0)
-for it in (d if isinstance(d,list) else []):
-    if it.get("name")==sys.argv[1]:
-        print(it.get("indexID",""))
-        break
-' "$_VEC_NAME" 2>/dev/null || echo "")
-    if [[ -n "$_VEC_ID" ]]; then
-      log "Adopting pre-existing Atlas vector index '${_VEC_NAME}' (${_VEC_ID}) into Terraform state…"
-      deploy_diag_checkpoint "terraform import start: module.bedrock_kb.mongodbatlas_search_index.vector ${TF_VAR_atlas_project_id}--${_VEC_CLUSTER}--${_VEC_ID}"
-      if terraform import -input=false \
-        'module.bedrock_kb.mongodbatlas_search_index.vector' \
-        "${TF_VAR_atlas_project_id}--${_VEC_CLUSTER}--${_VEC_ID}" >/dev/null 2>&1; then
-        ok "Imported existing vector index — plan will adopt it, not recreate"
-      else
-        warn "terraform import of vector index failed; if apply hits HTTP 409 ATLAS_SEARCH_DUPLICATE_INDEX, import it manually:"
-        warn "  terraform import 'module.bedrock_kb.mongodbatlas_search_index.vector' '${TF_VAR_atlas_project_id}--${_VEC_CLUSTER}--${_VEC_ID}'"
-      fi
-    fi
-  fi
-  unset _VEC_CLUSTER _VEC_COLL _VEC_NAME _VEC_ID
-fi
+_MCP_RUNTIME_ID_PRE=$(terraform output -raw mongodb_mcp_runtime_id 2>/dev/null || echo "")
 
 sep
 log "Running terraform plan..."
@@ -1140,40 +869,40 @@ ok "Terraform apply complete"
 
 # ── Outputs ──────────────────────────────────────────────────────────────────
 load_tf_outputs() {
-  EC2_IP=$(tfo -raw ec2_public_ip 2>/dev/null || echo "")
-  EC2_API=$(tfo -raw ec2_api_url 2>/dev/null || echo "")
-  EC2_UI=$(tfo -raw ec2_ui_url 2>/dev/null || echo "")
-  EC2_SSM=$(tfo -raw ec2_ssm_command 2>/dev/null || echo "")
-  EC2_INSTANCE_ID=$(tfo -raw ec2_instance_id 2>/dev/null || echo "")
-  ATLAS_MONGO_HOST=$(tfo -raw atlas_mongo_host 2>/dev/null || echo "")
-  ATLAS_CONNECTION_STRING=$(tfo -raw atlas_connection_string 2>/dev/null || echo "")
-  COGNITO_POOL_ID=$(tfo -raw cognito_user_pool_id 2>/dev/null || echo "")
-  COGNITO_CLIENT_ID=$(tfo -raw cognito_app_client_id 2>/dev/null || echo "")
-  COGNITO_JWKS=$(tfo -raw cognito_jwks_uri 2>/dev/null || echo "")
-  VOYAGE_ENDPOINT=$(tfo -raw voyage_endpoint_name 2>/dev/null || echo "")
+  EC2_IP=$(terraform output -raw ec2_public_ip 2>/dev/null || echo "")
+  EC2_API=$(terraform output -raw ec2_api_url 2>/dev/null || echo "")
+  EC2_UI=$(terraform output -raw ec2_ui_url 2>/dev/null || echo "")
+  EC2_SSM=$(terraform output -raw ec2_ssm_command 2>/dev/null || echo "")
+  EC2_INSTANCE_ID=$(terraform output -raw ec2_instance_id 2>/dev/null || echo "")
+  ATLAS_MONGO_HOST=$(terraform output -raw atlas_mongo_host 2>/dev/null || echo "")
+  ATLAS_CONNECTION_STRING=$(terraform output -raw atlas_connection_string 2>/dev/null || echo "")
+  COGNITO_POOL_ID=$(terraform output -raw cognito_user_pool_id 2>/dev/null || echo "")
+  COGNITO_CLIENT_ID=$(terraform output -raw cognito_app_client_id 2>/dev/null || echo "")
+  COGNITO_JWKS=$(terraform output -raw cognito_jwks_uri 2>/dev/null || echo "")
+  VOYAGE_ENDPOINT=$(terraform output -raw voyage_endpoint_name 2>/dev/null || echo "")
   if [[ "$EMBEDDINGS_PROVIDER" == "titan" ]]; then
     VOYAGE_ENDPOINT=""
   fi
-  ECR_API_REPO=$(tfo -raw ecr_api_repository_url 2>/dev/null || echo "")
-  ECR_UI_REPO=$(tfo -raw ecr_ui_repository_url 2>/dev/null || echo "")
-  ECR_RUNTIME_REPO=$(tfo -raw ecr_agent_runtime_repository_url 2>/dev/null || echo "")
-  ECR_MCP_RUNTIME_REPO=$(tfo -raw ecr_mongodb_mcp_runtime_repository_url 2>/dev/null || echo "")
-  MONGODB_MCP_RUNTIME_ARN=$(tfo -raw mongodb_mcp_runtime_arn 2>/dev/null || echo "")
-  MONGODB_MCP_RUNTIME_ENDPOINT=$(tfo -raw mongodb_mcp_runtime_endpoint 2>/dev/null || echo "")
-  AGENTCORE_RUNTIME_DEPLOYMENT_MODE=$(tfo -raw agentcore_runtime_deployment_mode 2>/dev/null || echo "$AGENTCORE_RUNTIME_DEPLOYMENT_MODE")
-  AGENTCORE_CODE_ARTIFACT_PREFIX=$(tfo -raw agentcore_code_artifact_prefix 2>/dev/null || echo "$AGENTCORE_CODE_ARTIFACT_PREFIX")
-  AGENTCORE_MEMORY_STORE_ID=$(tfo -raw agentcore_memory_id 2>/dev/null || echo "")
-  AGENTCORE_GATEWAY_URL=$(tfo -raw agentcore_gateway_url 2>/dev/null || echo "")
-  AGENTCORE_GATEWAY_ID=$(tfo -raw agentcore_gateway_id 2>/dev/null || echo "")
-  AGENTCORE_ORCHESTRATOR_ARN=$(tfo -raw acr_orchestrator_arn 2>/dev/null || echo "")
-  AGENTCORE_ORCHESTRATOR_ID=$(tfo -raw acr_orchestrator_id 2>/dev/null || echo "")
+  ECR_API_REPO=$(terraform output -raw ecr_api_repository_url 2>/dev/null || echo "")
+  ECR_UI_REPO=$(terraform output -raw ecr_ui_repository_url 2>/dev/null || echo "")
+  ECR_RUNTIME_REPO=$(terraform output -raw ecr_agent_runtime_repository_url 2>/dev/null || echo "")
+  ECR_MCP_RUNTIME_REPO=$(terraform output -raw ecr_mongodb_mcp_runtime_repository_url 2>/dev/null || echo "")
+  MONGODB_MCP_RUNTIME_ARN=$(terraform output -raw mongodb_mcp_runtime_arn 2>/dev/null || echo "")
+  MONGODB_MCP_RUNTIME_ENDPOINT=$(terraform output -raw mongodb_mcp_runtime_endpoint 2>/dev/null || echo "")
+  AGENTCORE_RUNTIME_DEPLOYMENT_MODE=$(terraform output -raw agentcore_runtime_deployment_mode 2>/dev/null || echo "$AGENTCORE_RUNTIME_DEPLOYMENT_MODE")
+  AGENTCORE_CODE_ARTIFACT_PREFIX=$(terraform output -raw agentcore_code_artifact_prefix 2>/dev/null || echo "$AGENTCORE_CODE_ARTIFACT_PREFIX")
+  AGENTCORE_MEMORY_STORE_ID=$(terraform output -raw agentcore_memory_id 2>/dev/null || echo "")
+  AGENTCORE_GATEWAY_URL=$(terraform output -raw agentcore_gateway_url 2>/dev/null || echo "")
+  AGENTCORE_GATEWAY_ID=$(terraform output -raw agentcore_gateway_id 2>/dev/null || echo "")
+  AGENTCORE_ORCHESTRATOR_ARN=$(terraform output -raw acr_orchestrator_arn 2>/dev/null || echo "")
+  AGENTCORE_ORCHESTRATOR_ID=$(terraform output -raw acr_orchestrator_id 2>/dev/null || echo "")
   # Load specialist ARNs + IDs from the for_each map outputs.
   # The list of specialist IDs comes from discover_agents (config/agents/*.agent.md),
   # so no agent IDs are hardcoded here.
   load_specialist_outputs_from_tf
-  ATLAS_PRIVATELINK_ENDPOINT_ID=$(tfo -raw atlas_privatelink_endpoint_id 2>/dev/null || echo "")
-  CW_API_LOG_GROUP=$(tfo -raw cloudwatch_api_log_group 2>/dev/null || echo "/${PROJECT_NAME}/${ENVIRONMENT}/api")
-  CW_UI_LOG_GROUP=$(tfo -raw cloudwatch_ui_log_group 2>/dev/null || echo "/${PROJECT_NAME}/${ENVIRONMENT}/ui")
+  ATLAS_PRIVATELINK_ENDPOINT_ID=$(terraform output -raw atlas_privatelink_endpoint_id 2>/dev/null || echo "")
+  CW_API_LOG_GROUP=$(terraform output -raw cloudwatch_api_log_group 2>/dev/null || echo "/${PROJECT_NAME}/${ENVIRONMENT}/api")
+  CW_UI_LOG_GROUP=$(terraform output -raw cloudwatch_ui_log_group 2>/dev/null || echo "/${PROJECT_NAME}/${ENVIRONMENT}/ui")
 }
 
 load_tf_outputs
@@ -1182,7 +911,7 @@ load_tf_outputs
 # immediately after apply in some edge cases. Refresh outputs once if needed.
 if [[ -z "$AGENTCORE_ORCHESTRATOR_ARN" ]] || \
    ! python3 -c "import json,sys; d=json.loads(sys.argv[1]); sys.exit(0 if d else 1)" \
-     "$(tfo -json acr_specialist_arns 2>/dev/null || echo '{}')" 2>/dev/null; then
+     "$(terraform output -json acr_specialist_arns 2>/dev/null || echo '{}')" 2>/dev/null; then
   warn "AgentCore runtime outputs incomplete after apply; running refresh-only apply to rehydrate outputs..."
   terraform apply -refresh-only -auto-approve -input=false >/dev/null 2>&1 || true
   load_tf_outputs
@@ -1203,7 +932,7 @@ fi
 # poll the runtime to READY and force the Gateway target to recreate so
 # tools/list runs against the warm runtime.
 MONGODB_MCP_RUNTIME_ID_POST="${MONGODB_MCP_RUNTIME_ARN##*/}"
-GATEWAY_ID_POST="$(tfo -raw agentcore_gateway_id 2>/dev/null || echo "")"
+GATEWAY_ID_POST="$(terraform output -raw agentcore_gateway_id 2>/dev/null || echo "")"
 if [[ -z "${_MCP_RUNTIME_ID_PRE:-}" && -n "$MONGODB_MCP_RUNTIME_ID_POST" && -n "$GATEWAY_ID_POST" ]]; then
   if ! declare -F force_mcp_runtime_image_sync >/dev/null 2>&1; then
     source "$SCRIPT_DIR/_agents-common.sh"
@@ -1264,18 +993,11 @@ unset MONGODB_MCP_RUNTIME_ID_POST GATEWAY_ID_POST _MCP_RUNTIME_ID_PRE
 [[ -n "$MONGODB_MCP_RUNTIME_ARN" ]] || err "MongoDB MCP runtime ARN output is empty after apply/refresh."
 [[ -n "$MONGODB_MCP_RUNTIME_ENDPOINT" ]] || err "MongoDB MCP runtime endpoint output is empty after apply/refresh."
 # Validate each discovered specialist has a runtime ARN in the map outputs.
-# Guard the iteration: with an orchestrator-only roster SPECIALIST_IDS is an
-# empty array and "${SPECIALIST_IDS[@]:-}" would expand to a single empty-string
-# element under `set -u`, falsely failing on specialist ''. Only iterate when
-# at least one specialist was discovered, and skip any empty id defensively.
-if [[ ${#SPECIALIST_IDS[@]} -gt 0 ]]; then
-  for _spec_id in "${SPECIALIST_IDS[@]}"; do
-    [[ -n "$_spec_id" ]] || continue
-    [[ -n "$(specialist_runtime_arn "$_spec_id")" ]] \
-      || err "AgentCore runtime ARN for specialist '${_spec_id}' is empty after apply/refresh."
-  done
-  unset _spec_id
-fi
+for _spec_id in "${SPECIALIST_IDS[@]:-}"; do
+  [[ -n "$(specialist_runtime_arn "$_spec_id")" ]] \
+    || err "AgentCore runtime ARN for specialist '${_spec_id}' is empty after apply/refresh."
+done
+unset _spec_id
 
 if [[ "$EMBEDDINGS_PROVIDER" == "voyage" ]]; then
   [[ -n "$VOYAGE_ENDPOINT" ]] || err "EMBEDDINGS_PROVIDER=voyage but Terraform output voyage_endpoint_name is empty."
@@ -1294,7 +1016,7 @@ fi
 # Re-read KB ID post-apply (now sourced directly from terraform output —
 # the legacy JSON state file at $KB_STATE_FILE is gone since the bedrock-kb
 # module migrated to the native aws_bedrockagent_knowledge_base resource).
-BEDROCK_KB_ID="$(tfo -raw knowledge_base_id 2>/dev/null || echo "")"
+BEDROCK_KB_ID="$(terraform output -raw knowledge_base_id 2>/dev/null || echo "")"
 
 # Build Mongo URI once for both runtime updates and .env.live output.
 if [[ -n "$ATLAS_CONNECTION_STRING" ]]; then
@@ -1325,14 +1047,7 @@ fi
 # ── Atlas cluster IDLE wait (covers the first-deploy race where SRV DNS
 #    has not yet propagated when terraform apply returns)
 ATLAS_PROJECT_ID_RESOLVED="${TF_VAR_atlas_project_id:-${TF_VAR_mongodb_atlas_project_id:-}}"
-if [[ "$ATLAS_CLUSTER_SOURCE" == "byo" ]]; then
-  # BYO: Terraform creates no cluster — the operator's cluster already exists and
-  # is running. The synthetic "${PROJECT_NAME}-${ENVIRONMENT}" name doesn't exist
-  # in the project, so this poll would spin the full budget then fatally err.
-  # Reachability against the REAL SRV URI is still asserted below (Phase 5b).
-  # ponytail: the IDLE wait only covers the managed first-deploy DNS race.
-  log "Skipping Atlas cluster IDLE wait (BYO cluster '${MONGODB_BYO_CLUSTER_NAME:-operator-managed}' is not Terraform-created; reachability checked at seed gate)"
-elif [[ -n "$ATLAS_PROJECT_ID_RESOLVED" && -n "$MONGODB_ATLAS_PUBLIC_KEY" && -n "$MONGODB_ATLAS_PRIVATE_KEY" ]]; then
+if [[ -n "$ATLAS_PROJECT_ID_RESOLVED" && -n "$MONGODB_ATLAS_PUBLIC_KEY" && -n "$MONGODB_ATLAS_PRIVATE_KEY" ]]; then
   CLUSTER_NAME="${PROJECT_NAME}-${ENVIRONMENT}"
   log "Waiting for Atlas cluster '$CLUSTER_NAME' to reach IDLE state..."
   CLUSTER_IDLE_BUDGET_S=600
@@ -1384,7 +1099,7 @@ assert_mongo_reachable "$MONGODB_URI" "$ATLAS_DB_NAME" 300 \
 
 log "Checking MongoDB seed state..."
 SEED_NEEDED="$(MONGODB_URI="$MONGODB_URI" MONGODB_DB="$ATLAS_DB_NAME" bun -e '
-const { MongoClient } = await import(process.env.MONGO_PROBE_DRIVER_SPEC || "mongodb"); // spec from _transient-errors.sh; bare import floats to bson@7.3.0 which crashes under Bun 1.3.13 (see mongo-probe-bun-bson-failure-report.md)
+import { MongoClient } from "mongodb";
 const uri = process.env.MONGODB_URI;
 const dbName = process.env.MONGODB_DB;
 if (!dbName) { console.error("MONGODB_DB env not set"); process.exit(1); }
@@ -1392,7 +1107,7 @@ const client = new MongoClient(uri, { appName: "deploy-seed-check" });
 try {
   await client.connect();
   const db = client.db(dbName);
-  const required = ["customers", "products", "orders", "troubleshooting_docs"];
+  const required = ["career_paths", "skills_taxonomy", "compensation_data", "companies"];
   let seeded = true;
   for (const coll of required) {
     const exists = (await db.listCollections({ name: coll }, { nameOnly: true }).toArray()).length > 0;
@@ -1439,7 +1154,7 @@ ok "MongoDB indexes verified (seed-indexes)"
 #   - auto-detects REWIRE on provider/dim drift (SSM + in-Mongo fingerprint)
 #   - waits for the Voyage SageMaker endpoint when EMBEDDINGS_PROVIDER=voyage
 #   - exits non-zero on incomplete results (no more warn-only)
-log "Generating embeddings for products + troubleshooting_docs (provider=${EMBEDDINGS_PROVIDER})..."
+log "Generating embeddings for recruitment collections (companies, career_paths, skills_taxonomy, compensation_data) (provider=${EMBEDDINGS_PROVIDER})..."
 run_embedding_seed "$ATLAS_DB_NAME" "$MONGODB_URI" \
   || err "Embedding seed failed — refusing to continue (see [embed-seed] envelope above)"
 ok "Embedding seed complete"
@@ -1518,12 +1233,6 @@ PY
   else
     err "Could not compute Atlas awsPrivateLink URI for the API"
   fi
-elif [[ "$NETWORK_MODE" == "public" ]]; then
-  # ── public mode ──────────────────────────────────────────────────────────
-  # No private URI to compute — the runtime + API use the BYO public SRV URI
-  # as-is. MONGODB_URI already holds it (from the atlas_connection_string output).
-  log "Phase 5c — public mode: using BYO public SRV URI (no private normalization)"
-  ok "API MongoDB URI left as public SRV connection string"
 else
   # ── peering mode ───────────────────────────────────────────────────────────
   log "Phase 5c — Computing Atlas peering URI for the EC2 API..."
@@ -2230,8 +1939,8 @@ export _M_AUTH_CALLER_ARN="${AWS_AUTH_CALLER_ARN:-$(aws sts get-caller-identity 
 # Connectivity mode + KB connectivity for post-deploy smoke / dashboards.
 export _M_NETWORK_MODE="$NETWORK_MODE"
 export _M_ATLAS_PEERING_CIDR="${ATLAS_PEERING_CIDR:-}"
-export _M_ATLAS_PEERING_CONN_ID="$(tfo -raw atlas_peering_connection_id 2>/dev/null || echo "")"
-export _M_KB_CONNECTIVITY_MODE="$(tfo -raw kb_connectivity_mode 2>/dev/null || echo "")"
+export _M_ATLAS_PEERING_CONN_ID="$(terraform output -raw atlas_peering_connection_id 2>/dev/null || echo "")"
+export _M_KB_CONNECTIVITY_MODE="$(terraform output -raw kb_connectivity_mode 2>/dev/null || echo "")"
 
 python3 - <<'PYEOF' > "$MANIFEST_FILE"
 import json, os

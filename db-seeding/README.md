@@ -10,16 +10,20 @@ MongoDB seed scripts for the Bedrock Multi-Agent demo stack. Each script is stan
 | `seed-products.ts` | `products` | 9 SKUs across home / electronics / outdoor |
 | `seed-troubleshooting.ts` | `troubleshooting_docs` | 8 seeded diagnostic playbooks (power, connectivity, HW fault, returns, firmware, smart-home) |
 | `seed-orders.ts` | `orders` | 12 orders covering shipped, processing, delivered, cancelled, and return-requested flows |
-| `seed-indexes.ts` | all + `agent_memory_facts` + `chat_sessions` + `chat_messages` | Regular indexes (including unique `{userId, factHash}` for write-side dedup) + Atlas **vector** indexes for `products`, `troubleshooting_docs`, `agent_memory_facts`, `chat_messages` + Atlas **Search (BM25)** indexes for the same four collections (used by `mongodb_hybrid_search` and the LTM hybrid retriever) + TTL on `agent_memory_facts`. Collection name overridable via **`CHAT_SESSIONS_COLLECTION`** and **`CHAT_MESSAGES_COLLECTION`**. |
-| `seed-embeddings.ts` | `products`, **seeder-owned rows of** `troubleshooting_docs` | Backfills `embedding` + `embeddingModel` fields via Voyage or Bedrock; requires AWS creds. **Auto-invoked by `deploy-project.sh` Phase 5b** and `deploy-local.sh` Phase 7 — manual invocation is only needed when iterating on the seeder. KB-managed rows in `troubleshooting_docs` (those carrying `bedrock_text_chunk` / `bedrock_metadata`) are explicitly skipped. `agent_memory_facts` and `chat_messages` embeddings are populated at write time by the API. Exits non-zero on any per-row failure or post-run gap. |
+| `seed-career-paths.ts` | `career_paths` | 5 role-progression paths (backend→ML, mid→senior, senior→staff, →data scientist, →eng manager) for the **career-coach** agent |
+| `seed-skills-taxonomy.ts` | `skills_taxonomy` | 19 skills with learning resources; covers every `skillId` referenced by `career_paths` (**career-coach**) |
+| `seed-compensation.ts` | `compensation_data` | 11 salary benchmarks across role × seniority × region with percentile bands (**career-coach** compensation workflow). Figures are illustrative demo data. |
+| `seed-companies.ts` | `companies` | 4 company research profiles (Lumen Retail, Vertex Commerce, Cloudpeak Systems, Northwind Analytics) with culture/sentiment (**company-intel**) |
+| `seed-indexes.ts` | all + `agent_memory_facts` + `chat_sessions` + `chat_messages` + recruitment collections | Regular indexes (including unique `{userId, factHash}` for write-side dedup) + Atlas **vector** indexes for `products`, `troubleshooting_docs`, `agent_memory_facts`, `chat_messages`, `career_paths`, `skills_taxonomy`, `compensation_data`, `companies` + Atlas **Search (BM25)** indexes for the lexical leg (adds `career_paths`, `compensation_data`, `companies`) + TTL on `agent_memory_facts`. Recruitment index names match the `indexName`/`lexicalIndex` values in `config/skills/*/SKILL.md`. Collection name overridable via **`CHAT_SESSIONS_COLLECTION`** and **`CHAT_MESSAGES_COLLECTION`**. |
+| `seed-embeddings.ts` | `products`, **seeder-owned rows of** `troubleshooting_docs`, `career_paths`, `skills_taxonomy`, `compensation_data`, `companies` | Backfills `embedding` + `embeddingModel` fields via Voyage or Bedrock; requires AWS creds. **Auto-invoked by `deploy-project.sh` Phase 5b** and `deploy-local.sh` Phase 7 — manual invocation is only needed when iterating on the seeder. Recruitment collections embed their `embeddingText` field. KB-managed rows in `troubleshooting_docs` (those carrying `bedrock_text_chunk` / `bedrock_metadata`) are explicitly skipped. `agent_memory_facts` and `chat_messages` embeddings are populated at write time by the API. Exits non-zero on any per-row failure or post-run gap. |
 | `seed-all.ts` | all (except embeddings) | Runs all of the above in order; run once per environment |
 
 ### Provider switch (REWIRE_EMBEDDINGS=1)
 
 When `EMBEDDINGS_PROVIDER` flips (e.g. titan ↔ voyage), the existing stored embeddings have the wrong dimension / wrong provider tag. The deploy-time wrapper auto-detects this via three independent signals:
 
-- SSM `/<SHARED_VPC_NAME>/<region>/embeddings/dim` ≠ the current resolved embedding dim (`getVoyageEmbeddingDims()` — `VOYAGE_OUTPUT_DIM` or the 1024 default)
-- A sampled seeder-owned row's `embedding.length` ≠ the current resolved embedding dim
+- SSM `/<SHARED_VPC_NAME>/<region>/embeddings/dim` ≠ current `VOYAGE_EMBEDDING_DIMS`
+- A sampled seeder-owned row's `embedding.length` ≠ current `VOYAGE_EMBEDDING_DIMS`
 - A sampled seeder-owned row's `embeddingModel` doesn't start with the current provider prefix
 
 Any one signal triggers `REWIRE_EMBEDDINGS=1` automatically. Operators can also force it manually:
@@ -70,7 +74,7 @@ MONGODB_URI=... bun db-seeding/seed-products.ts
 | `EMBED_BATCH_DELAY_MS` | `200` | Delay between embedding API calls (throttle) |
 | `AWS_REGION` | `us-east-1` | Required for `seed-embeddings.ts` |
 
-> **Embedding dim defaults to 1024 and is configurable via `VOYAGE_OUTPUT_DIM`.** `getVoyageEmbeddingDims()` in `api/src/adapters/voyage-embedding.ts` is the single env reader (default `VOYAGE_DEFAULT_EMBEDDING_DIMS = 1024`); `seed-indexes.ts` derives `numDimensions` from it. Only `voyage-multimodal-3.5` supports non-1024 (256/512/1024/2048). The default + Terraform/bash parity are pinned by `api/tests/unit/voyage-ssot-guard.test.ts`. Changing the dim requires re-embedding (auto-detected here via `REWIRE_EMBEDDINGS`).
+> **Embedding dim is a code constant, not an env var.** `VOYAGE_EMBEDDING_DIMS` (1024) lives in `api/src/adapters/voyage-embedding.ts` and is imported directly by `seed-indexes.ts`. Bumping it is a code change pinned by `api/tests/unit/voyage-ssot-guard.test.ts`.
 
 ## Atlas vector search indexes
 

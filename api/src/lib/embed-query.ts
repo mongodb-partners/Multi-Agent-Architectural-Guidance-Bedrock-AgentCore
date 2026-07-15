@@ -20,8 +20,7 @@
  * boundary. Image-capable call sites pass a `MultimodalItem` directly.
  *
  * Vector dimensions must match the Atlas Vector Search index for the
- * collection — 1024-d by default, configurable via `VOYAGE_OUTPUT_DIM`
- * (`getVoyageEmbeddingDims()`).
+ * collection — both are 1024-d (`VOYAGE_EMBEDDING_DIMS`).
  */
 
 import { logger } from "./logger.ts";

@@ -77,8 +77,8 @@ def test_render_routing_multi_path(monkeypatch) -> None:
             {
                 "pathTaken": "synthesis",
                 "selected": [
-                    {"agentId": "order-management", "agentName": "Order Management", "score": 5.2, "source": "heuristic"},
-                    {"agentId": "product-recommendation", "agentName": "Product Recommendation", "score": 4.1, "source": "heuristic"},
+                    {"agentId": "job-match", "agentName": "Job Match", "score": 5.2, "source": "heuristic"},
+                    {"agentId": "company-intel", "agentName": "Company Intel", "score": 4.1, "source": "heuristic"},
                 ],
                 "rejected": [],
             },
@@ -87,8 +87,8 @@ def test_render_routing_multi_path(monkeypatch) -> None:
         _ev(
             "orchestrator.specialist_draft",
             {
-                "agentId": "order-management",
-                "agentName": "Order Management",
+                "agentId": "job-match",
+                "agentName": "Job Match",
                 "status": "success",
                 "answerBytes": 124,
                 "latencyMs": 800,
@@ -98,8 +98,8 @@ def test_render_routing_multi_path(monkeypatch) -> None:
         _ev(
             "orchestrator.specialist_draft",
             {
-                "agentId": "product-recommendation",
-                "agentName": "Product Recommendation",
+                "agentId": "company-intel",
+                "agentName": "Company Intel",
                 "status": "success",
                 "answerBytes": 200,
                 "latencyMs": 950,
@@ -111,8 +111,8 @@ def test_render_routing_multi_path(monkeypatch) -> None:
             {
                 "modelId": "claude-haiku",
                 "inputSpecialists": [
-                    {"agentId": "order-management", "agentName": "Order Management"},
-                    {"agentId": "product-recommendation", "agentName": "Product Recommendation"},
+                    {"agentId": "job-match", "agentName": "Job Match"},
+                    {"agentId": "company-intel", "agentName": "Company Intel"},
                 ],
                 "omittedSpecialists": [],
                 "outputBytes": 280,
@@ -126,8 +126,8 @@ def test_render_routing_multi_path(monkeypatch) -> None:
 
     md = "\n".join(_markdown_lines(rec))
     assert "Multi-specialist synthesis (2 specialists)" in md
-    assert "Order Management" in md
-    assert "Product Recommendation" in md
+    assert "Job Match" in md
+    assert "Company Intel" in md
     assert "Synthesizer agent" in md
     assert "claude-haiku" in md
 
@@ -144,7 +144,7 @@ def test_render_routing_fast_path_single_specialist(monkeypatch) -> None:
             {
                 "pathTaken": "single",
                 "selected": [
-                    {"agentId": "troubleshooting", "agentName": "Troubleshooting", "score": 5.5, "source": "heuristic"},
+                    {"agentId": "career-coach", "agentName": "Career Coach", "score": 5.5, "source": "heuristic"},
                 ],
                 "rejected": [],
             },
@@ -153,8 +153,8 @@ def test_render_routing_fast_path_single_specialist(monkeypatch) -> None:
         _ev(
             "orchestrator.specialist_draft",
             {
-                "agentId": "troubleshooting",
-                "agentName": "Troubleshooting",
+                "agentId": "career-coach",
+                "agentName": "Career Coach",
                 "status": "final",
                 "answerBytes": 320,
                 "latencyMs": 1100,
@@ -167,7 +167,7 @@ def test_render_routing_fast_path_single_specialist(monkeypatch) -> None:
 
     md = "\n".join(_markdown_lines(rec))
     assert "Single specialist (fast path)" in md
-    assert "Troubleshooting" in md
+    assert "Career Coach" in md
     assert "Synthesizer agent" not in md
 
 
@@ -181,8 +181,8 @@ def test_render_routing_failed_specialist_shows_caveat(monkeypatch) -> None:
             {
                 "pathTaken": "synthesis",
                 "selected": [
-                    {"agentId": "order-management", "agentName": "Order Management", "score": 5.2, "source": "heuristic"},
-                    {"agentId": "product-recommendation", "agentName": "Product Recommendation", "score": 4.1, "source": "heuristic"},
+                    {"agentId": "job-match", "agentName": "Job Match", "score": 5.2, "source": "heuristic"},
+                    {"agentId": "company-intel", "agentName": "Company Intel", "score": 4.1, "source": "heuristic"},
                 ],
                 "rejected": [],
             },
@@ -191,8 +191,8 @@ def test_render_routing_failed_specialist_shows_caveat(monkeypatch) -> None:
         _ev(
             "orchestrator.specialist_draft",
             {
-                "agentId": "product-recommendation",
-                "agentName": "Product Recommendation",
+                "agentId": "company-intel",
+                "agentName": "Company Intel",
                 "status": "failed",
                 "answerBytes": 0,
                 "latencyMs": 50,
@@ -217,7 +217,7 @@ def test_render_routing_legacy_handoff_decision_still_works(monkeypatch) -> None
     events = [
         _ev(
             "handoff.decision",
-            {"from": "orchestrator", "to": "order-management", "label": "classifier:heuristic"},
+            {"from": "orchestrator", "to": "job-match", "label": "classifier:heuristic"},
             "h1",
         ),
     ]

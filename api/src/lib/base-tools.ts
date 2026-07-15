@@ -84,7 +84,7 @@ export function makeReadSkillResourceTool(registry: SkillRegistry): Tool {
     description:
       "Load a file under config/skills/<skillName>/. The skill must be in this agent's skills list and already activated (activate_skill or specialist pre-load). Args: skillName, path relative to that skill folder.",
     inputSchema: z.object({
-      skillName: z.string().min(1).describe("Skill folder name, e.g. order-management"),
+      skillName: z.string().min(1).describe("Skill folder name, e.g. job-match"),
       path: z
         .string()
         .min(1)
@@ -107,14 +107,14 @@ export function makeRunSkillScriptTool(registry: SkillRegistry): Tool {
     description:
       "Dynamically import and call an exported function from a skill's scripts/ directory. " +
       "The skill must be in this agent's skills: list and activated. " +
-      "Example: skillName='order-management', scriptPath='scripts/validate-return.mjs', " +
-      "exportName='validateReturnEligibility', args={order document}.",
+      "Example: skillName='job-match', scriptPath='scripts/rank-candidates.mjs', " +
+      "exportName='rankCandidates', args={candidate profile}.",
     inputSchema: z.object({
       skillName: z.string().min(1).describe("Skill folder name"),
       scriptPath: z
         .string()
         .min(1)
-        .describe("Relative path to the .mjs file, e.g. scripts/validate-return.mjs"),
+        .describe("Relative path to the .mjs file, e.g. scripts/rank-candidates.mjs"),
       exportName: z.string().min(1).describe("Named export to call"),
       args: z.unknown().describe("Argument passed to the function (object, array, or primitive)"),
     }),
@@ -400,7 +400,7 @@ export function makeActivateSkillTool(registry: SkillRegistry): Tool {
       skillName: z
         .string()
         .min(1)
-        .describe("Skill name from the discovery index (e.g. order-management)"),
+        .describe("Skill name from the discovery index (e.g. job-match)"),
     }),
     callback: async (input): Promise<JSONValue> => {
       const result = registry.activate(input.skillName);

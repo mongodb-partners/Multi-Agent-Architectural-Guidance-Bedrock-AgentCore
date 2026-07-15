@@ -88,8 +88,8 @@ describe("agent-classifier — Haiku multi-select", () => {
   test("Haiku tool call returns 2 specialists → classifyAgents preserves order and source='haiku'", async () => {
     mockSend = mock(async () =>
       toolUseResponse({
-        agentIds: ["order-management", "product-recommendation"],
-        reasoning: "user wants order status AND a laptop pick",
+        agentIds: ["job-match", "company-intel"],
+        reasoning: "user wants job matches AND company research",
       }),
     );
     const r = await classifyAgents({
@@ -97,35 +97,11 @@ describe("agent-classifier — Haiku multi-select", () => {
     });
     expect(r).toBeDefined();
     expect(r!.selections.length).toBe(2);
-    expect(r!.selections[0].agentId).toBe("order-management");
-    expect(r!.selections[1].agentId).toBe("product-recommendation");
+    expect(r!.selections[0].agentId).toBe("job-match");
+    expect(r!.selections[1].agentId).toBe("company-intel");
     expect(r!.selections[0].source).toBe("haiku");
     expect(r!.selections[1].source).toBe("haiku");
-    expect(r!.selections[0].reasoning).toContain("order status");
-  });
-
-  test("multi-intent escalation: heuristic-collapsing prompt reaches Haiku and multi-selects", async () => {
-    // This prompt scores a clear single leader (product-recommendation) with a
-    // real-but-sub-threshold runner-up (order-management). Before the
-    // escalation gate the heuristic returned a single specialist and Haiku was
-    // never consulted. Now it abstains, the Haiku tier runs, and both domains
-    // are returned. Proves the bug fix end-to-end.
-    mockSend = mock(async () =>
-      toolUseResponse({
-        agentIds: ["order-management", "product-recommendation"],
-        reasoning: "track the order AND recommend a replacement laptop",
-      }),
-    );
-    const r = await classifyAgents({
-      message: "Track order ORD-1005 and recommend a replacement laptop with similar specs.",
-    });
-    expect(mockSend.mock.calls.length).toBe(1); // heuristic deferred → Haiku ran
-    expect(r).toBeDefined();
-    expect(r!.selections.map((s) => s.agentId)).toEqual([
-      "order-management",
-      "product-recommendation",
-    ]);
-    expect(r!.selections.every((s) => s.source === "haiku")).toBe(true);
+    expect(r!.selections[0].reasoning).toContain("job matches");
   });
 
   test("tool schema receives agent enum and maxItems=CLASSIFIER_MULTI_MAX_AGENTS", async () => {
@@ -133,7 +109,7 @@ describe("agent-classifier — Haiku multi-select", () => {
     resetAgentClassifierCacheForTests();
     _setBedrockClientForTests(makeFakeClient());
     mockSend = mock(async () =>
-      toolUseResponse({ agentIds: ["order-management"] }),
+      toolUseResponse({ agentIds: ["job-match"] }),
     );
 
     await classifyAgents({ message: "blorple quazzle floom" });
@@ -143,33 +119,9 @@ describe("agent-classifier — Haiku multi-select", () => {
     expect(tool?.name).toBe("route_to_specialists");
     const schema = tool?.inputSchema?.json?.properties?.agentIds;
     expect(schema?.maxItems).toBe(3);
-    // Abstain is on by default, so an empty agentIds array is permitted.
-    expect(schema?.minItems).toBe(0);
+    expect(schema?.minItems).toBe(1);
     expect(Array.isArray(schema?.items?.enum)).toBe(true);
     expect(schema.items.enum.length).toBeGreaterThan(0);
-    // The abstain channel is offered to the model.
-    expect(tool?.inputSchema?.json?.properties?.abstain?.type).toBe("boolean");
-  });
-
-  test("Tier B abstain: Haiku sets abstain:true → classifyAgents returns undefined", async () => {
-    mockSend = mock(async () => toolUseResponse({ agentIds: [], abstain: true }));
-    const r = await classifyAgents({ message: "blorple quazzle floom" });
-    expect(r).toBeUndefined();
-  });
-
-  test("ORCHESTRATOR_CLARIFY_ON_VAGUE=0 restores legacy schema (minItems 1, no abstain) and forced pick", async () => {
-    process.env.ORCHESTRATOR_CLARIFY_ON_VAGUE = "0";
-    resetAgentClassifierCacheForTests();
-    _setBedrockClientForTests(makeFakeClient());
-    mockSend = mock(async () => toolUseResponse({ agentIds: ["order-management"] }));
-
-    const r = await classifyAgents({ message: "blorple quazzle floom" });
-    expect(r?.selections[0].agentId).toBe("order-management");
-
-    const cmd = lastInput as { input: { toolConfig?: any } };
-    const schema = cmd.input.toolConfig?.tools?.[0]?.toolSpec?.inputSchema?.json;
-    expect(schema?.properties?.agentIds?.minItems).toBe(1);
-    expect(schema?.properties?.abstain).toBeUndefined();
   });
 
   test("max-agents cap: tool returns 3 but cap=2 → result is sliced to 2", async () => {
@@ -179,47 +131,47 @@ describe("agent-classifier — Haiku multi-select", () => {
     mockSend = mock(async () =>
       toolUseResponse({
         agentIds: [
-          "order-management",
-          "product-recommendation",
-          "troubleshooting",
+          "job-match",
+          "company-intel",
+          "career-coach",
         ],
       }),
     );
     const r = await classifyAgents({ message: "blorple quazzle floom" });
     expect(r!.selections.length).toBe(2);
     expect(r!.selections.map((s) => s.agentId)).toEqual([
-      "order-management",
-      "product-recommendation",
+      "job-match",
+      "company-intel",
     ]);
   });
 
   test("hallucinated agent id is filtered out, valid ids preserved", async () => {
     mockSend = mock(async () =>
       toolUseResponse({
-        agentIds: ["bogus-agent-9000", "order-management", "another-fake"],
+        agentIds: ["bogus-agent-9000", "job-match", "another-fake"],
       }),
     );
     const r = await classifyAgents({ message: "blorple quazzle floom" });
     expect(r!.selections.length).toBe(1);
-    expect(r!.selections[0].agentId).toBe("order-management");
+    expect(r!.selections[0].agentId).toBe("job-match");
   });
 
   test("duplicate agent ids in tool reply are de-duplicated, first-occurrence order preserved", async () => {
     mockSend = mock(async () =>
       toolUseResponse({
         agentIds: [
-          "order-management",
-          "order-management",
-          "product-recommendation",
-          "order-management",
+          "job-match",
+          "job-match",
+          "company-intel",
+          "job-match",
         ],
       }),
     );
     const r = await classifyAgents({ message: "blorple quazzle floom" });
     expect(r!.selections.length).toBe(2);
     expect(r!.selections.map((s) => s.agentId)).toEqual([
-      "order-management",
-      "product-recommendation",
+      "job-match",
+      "company-intel",
     ]);
   });
 
@@ -249,10 +201,54 @@ describe("agent-classifier — Haiku multi-select", () => {
     resetAgentClassifierCacheForTests();
     _setBedrockClientForTests(makeFakeClient());
     mockSend = mock(async () =>
-      toolUseResponse({ agentIds: ["order-management"] }),
+      toolUseResponse({ agentIds: ["job-match"] }),
     );
     const r = await classifyAgents({ message: "blorple quazzle floom" });
     expect(r).toBeUndefined();
     expect(mockSend.mock.calls.length).toBe(0);
+  });
+
+  test("CLASSIFIER_BACKEND=llm → Haiku decides even for a strong heuristic prompt", async () => {
+    // This message would score decisively for company-intel under the
+    // heuristic, but LLM-first mode must consult Haiku and honor its answer.
+    process.env.CLASSIFIER_BACKEND = "llm";
+    resetAgentClassifierCacheForTests();
+    _setBedrockClientForTests(makeFakeClient());
+    mockSend = mock(async () => toolUseResponse({ agentIds: ["job-match"] }));
+    const r = await classifyAgents({
+      message: "Tell me about the company funding stage and employee sentiment",
+    });
+    expect(mockSend.mock.calls.length).toBe(1);
+    expect(r?.selections.map((s) => s.agentId)).toEqual(["job-match"]);
+    expect(r?.selections[0].source).toBe("haiku");
+  });
+
+  test("CLASSIFIER_BACKEND=haiku alias also routes LLM-first", async () => {
+    process.env.CLASSIFIER_BACKEND = "haiku";
+    resetAgentClassifierCacheForTests();
+    _setBedrockClientForTests(makeFakeClient());
+    mockSend = mock(async () => toolUseResponse({ agentIds: ["career-coach"] }));
+    const r = await classifyAgents({
+      message: "Here is my CV, what jobs match my experience and skills",
+    });
+    expect(mockSend.mock.calls.length).toBe(1);
+    expect(r?.selections.map((s) => s.agentId)).toEqual(["career-coach"]);
+  });
+
+  test("CLASSIFIER_BACKEND=llm → falls back to heuristic when Haiku returns nothing", async () => {
+    process.env.CLASSIFIER_BACKEND = "llm";
+    resetAgentClassifierCacheForTests();
+    _setBedrockClientForTests(makeFakeClient());
+    // Haiku returns no usable toolUse block → LLM-first must fall back to the
+    // heuristic, which routes this decisively to career-coach.
+    mockSend = mock(async () => ({
+      output: { message: { role: "assistant", content: [{ text: "n/a" }] } },
+    }));
+    const r = await classifyAgents({
+      message: "What salary should I expect and how do I negotiate my compensation offer",
+    });
+    expect(mockSend.mock.calls.length).toBe(1);
+    expect(r?.selections[0].agentId).toBe("career-coach");
+    expect(r?.selections[0].source).toBe("heuristic");
   });
 });

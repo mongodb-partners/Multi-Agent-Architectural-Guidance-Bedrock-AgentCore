@@ -35,14 +35,12 @@
 import {
   buildVoyageRequestBody,
   type MultimodalItem,
-  getVoyageEmbeddingDims,
+  VOYAGE_EMBEDDING_DIMS,
   voyageGenerateEmbeddings,
   getVoyageEndpoint,
   isVoyageConfigured,
   assertExpectedEmbeddingDims,
 } from "../api/src/adapters/voyage-embedding.ts";
-
-const VOYAGE_EMBEDDING_DIMS = getVoyageEmbeddingDims();
 
 // 1×1 transparent PNG, base64-encoded with the canonical `data:image/png;base64,`
 // header retained per the Voyage SDK contract.

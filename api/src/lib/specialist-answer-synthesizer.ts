@@ -52,7 +52,7 @@ Rules:
 
 /** One specialist answer fed into the synthesizer. */
 export type SpecialistAnswer = {
-  /** Routing id (e.g. `order-management`). Used internally only. */
+  /** Routing id (e.g. `job-match`). Used internally only. */
   agentId: string;
   /** Customer-facing display name (e.g. "Order Management"). */
   agentName: string;

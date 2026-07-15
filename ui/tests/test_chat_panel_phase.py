@@ -38,20 +38,20 @@ def _accumulate(events: list[TokenEvent]) -> tuple[str, str]:
 
 def test_specialist_drafts_not_persisted_synthesis_persisted() -> None:
     events = [
-        TokenEvent(text="Order status: ", phase="specialist", specialist_id="order-management", rank=0),
-        TokenEvent(text="shipped Monday.", phase="specialist", specialist_id="order-management", rank=0),
-        TokenEvent(text="Recommendation: ", phase="specialist", specialist_id="product-recommendation", rank=1),
-        TokenEvent(text="X1 Carbon.", phase="specialist", specialist_id="product-recommendation", rank=1),
-        TokenEvent(text="Your order ships Monday; ", phase="synthesis"),
-        TokenEvent(text="and we recommend the X1 Carbon.", phase="synthesis"),
+        TokenEvent(text="Top match: ", phase="specialist", specialist_id="job-match", rank=0),
+        TokenEvent(text="Senior Engineer at Lumen.", phase="specialist", specialist_id="job-match", rank=0),
+        TokenEvent(text="Company: ", phase="specialist", specialist_id="company-intel", rank=1),
+        TokenEvent(text="Lumen Retail.", phase="specialist", specialist_id="company-intel", rank=1),
+        TokenEvent(text="Your top match is Senior Engineer; ", phase="synthesis"),
+        TokenEvent(text="and the company is Lumen Retail.", phase="synthesis"),
     ]
     persisted, visible = _accumulate(events)
-    assert "Order status:" not in persisted
-    assert "X1 Carbon." not in persisted or persisted.endswith("X1 Carbon.")
-    assert persisted == "Your order ships Monday; and we recommend the X1 Carbon."
+    assert "Top match:" not in persisted
+    assert "Lumen Retail." not in persisted or persisted.endswith("Lumen Retail.")
+    assert persisted == "Your top match is Senior Engineer; and the company is Lumen Retail."
     # The user-visible stream still shows everything in real time.
-    assert "Order status:" in visible
-    assert "X1 Carbon." in visible
+    assert "Top match:" in visible
+    assert "Lumen Retail." in visible
 
 
 def test_fast_path_no_phase_persists_token_text() -> None:

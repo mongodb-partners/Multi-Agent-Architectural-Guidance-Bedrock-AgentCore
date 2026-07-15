@@ -395,7 +395,7 @@ class ScenarioResult:
 
 # Per-specialist single-intent probes. Each prompt is unambiguously
 # single-domain and MUST route to exactly one specialist with no synthesis.
-# The first entry (order-management) is the "primary" probe — its
+# The first entry (job-match) is the "primary" probe — its
 # session_id / trace_id are exposed via the ScenarioResult so downstream
 # scenarios (S6 persistence) can re-fetch it.
 #
@@ -404,24 +404,24 @@ class ScenarioResult:
 # happy-path keyword per specialist; the two trailing probes lock in two
 # anti-regression scenarios that previously misclassified:
 #
-#   - sku-compare: "what is the difference between sku-1 and sku-3 models"
-#     used to bounce off the heuristic (no strong keywords) and not engage
-#     Haiku fallback. Now Haiku correctly picks product-recommendation.
-#   - two-orders: same-domain multi-entity ("orders ORD-1001 AND ORD-1003").
-#     The synthesis path could have been triggered if the classifier mistook
-#     two distinct order ids as two distinct intents — we lock in that it
-#     does NOT fan out: one specialist handles both lookups inline.
+#   - company-compare: "how do Vertex Commerce and Cloudpeak Systems compare
+#     to work at" used to bounce off the heuristic (no strong keywords) and
+#     not engage Haiku fallback. Now Haiku correctly picks company-intel.
+#   - two-roles: same-domain multi-entity ("backend engineer AND data
+#     platform roles"). The synthesis path could have been triggered if the
+#     classifier mistook two distinct role types as two distinct intents — we
+#     lock in that it does NOT fan out: one specialist handles both inline.
 S1_PROBES: tuple[tuple[str, str, str], ...] = (
-    ("order-management",       "Where is my order ORD-1001?",
-     "order-management"),
-    ("product-recommendation", "Recommend a budget gaming laptop with a backlit keyboard for me.",
-     "product-recommendation"),
-    ("troubleshooting",        "My device will not power on. What should I check?",
-     "troubleshooting"),
-    ("product-recommendation", "what is the difference between sku-1 and sku-3 models",
-     "sku-compare"),
-    ("order-management",       "Tell me the status of my orders ORD-1001 and ORD-1003.",
-     "two-orders"),
+    ("job-match",     "Here is my background: senior backend engineer with Node.js and MongoDB. What jobs match me?",
+     "job-match"),
+    ("company-intel", "What is the funding stage and culture at Lumen Retail?",
+     "company-intel"),
+    ("career-coach",  "What salary should I expect for a mid-level machine learning engineer and how do I negotiate?",
+     "career-coach"),
+    ("company-intel", "how do Vertex Commerce and Cloudpeak Systems compare to work at",
+     "company-compare"),
+    ("job-match",     "Show me both backend engineer and data platform roles that fit me.",
+     "two-roles"),
 )
 
 
@@ -437,8 +437,8 @@ def _assert_single_intent_probe(
     probe surfaces as an S1-level FAIL with a clear ✗ line.
 
     `probe_label` distinguishes probes that share an expected specialist
-    (e.g. "product-recommendation" baseline vs "sku-compare" anti-regression
-    probe — both expect product-recommendation, so the label is what
+    (e.g. "company-intel" baseline vs "company-compare" anti-regression
+    probe — both expect company-intel, so the label is what
     identifies them in the summary)."""
     tag = f"{probe_label}→{expected}" if probe_label else expected
     invokes = turn.trace_events_by_type("agentcore.invoke")
@@ -541,7 +541,7 @@ def scenario_s1(
         )
         _assert_single_intent_probe(r, expected, turn, probe_label=label)
         # Keep the first probe's identifiers as the S1 "primary" so S6
-        # persistence reuses the existing session id (order-management).
+        # persistence reuses the existing session id (job-match).
         if idx == 0:
             primary_session = sid
             primary_trace = turn.collector_trace_id
@@ -572,7 +572,7 @@ def scenario_s2(
     turn = post_chat(
         api_url,
         token,
-        "Track my order ORD-1001 status AND recommend a waterproof outdoor headphone under $80 for me.",
+        "Find jobs that match my backend engineering CV AND tell me what Lumen Retail is like to work at.",
         session_id=sid,
         agent_id="orchestrator",
         timeout=300,
@@ -603,8 +603,8 @@ def scenario_s2(
         "stream emitted event: done",
     )
     r.assert_true(
-        "order-management" in specialists_invoked
-        and "product-recommendation" in specialists_invoked,
+        "job-match" in specialists_invoked
+        and "company-intel" in specialists_invoked,
         f"both specialists invoked (saw {specialists_invoked!r})",
     )
     r.assert_true(
@@ -779,13 +779,13 @@ def scenario_s4(
     r = ScenarioResult("S4")
     sid = make_session_id("S4", run_ts, tag)
     r.session_id = sid
-    log(f"\n-- S4 explicit specialist (troubleshooting) ({sid}) --")
+    log(f"\n-- S4 explicit specialist (career-coach) ({sid}) --")
     turn = post_chat(
         api_url,
         token,
-        "My device will not turn on after I left it in the rain. What should I check?",
+        "What skills should I develop to move from senior engineer into an engineering manager role?",
         session_id=sid,
-        agent_id="troubleshooting",
+        agent_id="career-coach",
     )
     r.trace_id = turn.x_trace_id
     r.elapsed_ms = turn.elapsed_ms
@@ -807,8 +807,8 @@ def scenario_s4(
         f"no multi_route_decision when agentId is explicit (saw {len(multi_decision)})",
     )
     r.assert_true(
-        "troubleshooting" in specialists_invoked,
-        f"explicit specialist 'troubleshooting' invoked (saw {specialists_invoked!r})",
+        "career-coach" in specialists_invoked,
+        f"explicit specialist 'career-coach' invoked (saw {specialists_invoked!r})",
     )
     return r
 
@@ -851,8 +851,8 @@ def scenario_s6(
         if label == "S1" and assistants:
             agent_ids = {m.get("agentId") for m in assistants}
             r.assert_true(
-                "order-management" in agent_ids,
-                f"S1 persisted assistant.agentId == 'order-management' (saw {agent_ids!r})",
+                "job-match" in agent_ids,
+                f"S1 persisted assistant.agentId == 'job-match' (saw {agent_ids!r})",
             )
 
     # Size cap: both traces must have `summary.eventsDropped == 0`. Per-event
@@ -975,7 +975,7 @@ def scenario_s8(
         args=(
             "a",
             sid_a,
-            "Track my order ORD-1001 status AND recommend a waterproof outdoor headphone under $80 for me.",
+            "Find jobs that match my backend engineering CV AND tell me what Lumen Retail is like to work at.",
         ),
     )
     t_b = threading.Thread(
@@ -983,7 +983,7 @@ def scenario_s8(
         args=(
             "b",
             sid_b,
-            "Track my order ORD-1003 status AND recommend a budget gaming laptop with a backlit keyboard for me.",
+            "Find data platform roles for me AND what salary should I expect for them.",
         ),
     )
     t_a.start()
@@ -1031,7 +1031,7 @@ def scenario_s8(
             f"(counts={synth_counts}) — proves AsyncLocalStorage scoping works",
         )
         # Persistence isolation: each session's text references only its own
-        # domain keywords; A must not leak B's distinct laptop ask.
+        # domain keywords; A must not leak B's distinct compensation ask.
         time.sleep(2)
         _, sess_a = fetch_session(api_url, token, sid_a)
         _, sess_b = fetch_session(api_url, token, sid_b)
@@ -1042,16 +1042,16 @@ def scenario_s8(
             str(m.get("content", "")) for m in sess_b.get("messages", [])
         ).lower()
         r.assert_true(
-            "ord-1001" in msgs_a,
-            "session A persisted text references ORD-1001 (A's domain)",
+            "lumen retail" in msgs_a or "company" in msgs_a,
+            "session A persisted text references Lumen Retail / company (A's domain)",
         )
         r.assert_true(
-            "ord-1003" in msgs_b or "gaming" in msgs_b or "laptop" in msgs_b,
-            "session B persisted text references ORD-1003 / gaming / laptop (B's domain)",
+            "salary" in msgs_b or "compensation" in msgs_b,
+            "session B persisted text references salary / compensation (B's domain)",
         )
         r.assert_true(
-            "ord-1003" not in msgs_a and "gaming laptop" not in msgs_a,
-            "session A persisted text does NOT leak B's distinct 'ORD-1003' / 'gaming laptop' keywords",
+            "salary" not in msgs_a and "compensation" not in msgs_a,
+            "session A persisted text does NOT leak B's distinct 'salary' / 'compensation' keywords",
         )
     return r
 
@@ -1141,7 +1141,7 @@ def _s9_parity_assertions(
     )
     targeted = {ev.get("payload", {}).get("targetAgentId") for ev in invokes}
     r.assert_true(
-        "order-management" in targeted and "product-recommendation" in targeted,
+        "job-match" in targeted and "company-intel" in targeted,
         f"S9 nested agentcore.invoke spans cover both specialists (targeted={targeted!r})",
     )
     r.assert_true(
@@ -1261,14 +1261,14 @@ def scenario_s9(
         fast_turn = post_chat(
             api_url,
             token,
-            "Where is my order ORD-1001?",
+            "Here is my background: senior backend engineer with Node.js and MongoDB. What jobs match me?",
             session_id=fast_sid,
             agent_id="orchestrator",
         )
         multi_turn = post_chat(
             api_url,
             token,
-            "Track my order ORD-1001 status AND recommend a waterproof outdoor headphone under $80 for me.",
+            "Find jobs that match my backend engineering CV AND tell me what Lumen Retail is like to work at.",
             session_id=multi_sid,
             agent_id="orchestrator",
             timeout=300,

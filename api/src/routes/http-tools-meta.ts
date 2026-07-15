@@ -22,14 +22,7 @@ httpToolsMetaRoutes.get("/http-tools", (c) => {
       urlConfigured: Boolean(expanded),
       headerKeys: t.headers ? Object.keys(t.headers) : [],
       passThroughBody: Boolean(t.passThroughBody),
-      timeoutMs: t.timeoutMs,
       parameterNames: t.parameters?.map((p) => p.name) ?? [],
-      parameters: (t.parameters ?? []).map((p) => ({
-        name: p.name,
-        type: p.type,
-        description: p.description,
-        required: p.required,
-      })),
     };
   });
 

@@ -104,6 +104,25 @@ const regularIndexes: { collection: string; spec: Record<string, 1 | -1>; option
   { collection: chatMessagesColl, spec: { sessionId: 1, timestamp: 1 } },
   { collection: chatMessagesColl, spec: { messageId: 1 }, options: { unique: true } },
   { collection: chatMessagesColl, spec: { userId: 1, ts: -1 } },
+  // ── Recruitment specialists (career-coach [career + compensation], company-intel) ──
+  // career_paths (career-coach) — looked up by pathId; filtered by seniority.
+  { collection: "career_paths", spec: { pathId: 1 }, options: { unique: true } },
+  { collection: "career_paths", spec: { targetRole: 1 } },
+  { collection: "career_paths", spec: { seniority: 1 } },
+  // skills_taxonomy (career-coach) — looked up by skillId ($in) or name ($in).
+  { collection: "skills_taxonomy", spec: { skillId: 1 }, options: { unique: true } },
+  { collection: "skills_taxonomy", spec: { name: 1 } },
+  { collection: "skills_taxonomy", spec: { category: 1 } },
+  // compensation_data (career-coach) — filtered by role/seniority/region.
+  { collection: "compensation_data", spec: { benchmarkId: 1 }, options: { unique: true } },
+  { collection: "compensation_data", spec: { role: 1, seniority: 1, region: 1 } },
+  { collection: "compensation_data", spec: { seniority: 1 } },
+  { collection: "compensation_data", spec: { region: 1 } },
+  // companies (company-intel) — looked up by companyId or exact name.
+  { collection: "companies", spec: { companyId: 1 }, options: { unique: true } },
+  { collection: "companies", spec: { name: 1 } },
+  { collection: "companies", spec: { industry: 1 } },
+  { collection: "companies", spec: { stage: 1 } },
 ];
 
 let regularOk = 0;
@@ -149,11 +168,9 @@ console.log(`✅  Regular indexes: ${regularOk}/${regularIndexes.length} created
 
 // Embedding dimension comes from the TS SSOT in
 // api/src/adapters/voyage-embedding.ts so every Atlas index, the deployed
-// model, and the bash deploy helpers agree. Configurable via VOYAGE_OUTPUT_DIM
-// (default 1024) — `getVoyageEmbeddingDims()` is the single env reader; the
-// default + parity are pinned by `voyage-ssot-guard.test.ts`.
-import { getVoyageEmbeddingDims } from "../api/src/adapters/voyage-embedding.ts";
-const EMBEDDING_DIMENSIONS = getVoyageEmbeddingDims();
+// model, and the bash deploy helpers agree. There is no env override —
+// raising the dim is a code change pinned by `voyage-ssot-guard.test.ts`.
+import { VOYAGE_EMBEDDING_DIMS as EMBEDDING_DIMENSIONS } from "../api/src/adapters/voyage-embedding.ts";
 const SIMILARITY = (process.env.VECTOR_SIMILARITY ?? "cosine") as "cosine" | "euclidean" | "dotProduct";
 const WAIT_FOR_ATLAS_SEARCH_INDEXES = ["1", "true", "yes"].includes(
   (process.env.WAIT_FOR_ATLAS_SEARCH_INDEXES ?? "").trim().toLowerCase(),
@@ -183,6 +200,12 @@ const vectorIndexes: { collection: string; name: string }[] = [
   { collection: "troubleshooting_docs", name: "troubleshooting-vector-index" },
   { collection: "agent_memory_facts", name: "agent_memory_facts-vector-index" },
   { collection: chatMessagesColl, name: "chat_messages-vector-index" },
+  // Recruitment specialists. Index names MUST match the `indexName` values the
+  // agent skills pass to mongodb_vector_search (config/skills/*/SKILL.md).
+  { collection: "career_paths", name: "career_paths_vector_index" },
+  { collection: "skills_taxonomy", name: "skills_taxonomy_vector_index" },
+  { collection: "compensation_data", name: "compensation_vector_index" },
+  { collection: "companies", name: "companies_vector_index" },
 ];
 
 // Atlas vector index definition shape
@@ -216,6 +239,28 @@ function vectorIndexDef(collection: string, indexName: string) {
         { type: "filter", path: "sessionId" },
         { type: "filter", path: "agentId" },
         { type: "filter", path: "role" },
+      ];
+      break;
+    case "career_paths":
+      // career-coach pre-filters by target seniority when stated.
+      filterFields = [{ type: "filter", path: "seniority" }];
+      break;
+    case "skills_taxonomy":
+      // career-coach may scope by skill category.
+      filterFields = [{ type: "filter", path: "category" }];
+      break;
+    case "compensation_data":
+      // career-coach (compensation workflow) pre-filters by seniority and region.
+      filterFields = [
+        { type: "filter", path: "seniority" },
+        { type: "filter", path: "region" },
+      ];
+      break;
+    case "companies":
+      // company-intel may scope by industry or stage.
+      filterFields = [
+        { type: "filter", path: "industry" },
+        { type: "filter", path: "stage" },
       ];
       break;
     default:
@@ -324,6 +369,42 @@ const lexicalIndexes: LexicalIndexSpec[] = [
       { type: "token", path: "userId" },
       { type: "token", path: "sessionId" },
       { type: "token", path: "role" },
+    ],
+  },
+  // ── Recruitment specialists ──────────────────────────────────────────────
+  // Index names + the primary `string` path MUST match the `lexicalIndex` and
+  // `lexicalPath` the agent skills pass to mongodb_vector_search hybrid mode.
+  {
+    // career-coach: lexicalIndex=career_paths_text_index, lexicalPath=description
+    collection: "career_paths",
+    name: "career_paths_text_index",
+    fields: [
+      { type: "string", path: "description" },
+      { type: "string", path: "targetRole" },
+      { type: "string", path: "fromRoles" },
+      { type: "token", path: "seniority" },
+    ],
+  },
+  {
+    // career-coach (compensation): lexicalIndex=compensation_text_index, lexicalPath=role
+    collection: "compensation_data",
+    name: "compensation_text_index",
+    fields: [
+      { type: "string", path: "role" },
+      { type: "string", path: "locationLabel" },
+      { type: "token", path: "seniority" },
+      { type: "token", path: "region" },
+    ],
+  },
+  {
+    // company-intel: lexicalIndex=companies_text_index, lexicalPath=name
+    collection: "companies",
+    name: "companies_text_index",
+    fields: [
+      { type: "string", path: "name" },
+      { type: "string", path: "industry" },
+      { type: "string", path: "description" },
+      { type: "token", path: "stage" },
     ],
   },
 ];

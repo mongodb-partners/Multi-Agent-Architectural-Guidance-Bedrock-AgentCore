@@ -32,6 +32,7 @@ export const mongodbQueryInputSchema = {
   limit: z.number().int().optional(),
   pipeline: z.array(z.record(z.string(), z.unknown())).optional(),
   update: z.record(z.string(), z.unknown()).optional(),
+  upsert: z.boolean().optional(),
   document: z.record(z.string(), z.unknown()).optional(),
   ...META_PASSTHROUGH,
 };

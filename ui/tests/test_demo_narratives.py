@@ -21,15 +21,15 @@ class TestNarrate:
             {
                 "type": "handoff.decision",
                 "payload": {
-                    "toAgentId": "order-management",
+                    "toAgentId": "job-match",
                     "fromAgentId": "orchestrator",
-                    "triggerSpans": [{"text": "order"}],
-                },
+                    "triggerSpans": [{"text": "job"}],
+                }
             }
         ]
         lines = narrate(events)
-        assert any("order-management" in line for line in lines)
-        assert any("order" in line for line in lines)
+        assert any("job-match" in line for line in lines)
+        assert any("job" in line for line in lines)
 
     def test_mongo_line_mentions_counts(self) -> None:
         events = [
@@ -51,7 +51,7 @@ class TestNarrate:
             {
                 "type": "handoff.decision",
                 "payload": {
-                    "toAgentId": "order-management",
+                    "toAgentId": "job-match",
                     "triggerSpans": [{"text": "<script>"}],
                 },
             }

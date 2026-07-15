@@ -43,11 +43,8 @@ sanitize_mongo_uri() {
 # Inlined so callers don't need an extra file on disk.
 _mc_run_bun_ping() {
   # URI/DB come from MONGO_URI / MONGO_DB env (set by assert_mongo_reachable caller).
-  # Driver spec resolved from $MONGO_PROBE_DRIVER_SPEC (single source of truth in
-  # _transient-errors.sh) — a bare `import "mongodb"` at repo root floats to the
-  # newest cached version, and bson@7.3.0 crashes at module load under Bun 1.3.13.
   bun -e '
-const { MongoClient } = await import(process.env.MONGO_PROBE_DRIVER_SPEC || "mongodb");
+import { MongoClient } from "mongodb";
 const uri = process.env.MONGO_URI;
 const dbName = process.env.MONGO_DB;
 const timeoutMs = Number(process.env.MONGO_TIMEOUT_MS || "8000");
@@ -67,6 +64,63 @@ try {
   try { await client.close(); } catch (_) {}
 }
 ' <<<"" 2>&1 || true
+}
+
+# _mc_verify_network_path <uri> <connected_host>
+#
+# Cross-checks that the URI shape AND the host the driver actually connected
+# to match the declared NETWORK_MODE. Catches the regression where the wrong
+# Terraform output value ends up in MONGODB_URI (e.g. public SRV captured in
+# privatelink mode) — connectivity still works against the public Atlas SRV
+# but the deploy intent is broken and traffic egresses over the internet.
+#
+# Pattern guide:
+#   privatelink: URI must NOT be mongodb+srv://; connected host typically
+#                contains "-pl-" or has the dedicated PL pattern
+#                cluster-pl-0-NN.PROJECT.mongodb.net.
+#   peering:     URI may be +srv:// (peering uses privateSrv); connected
+#                host typically contains "-pri" (or matches the peering
+#                private host pattern).
+#   (other)      no assertion.
+#
+# Returns 0 always — emits a warning, never fails the deploy. The hard fail
+# lives in _preflight-checks.sh::pf_check_privatelink_endpoint_available
+# which checks the AWS/Atlas resource state directly; this is the runtime
+# cross-check that catches "the URI we have is from the wrong stack".
+_mc_verify_network_path() {
+  local uri="$1"
+  local host="$2"
+  local mode="${NETWORK_MODE:-}"
+  if [[ -z "$mode" || -z "$host" ]]; then
+    return 0
+  fi
+  local sanitized
+  sanitized="$(sanitize_mongo_uri "$uri")"
+  if [[ "$mode" == "privatelink" ]]; then
+    if [[ "$uri" == mongodb+srv://* ]]; then
+      _mc_warn "NETWORK_MODE=privatelink but MONGODB_URI is mongodb+srv:// (expected multi-host non-SRV PL URI)"
+      _mc_warn "  uri=${sanitized} connected_host=${host}"
+      _mc_warn "  see docs/status/debugging.md 'MCP MongoDB URI must be the mode-correct private form'"
+    elif [[ "$host" != *"-pl-"* && "$host" != *"privatelink"* ]]; then
+      _mc_warn "NETWORK_MODE=privatelink but driver connected to '${host}' (expected '-pl-' host pattern)"
+      _mc_warn "  the URI shape is non-SRV but DNS resolved to a non-PL node — likely cross-stack drift"
+    else
+      _mc_log "✓ network path: privatelink (host=${host})"
+    fi
+  elif [[ "$mode" == "peering" ]]; then
+    if [[ "$uri" == mongodb+srv://* ]]; then
+      _mc_warn "NETWORK_MODE=peering but MONGODB_URI is mongodb+srv:// (expected multi-host non-SRV peering URI)"
+      _mc_warn "  uri=${sanitized} connected_host=${host}"
+      _mc_warn "  see docs/status/debugging.md 'MCP MongoDB URI must be the mode-correct private form'"
+    fi
+    if [[ "$host" != *"-pri"* && "$host" != *"privatesrv"* ]]; then
+      _mc_warn "NETWORK_MODE=peering but driver connected to '${host}' (expected '-pri' host pattern)"
+      _mc_warn "  re-check connectionStrings.private vs connectionStrings.standardSrv from the Atlas TF module"
+    else
+      _mc_log "✓ network path: peering (host=${host})"
+    fi
+  fi
+  return 0
 }
 
 # Emit a structured failure envelope to stderr — operator-actionable signal.
@@ -142,6 +196,7 @@ assert_mongo_reachable() {
       local connected_host="${probe_out#OK}"
       connected_host="${connected_host# }"
       _mc_log "✓ ${sanitized} reachable (db=${db}, attempt=${attempt}${connected_host:+, host=${connected_host}})"
+      _mc_verify_network_path "$uri" "$connected_host"
       return 0
     fi
     last_err="${probe_out#ERR }"

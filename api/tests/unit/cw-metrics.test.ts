@@ -85,7 +85,7 @@ describe("cw-metrics EMF emitter", () => {
 
   test("recordChatTurn with error=true raises TurnErrors to 1 and includes errorClass context", () => {
     recordChatTurn({
-      agentId: "order-management",
+      agentId: "job-match",
       latencyMs: 99,
       error: true,
       errorClass: "ThrottlingException",
@@ -170,7 +170,7 @@ describe("cw-metrics EMF emitter", () => {
     // failures. Distinct namespace from Memory so the Chat dashboard can show
     // both turn-level and embedding-level health on one panel.
     recordChatMirrorEmbeddingSkipped({
-      agentId: "order-management",
+      agentId: "job-match",
       code: "voyage_strict_failed",
     });
     expect(captured.length).toBe(1);
@@ -179,7 +179,7 @@ describe("cw-metrics EMF emitter", () => {
     const names = r._aws.CloudWatchMetrics[0].Metrics.map((m) => m.Name);
     expect(names).toEqual(["ChatMirrorEmbeddingSkipped"]);
     expect(r.ChatMirrorEmbeddingSkipped).toBe(1);
-    expect(r.agentId).toBe("order-management");
+    expect(r.agentId).toBe("job-match");
     expect(r.code).toBe("voyage_strict_failed");
     const dimKeys = r._aws.CloudWatchMetrics[0].Dimensions[0];
     expect(dimKeys).toContain("agentId");

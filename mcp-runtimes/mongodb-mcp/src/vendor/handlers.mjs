@@ -300,11 +300,12 @@ async function mongodb_query(rawArgs, trace) {
         break;
       }
       case "updateOne": {
-        const res = await coll.updateOne(input.filter, { $set: input.update });
+        const res = await coll.updateOne(input.filter, input.update, { upsert: input.upsert ?? false });
         result = {
           operation: "updateOne",
           matchedCount: res.matchedCount,
           modifiedCount: res.modifiedCount,
+          upsertedId: res.upsertedId ? String(res.upsertedId) : null,
         };
         trace.event("mongo.result", {
           docCount: res.modifiedCount,
@@ -399,6 +400,7 @@ async function mongodb_vector_search(args, trace) {
   if (minScoreNum !== undefined) {
     pipeline.push({ $match: { _score: { $gte: minScoreNum } } });
   }
+  pipeline.push({ $project: { embedding: 0, embeddingText: 0 } });
 
   const docs = await db.collection(collection).aggregate(pipeline).toArray();
 
@@ -514,7 +516,7 @@ async function mongodb_hybrid_search(args, trace) {
   };
   const vectorPromise = db
     .collection(collection)
-    .aggregate([vectorStage, { $addFields: { _score: { $meta: "vectorSearchScore" } } }])
+    .aggregate([vectorStage, { $addFields: { _score: { $meta: "vectorSearchScore" } } }, { $project: { embedding: 0, embeddingText: 0 } }])
     .toArray();
 
   const compound = { must: [{ text: { query: queryText, path: lexicalPath } }] };
@@ -538,6 +540,7 @@ async function mongodb_hybrid_search(args, trace) {
     .aggregate([
       { $search: { index: lexicalIndex, compound } },
       { $addFields: { _score: { $meta: "searchScore" } } },
+      { $project: { embedding: 0, embeddingText: 0 } },
       { $limit: fK },
     ])
     .toArray()

@@ -70,7 +70,7 @@ describe("agentcore.retry event payload contract", () => {
     });
     collector.event("agentcore.retry", {
       arn: "arn:aws:bedrock-agentcore:us-east-1:123:runtime/foo",
-      targetAgentId: "order-management",
+      targetAgentId: "job-match",
       mode: "orchestrator_to_specialist",
       attempt: 2,
       previousErrorClass: "ThrottlingException",
@@ -82,7 +82,7 @@ describe("agentcore.retry event payload contract", () => {
     expect(ev).toBeDefined();
     const p = ev?.payload as Record<string, unknown>;
     expect(p.arn).toMatch(/^arn:aws:/);
-    expect(p.targetAgentId).toBe("order-management");
+    expect(p.targetAgentId).toBe("job-match");
     expect(p.mode).toBe("orchestrator_to_specialist");
     expect(p.attempt).toBe(2);
     expect(p.previousErrorClass).toBe("ThrottlingException");

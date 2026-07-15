@@ -10,7 +10,7 @@ This folder is the **canonical getting started pack** for the Bedrock Multi-Agen
 
 A **configuration-driven multi-agent reference** on **AWS Bedrock** (via the [Strands Agents TypeScript SDK](https://github.com/strands-agents/sdk-typescript)) and **MongoDB Atlas**. A user types a question into a Streamlit web UI; the Hono API receives it, an **in-API classifier** picks the right specialist (or falls back to an orchestrator AgentCore Runtime), and a **specialist AgentCore Runtime** (order-management, troubleshooting, product-recommendation) streams the answer back over SSE. MongoDB tools run in a **dedicated MongoDB MCP AgentCore Runtime** behind the AgentCore Gateway. Memory uses a two-layer split: **short-term conversation memory lives in AgentCore Memory**, while **long-term cross-session memory lives in MongoDB Atlas** with hybrid vector + BM25 across `agent_memory_facts` + `chat_messages`. Observability lands in CloudWatch (logs, EMF metrics, four dashboards, alarms) plus OpenTelemetry / X-Ray.
 
-The product goal: **add specialists by editing markdown config**, not by forking business logic for every customer. New agent = new `config/agents/<name>.agent.md` + skill folder + redeploy. Before editing live config, check `config/samples/` for reference-only examples; files there are not loaded by the API or deployed to AgentCore.
+The product goal: **add specialists by editing markdown config**, not by forking business logic for every customer. New agent = new `config/agents/<name>.agent.md` + skill folder + redeploy.
 
 **Two co-equal connectivity modes** (mutually exclusive per account): `NETWORK_MODE=privatelink` (default, partner-validated) or `NETWORK_MODE=peering` (alternative, with experimental KB ingestion). Switching modes requires destroy + redeploy.
 
@@ -20,14 +20,12 @@ The product goal: **add specialists by editing markdown config**, not by forking
 
 1. **Skim** [`AGENTS.md`](../AGENTS.md), this file, and [`architecture.md`](architecture.md).
 2. **Configure `.env`** from [`.env.sample`](../.env.sample). Decisions to make up front:
-   - `NETWORK_MODE` — `privatelink` (default), `peering`, or `public` (Bring your own MongoDB Atlas cluster over the public internet — demo only). **Mutually exclusive per account.** Switching = destroy + redeploy.
-   - `ATLAS_CLUSTER_SOURCE` — `managed` (default, stack provisions the Atlas cluster) or `byo` (Bring your own existing Atlas cluster; pair with `NETWORK_MODE=public` + `MONGODB_BYO_URI`).
-   - `EMBEDDINGS_PROVIDER` — `voyage` (recommended for managed/private modes, requires Marketplace subscription) or `titan` (Bedrock built-in; **recommended for the public Bring-your-own-cluster setup** — no SageMaker endpoint to provision).
+   - `NETWORK_MODE` — `privatelink` (default) or `peering`. **Mutually exclusive per account.** Switching = destroy + redeploy.
+   - `EMBEDDINGS_PROVIDER` — `voyage` (recommended, requires Marketplace subscription) or `titan` (Bedrock built-in).
    - `AUTH_MODE` — `iam` (long-lived keys) or `sts` (assumed role / SSO).
 3. **Pick the matching orchestrator** and run it; deploy scripts run centralized preflight checks before applying infrastructure:
    - PrivateLink: `./deploy/deploy-full-with-privatelink.sh --auto-approve`
    - VPC peering: `./deploy/deploy-full-with-vpc-peering.sh --auto-approve`
-   - Public — Bring your own MongoDB Atlas cluster (demo only): `./deploy/deploy-full-public.sh --auto-approve`
 4. **Post-deploy smoke:** runs in `deploy-project.sh` Phase 11 (or `source .env && python3 e2e-smoke/post-deploy-smoke.py` to re-run).
 5. **Open the Streamlit UI** (URL printed by the deploy script), log in via the seeded Cognito user, send a chat.
 7. **Open the Trace Viewer** for that turn (link in the chat inline card), toggle **Show developer details**.
@@ -80,7 +78,6 @@ Pick the path that matches your role.
 | Doc | Purpose | Last refreshed |
 |---|---|---|
 | [`architecture.md`](architecture.md) | System overview, 5-runtime topology, AWS infra, request flow, classifier path | 2026-05-20 |
-| [`diagrams/README.md`](diagrams/README.md) | Mermaid diagram pages — AWS infrastructure, request flow, memory architecture, deployment pipeline | 2026-06-09 |
 | [`deployment-guide.md`](deployment-guide.md) | How to deploy (PrivateLink + VPC peering), CI/CD, teardown, prerequisites | 2026-05-20 |
 | [`configuration-guide.md`](configuration-guide.md) | `config/` folder — agent personas, skills, `environment.yaml`, `http-tools.json` | 2026-05-24 |
 | [`advanced/deploy-tweak-guide.md`](advanced/deploy-tweak-guide.md) | **Advanced** — deploy/runtime tuning: mode flags, ARNs, embeddings, operational env knobs | 2026-05-24 |
@@ -148,11 +145,10 @@ Code beats docs. When in doubt, read:
 | Strands agent construction | [`api/src/lib/create-strands-agent.ts`](../api/src/lib/create-strands-agent.ts) |
 | Long-term memory | [`api/src/lib/long-term-memory.ts`](../api/src/lib/long-term-memory.ts), [`api/src/lib/vector-retrieval.ts`](../api/src/lib/vector-retrieval.ts) |
 | Trace collector | [`api/src/lib/trace-collector.ts`](../api/src/lib/trace-collector.ts) |
-| Deploy entrypoints | [`deploy/deploy-full-with-privatelink.sh`](../deploy/deploy-full-with-privatelink.sh), [`deploy/deploy-full-with-vpc-peering.sh`](../deploy/deploy-full-with-vpc-peering.sh), [`deploy/deploy-full-public.sh`](../deploy/deploy-full-public.sh) (Bring your own MongoDB Atlas cluster, demo) |
+| Deploy entrypoints | [`deploy/deploy-full-with-privatelink.sh`](../deploy/deploy-full-with-privatelink.sh), [`deploy/deploy-full-with-vpc-peering.sh`](../deploy/deploy-full-with-vpc-peering.sh) |
 | Per-project infra | [`deploy/terraform/envs/ec2/main.tf`](../deploy/terraform/envs/ec2/main.tf) |
 | Shared infra | [`deploy/terraform/envs/shared/main.tf`](../deploy/terraform/envs/shared/main.tf) |
 | Network infra | [`deploy/terraform/envs/network/main.tf`](../deploy/terraform/envs/network/main.tf) |
 | MongoDB MCP runtime | [`mcp-runtimes/mongodb-mcp/`](../mcp-runtimes/mongodb-mcp/) |
 | Agent personas | [`config/agents/*.agent.md`](../config/agents/) |
-| Config samples | [`config/samples/`](../config/samples/) — reference-only examples, not loaded/deployed |
 | Skills | [`config/skills/`](../config/skills/) |

@@ -20,21 +20,21 @@ describe("TraceCollector — skill resource read rollup", () => {
   test("buffers reads by skill name and surfaces them on the matching skill.activated event", () => {
     const c = makeCollector();
     c.event("skill.activated", {
-      name: "order-management",
+      name: "job-match",
       reason: "skill_required",
       bodyPreview: "ok",
       bodyBytes: 2,
     });
     c.recordSkillResourceRead({
-      skillName: "order-management",
-      resourcePath: "references/order-status-codes.md",
+      skillName: "job-match",
+      resourcePath: "references/collections-schema.md",
       bytes: 4_096,
       toolUseId: "tu-1",
       latencyMs: 5,
     });
     c.recordSkillResourceRead({
-      skillName: "order-management",
-      resourcePath: "scripts/lookup-order.mjs",
+      skillName: "job-match",
+      resourcePath: "scripts/lookup-job.mjs",
       bytes: 2_048,
       toolUseId: "tu-2",
       latencyMs: 8,
@@ -50,10 +50,10 @@ describe("TraceCollector — skill resource read rollup", () => {
       latencyMs?: number;
     }>;
     expect(reads).toHaveLength(2);
-    expect(reads[0].resourcePath).toBe("references/order-status-codes.md");
+    expect(reads[0].resourcePath).toBe("references/collections-schema.md");
     expect(reads[0].bytes).toBe(4_096);
     expect(reads[0].toolUseId).toBe("tu-1");
-    expect(reads[1].resourcePath).toBe("scripts/lookup-order.mjs");
+    expect(reads[1].resourcePath).toBe("scripts/lookup-job.mjs");
   });
 
   test("read for an inactive skill is buffered but does not synthesize a skill.activated event", () => {

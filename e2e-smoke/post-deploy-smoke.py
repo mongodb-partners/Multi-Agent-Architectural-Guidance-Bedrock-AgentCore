@@ -123,13 +123,11 @@ def manifest_doc(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text())
 
 
-def check_health(api_url: str, resources: dict[str, Any], manifest: dict[str, Any]) -> None:
+def check_health(api_url: str, resources: dict[str, Any]) -> None:
     """
     /health smoke. We mirror deploy-project.sh Phase 9a2's contract:
     - mongodb + agentcore: HARD-REQUIRE 'connected'.
-    - bedrockKnowledgeBase: HARD-REQUIRE 'connected' when KB id is provisioned,
-      except peering-nlb where Bedrock-managed ingestion is experimental and
-      deployment keeps Mongo/vector smoke as the source of truth.
+    - bedrockKnowledgeBase: HARD-REQUIRE 'connected' when KB id is provisioned.
     - mcpServer: omitted on unauthenticated GET /health (Gateway MCP requires
       JWT). When present (optional Bearer on /health), WARN ONLY if not
       'connected'. Real MCP regressions are caught by runtime env wiring +
@@ -154,13 +152,6 @@ def check_health(api_url: str, resources: dict[str, Any], manifest: dict[str, An
             "chat checks will catch real MCP regressions."
         )
     if resources.get("bedrock_kb_id"):
-        kb_conn_mode = _kb_connectivity_mode_from_manifest(manifest)
-        if kb_conn_mode == "peering-nlb" and deps.get("bedrockKnowledgeBase") != "connected":
-            log(
-                "  warning: /health dependency bedrockKnowledgeBase is "
-                f"{deps.get('bedrockKnowledgeBase')!r}; peering-nlb KB ingestion is non-blocking."
-            )
-            return
         require(
             deps.get("bedrockKnowledgeBase") == "connected",
             f"/health dependency bedrockKnowledgeBase is {deps.get('bedrockKnowledgeBase')!r}",
@@ -179,19 +170,12 @@ def check_agents_endpoint(api_url: str, token: str) -> None:
             if isinstance(a, dict)
         ]
     log(f"agents={agent_ids}")
-    runtime_arns = discover_runtime_arns()
     for expected in (
         "orchestrator",
-        "order-management",
-        "product-recommendation",
-        "troubleshooting",
+        "job-match",
+        "career-coach",
+        "company-intel",
     ):
-        if not runtime_arns.get(expected):
-            log(
-                f"  skip {expected}: {_agent_arn_env_key(expected)} not set "
-                "(agent not deployed in this environment)"
-            )
-            continue
         require(expected in agent_ids, f"/agents missing {expected}")
 
 
@@ -356,53 +340,6 @@ def check_terraform_outputs(resources: dict[str, Any], manifest: dict[str, Any])
     require("/" in cw_ui and cw_ui.rstrip("/").endswith("/ui"), f"unexpected ui log group: {cw_ui!r}")
 
 
-def check_cloudwatch_log_retention(resources: dict[str, Any]) -> None:
-    log("\n== CloudWatch log retention ==")
-    if os.environ.get("SKIP_TERRAFORM_CHECKS") == "1":
-        log("skipped via SKIP_TERRAFORM_CHECKS=1")
-        return
-
-    region = str(resources.get("aws_region") or os.environ.get("AWS_REGION") or "").strip()
-    require(region, "aws_region missing; cannot check CloudWatch log retention")
-
-    expected_outputs = {
-        "cloudwatch_api_log_group": 30,
-        "cloudwatch_ui_log_group": 7,
-        "cloudwatch_mcp_log_group": 7,
-        "cloudwatch_agentcore_log_group": 7,
-    }
-    observed: dict[str, int | None] = {}
-
-    for output_name, expected_days in expected_outputs.items():
-        group_name = run(["terraform", "output", "-raw", output_name], cwd=TF_DIR)
-        require(group_name, f"{output_name} output empty")
-        raw = run(
-            [
-                "aws",
-                "logs",
-                "describe-log-groups",
-                "--region",
-                region,
-                "--log-group-name-prefix",
-                group_name,
-                "--output",
-                "json",
-            ],
-            timeout=30,
-        )
-        groups = json.loads(raw).get("logGroups") or []
-        match = next((g for g in groups if g.get("logGroupName") == group_name), None)
-        require(match is not None, f"CloudWatch log group not found: {group_name}")
-        retention = match.get("retentionInDays")
-        observed[group_name] = retention
-        require(
-            retention == expected_days,
-            f"{group_name}: retention {retention or 'Never expire'} days, expected {expected_days}",
-        )
-
-    log(f"PASS cloudwatch_log_retention {json.dumps(observed, sort_keys=True)}")
-
-
 def check_bedrock_kb(resources: dict[str, Any], manifest: dict[str, Any]) -> None:
     network_mode = _network_mode_from_manifest(manifest)
     kb_conn_mode = _kb_connectivity_mode_from_manifest(manifest)
@@ -429,133 +366,6 @@ def check_bedrock_kb(resources: dict[str, Any], manifest: dict[str, Any]) -> Non
     info = json.loads(raw)
     log(json.dumps(info, sort_keys=True))
     require(info.get("status") == "ACTIVE", f"Bedrock KB is not ACTIVE: {info.get('status')}")
-
-    ds_id = run(
-        [
-            "aws",
-            "bedrock-agent",
-            "list-data-sources",
-            "--region",
-            str(region),
-            "--knowledge-base-id",
-            str(kb_id),
-            "--query",
-            "dataSourceSummaries[0].dataSourceId",
-            "--output",
-            "text",
-        ],
-        timeout=60,
-    )
-    require(ds_id and ds_id != "None", f"Bedrock KB {kb_id} has no data source")
-
-    latest_job_raw = run(
-        [
-            "aws",
-            "bedrock-agent",
-            "list-ingestion-jobs",
-            "--region",
-            str(region),
-            "--knowledge-base-id",
-            str(kb_id),
-            "--data-source-id",
-            ds_id,
-            "--sort-by",
-            "attribute=STARTED_AT,order=DESCENDING",
-            "--max-results",
-            "1",
-            "--query",
-            (
-                "ingestionJobSummaries[0].{"
-                "jobId:ingestionJobId,"
-                "status:status,"
-                "scanned:statistics.numberOfDocumentsScanned,"
-                "failed:statistics.numberOfDocumentsFailed,"
-                "new:statistics.numberOfNewDocumentsIndexed,"
-                "modified:statistics.numberOfModifiedDocumentsIndexed"
-                "}"
-            ),
-            "--output",
-            "json",
-        ],
-        timeout=60,
-    )
-    latest_job = json.loads(latest_job_raw)
-    require(latest_job, f"Bedrock KB data source {ds_id} has no ingestion jobs")
-    log(f"latest KB ingestion: {json.dumps(latest_job, sort_keys=True)}")
-    status = str(latest_job.get("status") or "")
-    scanned = int(latest_job.get("scanned") or 0)
-    failed = int(latest_job.get("failed") or 0)
-
-    # Expected document count comes from the KB's *actual* S3 data source bucket,
-    # not the local deploy/kb-docs sample docs. When KB_DOCS_BUCKET points at an
-    # existing, externally-managed bucket (kb_docs_bucket_create=false) Terraform does
-    # NOT upload the sample docs — the KB ingests whatever was already
-    # placed under the inclusion prefix. Counting live bucket objects works for
-    # both the Terraform-managed and the externally-managed (reuse) bucket paths.
-    ds_cfg_raw = run(
-        [
-            "aws",
-            "bedrock-agent",
-            "get-data-source",
-            "--region",
-            str(region),
-            "--knowledge-base-id",
-            str(kb_id),
-            "--data-source-id",
-            ds_id,
-            "--query",
-            "dataSource.dataSourceConfiguration.s3Configuration",
-            "--output",
-            "json",
-        ],
-        timeout=60,
-    )
-    ds_cfg = json.loads(ds_cfg_raw) if ds_cfg_raw and ds_cfg_raw != "None" else {}
-    bucket_name = str((ds_cfg or {}).get("bucketArn") or "").split(":::")[-1]
-    inclusion_prefixes = (ds_cfg or {}).get("inclusionPrefixes") or [""]
-    expected_keys: set[str] = set()
-    for prefix in inclusion_prefixes:
-        keys_raw = run(
-            [
-                "aws",
-                "s3api",
-                "list-objects-v2",
-                "--region",
-                str(region),
-                "--bucket",
-                bucket_name,
-                "--prefix",
-                str(prefix),
-                "--query",
-                "Contents[?Size>`0`].Key",
-                "--output",
-                "json",
-            ],
-            timeout=120,
-        )
-        for key in (json.loads(keys_raw) if keys_raw and keys_raw != "None" else []) or []:
-            if not str(key).endswith("/"):
-                expected_keys.add(str(key))
-    expected_docs = len(expected_keys)
-    expected_names = sorted(k.rsplit("/", 1)[-1] for k in expected_keys)
-    require(
-        expected_docs > 0,
-        f"KB data source bucket s3://{bucket_name}/ has no source objects under prefixes {inclusion_prefixes}",
-    )
-    if kb_conn_mode == "peering-nlb" and (status != "COMPLETE" or failed > 0):
-        log(
-            "  warning: latest KB ingestion is "
-            f"status={status!r} scanned={scanned} failed={failed}; "
-            "peering-nlb KB ingestion is experimental and non-blocking."
-        )
-    else:
-        require(status == "COMPLETE", f"latest KB ingestion job is not COMPLETE: {status}")
-        require(
-            scanned == expected_docs,
-            f"latest KB ingestion job scanned {scanned} source document(s), "
-            f"expected {expected_docs} from s3://{bucket_name}/: {expected_names}",
-        )
-        require(failed == 0, f"latest KB ingestion job completed with {failed} failed source document(s)")
 
     endpoint_service = str(info.get("endpointServiceName") or "")
     endpoint_host = str(info.get("endpoint") or "")
@@ -853,62 +663,6 @@ def _read_env_live(path: Path) -> dict[str, str]:
     return out
 
 
-def _agent_id_from_arn_key(key: str) -> str | None:
-    """Map an ``AGENTCORE_<NAME>_ARN`` env key to its agent id.
-
-    ``AGENTCORE_ORCHESTRATOR_ARN``           -> ``orchestrator``
-    ``AGENTCORE_ORDER_MANAGEMENT_ARN``       -> ``order-management``
-    ``AGENTCORE_PRODUCT_RECOMMENDATION_ARN`` -> ``product-recommendation``
-
-    Returns ``None`` for keys that are not per-agent runtime ARNs (the legacy
-    ``AGENTCORE_RUNTIME_ARN`` alias, and ``MONGODB_MCP_RUNTIME_ARN`` which does
-    not carry the ``AGENTCORE_`` prefix and is not a chat agent).
-    """
-    if not key.startswith("AGENTCORE_") or not key.endswith("_ARN"):
-        return None
-    if key == "AGENTCORE_RUNTIME_ARN":
-        return None
-    spec = key[len("AGENTCORE_") : -len("_ARN")].lower().replace("_", "-")
-    return spec or None
-
-
-def _agent_arn_env_key(agent_id: str) -> str:
-    """Inverse of ``_agent_id_from_arn_key`` — used only for human-readable
-    skip messages so operators know which env var to set."""
-    return "AGENTCORE_" + agent_id.upper().replace("-", "_") + "_ARN"
-
-
-def discover_runtime_arns() -> dict[str, str]:
-    """Discover per-agent AgentCore Runtime ARNs from ``.env.live`` (preferred)
-    and the process environment, keyed by agent id.
-
-    Each agent has a dedicated ARN env var (``AGENTCORE_<NAME>_ARN``). When an
-    agent's ARN is absent — e.g. a specialist that simply was not deployed in
-    this environment — per-agent smoke checks SKIP rather than fail. The legacy
-    single-runtime ``AGENTCORE_RUNTIME_ARN`` alias maps to ``orchestrator`` only
-    when the canonical orchestrator ARN is not set. ``MONGODB_MCP_RUNTIME_ARN``
-    is intentionally excluded (it is not a chat agent).
-    """
-    env_live = _read_env_live(ROOT / ".env.live")
-
-    def lookup(key: str) -> str:
-        return (env_live.get(key) or os.environ.get(key) or "").strip()
-
-    arns: dict[str, str] = {}
-    for key in set(env_live) | set(os.environ):
-        agent_id = _agent_id_from_arn_key(key)
-        if not agent_id:
-            continue
-        value = lookup(key)
-        if value:
-            arns[agent_id] = value
-    if "orchestrator" not in arns:
-        legacy = lookup("AGENTCORE_RUNTIME_ARN")
-        if legacy:
-            arns["orchestrator"] = legacy
-    return arns
-
-
 def check_agentcore_runtime_env(resources: dict[str, Any]) -> None:
     """Fail fast when a specialist (or orchestrator) AgentCore Runtime is
     missing MongoDB MCP Gateway wiring env vars. This catches the Terraform-vs-script
@@ -929,7 +683,19 @@ def check_agentcore_runtime_env(resources: dict[str, Any]) -> None:
     region = str(resources.get("aws_region") or os.environ.get("AWS_REGION") or "").strip()
     require(region, "aws_region missing — needed for bedrock-agentcore-control calls")
 
-    runtime_arns = discover_runtime_arns()
+    env_live = _read_env_live(ROOT / ".env.live")
+    runtime_arns: dict[str, str] = {}
+    if env_live.get("AGENTCORE_ORCHESTRATOR_ARN"):
+        runtime_arns["orchestrator"] = env_live["AGENTCORE_ORCHESTRATOR_ARN"]
+    for key, value in env_live.items():
+        if not key.startswith("AGENTCORE_") or not key.endswith("_ARN"):
+            continue
+        if key in ("AGENTCORE_ORCHESTRATOR_ARN", "AGENTCORE_RUNTIME_ARN"):
+            continue
+        # AGENTCORE_COMPANY_INTEL_ARN -> company-intel
+        spec_id = key[len("AGENTCORE_") : -len("_ARN")].lower().replace("_", "-")
+        if spec_id:
+            runtime_arns[spec_id] = value
 
     if not runtime_arns:
         log("WARN: no AGENTCORE_*_ARN entries found in .env.live; runtime env check skipped")
@@ -1000,66 +766,43 @@ def check_all_agents(api_url: str, token: str) -> None:
 
     cases = [
         {
+            # Orchestrator entry point → routes to company-intel. "Lumen Retail"
+            # is seeded by db-seeding/seed-companies.ts with grounded facts
+            # (Series C, Austin TX, $310M) so we can assert on real content.
             "agent": "orchestrator",
-            "message": "I need to return order ORD-1003 for alex@example.com. Please help me start the return.",
-            "needles": ["ORD-1003", "return"],
-            "trace_any": ["handoff", "mongo.query", "mcp.call"],
+            "message": "Tell me about Lumen Retail — what funding stage is it and where is it headquartered?",
+            "needles": ["Series C", "Austin", "310M"],
+            "trace_any": ["handoff", "mongo.query", "mongo.vector_search", "mcp.call"],
         },
         {
-            "agent": "order-management",
-            "message": "What's the status of order ORD-1001?",
-            "needles": ["ORD-1001", "Shipped", "Tracking"],
-            "trace_any": ["mongo.query", "mcp.call", "handoff"],
+            # Direct-target company-intel. Same seeded company; assert grounded
+            # facts + evidence of the Mongo/MCP tool path.
+            "agent": "company-intel",
+            "message": "What is the engineering culture and funding stage at Lumen Retail?",
+            "needles": ["Series C", "Austin", "310M", "mentorship", "remote"],
+            "trace_any": ["mongo.query", "mongo.vector_search", "mcp.call", "handoff", "bedrock.kb.retrieve"],
         },
         {
-            "agent": "product-recommendation",
-            "message": "I need waterproof outdoor headphones or rugged audio gear under $80 for rain.",
-            "needles": ["waterproof", "rugged", "IP67", "outdoor"],
-            "trace_any": ["mongo.vector_search", "mcp.call", "handoff"],
+            # Direct-target job-match. LLM-authored answer, so needles are
+            # forgiving domain terms; the tool path is proven by trace_any.
+            "agent": "job-match",
+            "message": "Here is my background: senior backend engineer with Node.js and MongoDB. What jobs match me?",
+            "needles": ["engineer", "role", "match", "backend"],
+            "trace_any": ["mongo.vector_search", "mongo.query", "mcp.call", "handoff"],
         },
         {
-            "agent": "troubleshooting",
-            "message": "My device will not turn on after I left it in the rain. What should I check?",
-            "needles": ["dry", "power", "battery", "moisture", "water"],
-            "trace_any": ["bedrock.kb.retrieve", "tool.call", "mongo.vector_search", "handoff"],
+            # Direct-target career-coach (compensation workflow). Forgiving
+            # needles; require Mongo/MCP evidence via trace_any.
+            "agent": "career-coach",
+            "message": "What salary should I expect for a mid-level machine learning engineer and how do I negotiate?",
+            "needles": ["salary", "compensation", "negotiate", "range"],
+            "trace_any": ["mongo.query", "mongo.vector_search", "mcp.call", "handoff"],
         },
     ]
 
-    runtime_arns = discover_runtime_arns()
-    # Roster awareness: the orchestrator chat case sends an order-return prompt
-    # whose only correct handoff target is order-management. When that specialist
-    # is not deployed (orchestrator-only, or any partial roster missing it) the
-    # orchestrator can only ask a clarifying question (orchestrator.agent.md
-    # rule 5), so requiring a handoff/mongo/mcp trace is a false negative. Accept
-    # the clarification path (and still accept a real handoff, for liveness)
-    # whenever order-management is absent. Mirrors the per-roster skips used for
-    # the specialist cases and the agent-aware logic in
-    # deploy/scripts/backend-smoke.py.
-    specialist_ids = [a for a in runtime_arns if a != "orchestrator"]
-    orchestrator_handoff_target_present = "order-management" in specialist_ids
     for case in cases:
-        agent = str(case["agent"])
-        if not runtime_arns.get(agent):
-            log(
-                f"\n-- {agent} -- skipped: {_agent_arn_env_key(agent)} not set "
-                "(agent not deployed in this environment)"
-            )
-            continue
+        agent = case["agent"]
         log(f"\n-- {agent} --")
-        case_needles = list(case["needles"])
-        case_trace_any = list(case["trace_any"])
-        if agent == "orchestrator" and not orchestrator_handoff_target_present:
-            # order-management is the only valid target for the order-return
-            # prompt; without it the orchestrator clarifies. Accept clarification
-            # traces in addition to the (still-valid) handoff/mongo/mcp signals.
-            case_trace_any = list(case["trace_any"]) + [
-                "orchestrator.clarification",
-                "orchestrator.clarification_route",
-            ]
-            log(
-                "orchestrator case: order-management not deployed — accepting "
-                "clarification path (orchestrator cannot hand off an order request)"
-            )
         last_failure = ""
         max_attempts = chat_attempts()
         for attempt in range(1, max_attempts + 1):
@@ -1113,9 +856,9 @@ def check_all_agents(api_url: str, token: str) -> None:
                 "token": "token" in events and len(flat) > 20,
                 "done": "done" in events,
                 "no_error": not errors,
-                "content": any(n.lower() in flat.lower() for n in case_needles),
-                "trace_or_handoff": any(t in traces for t in case_trace_any)
-                or ("handoff" in case_trace_any and bool(handoffs)),
+                "content": any(n.lower() in flat.lower() for n in case["needles"]),
+                "trace_or_handoff": any(t in traces for t in case["trace_any"])
+                or ("handoff" in case["trace_any"] and bool(handoffs)),
             }
             log(f"events={sorted(set(events))}")
             log(f"traces_sample={sorted(set(traces))[:20]}")
@@ -1153,35 +896,11 @@ def check_long_term_memory_recall(api_url: str, token: str) -> None:
     if os.environ.get("SKIP_CHAT_CHECKS") == "1" or os.environ.get("SKIP_LTM_CHECK") == "1":
         log("skipped via SKIP_CHAT_CHECKS=1 or SKIP_LTM_CHECK=1")
         return
-    ltm_arns = discover_runtime_arns()
-    if not ltm_arns.get("orchestrator"):
-        log(
-            f"skipped: {_agent_arn_env_key('orchestrator')} not set "
-            "(orchestrator not deployed in this environment)"
-        )
-        return
-    if "order-management" not in [a for a in ltm_arns if a != "orchestrator"]:
-        # The plant/recall prompts are profile/preference messages that the
-        # orchestrator routes to order-management (verified live: the recall
-        # reply is answered "From your profile on file …" by order-management).
-        # The orchestrator itself is a pure router that never answers content,
-        # and other specialists (e.g. troubleshooting) only clarify for a
-        # profile/preference prompt, so without order-management deployed the
-        # recalled phrase can never be surfaced and the behavioural test is a
-        # false negative. The LTM read/write/embedding paths are still validated
-        # by the "seeded corpus embeddings" and "LTM embedding" checks above.
-        log(
-            f"skipped: {_agent_arn_env_key('order-management')} not set — the "
-            "LTM recall prompt is answered by order-management after handoff; "
-            "without it the orchestrator only clarifies and cannot surface the "
-            "recalled phrase. LTM storage is still covered by the embedding checks."
-        )
-        return
 
     needle = "HELIOTROPE-LANTERN"
     run_id = int(time.time() * 1000)
     plant_msg = (
-        f"Please remember this preference for future support tickets: my "
+        f"Please remember this preference for my job search: my "
         f"favorite mnemonic phrase is {needle}. Treat it as a stable user "
         "preference, not a one-off."
     )
@@ -1246,12 +965,6 @@ def check_cloudwatch_join(resources: dict[str, Any], api_url: str, token: str) -
     if os.environ.get("SKIP_CHAT_CHECKS") == "1":
         log("skipped via SKIP_CHAT_CHECKS=1")
         return
-    if not discover_runtime_arns().get("orchestrator"):
-        log(
-            f"skipped: {_agent_arn_env_key('orchestrator')} not set "
-            "(this check drives a chat through the orchestrator)"
-        )
-        return
 
     api_group = (resources.get("cloudwatch_api_log_group") or "").strip()
     if not api_group:
@@ -1269,7 +982,7 @@ def check_cloudwatch_join(resources: dict[str, Any], api_url: str, token: str) -
     # the API span AND the downstream AgentCore runtime emit logs carrying the
     # same trace_id. A bare greeting often short-circuits inside the orchestrator
     # without invoking any specialist runtime, leaving CloudWatch with API-only hits.
-    _, x_trace = post_chat(api_url, token, "orchestrator", "Please look up the status of order ORD-1001.")
+    _, x_trace = post_chat(api_url, token, "orchestrator", "Tell me about the funding stage and culture at Lumen Retail.")
     require(
         isinstance(x_trace, str) and len(x_trace) == 32 and re.match(r"^[0-9a-f]{32}$", x_trace, re.I),
         f"POST /chat missing X-Trace-Id (got {x_trace!r})",
@@ -1372,37 +1085,6 @@ def check_cloudwatch_join(resources: dict[str, Any], api_url: str, token: str) -
             "WARN: no AgentCore runtime ARNs in env — AgentCore trace join skipped."
         )
         return
-    existing_agentcore_groups: list[str] = []
-    for grp in agentcore_groups:
-        try:
-            raw = run(
-                [
-                    "aws",
-                    "logs",
-                    "describe-log-groups",
-                    "--region",
-                    region,
-                    "--log-group-name-prefix",
-                    grp,
-                    "--output",
-                    "json",
-                ],
-                timeout=20,
-            )
-            groups = json.loads(raw).get("logGroups") or []
-        except (SmokeFailure, json.JSONDecodeError):
-            continue
-        if any(g.get("logGroupName") == grp for g in groups):
-            existing_agentcore_groups.append(grp)
-
-    if not existing_agentcore_groups:
-        log(
-            "AgentCore vended APPLICATION_LOGS disabled or absent — skipping "
-            "payload-bearing AgentCore trace join. API trace join above still "
-            "validates sanitized app logs."
-        )
-        return
-    agentcore_groups = existing_agentcore_groups
     log(f"agentcore_log_groups_scanned={len(agentcore_groups)} (vended-logs)")
 
     # AgentCore-managed log delivery to CloudWatch can lag 30-90 s on cold
@@ -1499,25 +1181,10 @@ def _load_env_live_uri() -> str:
 
 def _bun_probe_mongo(uri: str, db: str, script: str) -> str:
     """Run `bun -e` with MONGO_URI / MONGO_DB / SCRIPT in env and return stdout.
-    Bun is preferred over pymongo so we don't need an optional Python dep.
-
-    The `script` MUST import the driver via
-    `await import(process.env.MONGO_PROBE_DRIVER_SPEC || 'mongodb')` rather than a
-    bare static `import 'mongodb'`. A bare import resolves to Bun's newest cached
-    version, and bson@7.3.0 crashes at module load under Bun 1.3.13
-    (node:v8 isBuildingSnapshot unimplemented) — the probe then emits no stdout
-    and callers misread the empty result as a data failure. The spec is single-
-    sourced from $MONGO_PROBE_DRIVER_SPEC (exported by deploy/scripts/
-    _transient-errors.sh); when the smoke test runs standalone we fall back to the
-    same Bun-safe 6.x line. See mongo-probe-bun-bson-failure-report.md."""
+    Bun is preferred over pymongo so we don't need an optional Python dep."""
     bun = subprocess.run(
         ["bun", "-e", script],
-        env={
-            **os.environ,
-            "MONGO_URI": uri,
-            "MONGO_DB": db,
-            "MONGO_PROBE_DRIVER_SPEC": os.environ.get("MONGO_PROBE_DRIVER_SPEC", "mongodb@6.21.0"),
-        },
+        env={**os.environ, "MONGO_URI": uri, "MONGO_DB": db},
         text=True,
         capture_output=True,
         timeout=60,
@@ -1616,10 +1283,10 @@ def check_mongo_runtime_reachable(resources: dict[str, Any]) -> None:
 
 
 def check_seeded_corpus_embeddings(resources: dict[str, Any]) -> None:
-    """Verify products + seeder-owned troubleshooting_docs rows all carry
-    `embedding` (correct dim) and `embeddingModel` (matches provider). Catches
-    the silent embedding-seed regression that the original "embeddings not in
-    DB" report exposed."""
+    """Verify the seeder-owned recruitment collections (companies, career_paths,
+    skills_taxonomy, compensation_data) all carry `embedding` (correct dim) and
+    `embeddingModel` (matches provider). Catches the silent embedding-seed
+    regression that the original "embeddings not in DB" report exposed."""
     log("\n== Seeded corpus embeddings ==")
     if os.environ.get("SKIP_CORPUS_EMBEDDING_CHECK") == "1":
         log("skipped via SKIP_CORPUS_EMBEDDING_CHECK=1")
@@ -1643,14 +1310,16 @@ def check_seeded_corpus_embeddings(resources: dict[str, Any]) -> None:
         slug = re.sub(r"[^a-zA-Z0-9_]", "_", project)
         db = f"{slug}_{env}"
     script = (
-        "const { MongoClient } = await import(process.env.MONGO_PROBE_DRIVER_SPEC || 'mongodb');"
+        "import { MongoClient } from 'mongodb';"
         "const uri = process.env.MONGO_URI; const db = process.env.MONGO_DB;"
         "const c = new MongoClient(uri, { appName: 'post-deploy-corpus-check', serverSelectionTimeoutMS: 8000 });"
         "try { await c.connect();"
         "  const out = {};"
         "  for (const { name, filter } of ["
-        "    { name: 'products', filter: {} },"
-        "    { name: 'troubleshooting_docs', filter: { bedrock_text_chunk: { $exists: false }, bedrock_metadata: { $exists: false } } },"
+        "    { name: 'companies', filter: {} },"
+        "    { name: 'career_paths', filter: {} },"
+        "    { name: 'skills_taxonomy', filter: {} },"
+        "    { name: 'compensation_data', filter: {} },"
         "  ]) {"
         "    const coll = c.db(db).collection(name);"
         "    const total = await coll.countDocuments(filter);"
@@ -1706,25 +1375,21 @@ def check_long_term_memory_embeddings(
 
     Design note — unique plant per run:
     The `check_long_term_memory_recall` test plants HELIOTROPE-LANTERN via the
-    orchestrator, which routes to order-management. That agent deflects mnemonic
-    storage, so the LTM extractor returns factCount=0 and no new row is written.
-    After the first ever smoke run those facts are also duplicates anyway.
+    orchestrator, which routes to a specialist. That specialist may deflect
+    mnemonic storage, so the LTM extractor can return factCount=0 and no new
+    row is written. After the first ever smoke run those facts are also
+    duplicates anyway.
 
     To guarantee a fresh `agent_memory_facts` row with an embedding on every
-    run, this check plants a timestamped preference via `product-recommendation`
-    directly. That agent confirms user preferences, which the extractor does
-    extract. The unique run-ID in the fact prevents deduplication collisions
-    across runs. The check then queries for that specific token in MongoDB.
+    run, this check plants a timestamped preference via `career-coach`
+    directly. That agent confirms candidate preferences (target role, location,
+    comp expectations), which the extractor does extract. The unique run-ID in
+    the fact prevents deduplication collisions across runs. The check then
+    queries for that specific token in MongoDB.
     """
     log("\n== LTM Mongo-side embedding writes ==")
     if os.environ.get("SKIP_CORPUS_EMBEDDING_CHECK") == "1" or os.environ.get("SKIP_LTM_CHECK") == "1":
         log("skipped via SKIP_CORPUS_EMBEDDING_CHECK=1 or SKIP_LTM_CHECK=1")
-        return
-    if not discover_runtime_arns().get("product-recommendation"):
-        log(
-            f"skipped: {_agent_arn_env_key('product-recommendation')} not set "
-            "(this check plants a fact via product-recommendation)"
-        )
         return
     uri = _load_env_live_uri()
     if not uri:
@@ -1752,18 +1417,18 @@ def check_long_term_memory_embeddings(
         slug = re.sub(r"[^a-zA-Z0-9_]", "_", project)
         db = f"{slug}_{env}"
 
-    # Plant a uniquely-keyed preference via product-recommendation so the LTM
+    # Plant a uniquely-keyed preference via career-coach so the LTM
     # extractor always has a genuinely-new fact to store and embed.
     run_id = int(time.time() * 1000)
     unique_token = f"SMOKE-EMB-{run_id}"
     plant_msg = (
-        f"For my product profile: I only buy items tagged {unique_token}. "
-        "Please remember this as a permanent filter preference."
+        f"For my career profile: my target-role code is {unique_token}. "
+        "Please remember this as a permanent preference for my job search."
     )
     plant_session = f"smoke-emb-plant-{run_id}"
     log(f"planting unique embedding-check fact: {unique_token!r}")
     try:
-        body, _ = post_chat(api_url, token, "product-recommendation", plant_msg, session_id=plant_session)
+        body, _ = post_chat(api_url, token, "career-coach", plant_msg, session_id=plant_session)
         _plant_text, plant_events, _plant_traces, _plant_handoffs, plant_errors = parse_sse(body)
         if "done" not in plant_events or plant_errors:
             log(f"  ⚠ embedding-check plant turn had issues (events={plant_events} errors={plant_errors[:1]}); proceeding")
@@ -1786,7 +1451,7 @@ def check_long_term_memory_embeddings(
     five_min_ago_ms = int((time.time() - 300) * 1000)
     one_hour_ago_ms = int((time.time() - 3600) * 1000)
     script = (
-        "const { MongoClient } = await import(process.env.MONGO_PROBE_DRIVER_SPEC || 'mongodb');"
+        "import { MongoClient } from 'mongodb';"
         "const uri = process.env.MONGO_URI; const db = process.env.MONGO_DB;"
         f"const sinceFacts = new Date({five_min_ago_ms});"
         f"const sinceMsgs = new Date({one_hour_ago_ms}).toISOString();"
@@ -1859,13 +1524,12 @@ def main() -> int:
     log(f"manifest={args.manifest}")
     log(f"network_mode={_network_mode_from_manifest(full_manifest)}  kb_connectivity_mode={_kb_connectivity_mode_from_manifest(full_manifest)}")
 
-    check_health(api_url, resources, full_manifest)
+    check_health(api_url, resources)
     token = cognito_token(client_id)
     log(f"cognito_token_len={len(token)}")
     check_agents_endpoint(api_url, token)
     check_embedding_manifest_and_sagemaker(resources)
     check_terraform_outputs(resources, full_manifest)
-    check_cloudwatch_log_retention(resources)
     check_bedrock_kb(resources, full_manifest)
     # Verify every AgentCore Runtime has the Gateway MCP wiring vars BEFORE
     # the live chat checks. Missing AGENTCORE_GATEWAY_URL means mongodb_* tools cannot

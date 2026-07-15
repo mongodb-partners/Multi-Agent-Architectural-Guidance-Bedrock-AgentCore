@@ -533,7 +533,7 @@ describe("User Isolation — comprehensive API security tests", () => {
         body: JSON.stringify({
           message: "I am trying to intrude",
           sessionId: "sess-ch-alice",
-          agentId: "order-management",
+          agentId: "job-match",
         }),
       });
       expect(res.status).toBe(404);
@@ -550,7 +550,7 @@ describe("User Isolation — comprehensive API security tests", () => {
         body: JSON.stringify({
           message: "intruder message that must not appear",
           sessionId: "sess-ch-unmodified",
-          agentId: "order-management",
+          agentId: "job-match",
         }),
       });
 
@@ -590,7 +590,7 @@ describe("User Isolation — comprehensive API security tests", () => {
         body: JSON.stringify({
           message: "hi",
           sessionId: "sess-ch-exists-alice",
-          agentId: "order-management",
+          agentId: "job-match",
         }),
       });
       const missingRes = await app.request("http://localhost/chat", {
@@ -599,7 +599,7 @@ describe("User Isolation — comprehensive API security tests", () => {
         body: JSON.stringify({
           message: "hi",
           sessionId: "sess-ch-totally-missing",
-          agentId: "order-management",
+          agentId: "job-match",
         }),
       });
 
@@ -1142,7 +1142,7 @@ describe("User Isolation — comprehensive API security tests", () => {
           message: "steal this session",
           sessionId: "sess-pe-alice-chat",
           userId: "alice", // attacker-supplied — must be stripped by bodySchema
-          agentId: "order-management",
+          agentId: "job-match",
         }),
       });
       // The session belongs to alice; bob's jwt.sub is "bob" → FORBIDDEN_SESSION → 404

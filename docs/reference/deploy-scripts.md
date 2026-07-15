@@ -10,7 +10,6 @@ Every shell script under [`deploy/`](../../deploy/), [`deploy/destroy/`](../../d
 |---|---|---|---|---|
 | [`deploy/deploy-full-with-privatelink.sh`](../../deploy/deploy-full-with-privatelink.sh) | Orchestrator | PrivateLink | yes | Network → shared → project |
 | [`deploy/deploy-full-with-vpc-peering.sh`](../../deploy/deploy-full-with-vpc-peering.sh) | Orchestrator | Peering | yes | Network → shared → project |
-| [`deploy/deploy-full-public.sh`](../../deploy/deploy-full-public.sh) | Orchestrator | Public (Bring your own MongoDB Atlas cluster, demo) | yes | Network → shared → project |
 | [`deploy/scripts/deploy-network.sh`](../../deploy/scripts/deploy-network.sh) | `envs/network` | both | yes | Shared VPC + Atlas connectivity primitives |
 | [`deploy/scripts/deploy-shared.sh`](../../deploy/scripts/deploy-shared.sh) | `envs/shared` | mode-agnostic | yes | SageMaker, log groups, dashboards, invocation logging |
 | [`deploy/scripts/deploy-project.sh`](../../deploy/scripts/deploy-project.sh) | `envs/ec2` | both | yes | EC2, ECR, Cognito, KB, AgentCore Runtimes, Gateway |
@@ -19,10 +18,8 @@ Every shell script under [`deploy/`](../../deploy/), [`deploy/destroy/`](../../d
 | [`deploy/deploy-agents.sh`](../../deploy/deploy-agents.sh) | AgentCore | both | yes | Targeted apply of `acr_specialists` + `acr_orchestrator` + code artifact |
 | [`deploy/destroy/destroy-project-with-privatelink.sh`](../../deploy/destroy/destroy-project-with-privatelink.sh) | Teardown | PrivateLink | yes | Project-only `envs/ec2` destroy |
 | [`deploy/destroy/destroy-project-with-vpc-peering.sh`](../../deploy/destroy/destroy-project-with-vpc-peering.sh) | Teardown | Peering | yes | Project-only `envs/ec2` destroy |
-| [`deploy/destroy/destroy-project-with-public.sh`](../../deploy/destroy/destroy-project-with-public.sh) | Teardown | Public (BYO Atlas) | yes | Project-only `envs/ec2` destroy |
 | [`deploy/destroy/destroy-shared-with-privatelink.sh`](../../deploy/destroy/destroy-shared-with-privatelink.sh) | Teardown | PrivateLink | yes | Shared + network singleton destroy |
 | [`deploy/destroy/destroy-shared-with-vpc-peering.sh`](../../deploy/destroy/destroy-shared-with-vpc-peering.sh) | Teardown | Peering | yes | Shared + network singleton destroy |
-| [`deploy/destroy/destroy-shared-with-public.sh`](../../deploy/destroy/destroy-shared-with-public.sh) | Teardown | Public (BYO Atlas) | yes | Shared + network singleton destroy |
 | [`deploy/destroy/reap-orphan-security-groups-privatelink.sh`](../../deploy/destroy/reap-orphan-security-groups-privatelink.sh) | Deferred teardown cleanup | PrivateLink | yes | AgentCore runtime security groups left behind by service-managed ENIs |
 | [`deploy/destroy/reap-orphan-security-groups-vpc-peering.sh`](../../deploy/destroy/reap-orphan-security-groups-vpc-peering.sh) | Deferred teardown cleanup | Peering | yes | AgentCore runtime security groups left behind by service-managed ENIs |
 | [`deploy/scripts/destroy.sh`](../../deploy/scripts/destroy.sh) | Teardown engine | both | yes | `terraform destroy` for one env |
@@ -63,24 +60,7 @@ Sister script for peering mode. Same 3-phase structure, same flag surface. Diffe
 
 Prints an EXPERIMENTAL banner unless `--auto-approve` is set; the banner explains the TF_VAR_enable_kb_peering=false degradation path (public-SRV KB ingestion).
 
-### `deploy-full-public.sh`
-Public-mode orchestrator — **Bring your own MongoDB Atlas cluster** reached over the public internet. **DEMO ONLY** (requires a `0.0.0.0/0` Atlas IP access list). Same 3-phase structure and flag surface as the private orchestrators. Differs in four ways:
-
-1. Hard-exports `NETWORK_MODE=public` + `ATLAS_CLUSTER_SOURCE=byo` before delegating, so the sub-scripts route to their public / bring-your-own-cluster branches and stamp `network_mode='public'` into tfvars + SSM + `deploy-manifest.json`.
-2. **No Atlas cluster is provisioned** — the operator's own cluster is reached over public SRV via `MONGODB_BYO_URI`; the Atlas-private machinery (PrivateLink VPCE, VPC peering) is count-gated to 0.
-3. AgentCore runtime runs in **PUBLIC** egress mode (no VPC attachment, no NAT); the EC2 host skips the Elastic IP and takes an auto-assigned public IP.
-4. Bedrock KB ingestion runs over public SRV (`kb_connectivity_mode=public-srv`).
-
-**Usage:**
-```bash
-./deploy/deploy-full-public.sh [--auto-approve] [--skip-docker]
-                               [--skip-smoke] [--skip-network]
-                               [--skip-shared] [--env-file <path>]
-```
-
-**Required `.env`:** `ATLAS_CLUSTER_SOURCE=byo`, `NETWORK_MODE=public`, `ALLOW_PUBLIC_ATLAS=1`, `MONGODB_BYO_URI`, `ATLAS_PROJECT_ID`, an Atlas DB user matching the URI. **Recommended:** `EMBEDDINGS_PROVIDER=titan` (Bedrock built-in — no Voyage SageMaker endpoint to provision, no Marketplace subscription; the lightest fit for a Bring-your-own-cluster demo).
-
-> PrivateLink, VPC peering, and public mode are **mutually exclusive per account**. Switching modes requires destroy + redeploy. All three orchestrators guard against silent mode swaps via the SSM `/<shared_vpc_name>/<region>/network_mode` canary.
+> PrivateLink and VPC peering are **mutually exclusive per account**. Switching modes requires destroy + redeploy. Both orchestrators guard against silent mode swaps via the SSM `/<shared_vpc_name>/<region>/network_mode` canary.
 
 ---
 
@@ -123,7 +103,7 @@ Applies the shared observability + embeddings stack. Singleton per `(account, re
 4. Generate `backend.hcl` + `terraform.tfvars`. State key: `${SHARED_VPC_NAME}/${AWS_REGION}/<env>/shared/terraform.tfstate`.
 5. `terraform init` + plan + apply. Provisions:
    - Voyage SageMaker endpoint (when `VOYAGE_MODEL_PACKAGE_ARN` set).
-   - CloudWatch log groups: `api`, `ui`, `mcp`, `agentcore`, `otel`, `otel-atlas`. Retention defaults are 30 days for API/OTel and 7 days for UI/MCP/shared AgentCore (`API_LOG_RETENTION_DAYS`, `AUX_LOG_RETENTION_DAYS`, `OTEL_LOG_RETENTION_DAYS`).
+   - CloudWatch log groups: `api`, `ui`, `mcp`, `agentcore`, `otel`, `otel-atlas`.
    - Bedrock invocation logging (account-scoped singleton).
    - Fleet + Mongo + cost dashboards + 7 alarms.
    - Atlas dashboard + 2 alarms (when `enable_atlas_metrics=true`).
@@ -225,24 +205,18 @@ Agent-only redeploy. Use when only `config/agents/*.agent.md` or `config/skills/
 
 ## 4. Teardown
 
-All mode-specific wrappers live under [`deploy/destroy/`](../../deploy/destroy/) ([`README`](../../deploy/destroy/README.md); separate from `deploy/deploy-*.sh` entrypoints).
+All mode-specific wrappers live under [`deploy/destroy/`](../../deploy/destroy/) (separate from `deploy/deploy-*.sh` entrypoints).
 
 ### Mode-specific destroy wrappers
-Use these for normal teardown. Project scripts delete only the per-project `envs/ec2` stack. Shared scripts delete the singleton `envs/shared` stack and then the `envs/network` stack, and refuse to run while terraform-managed EC2 instances tagged `Environment=<ENVIRONMENT>` still exist unless `--force` is supplied. Each wrapper hard-sets `NETWORK_MODE` and delegates to [`destroy.sh`](#destroysh).
-
-**Mode canary behavior:** PrivateLink and public wrappers **error** when SSM `network_mode` disagrees (unless `--force`). VPC peering wrappers **warn** and continue — they always destroy with `NETWORK_MODE=peering`.
-
-**Public (BYO Atlas) mode:** the `*-public.sh` wrappers hard-set `NETWORK_MODE=public` + `ATLAS_CLUSTER_SOURCE=byo`. Your own Atlas cluster is never touched (Terraform never created it). There is **no orphan-SG reaper** — AgentCore runs PUBLIC egress (no VPC attachment), so no `agentic_ai` ENIs pin the runtime SGs and `envs/network` (shared VPC only, no Atlas VPCE/peering) destroys in one pass.
+Use these for normal teardown. Project scripts delete only the per-project `envs/ec2` stack. Shared scripts delete the singleton `envs/shared` stack and then the `envs/network` stack, and refuse to run while project EC2 instances are still present unless `--force` is supplied. Each wrapper hard-sets `NETWORK_MODE` and delegates to [`destroy.sh`](#destroysh).
 
 **Usage:**
 ```bash
 ./deploy/destroy/destroy-project-with-privatelink.sh [--auto-approve] [--env-file <path>] [--force]
 ./deploy/destroy/destroy-project-with-vpc-peering.sh [--auto-approve] [--env-file <path>] [--force]
-./deploy/destroy/destroy-project-with-public.sh [--auto-approve] [--env-file <path>] [--force]
 
 ./deploy/destroy/destroy-shared-with-privatelink.sh [--auto-approve] [--env-file <path>] [--with-bootstrap] [--force]
 ./deploy/destroy/destroy-shared-with-vpc-peering.sh [--auto-approve] [--env-file <path>] [--with-bootstrap] [--force]
-./deploy/destroy/destroy-shared-with-public.sh [--auto-approve] [--env-file <path>] [--with-bootstrap] [--force]
 ```
 
 **Ordering — REQUIRED:** project wrapper first, then shared wrapper. Per-project EC2 envs read SSM published by shared + network; destroying shared/network first leaves orphan refs.
@@ -250,7 +224,7 @@ Use these for normal teardown. Project scripts delete only the per-project `envs
 **`--with-bootstrap`** is accepted only by the shared wrappers and is passed to the final `network` destroy step. It also empties + destroys the shared S3 state bucket. Only use when no other env uses it — this deletes ALL Terraform state.
 
 ### `reap-orphan-security-groups-{privatelink|vpc-peering}.sh`
-Deferred cleanup for project runtime security groups that `destroy.sh --mode ec2` had to leave in AWS because service-managed AgentCore ENIs (`interface-type=agentic_ai`) were still attached. AWS does not allow manual detach/delete of those ENIs, so the project destroy records the security group ids in `destroy-reports/orphan-security-groups.tsv` and lets the matching mode-specific reaper delete them later. The two scripts are functionally identical; use the one that matches your destroy wrapper.
+Deferred cleanup for project runtime security groups that `destroy.sh --mode ec2` had to leave in AWS because service-managed AgentCore ENIs (`interface-type=agentic_ai`) were still attached. AWS does not allow manual detach/delete of those ENIs, so the project destroy records the security group ids in `destroy-reports/orphan-security-groups.tsv` and lets the matching mode-specific reaper delete them later.
 
 **Usage:**
 ```bash

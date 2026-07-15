@@ -76,7 +76,7 @@ class TestStreamChatTraceParsing:
                     "id": "ev-1",
                     "ts": 1717100000000,
                     "parentId": None,
-                    "agentId": "order-management",
+                    "agentId": "job-match",
                     "payload": {
                         "modelId": "anthropic.claude-haiku-4-5",
                         "inputTokens": 10,
@@ -97,7 +97,7 @@ class TestStreamChatTraceParsing:
         t = traces[0]
         assert t.type == "model.usage"
         assert t.payload["inputTokens"] == 10
-        assert t.agent_id == "order-management"
+        assert t.agent_id == "job-match"
 
         done_events = [e for e in events if isinstance(e, DoneEvent)]
         assert len(done_events) == 1
@@ -116,7 +116,7 @@ class TestStreamChatTraceParsing:
 
     def test_emits_agent_active_for_agent_info(self) -> None:
         body = _sse_blob(
-            ("agent_info", {"agentId": "order-management", "agentName": "Order Management"}),
+            ("agent_info", {"agentId": "job-match", "agentName": "Job Match"}),
             ("token", {"text": "ok"}),
             ("done", {"sessionId": "s1"}),
         )
@@ -125,8 +125,8 @@ class TestStreamChatTraceParsing:
 
         active = [e for e in events if isinstance(e, AgentActiveEvent)]
         assert len(active) == 1
-        assert active[0].agent_id == "order-management"
-        assert active[0].agent_name == "Order Management"
+        assert active[0].agent_id == "job-match"
+        assert active[0].agent_name == "Job Match"
 
 
 class TestGetTrace:

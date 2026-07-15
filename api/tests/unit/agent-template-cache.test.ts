@@ -62,14 +62,14 @@ describe("agent-template cache", () => {
   });
 
   test("specialist (preActivateSkills=true) returns the same template on repeat call", async () => {
-    const a = await getAgentTemplate("order-management", { preActivateSkills: true });
-    const b = await getAgentTemplate("order-management", { preActivateSkills: true });
+    const a = await getAgentTemplate("job-match", { preActivateSkills: true });
+    const b = await getAgentTemplate("job-match", { preActivateSkills: true });
     expect(a).toBeDefined();
     expect(a).toBe(b);
   });
 
   test("specialist template has all skills pre-activated", async () => {
-    const t = await getAgentTemplate("order-management", { preActivateSkills: true });
+    const t = await getAgentTemplate("job-match", { preActivateSkills: true });
     expect(t).toBeDefined();
     const allowed = Array.from(t!.registry.allowedSkills);
     if (allowed.length > 0) {
@@ -92,10 +92,10 @@ describe("agent-template cache", () => {
     // Simulate orchestrator-style lazy use of a specialist's skills list.
     // Without bypass, activate_skill from one chat leaks the activated set
     // into the next chat's registry.
-    const specialist = getAgent("order-management");
+    const specialist = getAgent("job-match");
     if (!specialist || specialist.skills.length === 0) return;
-    const a = await getAgentTemplate("order-management", { preActivateSkills: false });
-    const b = await getAgentTemplate("order-management", { preActivateSkills: false });
+    const a = await getAgentTemplate("job-match", { preActivateSkills: false });
+    const b = await getAgentTemplate("job-match", { preActivateSkills: false });
     // Lazy bypass: each call yields a fresh template (different registry instance)
     expect(a).not.toBe(b);
     expect(a?.registry).not.toBe(b?.registry);
@@ -120,12 +120,12 @@ describe("agent-template cache", () => {
   });
 
   test("degraded mode: specialist declaring mongodb_* but getMcpTools()=[] is marked mcpDegraded and NOT cached", async () => {
-    const specialist = getAgent("product-recommendation");
-    if (!specialist) return; // tolerate fixtures without product-recommendation
+    const specialist = getAgent("company-intel");
+    if (!specialist) return; // tolerate fixtures without company-intel
     expect(specialist.tools).toContain("mongodb_vector_search");
 
     MCP_STATE.returnEmpty = true;
-    const a = await getAgentTemplate("product-recommendation", { preActivateSkills: true });
+    const a = await getAgentTemplate("company-intel", { preActivateSkills: true });
     expect(a).toBeDefined();
     expect(a!.mcpDegraded).toBe(true);
     expect(a!.missingTools ?? []).toEqual(
@@ -136,25 +136,25 @@ describe("agent-template cache", () => {
     // call must build a fresh template so it can re-attempt getMcpTools().
     // Without this, a transient MCP outage at boot would brick every
     // subsequent chat turn for the lifetime of the process.
-    const b = await getAgentTemplate("product-recommendation", { preActivateSkills: true });
+    const b = await getAgentTemplate("company-intel", { preActivateSkills: true });
     expect(b).toBeDefined();
     expect(b).not.toBe(a);
   });
 
   test("degraded → recovered: once getMcpTools() returns tools, template is cached again", async () => {
-    const specialist = getAgent("product-recommendation");
+    const specialist = getAgent("company-intel");
     if (!specialist) return;
 
     MCP_STATE.returnEmpty = true;
-    const degraded = await getAgentTemplate("product-recommendation", { preActivateSkills: true });
+    const degraded = await getAgentTemplate("company-intel", { preActivateSkills: true });
     expect(degraded!.mcpDegraded).toBe(true);
 
     // MCP came back online. Next call should build a healthy template,
     // cache it, and a second call should return the same instance.
     MCP_STATE.returnEmpty = false;
-    const healthy = await getAgentTemplate("product-recommendation", { preActivateSkills: true });
+    const healthy = await getAgentTemplate("company-intel", { preActivateSkills: true });
     expect(healthy!.mcpDegraded).toBeUndefined();
-    const healthyAgain = await getAgentTemplate("product-recommendation", {
+    const healthyAgain = await getAgentTemplate("company-intel", {
       preActivateSkills: true,
     });
     expect(healthyAgain).toBe(healthy);

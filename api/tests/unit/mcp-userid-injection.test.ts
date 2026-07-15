@@ -253,7 +253,7 @@ describe("AGGREGATE injection — mongodb_aggregate", () => {
     const result = inject("mongodb_aggregate", {
       collection: "agent_memory_facts",
       pipeline: [
-        { $match: { agentId: "order-management" } },
+        { $match: { agentId: "job-match" } },
         { $limit: 5 },
       ],
     }) as Record<string, unknown>;
@@ -261,7 +261,7 @@ describe("AGGREGATE injection — mongodb_aggregate", () => {
     // First stage should now be the userId match
     expect(pipeline[0]).toEqual({ $match: { userId: USER } });
     // Caller's $match is pushed to [1]
-    expect(pipeline[1]).toEqual({ $match: { agentId: "order-management" } });
+    expect(pipeline[1]).toEqual({ $match: { agentId: "job-match" } });
   });
 
   test("gateway-prefixed aggregate behaves identically", () => {

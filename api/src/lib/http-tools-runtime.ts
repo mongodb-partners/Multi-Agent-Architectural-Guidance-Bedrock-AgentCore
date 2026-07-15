@@ -299,7 +299,7 @@ export function makeHttpConfigTool(def: HttpToolDefinition, file: HttpToolsFile)
 /**
  * HTTP tool defined under `config/skills/<skill>/http-tools.json`.
  * Same gates as `read_skill_resource` / `run_skill_script`: skill on agent + activated.
- * Strands tool name is `skillFolder/localName` (e.g. `order-management/notify_customer`).
+ * Strands tool name is `skillFolder/localName` (e.g. `job-match/notify_candidate`).
  */
 export function makeSkillHttpConfigTool(
   strandsToolName: string,

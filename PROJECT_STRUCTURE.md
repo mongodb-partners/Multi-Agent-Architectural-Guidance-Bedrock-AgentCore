@@ -16,7 +16,6 @@ A per-folder map of the repository as it ships today. Each entry explains **what
 │   └── mongodb-mcp/        MongoDB MCP server as an AgentCore Runtime (ARM64 container)
 ├── config/
 │   ├── agents/             *.agent.md — runtime LLM agent definitions
-│   ├── samples/            reference-only config examples (not loaded/deployed)
 │   ├── skills/             SKILL.md folders — domain knowledge + scripts + http-tools
 │   ├── environment.yaml    API defaults (port, CORS, etc.)
 │   ├── demo-prompts.yaml   Sidebar "Try a prompt" entries
@@ -140,9 +139,6 @@ config/
 │   ├── order-management.agent.md     Haiku 4.5
 │   ├── product-recommendation.agent.md   Sonnet 4.6
 │   └── troubleshooting.agent.md      Sonnet 4.6
-├── samples/
-│   ├── agents/                         Example .agent.md files to copy from
-│   └── http-tools-sample.json          Example HTTP tool declaration
 ├── skills/
 │   ├── order-management/
 │   │   ├── SKILL.md
@@ -318,5 +314,4 @@ Documented in [`docs/deployment-guide.md` § CI/CD](docs/deployment-guide.md).
 | **`AGENTS.md`** at the repo root | Instructions for **coding agents / human contributors** |
 | **`PROJECT_STRUCTURE.md`** (this file) | Per-folder map of the repo |
 | **`config/agents/*.agent.md`** | Runtime LLM agent personas (orchestrator, order, product, troubleshoot) |
-| **`config/samples/`** | Reference-only config examples. Not loaded by the app or deployed until copied into a live config directory |
 | **`config/skills/<name>/SKILL.md`** | Runtime skill instructions for a domain |

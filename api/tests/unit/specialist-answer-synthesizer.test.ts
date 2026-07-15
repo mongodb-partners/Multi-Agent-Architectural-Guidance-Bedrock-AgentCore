@@ -18,14 +18,14 @@ import {
 
 describe("specialist-answer-synthesizer — buildSynthesizerUserMessage", () => {
   const successAnswer: SpecialistAnswer = {
-    agentId: "order-management",
-    agentName: "Order Management",
+    agentId: "job-match",
+    agentName: "Job Match",
     status: "success",
     answerText: "Your order ABC-123 ships Monday.",
   };
   const failedAnswer: SpecialistAnswer = {
-    agentId: "product-recommendation",
-    agentName: "Product Recommendation",
+    agentId: "company-intel",
+    agentName: "Company Intel",
     status: "failed",
     answerText: "",
     failureMessage: "model timed out",
@@ -42,10 +42,10 @@ describe("specialist-answer-synthesizer — buildSynthesizerUserMessage", () => 
   test("attributes specialists by display name in classifier-ranked order", () => {
     const out = buildSynthesizerUserMessage({
       userMessage: "track my order AND recommend a laptop",
-      specialistAnswers: [successAnswer, { ...successAnswer, agentName: "Product Recommendation", agentId: "product-recommendation", answerText: "Try the X1." }],
+      specialistAnswers: [successAnswer, { ...successAnswer, agentName: "Company Intel", agentId: "company-intel", answerText: "Try the X1." }],
     });
-    const orderIdx = out.indexOf("Order Management");
-    const productIdx = out.indexOf("Product Recommendation");
+    const orderIdx = out.indexOf("Job Match");
+    const productIdx = out.indexOf("Company Intel");
     expect(orderIdx).toBeGreaterThan(-1);
     expect(productIdx).toBeGreaterThan(-1);
     expect(orderIdx).toBeLessThan(productIdx);
@@ -56,7 +56,7 @@ describe("specialist-answer-synthesizer — buildSynthesizerUserMessage", () => 
       userMessage: "...",
       specialistAnswers: [successAnswer, failedAnswer],
     });
-    expect(out).toContain("Product Recommendation");
+    expect(out).toContain("Company Intel");
     expect(out).toContain("could not answer");
     // The failure message text is included for the SYNTHESIZER's awareness,
     // but the system prompt instructs it to never expose specialist ids

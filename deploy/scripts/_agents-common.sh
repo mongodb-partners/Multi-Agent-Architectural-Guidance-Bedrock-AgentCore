@@ -410,11 +410,10 @@ env = {
   'EMBEDDINGS_PROVIDER':       os.environ.get('EMBEDDINGS_PROVIDER', ''),
   'VOYAGE_SAGEMAKER_ENDPOINT': os.environ.get('VOYAGE_ENDPOINT', ''),
   # Voyage configuration is intentionally minimal here. The runtime adapter
-  # (api/src/adapters/voyage-embedding.ts) owns the canonical multimodal
-  # envelope and resolves VOYAGE_OUTPUT_DIM (default 1024). The legacy
-  # text-only envelope and request-format override were removed in the
-  # multimodal-only migration — see docs/reference/voyage.md.
-  'VOYAGE_OUTPUT_DIM':         os.environ.get('VOYAGE_OUTPUT_DIM', ''),
+  # (api/src/adapters/voyage-embedding.ts) hard-codes the canonical multimodal
+  # envelope and VOYAGE_EMBEDDING_DIMS=1024. The legacy text-only envelope and
+  # its companion env vars were removed in the multimodal-only migration —
+  # see docs/reference/voyage.md.
   # LTM trace-value gating — sourced from operator .env so flips are
   # captured by ./deploy/deploy-agents.sh and never hand-edited on EC2.
   # 0 (default) = redacted; 1 = raw text in trace events.
@@ -536,10 +535,7 @@ print(json.dumps(env))")
 # at apply time. Phase 5c then normalizes the API URI (retryWrites, PL flags).
 # This helper re-syncs the MCP runtime env to the same URI the API uses so
 # pf_check_mcp_runtime_env_complete and /health/deep see identical connection
-# strings. Preserves all other runtime env vars and container config. Also
-# re-syncs MONGODB_ALLOW_WRITE because existing AgentCore runtimes intentionally
-# ignore Terraform environment-variable drift and rely on this phase for live
-# runtime env updates.
+# strings. Preserves all other runtime env vars and container config.
 #
 # Args:
 #   $1 runtime_id   mongodb-mcp AgentCore runtime id
@@ -573,7 +569,6 @@ update_mcp_runtime_mongodb_env() {
   RUNTIME_ID="$runtime_id" \
   MONGO_URI="$mongodb_uri" \
   MONGO_DB="$mongodb_db" \
-  MONGO_ALLOW_WRITE="${MONGODB_ALLOW_WRITE:-${TF_VAR_mongodb_allow_write:-}}" \
   python3 - <<'PY' > "$update_args_file"
 import json, os
 
@@ -581,30 +576,11 @@ cfg = json.loads(os.environ["CFG_JSON"])
 env = dict(cfg.get("environmentVariables") or {})
 env["MONGODB_URI"] = os.environ["MONGO_URI"]
 env["MONGODB_DB"] = os.environ["MONGO_DB"]
-allow_write_raw = os.environ.get("MONGO_ALLOW_WRITE", "")
-allow_write = allow_write_raw.strip().lower() in {"1", "true", "yes", "on"}
-env["MONGODB_ALLOW_WRITE"] = "1" if allow_write else "0"
-
-# requireServiceS3Endpoint (nested in networkModeConfig) is immutable after
-# creation for AgentCore runtimes created after 2026-06-11. get-agent-runtime
-# returns it, but replaying it on update-agent-runtime — even unchanged — fails
-# with "cannot modify requireServiceS3Endpoint". Strip it so the replay carries
-# only the mutable network fields (networkMode / subnets / securityGroups).
-def _strip_immutable_net(net):
-    if not isinstance(net, dict):
-        return {"networkMode": "PUBLIC"}
-    nmc = net.get("networkModeConfig")
-    if isinstance(nmc, dict) and "requireServiceS3Endpoint" in nmc:
-        net = dict(net)
-        net["networkModeConfig"] = {k: v for k, v in nmc.items()
-                                    if k != "requireServiceS3Endpoint"}
-    return net
-
 out = {
     "agentRuntimeId": os.environ["RUNTIME_ID"],
     "roleArn": cfg["roleArn"],
     "agentRuntimeArtifact": cfg["agentRuntimeArtifact"],
-    "networkConfiguration": _strip_immutable_net(cfg.get("networkConfiguration") or {"networkMode": "PUBLIC"}),
+    "networkConfiguration": cfg.get("networkConfiguration") or {"networkMode": "PUBLIC"},
     "protocolConfiguration": cfg.get("protocolConfiguration") or {"serverProtocol": "MCP"},
     "environmentVariables": env,
 }
@@ -623,7 +599,7 @@ PY
     _ac_err "mongodb-mcp runtime ${runtime_id}: update-agent-runtime (MONGODB_URI) failed"
   fi
   rm -f "$update_args_file"
-  _ac_ok "mongodb-mcp runtime env synced (MONGODB_URI + MONGODB_DB + MONGODB_ALLOW_WRITE)"
+  _ac_ok "mongodb-mcp runtime env synced (MONGODB_URI + MONGODB_DB)"
 
   local runtime_status attempt
   for attempt in $(seq 1 36); do
@@ -841,27 +817,11 @@ print((artifact.get('containerConfiguration') or {}).get('containerUri') or '')
 import json, os, sys
 
 cfg = json.loads(os.environ['CFG_JSON'])
-
-# requireServiceS3Endpoint (nested in networkModeConfig) is immutable after
-# creation for AgentCore runtimes created after 2026-06-11. get-agent-runtime
-# returns it, but replaying it on update-agent-runtime — even unchanged — fails
-# with "cannot modify requireServiceS3Endpoint". Strip it so the replay carries
-# only the mutable network fields (networkMode / subnets / securityGroups).
-def _strip_immutable_net(net):
-    if not isinstance(net, dict):
-        return {'networkMode': 'PUBLIC'}
-    nmc = net.get('networkModeConfig')
-    if isinstance(nmc, dict) and 'requireServiceS3Endpoint' in nmc:
-        net = dict(net)
-        net['networkModeConfig'] = {k: v for k, v in nmc.items()
-                                    if k != 'requireServiceS3Endpoint'}
-    return net
-
 out = {
     'agentRuntimeId':     os.environ['RUNTIME_ID'],
     'roleArn':            cfg['roleArn'],
     'agentRuntimeArtifact': cfg['agentRuntimeArtifact'],
-    'networkConfiguration':  _strip_immutable_net(cfg.get('networkConfiguration') or {'networkMode': 'PUBLIC'}),
+    'networkConfiguration':  cfg.get('networkConfiguration')  or {'networkMode': 'PUBLIC'},
     'protocolConfiguration': cfg.get('protocolConfiguration') or {'serverProtocol': 'MCP'},
     'environmentVariables':  cfg.get('environmentVariables', {}),
 }

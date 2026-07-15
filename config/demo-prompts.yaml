@@ -3,19 +3,58 @@
 groups:
   - title: Routing & handoff
     prompts:
-      - label: Order status
-        text: Where is my order #12345?
-      - label: Product question
-        text: What's the difference between the SKU-2 and SKU-3 models?
-      - label: Troubleshooting
-        text: My device shows error code E-104 — can you help?
+      - label: Skill gap
+        text: What skills do I need to become an engineering manager?
+      - label: Salary question
+        text: What salary should I expect for a Senior Software Engineer in Austin?
+      - label: Company research
+        text: What's the engineering culture like at Lumen Retail?
 
   - title: MongoDB lens
     prompts:
-      - label: Find an order (Atlas)
-        text: Look up order 12345 in MongoDB and tell me the shipment status.
+      - label: Company lookup (Atlas)
+        text: Look up Lumen Retail in MongoDB and summarize its funding and size.
       - label: Vector search
-        text: Show me similar products to the SKU-2 using vector search.
+        text: Find job openings similar to my background using vector search.
+
+  - title: Job Match
+    prompts:
+      - label: Submit CV
+        text: "Priya Sharma
+          Senior Software Engineer
+          Email: priya.sharma@example.com | Phone: +1 (555) 207-3391
+          Location: Austin, TX (open to remote)
+
+          PROFESSIONAL SUMMARY
+          Backend-leaning full-stack engineer with 6 years of experience building high-throughput
+          TypeScript/Node.js services and, more recently, LLM-powered features. I enjoy data modeling,
+          API design, and turning fuzzy product ideas into reliable systems.
+
+          SKILLS
+          TypeScript, JavaScript, Node.js, MongoDB, PostgreSQL, REST APIs, GraphQL, Docker, AWS,
+          microservices, RAG, vector search, embeddings, prompt engineering, React, CI/CD, Git
+
+          EXPERIENCE
+          Senior Software Engineer — Vertex Commerce (2021 - Present)
+          - Designed and shipped Node.js + TypeScript microservices handling 4k requests/sec on AWS.
+          - Led migration of the product catalog to MongoDB, cutting p95 latency by 38%.
+          - Built an internal RAG assistant over support docs using embeddings + vector search.
+          - Mentored 3 mid-level engineers and ran the API design review process.
+
+          Software Engineer — Cloudpeak Systems (2018 - 2021)
+          - Built REST and GraphQL APIs in Node.js backing a React dashboard.
+          - Introduced Docker-based CI/CD, reducing deploy time from 40 to 8 minutes.
+          - Owned the billing service and its PostgreSQL data model.
+
+          EDUCATION
+          B.S. in Computer Science — University of Texas at Austin (2018)
+
+          CERTIFICATIONS
+          AWS Certified Solutions Architect Associate"
+      - label: Interview prep
+        text: I'm interested in the Machine Learning Engineer role at Lumen Retail. Can you give me interview preparation tips?
+      - label: Behavioral prep
+        text: What are some behavioral interview questions I should prepare for a senior engineering role?
 
   - title: Memory
     prompts:

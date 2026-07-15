@@ -1,7 +1,7 @@
 # Streamlit UI — typical builds:
 #   docker build -f ui/Dockerfile -t multi-agent-streamlit:local ui
 #   docker compose up --build   (from repo root; see compose.yaml)
-FROM python:3.12-slim-bookworm
+FROM python:3.13-slim-bookworm
 
 WORKDIR /app
 
@@ -12,8 +12,14 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     STREAMLIT_BROWSER_GATHER_USAGE_STATS=false \
     PIP_NO_CACHE_DIR=1
 
+RUN apt-get update && \
+    apt-get upgrade -y && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --upgrade pip && \
+    pip install --no-cache-dir --timeout 120 --prefer-binary -r requirements.txt
 
 COPY app.py .
 COPY pages ./pages

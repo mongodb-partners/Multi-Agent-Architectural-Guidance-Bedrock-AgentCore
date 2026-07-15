@@ -24,16 +24,16 @@ describe("skill-scoped http tools", () => {
   });
 
   test("parseSkillScopedHttpToolName prefers longest skill id", () => {
-    const allowed = new Set(["order-management", "order"]);
-    expect(parseSkillScopedHttpToolName("order-management/notify", allowed)).toEqual({
-      skillName: "order-management",
+    const allowed = new Set(["job-match", "job"]);
+    expect(parseSkillScopedHttpToolName("job-match/notify", allowed)).toEqual({
+      skillName: "job-match",
       localToolName: "notify",
     });
-    expect(parseSkillScopedHttpToolName("order/notify", allowed)).toEqual({
-      skillName: "order",
+    expect(parseSkillScopedHttpToolName("job/notify", allowed)).toEqual({
+      skillName: "job",
       localToolName: "notify",
     });
-    expect(parseSkillScopedHttpToolName("order-management/extra/bad", allowed)).toBeNull();
+    expect(parseSkillScopedHttpToolName("job-match/extra/bad", allowed)).toBeNull();
     expect(parseSkillScopedHttpToolName("mongodb_query", allowed)).toBeNull();
   });
 

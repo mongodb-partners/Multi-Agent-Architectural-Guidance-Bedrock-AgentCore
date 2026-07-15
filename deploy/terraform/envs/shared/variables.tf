@@ -59,26 +59,8 @@ variable "voyage_endpoint_name_suffix" {
 # ── CloudWatch retention ──────────────────────────────────────────────────────
 variable "log_retention_days" {
   type        = number
-  description = "Deprecated compatibility fallback for API + OTel log retention. UI, MCP, and AgentCore use aux_log_retention_days."
-  default     = null
-}
-
-variable "api_log_retention_days" {
-  type        = number
-  description = "Retention (days) for the shared API log group."
-  default     = null
-}
-
-variable "aux_log_retention_days" {
-  type        = number
-  description = "Retention (days) for short-lived shared UI, MCP, and AgentCore placeholder log groups."
-  default     = 7
-}
-
-variable "otel_log_retention_days" {
-  type        = number
-  description = "Retention (days) for shared OTel log groups. Defaults to the API retention window."
-  default     = null
+  description = "Retention (days) applied to the shared API / UI / MCP / AgentCore / OTel log groups."
+  default     = 30
 }
 
 # ── Fleet dashboards + alarms ─────────────────────────────────────────────────

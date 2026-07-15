@@ -61,10 +61,10 @@ describe("session-store — basic CRUD", () => {
 
   test("appendAssistantMessage appends with agentId", async () => {
     await appendUserMessage("sess-3", "q", "user-a");
-    await appendAssistantMessage("sess-3", "a", "order-management", "user-a");
+    await appendAssistantMessage("sess-3", "a", "job-match", "user-a");
     const s = asRecord(await getSession("sess-3", "user-a"));
     expect(s.messages).toHaveLength(2);
-    expect(s.messages[1]!.agentId).toBe("order-management");
+    expect(s.messages[1]!.agentId).toBe("job-match");
   });
 
   test("deleteSession removes the session for its owner", async () => {

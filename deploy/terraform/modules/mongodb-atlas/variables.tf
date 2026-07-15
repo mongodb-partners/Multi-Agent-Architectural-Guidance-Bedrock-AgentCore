@@ -3,35 +3,6 @@ variable "atlas_project_id" {
   description = "MongoDB Atlas Project ID"
 }
 
-# ── Bring Your Own (BYO) cluster ───────────────────────────────────────────────
-# cluster_source=managed (default): Terraform creates the cluster + DB user + IP
-# access list (today's behaviour). cluster_source=byo: the operator owns a
-# pre-existing cluster; we create nothing in Atlas and instead pass their
-# connection details straight through to the outputs.
-variable "cluster_source" {
-  type        = string
-  default     = "managed"
-  description = "Cluster lifecycle: 'managed' (Terraform creates the M10 cluster, DB user, IP access list) or 'byo' (use a pre-existing cluster; create nothing in Atlas, pass byo_* through to outputs)."
-
-  validation {
-    condition     = contains(["managed", "byo"], var.cluster_source)
-    error_message = "cluster_source must be 'managed' or 'byo'."
-  }
-}
-
-variable "byo_connection_string" {
-  type        = string
-  default     = ""
-  sensitive   = true
-  description = "BYO only: full operator-supplied connection string WITH credentials (e.g. mongodb+srv://user:pass@cluster.xxxxx.mongodb.net/?...). Becomes the module's connection_string output."
-}
-
-variable "byo_srv_host" {
-  type        = string
-  default     = ""
-  description = "BYO only: operator cluster SRV hostname without scheme (e.g. cluster.xxxxx.mongodb.net). Becomes the module's mongo_host output."
-}
-
 variable "cluster_name" {
   type        = string
   description = "Atlas cluster name"
@@ -68,11 +39,11 @@ variable "privatelink_endpoint_id" {
 variable "network_mode" {
   type        = string
   default     = "privatelink"
-  description = "Connectivity mode. 'privatelink' (default) scopes the Atlas IP access list to var.operator_ip_cidr (the deploy machine) — runtime reaches Atlas via the PrivateLink endpoint, which bypasses the IP access list. 'peering' scopes the IP access list to var.vpc_cidr — runtime + Bedrock KB both reach Atlas privately via VPC peering. Neither mode ever opens Atlas to 0.0.0.0/0."
+  description = "Connectivity mode. 'privatelink' (default) keeps the existing 0.0.0.0/0 IP access list entry — Bedrock KB ingestion uses public SRV when enable_kb_privatelink=false. 'peering' replaces the open entry with var.vpc_cidr — runtime + Bedrock KB both reach Atlas privately via VPC peering."
 
   validation {
-    condition     = contains(["privatelink", "peering", "public"], var.network_mode)
-    error_message = "network_mode must be 'privatelink', 'peering', or 'public'."
+    condition     = contains(["privatelink", "peering"], var.network_mode)
+    error_message = "network_mode must be either 'privatelink' or 'peering'."
   }
 }
 
@@ -80,23 +51,5 @@ variable "vpc_cidr" {
   type        = string
   default     = ""
   description = "Customer VPC CIDR. REQUIRED when network_mode='peering' — used as the peering IP access list entry so only this VPC can reach Atlas in peering mode. Ignored when network_mode='privatelink'."
-}
-
-# WHY: This variable is the replacement for the old 0.0.0.0/0 IP access list
-# entry. The security requirement is "Atlas reachable only from where it was
-# created from, never the public internet". In privatelink mode the cluster's
-# only public-SRV consumers are the operator-run local-exec provisioners on the
-# deploy machine, so we scope the allowlist to that one /32 instead of opening
-# it to the world. Empty default keeps the module usable when a caller has no
-# operator IP (peering mode, or a PrivateLink-only setup with no local-exec).
-variable "operator_ip_cidr" {
-  type        = string
-  default     = ""
-  description = "Operator/deploy-machine public IP in CIDR /32 form (e.g. 203.0.113.42/32) — 'anywhere it was created from'. Used when network_mode='privatelink' as the ONLY public-SRV Atlas IP access list entry (replaces the former 0.0.0.0/0 open entry) so operator-run local-exec provisioners and post-deploy smoke can reach Atlas while the public internet cannot. Deploy scripts auto-detect this via checkip.amazonaws.com (override with OPERATOR_IP_CIDR). Ignored when network_mode='peering' (the peered VPC CIDR is used instead, and the operator laptop /32 is added by modules/atlas-vpc-peering)."
-
-  validation {
-    condition     = var.operator_ip_cidr == "" || can(cidrnetmask(var.operator_ip_cidr))
-    error_message = "operator_ip_cidr must be empty or a valid IPv4 CIDR (e.g. 203.0.113.42/32)."
-  }
 }
 

@@ -113,7 +113,7 @@ These are typically set in `.env.live` by `deploy-project.sh`. For local dev wit
 |---|---|---|
 | `MONGODB_URI` | `mongodb+srv://...` (local) or `mongodb://...:1024,...:1025/?ssl=true` (AgentCore Runtime PrivateLink) | Atlas connection string |
 | `MONGODB_DB` | `<project>_<env>` (e.g. `mongodb_multiagent_dev`) | Database name; project+env-derived (underscored) by `.env` |
-| `MONGODB_ALLOW_WRITE` | `1` or `true` | Required for `insertOne` / `updateOne` against real Atlas. Default off (read-only). Set it in `.env` and run a full redeploy (`deploy-full-with-*` → `deploy-project.sh`): the script derives `TF_VAR_mongodb_allow_write` from it for first-create Terraform config, and Phase 6 runtime-env sync pushes `MONGODB_ALLOW_WRITE` to existing mongodb-mcp AgentCore Runtimes. Destructive ops (`delete*`, `drop*`, `replaceOne`) stay refused regardless. |
+| `MONGODB_ALLOW_WRITE` | `1` or `true` | Required for `updateOne` against real Atlas. Default off (read-only). |
 | `SHORT_TERM_MEMORY_BACKEND` | `agentcore` (EC2 deploy default) | `agentcore` makes AgentCore Memory the short-term conversation backend when authenticated. This is the production deployment default. |
 | `PERSIST_CHAT_SESSIONS` | unset (default-on when `MONGODB_URI` is set), `0`/`false` to opt out | Mirror session history to MongoDB `chat_sessions` for the Sessions page, audit/debug history, and cold-read fallback. This does not make MongoDB the primary short-term memory backend in deployed AWS. |
 | `MEMORY_TTL_DAYS` | `30` in EC2 `.env.live` (`90` code fallback if unset) | TTL for `agent_memory_facts` long-term facts collection |

@@ -24,7 +24,6 @@ flowchart LR
 | Source | Purpose | Loaded by | Reload behavior |
 |---|---|---|---|
 | `config/agents/*.agent.md` | Agent persona, model, tools list, memory flags, handoffs | `api/src/lib/config-scan.ts` | Mtime cache; **AgentCore runtime** behavior requires `./deploy/deploy-agents.sh` |
-| `config/samples/` | Reference-only example agents/tools to copy from when authoring new config | Not loaded | Safe storage for examples; no runtime or deploy effect until copied into a live config directory |
 | `config/skills/<id>/SKILL.md` | Skill instructions + `metadata` block | `api/src/lib/skill-loader.ts` | Discovery cached by skills-dir mtime; body cached by file mtime |
 | `config/skills/<id>/scripts/*.mjs` | Dynamically imported by `run_skill_script` | `api/src/lib/base-tools.ts` (on demand) | Node ESM cache — process restart to re-import |
 | `config/skills/<id>/references/*.md` | Read by `read_skill_resource` | `api/src/lib/skill-loader.ts` (on demand) | Re-read on each call; capped by `SKILL_RESOURCE_MAX_BYTES` |
@@ -40,8 +39,6 @@ flowchart LR
 ## 2. Agent configuration (`config/agents/*.agent.md`)
 
 Each agent is a markdown file with YAML frontmatter. The file name (without `.agent.md`) **must** match the `id` field.
-
-Before creating or modifying a live agent, look in `config/samples/agents/` for reusable examples. Sample files are intentionally outside `config/agents/`; they are not returned by `GET /agents`, included in classifier rosters, or provisioned as AgentCore specialist runtimes.
 
 ```yaml
 ---

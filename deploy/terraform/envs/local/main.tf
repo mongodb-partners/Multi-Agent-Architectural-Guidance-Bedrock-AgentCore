@@ -36,8 +36,7 @@ data "aws_s3_bucket" "shared" {
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
-# MongoDB Atlas — M10 cluster (public SRV endpoint, but the IP access list is
-# scoped to the operator laptop /32 via var.operator_ip_cidr — NOT 0.0.0.0/0)
+# MongoDB Atlas — M10 cluster (public endpoint; app runs on localhost)
 # ══════════════════════════════════════════════════════════════════════════════
 module "mongodb_atlas" {
   source = "../../modules/mongodb-atlas"
@@ -48,15 +47,6 @@ module "mongodb_atlas" {
   db_username      = var.atlas_db_user
   db_password      = var.atlas_db_password
   project_tag      = var.project_name
-  # WHY: local mode reaches Atlas over public SRV from the laptop, so the
-  # laptop /32 is the only allowlist entry. Forward it here so the module never
-  # has to fall back to 0.0.0.0/0.
-  operator_ip_cidr = var.operator_ip_cidr
-
-  # BYO passthrough (local mode just proxies the operator URI through).
-  cluster_source        = var.cluster_source
-  byo_connection_string = var.byo_connection_string
-  byo_srv_host          = var.byo_srv_host
 }
 
 # Atlas Search indexes that belong to application data are reconciled through
@@ -75,14 +65,11 @@ resource "null_resource" "seed_mongodb_indexes" {
     environment = {
       MONGODB_URI = module.mongodb_atlas.connection_string
       MONGODB_DB  = var.atlas_db_name
-      # Embedding dim is driven by VOYAGE_OUTPUT_DIM (default 1024 ==
-      # VOYAGE_DEFAULT_EMBEDDING_DIMS in api/src/adapters/voyage-embedding.ts).
-      # seed-indexes.ts reads VOYAGE_OUTPUT_DIM via getVoyageEmbeddingDims().
-      # Terraform can't shell out to voyage-print.ts, so var.voyage_output_dim's
-      # default is pinned by the bun guard test
+      # NOTE: must match VOYAGE_EMBEDDING_DIMS in
+      # api/src/adapters/voyage-embedding.ts. Terraform can't shell out to
+      # voyage-print.ts here, so the literal is pinned by the bun guard test
       # `voyage SSOT — terraform <-> TS parity for embedding dim`.
-      VOYAGE_OUTPUT_DIM             = tostring(var.voyage_output_dim)
-      EMBEDDING_DIMENSIONS          = tostring(var.voyage_output_dim)
+      EMBEDDING_DIMENSIONS          = "1024"
       WAIT_FOR_ATLAS_SEARCH_INDEXES = "1"
     }
   }
@@ -101,9 +88,8 @@ module "bedrock_kb" {
   project_name = var.project_name
   environment  = var.environment
 
-  shared_bucket_name  = data.aws_s3_bucket.shared.id
-  shared_bucket_arn   = data.aws_s3_bucket.shared.arn
-  kb_docs_bucket_name = var.kb_docs_bucket_name
+  shared_bucket_name = data.aws_s3_bucket.shared.id
+  shared_bucket_arn  = data.aws_s3_bucket.shared.arn
 
   atlas_project_id   = var.atlas_project_id
   atlas_cluster_name = module.mongodb_atlas.cluster_name

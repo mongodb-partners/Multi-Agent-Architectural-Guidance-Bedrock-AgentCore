@@ -26,10 +26,11 @@ describe("orchestrator long-term memory config", () => {
     expect(orchestrator!.memory?.longTerm).toBe(true);
   });
 
-  test("order-management retains memory.longTerm = true", () => {
-    const agent = getAgent("order-management");
+  test("specialist memory flags are parsed from config", () => {
+    const agent = getAgent("career-coach");
     expect(agent).not.toBeNull();
     expect(agent!.memory?.longTerm).toBe(true);
+    expect(agent!.memory?.shortTerm).toBe(true);
   });
 
   test("chat.ts wantsScoped evaluates to true for orchestrator (regression guard)", () => {
@@ -109,8 +110,8 @@ describe("framework-canonical long-term memory recall rules", () => {
     expect(persona).not.toContain("never say \"what accounts did you share?\"");
   });
 
-  test("order-management persona no longer copies the recall rules inline", () => {
-    const persona = (loadAgentPersona("order-management") || "").toLowerCase();
+  test("specialist persona no longer copies the recall rules inline", () => {
+    const persona = (loadAgentPersona("career-coach") || "").toLowerCase();
     expect(persona).not.toContain("you do have long-term memory");
     expect(persona).not.toContain("do not say \"i don't have the ability to recall previous conversations");
   });

@@ -16,7 +16,7 @@ describe("useOrchestratorSwarm", () => {
 
   test("false for specialist agents even when swarm is set", () => {
     expect(
-      useOrchestratorSwarm("order-management", {
+      useOrchestratorSwarm("job-match", {
         ORCHESTRATOR_MODE: "swarm",
       }),
     ).toBe(false);

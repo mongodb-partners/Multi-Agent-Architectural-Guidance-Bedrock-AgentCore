@@ -89,9 +89,7 @@ voyage_supported_models() {
 }
 
 # voyage_embedding_dims
-# Prints the resolved embedding dim (an integer) from the TS SSOT — the env
-# override when set, else the default (1024). Tracks the env automatically
-# because it shells out to `voyage-print.ts dims` (getVoyageEmbeddingDims()).
+# Prints VOYAGE_EMBEDDING_DIMS (an integer, currently 1024) from the TS SSOT.
 voyage_embedding_dims() {
   if [[ -z "$_VOYAGE_DIMS_CACHE" ]]; then
     _voyage_require_bun || return 1

@@ -4,7 +4,11 @@
  *   2. products
  *   3. troubleshooting_docs
  *   4. orders
- *   5. indexes (regular + Atlas vector search + TTL)
+ *   5. career_paths        (career-coach)
+ *   6. skills_taxonomy     (career-coach)
+ *   7. compensation_data   (career-coach — compensation workflow)
+ *   8. companies           (company-intel)
+ *   9. indexes (regular + Atlas vector search + TTL)
  *
  * Embeddings are NOT run here — they require live AWS credentials and are slow.
  * Run seed-embeddings.ts separately after this script.
@@ -18,10 +22,9 @@
  *   MEMORY_TTL_DAYS=90          — TTL for agent_memory_facts + chat_messages (default 90)
  *   VECTOR_SIMILARITY=cosine    — cosine | euclidean | dotProduct (default cosine)
  *
- * Embedding dimension defaults to 1024 (VOYAGE_DEFAULT_EMBEDDING_DIMS) and is
- * configurable via VOYAGE_OUTPUT_DIM — resolved by getVoyageEmbeddingDims() in
- * api/src/adapters/voyage-embedding.ts. The default + parity are enforced by
- * api/tests/unit/voyage-ssot-guard.test.ts.
+ * Embedding dimension is pinned by VOYAGE_EMBEDDING_DIMS in
+ * api/src/adapters/voyage-embedding.ts — no env override (the dim is a code
+ * change enforced by api/tests/unit/voyage-ssot-guard.test.ts).
  */
 
 import { getConfig } from "./connect.ts";
@@ -34,6 +37,10 @@ const scripts = [
   "seed-products.ts",
   "seed-troubleshooting.ts",
   "seed-orders.ts",
+  "seed-career-paths.ts",
+  "seed-skills-taxonomy.ts",
+  "seed-compensation.ts",
+  "seed-companies.ts",
   "seed-indexes.ts",
 ];
 

@@ -242,12 +242,6 @@ Advisory only — never fails. Prints expected resources, ~$240–320/month esti
 **Catches:** A pre-existing cluster on **M0 / M2 / M5** — these tiers don't accept PrivateLink and don't support vector indexes. Only fails if the cluster already exists; first-time deploys (where Terraform creates the cluster) pass.
 **Fix:** Atlas → Cluster → Edit configuration → Cluster Tier ≥ M10, **or** destroy and let Terraform recreate at the configured tier.
 
-#### atlas-no-public-ip-access-list
-**Function:** `pf_check_atlas_no_public_ip_access_list`
-**Profiles:** `project-post-apply`, `local-post-apply`.
-**Catches:** The Atlas project IP access list contains a public-internet entry (`0.0.0.0/0`, `0.0.0.0/1`, or `ipAddress 0.0.0.0`). Atlas must be reachable only from where it was created (the operator/deploy machine `/32` in privatelink + local modes) or the peered VPC CIDR (peering mode) — never the open internet. Catches both a Terraform regression and stale/manually-added open entries that Terraform does not manage. Reads `GET /groups/<project>/accessList` via the Atlas Admin API; non-2xx is treated as a skip (transient).
-**Fix:** Remove the open entry in Atlas → Network Access → IP Access List, then re-run the deploy so the `mongodb-atlas` module re-applies its scoped entry (privatelink → `OPERATOR_IP_CIDR`; peering → VPC CIDR). The `mongodb-atlas` module never emits `0.0.0.0/0`; a leftover entry was added manually or by an older deploy.
-
 #### atlas-privatelink-orphans
 **Function:** `pf_check_atlas_privatelink_no_orphans`
 **Catches:** Stale PrivateLink endpoints in `DELETING` / `FAILED` state from a previous deploy that didn't fully clean up. Atlas refuses to create a new endpoint while orphans linger.
@@ -278,8 +272,8 @@ Advisory only — never fails. Prints expected resources, ~$240–320/month esti
 #### kb-ingestion-complete
 **Function:** `pf_check_kb_ingestion_complete` *(post-apply only)*
 **Profiles:** `project-post-apply`, `local-post-apply` (skipped when `BEDROCK_KB_ID` empty).
-**Catches:** The latest Bedrock KB ingestion job is not `COMPLETE`, scanned `0` source documents, OR completed with `numberOfDocumentsFailed > 0`. This explicitly catches Bedrock's partial-success shape where job status is `COMPLETE` but one source file failed to index. Healthy no-op syncs with `0` new/modified documents pass when scanned documents are present and failed documents are `0`.
-**Fix:** Inspect with `aws bedrock-agent list-ingestion-jobs --knowledge-base-id <kb-id> --data-source-id <ds-id>` and the KB APPLICATION_LOGS group (`/aws/bedrock/knowledgebase/<kb-id>`); re-trigger by running `terraform apply` on the `bedrock-kb` module.
+**Catches:** The latest Bedrock KB ingestion job is not `COMPLETE`, OR completed with `0` documents indexed. Uses `aws bedrock-agent list-ingestion-jobs` (authoritative, schema-independent — survives Bedrock chunk-shape changes).
+**Fix:** Inspect with `aws bedrock-agent list-ingestion-jobs --knowledge-base-id <kb-id> --data-source-id <ds-id>`; re-trigger by running `terraform apply` on the `bedrock-kb` module.
 
 ### Voyage (Marketplace)
 
@@ -320,7 +314,7 @@ endpoint rejected the multimodal envelope (sent 'inputs', expected 'input').
 The deployed model package is text-only — this stack only supports multimodal Voyage listings.
 ```
 
-A 200 OK is additionally cross-checked against `voyage_embedding_dims` (the resolved dim — `VOYAGE_OUTPUT_DIM` if set, else the 1024 default — sourced via `getVoyageEmbeddingDims()` in the TS SSOT). Any dim drift fails the check.
+A 200 OK is additionally cross-checked against `voyage_embedding_dims` (1024 today, sourced from `VOYAGE_EMBEDDING_DIMS` in the TS SSOT). Any dim drift fails the check.
 
 **Skipped when:** `EMBEDDINGS_PROVIDER != voyage`, or the endpoint name cannot yet be resolved (`VOYAGE_SAGEMAKER_ENDPOINT` / `TF_VAR_voyage_endpoint_name_suffix` both unset — `shared-post-apply` exports the Terraform output before invoking), or `bun` is unavailable on the host (the SSOT body cannot be built without it).
 

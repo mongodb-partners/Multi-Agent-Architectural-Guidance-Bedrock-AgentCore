@@ -167,9 +167,7 @@ case "$EMBEDDINGS_PROVIDER" in
 esac
 
 # Dashboards + invocation logging + retention — all optional with safe defaults
-API_LOG_RETENTION_DAYS="${API_LOG_RETENTION_DAYS:-${LOG_RETENTION_DAYS:-30}}"
-AUX_LOG_RETENTION_DAYS="${AUX_LOG_RETENTION_DAYS:-7}"
-OTEL_LOG_RETENTION_DAYS="${OTEL_LOG_RETENTION_DAYS:-${LOG_RETENTION_DAYS:-$API_LOG_RETENTION_DAYS}}"
+LOG_RETENTION_DAYS="${LOG_RETENTION_DAYS:-30}"
 ENABLE_FLEET_DASHBOARDS="${ENABLE_FLEET_DASHBOARDS:-true}"
 ENABLE_ATLAS_METRICS="${ENABLE_ATLAS_METRICS:-false}"
 ENABLE_BEDROCK_INVOCATION_LOGGING="${ENABLE_BEDROCK_INVOCATION_LOGGING:-true}"
@@ -259,9 +257,7 @@ ok "backend.hcl written (state key: ${SHARED_VPC_NAME}/${AWS_REGION}/${ENVIRONME
   echo "shared_vpc_name         = \"${SHARED_VPC_NAME}\""
   echo "shared_bucket_name      = \"${SHARED_BUCKET}\""
   echo "shared_resource_prefix  = \"${SHARED_RESOURCE_PREFIX}\""
-  echo "api_log_retention_days  = ${API_LOG_RETENTION_DAYS}"
-  echo "aux_log_retention_days  = ${AUX_LOG_RETENTION_DAYS}"
-  echo "otel_log_retention_days = ${OTEL_LOG_RETENTION_DAYS}"
+  echo "log_retention_days      = ${LOG_RETENTION_DAYS}"
   if [[ -n "$VOYAGE_MODEL_PACKAGE_ARN" ]]; then
     echo "voyage_model_package_arn    = \"${VOYAGE_MODEL_PACKAGE_ARN}\""
     echo "voyage_instance_type        = \"${VOYAGE_INSTANCE_TYPE}\""

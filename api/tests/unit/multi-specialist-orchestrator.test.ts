@@ -144,9 +144,9 @@ describe("multi-specialist-orchestrator", () => {
     const flow = runMultiSpecialistFlow({
       message: "track my order",
       collector,
-      classifier: async () => makeClassifier([{ agentId: "order-management", score: 5 }]),
+      classifier: async () => makeClassifier([{ agentId: "job-match", score: 5 }]),
       invokeSpecialist: fakeInvoker(
-        { "order-management": { tokens: ["Your order ", "is on the way."] } },
+        { "job-match": { tokens: ["Your order ", "is on the way."] } },
         () => collector,
       ),
     });
@@ -190,15 +190,15 @@ describe("multi-specialist-orchestrator", () => {
     expect((draft.payload as { status: string }).status).toBe("final");
   });
 
-  test("classifier abstains (returns nothing) → needs_clarification, not stream_error", async () => {
+  test("FAILURE: classifier returns nothing → stream_error", async () => {
     const collector = makeCollector();
     const flow = runMultiSpecialistFlow({
-      message: "Can you help me?",
+      message: "...",
       collector,
       classifier: async () => undefined,
       invokeSpecialist: fakeInvoker({}, () => collector),
     });
-    const events: Array<{ kind: string; inputMessage?: string }> = [];
+    const events: Array<{ kind: string }> = [];
     let result: MultiSpecialistFlowResult | undefined;
     await withTrace(collector, async () => {
       while (true) {
@@ -207,19 +207,11 @@ describe("multi-specialist-orchestrator", () => {
           result = next.value;
           break;
         }
-        events.push(next.value as { kind: string; inputMessage?: string });
+        events.push({ kind: next.value.kind });
       }
     });
-    // No specialist was attempted, and we ask for clarification instead of erroring.
-    expect(events.find((e) => e.kind === "stream_error")).toBeUndefined();
-    const clar = events.find((e) => e.kind === "needs_clarification");
-    expect(clar).toBeDefined();
-    expect(clar?.inputMessage).toBe("Can you help me?");
+    expect(events.find((e) => e.kind === "stream_error")).toBeDefined();
     expect(result?.finalAnswer).toBe("");
-    expect(result?.successfulSpecialists.length).toBe(0);
-    expect(result?.failedSpecialists.length).toBe(0);
-    // A clarification-route trace event is emitted for observability.
-    expect(eventsOfType(collector, "orchestrator.clarification_route").length).toBe(1);
   });
 
   test("FAILURE: specialist throws → marked as failed", async () => {
@@ -227,9 +219,9 @@ describe("multi-specialist-orchestrator", () => {
     const flow = runMultiSpecialistFlow({
       message: "...",
       collector,
-      classifier: async () => makeClassifier([{ agentId: "order-management", score: 5 }]),
+      classifier: async () => makeClassifier([{ agentId: "job-match", score: 5 }]),
       invokeSpecialist: fakeInvoker(
-        { "order-management": { throwOnInvoke: new Error("ARN missing") } },
+        { "job-match": { throwOnInvoke: new Error("ARN missing") } },
         () => collector,
       ),
     });
@@ -260,13 +252,13 @@ describe("multi-specialist-orchestrator", () => {
       collector,
       classifier: async () =>
         makeClassifier([
-          { agentId: "order-management", score: 5 },
-          { agentId: "product-recommendation", score: 4 },
+          { agentId: "job-match", score: 5 },
+          { agentId: "company-intel", score: 4 },
         ]),
       invokeSpecialist: fakeInvoker(
         {
-          "order-management": { tokens: ["Order ok."] },
-          "product-recommendation": { tokens: ["Laptop ok."] },
+          "job-match": { tokens: ["Order ok."] },
+          "company-intel": { tokens: ["Laptop ok."] },
         },
         () => collector,
       ),
@@ -306,10 +298,10 @@ describe("multi-specialist-orchestrator", () => {
     const flow = runMultiSpecialistFlow({
       message: "hi",
       collector,
-      classifier: async () => makeClassifier([{ agentId: "order-management", score: 5 }]),
+      classifier: async () => makeClassifier([{ agentId: "job-match", score: 5 }]),
       invokeSpecialist: fakeInvoker(
         {
-          "order-management": {
+          "job-match": {
             tokens: ["ok"],
             traces: [nestedEv],
           },

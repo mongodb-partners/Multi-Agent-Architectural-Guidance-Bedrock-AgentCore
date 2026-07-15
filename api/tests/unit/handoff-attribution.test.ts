@@ -6,13 +6,13 @@ const PRODUCT_META = { description: "answers product information questions", ski
 const TROUBLESHOOT_META = { description: "diagnoses device errors", skills: ["device-faq"] };
 
 const HANDOFFS = [
-  { label: "Order Issues", agent: "order-management", prompt: "track order shipment" },
+  { label: "Order Issues", agent: "job-match", prompt: "track order shipment" },
   { label: "Product Info", agent: "product", prompt: "describe product features" },
   { label: "Troubleshoot", agent: "troubleshoot", prompt: "diagnose device errors" },
 ];
 
 const META = (id: string) => {
-  if (id === "order-management") return ORDER_META;
+  if (id === "job-match") return ORDER_META;
   if (id === "product") return PRODUCT_META;
   if (id === "troubleshoot") return TROUBLESHOOT_META;
   return undefined;
@@ -23,7 +23,7 @@ describe("attributeHandoff", () => {
     const r = attributeHandoff({
       userMessage: "where is my order?",
       orchestratorReasoning: "",
-      chosenAgentId: "order-management",
+      chosenAgentId: "job-match",
       orchestratorHandoffs: HANDOFFS,
       agentMeta: META,
     });
@@ -38,7 +38,7 @@ describe("attributeHandoff", () => {
     const bigramR = attributeHandoff({
       userMessage: "track order shipment status",
       orchestratorReasoning: "",
-      chosenAgentId: "order-management",
+      chosenAgentId: "job-match",
       orchestratorHandoffs: HANDOFFS,
       agentMeta: META,
     });
@@ -53,7 +53,7 @@ describe("attributeHandoff", () => {
     const r = attributeHandoff({
       userMessage: message,
       orchestratorReasoning: "",
-      chosenAgentId: "order-management",
+      chosenAgentId: "job-match",
       orchestratorHandoffs: HANDOFFS,
       agentMeta: META,
     });
@@ -68,7 +68,7 @@ describe("attributeHandoff", () => {
     const r = attributeHandoff({
       userMessage: "the is for a my we",
       orchestratorReasoning: "",
-      chosenAgentId: "order-management",
+      chosenAgentId: "job-match",
       orchestratorHandoffs: HANDOFFS,
       agentMeta: META,
     });
@@ -81,7 +81,7 @@ describe("attributeHandoff", () => {
     const r = attributeHandoff({
       userMessage: "I have order question and product question",
       orchestratorReasoning: "",
-      chosenAgentId: "order-management",
+      chosenAgentId: "job-match",
       orchestratorHandoffs: HANDOFFS,
       agentMeta: META,
     });
@@ -95,7 +95,7 @@ describe("attributeHandoff", () => {
     const r = attributeHandoff({
       userMessage: "xxxxxx yyyyyy zzzzzz",
       orchestratorReasoning: "",
-      chosenAgentId: "order-management",
+      chosenAgentId: "job-match",
       orchestratorHandoffs: HANDOFFS,
       agentMeta: META,
     });
@@ -120,7 +120,7 @@ describe("attributeHandoff", () => {
     const r = attributeHandoff({
       userMessage: "help",
       orchestratorReasoning: "this needs order tracking",
-      chosenAgentId: "order-management",
+      chosenAgentId: "job-match",
       orchestratorHandoffs: HANDOFFS,
       agentMeta: META,
     });
@@ -133,7 +133,7 @@ describe("attributeHandoff", () => {
     const r = attributeHandoff({
       userMessage: "order shipment product information device errors",
       orchestratorReasoning: "",
-      chosenAgentId: "order-management",
+      chosenAgentId: "job-match",
       orchestratorHandoffs: HANDOFFS,
       agentMeta: META,
     });
@@ -148,10 +148,10 @@ describe("attributeHandoff", () => {
     const r = attributeHandoff({
       userMessage: "order shipment",
       orchestratorReasoning: "",
-      chosenAgentId: "order-management",
+      chosenAgentId: "job-match",
       orchestratorHandoffs: HANDOFFS,
       agentMeta: META,
     });
-    expect(r.alternativesConsidered.find((a) => a.agentId === "order-management")).toBeUndefined();
+    expect(r.alternativesConsidered.find((a) => a.agentId === "job-match")).toBeUndefined();
   });
 });

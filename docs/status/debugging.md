@@ -11,8 +11,8 @@ A developer- and SRE-oriented guide for diagnosing problems in the deployed stac
 | EC2 host filesystem | `/opt/multiagent/` | `aws ssm start-session --target <instance-id>` |
 | API + UI + ADOT systemd units | `journalctl -u multiagent-api / -u multiagent-ui / -u multiagent-adot` | Via SSM session or `aws ssm send-command` |
 | Runtime env file | `/opt/multiagent/.env.live` | Rewritten by `deploy-api.sh`; **do not hand-edit** |
-| API + UI logs | CloudWatch `/<SHARED_RESOURCE_PREFIX>/<env>/{api,ui}` | CloudWatch Logs Insights (queries in [`observability-runbook.md`](../observability-runbook.md)); retention defaults: API 30 days, UI 7 days |
-| AgentCore Runtime logs | Sanitized app logs/spans via `/<SHARED_RESOURCE_PREFIX>/<env>/agentcore` and Trace Viewer. AgentCore service-vended `APPLICATION_LOGS` under `/aws/vendedlogs/bedrock-agentcore/...` are **off by default** because they include raw `request_payload` / `response_payload`; enable only with `enable_agentcore_vended_application_logs=true` for an approved investigation window. | CloudWatch Logs Insights |
+| API + UI logs | CloudWatch `/<SHARED_RESOURCE_PREFIX>/<env>/{api,ui}` | CloudWatch Logs Insights (queries in [`observability-runbook.md`](../observability-runbook.md)) |
+| AgentCore Runtime logs | CloudWatch `/<SHARED_RESOURCE_PREFIX>/<env>/agentcore` and `/aws/bedrock/agentcore/runtime/<runtime-id>` | CloudWatch Logs Insights |
 | Bedrock invocation logs | `/aws/bedrock/invocations` (+ `-audit`) | Bedrock model usage + per-user cost dashboard |
 | OTel collector logs | `/<SHARED_RESOURCE_PREFIX>/<env>/otel` | Atlas Prometheus metrics ship to `otel-atlas` |
 | MongoDB Atlas | `MONGODB_URI` (PrivateLink or peering URI in `.env.live`; public SRV via `MONGODB_URI_PUBLIC` only for off-VPC tooling) | `mongosh` from EC2; or harness via `MONGODB_URI_PUBLIC` |
@@ -157,23 +157,6 @@ Bedrock model access denied for the fact-extractor model. The default is `us.ant
 OTel peer-dep drift. Strands TS SDK 0.7 pins `@opentelemetry/{sdk-trace-*,resources}` on the **1.30.x** line and exporters on `^0.57.x`. When `api/package.json` strays outside that range, npm/bun installs two copies of `sdk-trace-base` (one nested under `node_modules/@strands-agents/sdk/node_modules/`) and our `initOtel()` only binds the top-level provider; Strands' shadow provider stays Noop.
 
 Run `bun run validate:strands-otel` to catch full-Noop globals. Dual-provider drift (top-level real, Strands shadow-Noop) is not caught by the validator — check `ls node_modules/@strands-agents/sdk/node_modules/@opentelemetry` exists; if it does, downgrade until it disappears. See [`AGENTS.md § Strands / Bedrock touchpoints`](../../AGENTS.md) for the dep matrix.
-
-### X-Ray Trace Viewer link: "Resource could not be found" / `aws/spans` log group missing
-Symptom: CloudWatch logs link works; X-Ray link opens the right trace id but the console says *Resource could not be found* and mentions `UpdateTraceSegmentDestination` or *No log groups were found*. ADOT sidecar logs show `PutTraceSegments … The specified log group does not exist`.
-
-Cause: `xray update-trace-segment-destination CloudWatchLogs` alone does **not** create the reserved `aws/spans` log group on first enable. The ADOT `awsxray` exporter then drops every span.
-
-Fix (one-time per account+region): toggle destination so AWS provisions `aws/spans`, then restart the ADOT sidecar on EC2:
-
-```bash
-aws xray update-trace-segment-destination --destination XRay --region <region>
-# wait until get-trace-segment-destination Status=ACTIVE
-aws xray update-trace-segment-destination --destination CloudWatchLogs --region <region>
-# wait until Status=ACTIVE, confirm: aws logs describe-log-groups --log-group-name-prefix aws/spans
-sudo systemctl restart aws-otel-collector   # on EC2
-```
-
-Future deploys: `modules/cloudwatch-genai` `transaction_search_toggle` null_resource now auto-toggles when `aws/spans` is absent. Test on a **new** chat turn (not old stored traces).
 
 ### CloudWatch fleet dashboard widgets empty / alarms in `INSUFFICIENT_DATA`
 The Phase 3 dashboards depend on the API's EMF emitter writing to stdout. Check `METRICS_EMITTER_ENABLED` (default `true`) — it's set to `0` in CI to silence noise; the same value can accidentally land in `.env.live` after a wrongly-merged env file. Restart the API after fixing.
@@ -343,14 +326,6 @@ Permanent guardrail: targeted deploy scripts that add their own `EXIT` cleanup a
 ### Bedrock KB — `troubleshooting_docs.docId` must be partial-unique
 See § 5 above. Code: [`db-seeding/seed-indexes.ts`](../../db-seeding/seed-indexes.ts).
 
-### Bedrock KB ingestion COMPLETE can still have failed documents
-**Symptom.** Deploy appears successful and the KB is `ACTIVE`, but retrieval only covers some source files. `aws bedrock-agent list-ingestion-jobs` shows `status=COMPLETE` with `statistics.numberOfDocumentsFailed > 0` (for example, 4 scanned / 3 indexed / 1 failed).
-
-**Permanent guardrails (do not remove):**
-- The Terraform ingestion waiter in [`deploy/terraform/modules/bedrock-kb/main.tf`](../../deploy/terraform/modules/bedrock-kb/main.tf) must treat `COMPLETE` as success only when `numberOfDocumentsFailed == 0` and the scanned document count exactly matches `deploy/kb-docs/*.txt`. It retries once, then fails the apply with ingestion details.
-- `pf_check_kb_ingestion_complete` in [`deploy/scripts/_preflight-checks.sh`](../../deploy/scripts/_preflight-checks.sh) must check `numberOfDocumentsFailed`, not just status or new/modified counts. Healthy no-op syncs can show `0` new/modified documents and should pass when scanned docs are present and failed docs are `0`.
-- Post-deploy smoke must assert the latest KB ingestion job is `COMPLETE`, scanned exactly the same number of source docs as `deploy/kb-docs/*.txt`, and has `0` failed documents before chat UAT.
-
 ### AgentCore Runtime trace path — observability summary, not just events
 `TraceCollector.attachEventsNested(...)` must update both the spliced events AND the parent's tally counters (`toolCallCount`, `mongoQueryCount`, `mcpCallCount`, `mongoDocsReturned`, `agentcoreHops`). Two emission shapes mix in the same stream:
 
@@ -461,7 +436,7 @@ db.agent_memory_facts.countDocuments({ embeddingModel: /^amazon\.titan/ })
 db.chat_messages.countDocuments({ embeddingError: { $exists: true } })
 ```
 
-**Atlas index dimension footnote.** Both `amazon.titan-embed-text-v2:0` (1024-d) and `voyage-multimodal-3` / `voyage-multimodal-3.5` (1024-d by default, resolved by `getVoyageEmbeddingDims()` / `VOYAGE_OUTPUT_DIM` in `api/src/adapters/voyage-embedding.ts`) share the same Atlas vector index dimension at the default. Note: setting `VOYAGE_OUTPUT_DIM` to a non-1024 Matryoshka value (voyage-multimodal-3.5 only) makes the Voyage and Titan dims diverge — re-seed the index and re-embed before switching providers. Mismatched rows therefore don't crash vector search — they just return wrong results. This is why the silent-fallback bug took so long to surface. See [`docs/reference/voyage.md`](../reference/voyage.md) for the SSOT.
+**Atlas index dimension footnote.** Both `amazon.titan-embed-text-v2:0` (1024-d) and `voyage-multimodal-3` / `voyage-multimodal-3.5` (1024-d, pinned by `VOYAGE_EMBEDDING_DIMS` in `api/src/adapters/voyage-embedding.ts`) share the same Atlas vector index dimension. Mismatched rows therefore don't crash vector search — they just return wrong results. This is why the silent-fallback bug took so long to surface. See [`docs/reference/voyage.md`](../reference/voyage.md) for the SSOT.
 
 **Backfill.** Run [`db-seeding/reembed-mismatched.ts`](../../db-seeding/reembed-mismatched.ts) (dry-run by default; `--apply` to write) to re-embed mismatched rows with the declared provider. Idempotent — safe to re-run after every provider switch.
 

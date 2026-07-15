@@ -264,7 +264,7 @@ def test_render_agentcore_does_not_json_parse_trimmed_payload(monkeypatch) -> No
                 "agentcore.invoke",
                 {
                     "mode": "api_to_runtime",
-                    "targetAgentId": "product-recommendation",
+                    "targetAgentId": "company-intel",
                     "latencyMs": 12,
                     "responseBytes": 4096,
                     "payload": "[trimmed 6666B]",
@@ -654,13 +654,13 @@ def test_dev_skill_resource_reads_renders_per_skill_table(monkeypatch) -> None:
         _ev(
             "skill.activated",
             {
-                "name": "order-management",
+                "name": "job-match",
                 "source": "pre_activate",
                 "injectedVia": "system_prompt",
                 "bytes": 2048,
                 "allowed": True,
                 "resourceReads": [
-                    {"resourcePath": "references/order-status-codes.md", "bytes": 1024, "toolUseId": "tu-1"},
+                    {"resourcePath": "references/collections-schema.md", "bytes": 1024, "toolUseId": "tu-1"},
                     {"resourcePath": "scripts/lookup-order.mjs", "bytes": 512, "toolUseId": "tu-2"},
                 ],
             },
@@ -672,7 +672,7 @@ def test_dev_skill_resource_reads_renders_per_skill_table(monkeypatch) -> None:
         for name, args, _ in recorder.calls
         if name in {"markdown", "table", "write", "caption"} and args
     )
-    assert "order-status-codes.md" in blob
+    assert "collections-schema.md" in blob
     assert "lookup-order.mjs" in blob
 
 

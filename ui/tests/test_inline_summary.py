@@ -120,11 +120,11 @@ class TestAggregateSummary:
         events = [
             _ev(
                 "handoff.decision",
-                {"fromAgentId": "orchestrator", "toAgentId": "order-management"},
+                {"fromAgentId": "orchestrator", "toAgentId": "job-match"},
             ),
         ]
         s = aggregate_summary(events)
-        assert s.handoffs == [("orchestrator", "order-management")]
+        assert s.handoffs == [("orchestrator", "job-match")]
 
     def test_classification_reasoning_captured(self) -> None:
         events = [
@@ -132,15 +132,15 @@ class TestAggregateSummary:
                 "agentcore.classification",
                 {
                     "inputMessage": "where is my order",
-                    "chosenSpecialist": "order-management",
-                    "reasoning": "Detected order-tracking intent.",
+                    "chosenSpecialist": "job-match",
+                    "reasoning": "Detected job-match intent.",
                     "latencyMs": 240,
                 },
             ),
             _ev(
                 "agentcore.classification",
                 {
-                    "chosenSpecialist": "product-recommendation",
+                    "chosenSpecialist": "company-intel",
                     "reasoning": "",
                     "latencyMs": 180,
                 },
@@ -152,10 +152,10 @@ class TestAggregateSummary:
         ]
         s = aggregate_summary(events)
         assert len(s.classifications) == 2
-        assert s.classifications[0]["chosen"] == "order-management"
+        assert s.classifications[0]["chosen"] == "job-match"
         assert s.classifications[0]["reasoning"].startswith("Detected")
         assert s.classifications[0]["latency_ms"] == 240
-        assert s.classifications[1]["chosen"] == "product-recommendation"
+        assert s.classifications[1]["chosen"] == "company-intel"
         assert s.classifications[1]["reasoning"] == ""
         assert s.has_reasoning() is True
         assert s.has_signal() is True

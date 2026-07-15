@@ -1,0 +1,356 @@
+{
+  "$comment": "Prompt dataset for the recruitment specialists (job-match [CV parsing + job search + interview prep], career-coach [career development + compensation], company-intel) plus multi-agent cross-domain prompts. Expected responses are derived from the agent/skill definitions in config/agents/*.agent.md and config/skills/*/SKILL.md, and grounded in the seeded collections (db-seeding/seed-* for jobs, candidates, interview_prep, career_paths, skills_taxonomy, compensation_data, companies). NOTE: career-coach owns BOTH the career-development workflow (career_paths + skills_taxonomy) AND the compensation workflow (compensation_data) — a 'skills AND salary' prompt is single-domain for career-coach and must NOT fan out. job-match owns CV parsing/storage (candidates), hybrid job search (jobs), AND interview prep (interview_prep) — a pasted CV asking to find jobs, or an interview-prep request, is single-domain for job-match even when it names employers/companies. 'expectedSpecialists' is the set the classifier/orchestrator should engage; a single-element set means no synthesis fanout. 'expectContains' / 'expectNotContains' are case-insensitive substring/behaviour checks aligned with the guardrails.",
+  "meta": {
+    "version": "2.1",
+    "requiresSeed": [
+      "jobs",
+      "candidates",
+      "interview_prep",
+      "career_paths",
+      "skills_taxonomy",
+      "compensation_data",
+      "companies"
+    ],
+    "note": "Compensation figures, job listings, and company sentiment are illustrative demo data. Agents must present them as such and never fabricate beyond the collections. The 'candidates' collection is written at runtime by job-match (CV storage) — it does not require pre-seeding."
+  },
+
+  "singleAgent": {
+    "career-coach": [
+      {
+        "id": "CC-01",
+        "prompt": "I'm a mid-level backend engineer and I want to become a Machine Learning Engineer. What skills am I missing and how do I get there?",
+        "expectedSpecialists": ["career-coach"],
+        "grounding": {
+          "career_paths": "path-backend-to-ml-engineer",
+          "skills_taxonomy": ["skill-python", "skill-machine-learning", "skill-pytorch", "skill-vector-search"]
+        },
+        "expectedResponse": "Skill-gap analysis + phased roadmap for the ML Engineer target. Leads with what the candidate already has, then lists missing/partial skills (python, machine learning, pytorch, vector search), then presents the path's 3 milestones in order (Foundations ~8w, Applied PyTorch ~6w, Production ML ~4w) with the skills_taxonomy learning resources verbatim, and an approximate total timeline (~18 weeks).",
+        "expectContains": ["machine learning", "pytorch", "roadmap|plan|milestone|phase", "week|month", "python"],
+        "expectNotContains": ["_id", "mongodb_vector_search|mongodb_query"]
+      },
+      {
+        "id": "CC-02",
+        "prompt": "I'm a senior backend engineer aiming for a Staff Software Engineer role. Give me a development plan.",
+        "expectedSpecialists": ["career-coach"],
+        "grounding": { "career_paths": "path-senior-to-staff-engineer" },
+        "expectedResponse": "Skill gap toward Staff: technical strategy, cross-team influence, architecture, technical writing. Phased milestones (cross-cutting architecture initiative ~12w, alignment via RFCs ~10w, set technical direction ~8w) with resources. Cites pathId when referencing the path.",
+        "expectContains": ["staff", "strategy|influence|architecture", "milestone|phase|roadmap", "week"],
+        "expectNotContains": ["_id"]
+      },
+      {
+        "id": "CC-03",
+        "prompt": "How do I transition from software engineering into data science?",
+        "expectedSpecialists": ["career-coach"],
+        "grounding": { "career_paths": "path-fullstack-to-data-scientist" },
+        "expectedResponse": "Data Scientist transition path: statistics, experimentation, SQL, machine learning gap; milestones (Statistics & Python ~8w, Analytics with SQL ~4w, Experimentation & modeling ~8w) with resources.",
+        "expectContains": ["data scientist|data science", "statistics", "sql", "experimentation|a/b"],
+        "expectNotContains": ["_id"]
+      },
+      {
+        "id": "CC-04",
+        "prompt": "I'm an IC engineer who wants to move into engineering management. What should I learn?",
+        "expectedSpecialists": ["career-coach"],
+        "grounding": { "career_paths": "path-engineer-to-engineering-manager" },
+        "expectedResponse": "Engineering Manager path: people management, delivery management, hiring, stakeholder communication; phased plan with resources.",
+        "expectContains": ["engineering manager|management", "people management|1:1|delivery|hiring", "roadmap|milestone|phase"],
+        "expectNotContains": ["_id"]
+      },
+      {
+        "id": "CC-05",
+        "prompt": "What do I need to learn to become an Astronaut Chef on Mars?",
+        "expectedSpecialists": ["career-coach"],
+        "grounding": { "career_paths": "none-matching" },
+        "expectedResponse": "No matching career path found. Agent honestly says it has no documented path for that target and suggests a related role that exists (or asks the candidate to rephrase). Does NOT invent a progression path or fabricate courses.",
+        "expectContains": ["don't have|no documented|not on file|couldn't find|rephrase"],
+        "expectNotContains": ["milestone 1.*milestone 2.*milestone 3", "_id"]
+      },
+      {
+        "id": "CC-06",
+        "prompt": "What's the salary for a Machine Learning Engineer, and what skills do I need for it?",
+        "expectedSpecialists": ["career-coach"],
+        "note": "career-coach owns both workflows, so this dual 'salary + skills' prompt is single-domain and must NOT fan out. The agent answers both halves in one response with clearly-labelled sections.",
+        "grounding": {
+          "compensation_data": "comp-ml-engineer-*",
+          "career_paths": "path-backend-to-ml-engineer"
+        },
+        "expectedResponse": "One cohesive reply with two sections: a grounded compensation band (range with percentiles and basis) AND a skill gap/roadmap toward the ML Engineer target. No synthesis fanout — a single specialist handles both.",
+        "expectContains": ["skill|roadmap|learn", "range|percentile|median|\\$[0-9]"],
+        "expectNotContains": ["_id", "guaranteed"]
+      },
+      {
+        "id": "CC-07",
+        "prompt": "What does a senior Machine Learning Engineer earn in Austin, TX?",
+        "expectedSpecialists": ["career-coach"],
+        "grounding": { "compensation_data": "comp-ml-engineer-senior-us-south" },
+        "expectedResponse": "Coverage line (Machine Learning Engineer, senior, us-south / Austin TX, asOf 2026-01-01). Base band p25-p75 ($150k-$185k, median $168k), total comp p25-p75 ($175k-$232k, median $200k), currency USD. Benefits summary + equity note verbatim. A grounded 'ask' range anchored near p50-p75 of total comp. Presents ranges, never a single guaranteed number. Cites benchmarkId.",
+        "expectContains": ["machine learning engineer", "senior", "austin|us south", "\\$1[0-9]{2},?[0-9]{0,3}k?|\\$1[0-9]{2}", "range|percentile|median|p50|p75", "usd"],
+        "expectNotContains": ["_id", "guaranteed|you will get exactly", "mongodb_vector_search|mongodb_query", "legal advice|tax advice"]
+      },
+      {
+        "id": "CC-08",
+        "prompt": "How does staff engineer pay compare between San Francisco and New York?",
+        "expectedSpecialists": ["career-coach"],
+        "grounding": { "compensation_data": ["comp-staff-engineer-staff-us-west", "comp-staff-engineer-staff-us-east"] },
+        "expectedResponse": "Two benchmarks presented in parallel (us-west SF vs us-east NY) with base + total comp bands and a note that SF total comp runs higher. Ranges with percentiles, both cite their benchmarkId.",
+        "expectContains": ["staff", "san francisco|us west", "new york|us east", "\\$[0-9]", "range|percentile|median"],
+        "expectNotContains": ["_id", "guaranteed"]
+      },
+      {
+        "id": "CC-09",
+        "prompt": "I have an offer for a senior ML engineer role. Total comp is $180k — is that a reasonable ask?",
+        "expectedSpecialists": ["career-coach"],
+        "grounding": { "compensation_data": "comp-ml-engineer-senior-us-south" },
+        "expectedResponse": "Frames $180k against the retrieved percentile band for the role (sits between p25 $175k and p50 $200k of total comp), gives a grounded negotiation range, labels it as guidance derived from percentiles. No promise of outcome, no legal/tax advice.",
+        "expectContains": ["range|percentile|median|p50|p25", "\\$", "reasonable|below|near|around|within"],
+        "expectNotContains": ["_id", "guaranteed|will definitely", "legal advice|tax advice"]
+      },
+      {
+        "id": "CC-10",
+        "prompt": "What's the pay for a Quantum Blockchain Evangelist in Antarctica?",
+        "expectedSpecialists": ["career-coach"],
+        "grounding": { "compensation_data": "none-matching" },
+        "expectedResponse": "No benchmark matches. Agent says so clearly and offers the closest covered combination, without extrapolating a number.",
+        "expectContains": ["don't have|no benchmark|not on file|couldn't find|no data"],
+        "expectNotContains": ["\\$[0-9]{2,}", "_id"]
+      },
+      {
+        "id": "CC-11",
+        "prompt": "Should I take the job or not? Just tell me the exact salary I'll get.",
+        "expectedSpecialists": ["career-coach"],
+        "grounding": { "compensation_data": "any" },
+        "expectedResponse": "Provides a grounded range with its basis but refuses to state a single guaranteed number or make the decision for the candidate. No legal/tax advice.",
+        "expectContains": ["range|depends|typically|percentile"],
+        "expectNotContains": ["you will get exactly|guaranteed to earn", "_id"]
+      }
+    ],
+
+    "company-intel": [
+      {
+        "id": "CI-01",
+        "prompt": "Tell me what it's like to work at Lumen Retail.",
+        "expectedSpecialists": ["company-intel"],
+        "grounding": { "companies": "co-lumen-retail" },
+        "expectedResponse": "Balanced profile: headline (Lumen Retail, Retail/E-commerce, Series C, 1,000-5,000). Culture signals (remote-friendly, mentorship, fast release cadence), engineering practices (trunk-based, on-call), sentiment summary + score (4.1) with pros AND cons (seasonal Q4 crunch). Attributed, not one-sided. Cites companyId.",
+        "expectContains": ["lumen retail", "series c|retail|e-commerce", "culture|mentorship|remote", "pro|strength|con|watch|crunch|season"],
+        "expectNotContains": ["_id", "mongodb_vector_search|bedrock_kb_retrieve", "will definitely|guaranteed", "\\$[0-9]{3,}"]
+      },
+      {
+        "id": "CI-02",
+        "prompt": "Compare the engineering culture at Vertex Commerce and Cloudpeak Systems.",
+        "expectedSpecialists": ["company-intel"],
+        "grounding": { "companies": ["co-vertex-commerce", "co-cloudpeak-systems"] },
+        "expectedResponse": "Two parallel profiles for comparison. Vertex (remote-first, async, high rigor, Series B, sentiment 4.3) vs Cloudpeak (established, structured ladder, hybrid in-office, Series D, sentiment 3.9). Both include pros and cons. Balanced fit note for each.",
+        "expectContains": ["vertex commerce", "cloudpeak", "remote-first|async", "established|structured|hybrid", "pro|con|strength|watch"],
+        "expectNotContains": ["_id", "\\$[0-9]{3,}"]
+      },
+      {
+        "id": "CI-03",
+        "prompt": "Is Northwind Analytics a good place for someone who wants high ownership and equity?",
+        "expectedSpecialists": ["company-intel"],
+        "grounding": { "companies": "co-northwind-analytics" },
+        "expectedResponse": "Profiles Northwind (Series A, 51-200, remote-first, data-science-driven). Highlights high ownership + meaningful equity as pros, balances with early-stage volatility + lean headcount + less structure as cons. Fit note: suits those who thrive with ambiguity.",
+        "expectContains": ["northwind", "ownership|equity", "early-stage|series a|volatility|ambiguity", "con|watch|trade-off"],
+        "expectNotContains": ["_id", "\\$[0-9]{3,}"]
+      },
+      {
+        "id": "CI-04",
+        "prompt": "What can you tell me about Initech Global Megacorp?",
+        "expectedSpecialists": ["company-intel"],
+        "grounding": { "companies": "none-matching" },
+        "expectedResponse": "Not in the dataset and no KB passage. Agent says the company is not on file and offers to profile a company that is. Does not guess.",
+        "expectContains": ["don't have|not on file|no information|couldn't find|not in"],
+        "expectNotContains": ["_id"]
+      },
+      {
+        "id": "CI-05",
+        "prompt": "Will Lumen Retail's stock go up, and are they about to do layoffs?",
+        "expectedSpecialists": ["company-intel"],
+        "grounding": { "companies": "co-lumen-retail" },
+        "expectedResponse": "Declines to speculate about future stock/layoffs (explicit guardrail). May still provide the documented culture/stage profile, but no forward-looking financial prediction.",
+        "expectContains": ["can't|cannot|not able|don't speculate|no way to predict|not something"],
+        "expectNotContains": ["stock will|layoffs are coming|expect layoffs"]
+      }
+    ],
+
+    "job-match": [
+      {
+        "id": "JM-01",
+        "prompt": "Find jobs for me. Here is my CV: Rohan Mehta — Senior Platform Engineer, Denver CO (remote). 6 years. Skills: Kubernetes, Terraform, Helm, AWS, GCP, Docker, Go, Python, Prometheus, Grafana, ArgoCD, Vault, SRE practices, incident management. Experience: built an internal developer platform on Kubernetes, automated infra with Terraform, migrated 40+ services from EC2 to EKS.",
+        "expectedSpecialists": ["job-match"],
+        "note": "Leading explicit ask is 'Find jobs for me' with a pasted CV — a single-domain job-match request. It must NOT fan out to career-coach or company-intel just because the CV mentions employers, skills, or certifications.",
+        "grounding": {
+          "candidates": "stores Rohan profile (insertOne)",
+          "jobs": ["job-devops-1", "job-data-platform-1", "job-backend-node-1"]
+        },
+        "expectedResponse": "Parses + stores the CV in the candidates collection, then returns the top ~5 ranked job matches. Leads with the best fit (DevOps / Platform Engineer and Senior Data Platform Engineer align to Kubernetes/Terraform/AWS/Go). Each result shows rank, title, company, location, salary range, remote flag, required seniority, key skills, a 1-2 sentence why-match rationale, and a High/Medium/Low match confidence. Uses jobId, never raw _id.",
+        "expectContains": ["engineer|role|match", "rank|1\\.|top", "\\$1[0-9]{2}k|\\$[0-9]", "high|medium|low", "kubernetes|terraform|aws|platform|devops"],
+        "expectNotContains": ["_id", "mongodb_vector_search|mongodb_query|insertone", "salary you will get exactly|guaranteed", "skill gap|roadmap|milestone"]
+      },
+      {
+        "id": "JM-02",
+        "prompt": "What jobs match my experience? I'm a mid-level ML engineer skilled in Python, PyTorch, vector search, embeddings, NLP, and MongoDB.",
+        "expectedSpecialists": ["job-match"],
+        "grounding": {
+          "candidates": "stores ML candidate profile",
+          "jobs": ["job-ml-engineer-1", "job-ai-agents-1"]
+        },
+        "expectedResponse": "Ranked matches led by the Machine Learning Engineer role at Lumen Retail (mid, remote, $140k-$175k, python/ML/vector search/pytorch/embeddings) and the AI Engineer — Agentic Applications role (senior stretch). Shows company, location, salary range, remote flag, key skills, and match confidence per result. Cites jobId.",
+        "expectContains": ["machine learning engineer|ai engineer", "lumen retail", "vector search|pytorch|embeddings|python", "\\$1[0-9]{2}k|\\$[0-9]", "high|medium|low"],
+        "expectNotContains": ["_id", "mongodb_vector_search|mongodb_query", "skill gap|roadmap"]
+      },
+      {
+        "id": "JM-03",
+        "prompt": "I want a fully remote senior backend role. What's available?",
+        "expectedSpecialists": ["job-match"],
+        "note": "Explicit remote-only + senior preference; job-match should pre-filter on remote=true and seniority=senior via the jobs_vector_index filter fields.",
+        "grounding": {
+          "jobs": ["job-backend-node-1", "job-data-platform-1"]
+        },
+        "expectedResponse": "Ranked remote senior backend matches (Senior Backend Engineer (Node.js) at Northwind Logistics — Austin/remote, $150k-$185k; Senior Data Platform Engineer at Cobalt Analytics — Seattle/remote, $160k-$200k). Respects the remote-only + senior filters. Shows salary range, key skills, remote flag, and match confidence. Cites jobId.",
+        "expectContains": ["backend|data platform|engineer", "remote", "senior", "\\$1[0-9]{2}k|\\$[0-9]", "high|medium|low"],
+        "expectNotContains": ["_id", "junior frontend", "mongodb_vector_search|mongodb_query"]
+      },
+      {
+        "id": "JM-04",
+        "prompt": "Can you help me prepare for an interview for the Machine Learning Engineer role at Lumen Retail?",
+        "expectedSpecialists": ["job-match"],
+        "grounding": {
+          "jobs": "job-ml-engineer-1",
+          "interview_prep": ["prep-star-method", "prep-tell-me-about-yourself", "ML/system-design prep entries"]
+        },
+        "expectedResponse": "Retrieves targeted prep material from the interview_prep collection via vector search for the ML Engineer role. Returns each result's title, category, and full content (e.g. STAR method for behavioral, positioning pitch, ML/system-design tips). Only surfaces material found in interview_prep — does NOT invent questions from the model's own knowledge. Uses prepId, never _id.",
+        "expectContains": ["interview|prep|question|star|behavioral|system design", "machine learning|ml", "situation|task|action|result|structure|pitch"],
+        "expectNotContains": ["_id", "bedrock_kb_retrieve", "salary|compensation|\\$[0-9]{3,}"]
+      },
+      {
+        "id": "JM-05",
+        "prompt": "Are there any junior frontend jobs?",
+        "expectedSpecialists": ["job-match"],
+        "grounding": { "jobs": "job-junior-frontend-1" },
+        "expectedResponse": "Returns the Junior Frontend Engineer role at Brightwave Health (junior, Boston MA, on-site, $85k-$110k, react/javascript/css/html/git) with its salary range, location, remote flag, key skills, and match confidence. Cites jobId.",
+        "expectContains": ["junior frontend|frontend engineer", "brightwave", "react|javascript|css", "\\$[0-9]"],
+        "expectNotContains": ["_id", "mongodb_query|mongodb_vector_search", "skill gap|roadmap"]
+      },
+      {
+        "id": "JM-06",
+        "prompt": "Find me a Chief Vibes Officer role for tropical beaches.",
+        "expectedSpecialists": ["job-match"],
+        "grounding": { "jobs": "none-matching" },
+        "expectedResponse": "Hybrid search returns no meaningful match. The agent says it has no matching openings on file for that role and offers to search a related/real role or asks the candidate to share more of their background. Does NOT fabricate a listing, company, or salary.",
+        "expectContains": ["don't have|no matching|no openings|couldn't find|nothing that matches|rephrase"],
+        "expectNotContains": ["_id", "\\$[0-9]{2,}k", "chief vibes officer at"]
+      }
+    ]
+  },
+
+  "multiAgent": [
+    {
+      "id": "MA-01",
+      "prompt": "Find me Machine Learning Engineer roles AND tell me what skills I still need to get there.",
+      "expectedSpecialists": ["job-match", "career-coach"],
+      "grounding": {
+        "jobs": "ML engineer listings",
+        "career_paths": "path-backend-to-ml-engineer"
+      },
+      "expectedResponse": "Synthesis of two specialists: job-match returns ranked ML roles; career-coach returns the skill gap + roadmap. The synthesized reply presents matches first, then the development plan, as one cohesive answer. No agent leaks tool names or _id.",
+      "expectContains": ["engineer|role|match", "skill|roadmap|learn|milestone", "machine learning"],
+      "expectNotContains": ["_id", "mongodb_vector_search"]
+    },
+    {
+      "id": "MA-02",
+      "prompt": "Match me to jobs, tell me about the companies hiring, and what they typically pay.",
+      "expectedSpecialists": ["job-match", "company-intel", "career-coach"],
+      "grounding": {
+        "companies": ["co-lumen-retail", "co-vertex-commerce"],
+        "compensation_data": "role-matched benchmarks"
+      },
+      "expectedResponse": "Three-way synthesis: ranked job matches (job-match), a balanced company profile for each hiring company (company-intel), and grounded pay ranges (career-coach compensation workflow). Each domain stays in its lane (company-intel gives no pay figures; career-coach gives no culture opinion). One cohesive reply.",
+      "expectContains": ["job|role|match", "culture|company|profile", "\\$|range|pay|compensation"],
+      "expectNotContains": ["_id", "mongodb_vector_search|bedrock_kb_retrieve"]
+    },
+    {
+      "id": "MA-03",
+      "prompt": "I'm targeting a Staff Engineer role at Cloudpeak Systems. What's the skill gap, what do they pay in SF, and what's their culture like?",
+      "expectedSpecialists": ["career-coach", "company-intel"],
+      "grounding": {
+        "career_paths": "path-senior-to-staff-engineer",
+        "compensation_data": "comp-staff-engineer-staff-us-west",
+        "companies": "co-cloudpeak-systems"
+      },
+      "expectedResponse": "career-coach: Staff skill gap + roadmap AND SF staff comp range (base $215k-$265k p25-p75, total $300k-$430k). company-intel: Cloudpeak balanced profile (established, structured ladder, hybrid). Synthesized cohesively; boundaries respected (company-intel gives no pay figures).",
+      "expectContains": ["staff", "skill|roadmap|strategy|architecture", "\\$[0-9]|range|percentile", "cloudpeak|culture|structured|established"],
+      "expectNotContains": ["_id", "guaranteed"]
+    },
+    {
+      "id": "MA-04",
+      "prompt": "Here is my CV, please find matching jobs, then tell me what to earn and how to close any skill gaps.\nPriya Sharma — Senior Software Engineer, Austin TX. 6 years. Skills: TypeScript, Node.js, MongoDB, vector search, RAG, AWS.",
+      "expectedSpecialists": ["job-match", "career-coach"],
+      "grounding": {
+        "candidates": "stores Priya profile",
+        "compensation_data": "senior roles us-south",
+        "career_paths": "closest target path"
+      },
+      "expectedResponse": "job-match stores the CV in candidates and returns ranked matches; career-coach gives Austin senior comp ranges AND the gap/roadmap toward the matched target. Synthesized. CV storage happens (job-match Step 1) without exposing _id.",
+      "expectContains": ["match|role|job", "\\$|range|pay|compensation", "skill|roadmap|gap"],
+      "expectNotContains": ["_id", "mongodb_query|mongodb_vector_search"]
+    },
+    {
+      "id": "MA-05",
+      "prompt": "Should I take the Lumen Retail offer? Tell me the culture, the pay, and whether I'm qualified.",
+      "expectedSpecialists": ["company-intel", "career-coach"],
+      "grounding": {
+        "companies": "co-lumen-retail",
+        "compensation_data": "role-matched benchmark",
+        "career_paths": "target path"
+      },
+      "expectedResponse": "company-intel: Lumen culture (balanced, incl. Q4 crunch). career-coach: comp range for the role/level AND qualification/skill fit as a gap. None of them makes the take-it-or-not decision for the user or promises an outcome.",
+      "expectContains": ["lumen|culture", "\\$|range|pay", "skill|qualif|gap|fit"],
+      "expectNotContains": ["_id", "you should definitely take|guaranteed"]
+    }
+  ],
+
+  "routingGuards": [
+    {
+      "id": "RG-01",
+      "prompt": "What skills do I need to become a data scientist?",
+      "expectedSpecialists": ["career-coach"],
+      "assert": "single specialist, no synthesis fanout — a clearly single-domain career prompt must route to exactly one specialist"
+    },
+    {
+      "id": "RG-02",
+      "prompt": "What does a mid-level data scientist earn in Austin?",
+      "expectedSpecialists": ["career-coach"],
+      "assert": "single specialist — compensation-only intent, now owned by career-coach"
+    },
+    {
+      "id": "RG-03",
+      "prompt": "What's Vertex Commerce like to work at?",
+      "expectedSpecialists": ["company-intel"],
+      "assert": "single specialist — company-research-only intent"
+    },
+    {
+      "id": "RG-04",
+      "prompt": "What's the salary for a Machine Learning Engineer, and what skills do I need for it?",
+      "expectedSpecialists": ["career-coach"],
+      "assert": "single specialist, no synthesis fanout — career-coach owns both compensation and career-development, so a 'salary + skills' prompt must NOT fan out to two agents"
+    },
+    {
+      "id": "RG-05",
+      "prompt": "Find jobs for me. Here is my CV: Rohan Mehta — Senior Platform Engineer. Skills: Kubernetes, Terraform, AWS, Go, Python. Experience: Strata Cloud, Irongate Systems. Certifications: CKA, AWS Certified DevOps Engineer.",
+      "expectedSpecialists": ["job-match"],
+      "assert": "single specialist, no synthesis fanout — the leading explicit ask is 'find jobs' with a pasted CV; incidental employer names, skills, and certifications must NOT route or fan out to company-intel or career-coach"
+    },
+    {
+      "id": "RG-06",
+      "prompt": "What jobs match my resume?",
+      "expectedSpecialists": ["job-match"],
+      "assert": "single specialist — job-search-only intent routes to job-match"
+    },
+    {
+      "id": "RG-07",
+      "prompt": "Help me prepare for my interview for the AI Engineer role at Lumen Retail.",
+      "expectedSpecialists": ["job-match"],
+      "assert": "single specialist — interview-prep intent is owned by job-match (interview_prep collection), NOT company-intel despite the company name in the prompt"
+    }
+  ]
+}

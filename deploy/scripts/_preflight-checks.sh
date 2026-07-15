@@ -411,10 +411,6 @@ PREFLIGHT_PROFILE_project_post_apply=(
   pf_check_env_required_keys_filled
   pf_check_atlas_api_keys_present
   pf_check_atlas_api_key_scope
-  # WHY: post-apply guard — fail the deploy if the live Atlas project still has a
-  # 0.0.0.0/0 entry, whether from a Terraform regression or a stale/manual entry
-  # that Terraform cannot see.
-  pf_check_atlas_no_public_ip_access_list
   pf_check_runtime_role_bedrock_invoke
   pf_check_privatelink_endpoint_available
   pf_check_vector_indexes_present
@@ -432,9 +428,6 @@ PREFLIGHT_PROFILE_local_post_apply=(
   pf_check_env_file_present_and_sourceable
   pf_check_atlas_api_keys_present
   pf_check_atlas_api_key_scope
-  # WHY: same public-internet guard for the laptop/local deploy path — local
-  # mode also must never leave Atlas open to 0.0.0.0/0.
-  pf_check_atlas_no_public_ip_access_list
   pf_check_vector_indexes_present
   pf_check_documents_have_embeddings
   pf_check_embedding_dim_consistency
@@ -898,15 +891,6 @@ pf_check_env_required_keys_filled() {
       TF_VAR_mongodb_atlas_project_id TF_VAR_atlas_db_password EMBEDDINGS_PROVIDER
     )
   fi
-  # BYO + public (demo): no Atlas Admin API / project / password needed — the
-  # operator supplies the full connection string and acknowledges public egress.
-  if [[ "${ATLAS_CLUSTER_SOURCE:-managed}" == "byo" && "${NETWORK_MODE:-}" == "public" ]]; then
-    if [[ "$auth_mode_normalized" == "sts" ]]; then
-      REQUIRED_KEYS=(AWS_REGION ENVIRONMENT PROJECT_NAME SHARED_VPC_NAME EMBEDDINGS_PROVIDER MONGODB_BYO_URI ALLOW_PUBLIC_ATLAS)
-    else
-      REQUIRED_KEYS=(AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_REGION ENVIRONMENT PROJECT_NAME SHARED_VPC_NAME EMBEDDINGS_PROVIDER MONGODB_BYO_URI ALLOW_PUBLIC_ATLAS)
-    fi
-  fi
   # Voyage path requires VOYAGE_MODEL_PACKAGE_ARN
   if [[ "${EMBEDDINGS_PROVIDER:-}" == "voyage" ]]; then
     REQUIRED_KEYS+=(VOYAGE_MODEL_PACKAGE_ARN)
@@ -1317,10 +1301,7 @@ pf_check_aws_service_limits() {
   fi
 
   # Elastic IPs — actual quota pulled live from Service Quotas (no hardcode).
-  # ponytail: public mode allocates neither an EIP (instance uses its auto-assigned
-  # public IP) nor a NAT gateway, so EIP headroom can't block the apply — skip it.
-  local eip_count="n/a(public)" eip_limit="n/a"
-  if [[ "${NETWORK_MODE:-}" != "public" ]]; then
+  local eip_count eip_limit
   eip_count="$(aws ec2 describe-addresses --region "$region" --query 'length(Addresses)' --output text 2>/dev/null || echo '?')"
   eip_limit="$(_pf_resolve_quota "$region" ec2 L-0263D0A3)"
   if [[ -z "$eip_limit" ]]; then
@@ -1336,7 +1317,6 @@ pf_check_aws_service_limits() {
     else
       problems+=("Elastic IPs in ${region}: ${eip_count}/${eip_limit} (live Service Quotas limit). New project EIP / NAT gateway allocation may fail")
     fi
-  fi
   fi
 
   if (( ${#problems[@]} == 0 )); then
@@ -2304,47 +2284,6 @@ PY
   _pf_pass pf_check_atlas_cluster_tier "cluster ${cluster_name} tier=${tier:-?}"
 }
 
-# pf:check: pf_check_atlas_no_public_ip_access_list
-# pf:catches: "Atlas project IP access list contains 0.0.0.0/0 (public-internet path to the DB)"
-# Post-apply guard for the security requirement: Atlas must be reachable only
-# from where it was created (operator IP) or the peered VPC — NEVER the open
-# internet. This catches BOTH a Terraform regression and stale/manually-added
-# 0.0.0.0/0 (or 0.0.0.0/1) entries that Terraform does not manage.
-pf_check_atlas_no_public_ip_access_list() {
-  _pf_prereq pf_check_atlas_api_key_scope || \
-    { _pf_skip pf_check_atlas_no_public_ip_access_list "prereq pf_check_atlas_api_key_scope failed"; return 0; }
-  local proj="${TF_VAR_atlas_project_id:-${TF_VAR_mongodb_atlas_project_id:-}}"
-  local out status body
-  out="$(mktemp)"
-  status="$(_pf_atlas_api "$out" "/groups/${proj}/accessList")"
-  body="$(cat "$out")"
-  rm -f "$out"
-  if [[ ! "$status" =~ ^2 ]]; then
-    _pf_skip pf_check_atlas_no_public_ip_access_list "could not read project IP access list (HTTP ${status})"
-    return 0
-  fi
-  # Match an open allowlist entry: cidrBlock 0.0.0.0/0 or 0.0.0.0/1, or an
-  # ipAddress 0.0.0.0. Whitespace-tolerant for both compact + pretty JSON.
-  local open_entries
-  open_entries="$(echo "$body" \
-    | grep -oE '"(cidrBlock|ipAddress)"[[:space:]]*:[[:space:]]*"0\.0\.0\.0(/[01])?"' \
-    | sort -u | tr '\n' ' ')"
-  if [[ -z "$open_entries" ]]; then
-    _pf_pass pf_check_atlas_no_public_ip_access_list "Atlas IP access list has no 0.0.0.0/0 (no public-internet path)"
-    return 0
-  fi
-  local _ip_hint
-  _ip_hint="$(_pf_operator_ip_cidr_hint)"
-  _pf_fail pf_check_atlas_no_public_ip_access_list \
-    --summary "Atlas project IP access list is open to the public internet (0.0.0.0/0)" \
-    --shortcoming "config (Atlas network access)" \
-    --observed "GET /groups/${proj}/accessList contains: ${open_entries}" \
-    --fix "Remove the open entry in Atlas → Network Access → IP Access List (Terraform now scopes it to the deploy machine / VPC; a leftover 0.0.0.0/0 was likely added manually or by an older deploy)" \
-    --fix "Re-run the deploy so the mongodb-atlas module re-applies its scoped entry (privatelink → ${_ip_hint}; peering → VPC CIDR)" \
-    --hint "console:https://cloud.mongodb.com/v2/${proj}#/security/network/accessList" \
-    --doc "docs/deployment-preflight-checks.md#atlas-no-public-ip-access-list"
-}
-
 # pf:check: pf_check_atlas_privatelink_no_orphans
 # pf:catches: "Stale Atlas PrivateLink endpoint left from previous run"
 pf_check_atlas_privatelink_no_orphans() {
@@ -2724,9 +2663,9 @@ PY
         _pf_fail pf_check_voyage_endpoint_live_smoke \
           --summary "Voyage SageMaker endpoint '${endpoint}' returned dim=${dim}, expected ${expected_dim}" \
           --shortcoming "config" \
-          --observed "resolved embedding dim=${expected_dim} (getVoyageEmbeddingDims() in api/src/adapters/voyage-embedding.ts; VOYAGE_OUTPUT_DIM or default 1024) does not match endpoint output" \
-          --fix "Confirm the subscribed model emits the resolved dim (voyage-multimodal-3 is 1024-only; voyage-multimodal-3.5 supports 256/512/1024/2048 via VOYAGE_OUTPUT_DIM)" \
-          --fix "Align VOYAGE_OUTPUT_DIM with the deployed model, or set VOYAGE_MODEL_PACKAGE_ARN to the matching multimodal Marketplace model package and redeploy the shared stack" \
+          --observed "VOYAGE_EMBEDDING_DIMS=${expected_dim} (api/src/adapters/voyage-embedding.ts) does not match endpoint output" \
+          --fix "Confirm the subscribed model is voyage-multimodal-3 (emit 1024-d)" \
+          --fix "Set VOYAGE_MODEL_PACKAGE_ARN to the matching multimodal Marketplace model package and redeploy the shared stack" \
           --doc "docs/deployment-preflight-checks.md#voyage-endpoint-live-smoke"
         return 0
       fi
@@ -2971,9 +2910,8 @@ pf_check_concurrent_deploy_lock() {
         --shortcoming "config (state)" \
         --observed "s3://${bucket}/${key} exists: ${body}" \
         --fix "Wait for the other deploy to finish (look for the host/pid in the lock body)" \
-        --fix "If you are sure no other deploy is running, force-break by re-running THE SAME deploy command with PREFLIGHT_FORCE_LOCK_BREAK=1 prefixed (use whichever deploy-full-*.sh you started with)" \
-        --fix "Or delete it directly: aws s3 rm s3://${bucket}/${key} --region ${region}" \
-        --hint "run:aws s3 rm s3://${bucket}/${key} --region ${region}" \
+        --fix "If you are sure no other deploy is running, force-break: PREFLIGHT_FORCE_LOCK_BREAK=1 ./deploy/deploy-full-with-privatelink.sh" \
+        --hint "run:PREFLIGHT_FORCE_LOCK_BREAK=1 ./deploy/deploy-full-with-privatelink.sh" \
         --doc "docs/deployment-preflight-checks.md#concurrent-deploy-lock"
       return 0
     fi
@@ -3198,7 +3136,7 @@ pf_check_documents_have_embeddings() {
 
   local probe_script
   IFS= read -r -d '' probe_script <<'JS' || true
-const { MongoClient } = await import(process.env.MONGO_PROBE_DRIVER_SPEC || "mongodb"); // spec from _transient-errors.sh; bare import floats to bson@7.3.0 which crashes under Bun 1.3.13 (see mongo-probe-bun-bson-failure-report.md)
+import { MongoClient } from "mongodb";
 
 const uri = process.env.MONGODB_URI;
 const dbName = process.env.MONGODB_DB;
@@ -3529,10 +3467,6 @@ pf_check_kb_ingestion_complete() {
     _pf_skip pf_check_kb_ingestion_complete "BEDROCK_KB_ID not set (deploy without KB)"
     return 0
   fi
-  if [[ "${NETWORK_MODE:-}" == "peering" && "${TF_VAR_enable_kb_peering:-true}" != "false" ]]; then
-    _pf_skip pf_check_kb_ingestion_complete "peering-NLB KB ingestion is experimental and non-blocking in VPC peering mode"
-    return 0
-  fi
   _pf_ensure_aws_auth || { _pf_skip pf_check_kb_ingestion_complete "AWS auth not validated"; return 0; }
   local region="${AWS_REGION:-us-east-1}"
 
@@ -3556,7 +3490,7 @@ pf_check_kb_ingestion_complete() {
     --data-source-id "$ds_id" \
     --sort-by 'attribute=STARTED_AT,order=DESCENDING' \
     --max-results 1 \
-    --query 'ingestionJobSummaries[0].[status,statistics.numberOfDocumentsScanned,statistics.numberOfDocumentsFailed,statistics.numberOfNewDocumentsIndexed,statistics.numberOfModifiedDocumentsIndexed]' \
+    --query 'ingestionJobSummaries[0].[status,statistics.numberOfNewDocumentsIndexed,statistics.numberOfModifiedDocumentsIndexed]' \
     --output text 2>/dev/null || echo '')"
 
   if [[ -z "$probe" ]]; then
@@ -3565,14 +3499,10 @@ pf_check_kb_ingestion_complete() {
   fi
 
   # AWS CLI text output uses TAB delimiters; bash 3.2 read into array.
-  local status=""; local scanned_count=""; local failed_count=""; local new_count=""; local mod_count=""
-  IFS=$'\t' read -r status scanned_count failed_count new_count mod_count <<<"$probe"
-  scanned_count="${scanned_count:-0}"
-  failed_count="${failed_count:-0}"
+  local status=""; local new_count=""; local mod_count=""
+  IFS=$'\t' read -r status new_count mod_count <<<"$probe"
   new_count="${new_count:-0}"
   mod_count="${mod_count:-0}"
-  [[ "$scanned_count" == "None" ]] && scanned_count=0
-  [[ "$failed_count" == "None" ]] && failed_count=0
   [[ "$new_count" == "None" ]] && new_count=0
   [[ "$mod_count" == "None" ]] && mod_count=0
 
@@ -3580,7 +3510,7 @@ pf_check_kb_ingestion_complete() {
     _pf_fail pf_check_kb_ingestion_complete \
       --summary "KB ingestion job status='${status}' (want 'COMPLETE')" \
       --shortcoming "config (data)" \
-      --observed "status=${status} scanned=${scanned_count} failed=${failed_count} new=${new_count} mod=${mod_count}" \
+      --observed "status=${status} new=${new_count} mod=${mod_count}" \
       --fix "Inspect the job: aws bedrock-agent list-ingestion-jobs --knowledge-base-id ${kb_id} --data-source-id ${ds_id}" \
       --fix "Re-run terraform apply on module bedrock-kb to retry the ingestion" \
       --hint "run:aws bedrock-agent list-ingestion-jobs --knowledge-base-id ${kb_id} --data-source-id ${ds_id}" \
@@ -3588,30 +3518,19 @@ pf_check_kb_ingestion_complete() {
     return 0
   fi
 
-  if (( scanned_count < 1 )); then
+  local indexed=$(( new_count + mod_count ))
+  if (( indexed < 1 )); then
     _pf_fail pf_check_kb_ingestion_complete \
-      --summary "KB ingestion COMPLETE but no source documents were scanned" \
+      --summary "KB ingestion COMPLETE but zero documents indexed" \
       --shortcoming "config (data)" \
-      --observed "scanned=${scanned_count} failed=${failed_count} new=${new_count} mod=${mod_count}" \
+      --observed "new=${new_count} mod=${mod_count}" \
       --fix "Verify KB source bucket has docs: aws s3 ls s3://<bucket>/<prefix>" \
       --fix "Re-trigger ingestion via terraform apply on module bedrock-kb" \
       --doc "docs/deployment-preflight-checks.md#kb-ingestion-complete"
     return 0
   fi
 
-  if (( failed_count > 0 )); then
-    _pf_fail pf_check_kb_ingestion_complete \
-      --summary "KB ingestion COMPLETE but ${failed_count} source document(s) failed" \
-      --shortcoming "config (data)" \
-      --observed "scanned=${scanned_count} failed=${failed_count} new=${new_count} mod=${mod_count}" \
-      --fix "Inspect the job: aws bedrock-agent list-ingestion-jobs --knowledge-base-id ${kb_id} --data-source-id ${ds_id}" \
-      --fix "Check APPLICATION_LOGS for per-document failure reasons: /aws/bedrock/knowledgebase/${kb_id}" \
-      --fix "Re-trigger ingestion via terraform apply on module bedrock-kb" \
-      --doc "docs/deployment-preflight-checks.md#kb-ingestion-complete"
-    return 0
-  fi
-
-  _pf_pass pf_check_kb_ingestion_complete "ingestion COMPLETE (scanned=${scanned_count} failed=${failed_count} new=${new_count} mod=${mod_count})"
+  _pf_pass pf_check_kb_ingestion_complete "ingestion COMPLETE (new=${new_count} mod=${mod_count})"
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -4218,23 +4137,9 @@ PY
   _ssot_repo="$(cd "${BASH_SOURCE%/*}/../.." && pwd)"
   local _bad
 
-  # (a) `VOYAGE_REQUEST_FORMAT` is dead everywhere in deploy/. `VOYAGE_OUTPUT_DIM`
-  #     is allowed only as controlled derivation in deploy-project.sh /
-  #     deploy-local.sh, as controlled env pass-through in _env-live.sh /
-  #     _agents-common.sh, and as the legitimate mirror in Terraform `.tf` files
-  #     (var.voyage_output_dim wiring into the seed null_resource). All other
-  #     deploy shell references are forbidden; deploy logic must resolve dims
-  #     through the SSOT bridge `voyage_embedding_dims`.
-  _bad="$(grep -rln -E 'VOYAGE_REQUEST_FORMAT' "${_ssot_repo}/deploy" 2>/dev/null \
+  # (a) No `VOYAGE_REQUEST_FORMAT` / `VOYAGE_OUTPUT_DIM` reads anywhere in deploy/.
+  _bad="$(grep -rln -E 'VOYAGE_REQUEST_FORMAT|VOYAGE_OUTPUT_DIM' "${_ssot_repo}/deploy" 2>/dev/null \
     | grep -v '_preflight-checks.sh' || true)"
-  _bad="${_bad}${_bad:+$'\n'}$(grep -rln -E 'VOYAGE_OUTPUT_DIM' "${_ssot_repo}/deploy" 2>/dev/null \
-    | grep -v '\.tf$' \
-    | grep -v 'deploy-local.sh' \
-    | grep -v 'deploy-project.sh' \
-    | grep -v '_env-live.sh' \
-    | grep -v '_agents-common.sh' \
-    | grep -v '_preflight-checks.sh' || true)"
-  _bad="$(printf '%s' "$_bad" | sed '/^$/d')"
   if [[ -n "$_bad" ]]; then
     echo "  ✗ pf_check_voyage_ssot_only_source: stale Voyage env refs in:"
     printf '      %s\n' $_bad

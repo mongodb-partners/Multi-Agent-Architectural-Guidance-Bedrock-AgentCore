@@ -33,12 +33,12 @@ type Row = {
  * matching test in `agent-classifier-multi.test.ts` first.
  */
 const SINGLE_DOMAIN: string[] = [
-  "Recommend a budget gaming laptop for me",
-  "Error code PWR-001 my device wont power on",
-  "Track my order shipment delivery",
-  "Where is my package, give me an update on order ABC-123",
-  "Suggest a phone for travel photography under 800 dollars",
-  "My screen is flickering and the device keeps rebooting",
+  "What salary should I expect and how do I negotiate my compensation offer",
+  "Tell me about the company funding stage and employee sentiment",
+  "Here is my CV, what jobs match my experience and skills",
+  "What skills do I need to learn to grow into a senior engineering role",
+  "Give me interview preparation tips for a machine learning engineer opening",
+  "What is the engineering culture like at Lumen Retail",
 ];
 
 /**
@@ -49,9 +49,9 @@ const SINGLE_DOMAIN: string[] = [
  * so a future tuning pass can see how many flip without manual probing.
  */
 const MULTI_DOMAIN: string[] = [
-  "track my order ABC-123 AND recommend a replacement laptop with similar specs",
-  "my new laptop wont power on PWR-001 and I want to return it / track refund",
-  "recommend a gaming phone under 600 and tell me if my pending order has shipped",
+  "match jobs to my CV skills AND tell me about the company culture and funding",
+  "match jobs to my CV experience AND what salary compensation should I expect to negotiate",
+  "find openings that fit my resume and tell me what those companies are like to work at",
 ];
 
 async function run() {

@@ -1,5 +1,7 @@
 /**
- * Seed: generate and store embeddings for products and troubleshooting_docs.
+ * Seed: generate and store embeddings for products, troubleshooting_docs, and
+ * the recruitment specialist collections (career_paths, skills_taxonomy,
+ * compensation_data, companies).
  *
  * Strict provider selection — `EMBEDDINGS_PROVIDER` is mandatory and is the
  * single source of truth:
@@ -156,6 +158,43 @@ const TROUBLESHOOTING_PLAN: CollectionPlan = {
   },
 };
 
+// ── Recruitment specialist collections ─────────────────────────────────────
+// Each is fully seeder-owned (no Bedrock KB chunks) and carries an
+// `embeddingText` field built by its seed script. Prefer that field verbatim;
+// fall back to key text fields if a legacy row lacks it.
+
+const CAREER_PATHS_PLAN: CollectionPlan = {
+  name: "career_paths",
+  seederOwnedFilter: {},
+  idField: "pathId",
+  buildText: (doc) =>
+    String(doc.embeddingText ?? [doc.targetRole, doc.description].filter(Boolean).join(". ")),
+};
+
+const SKILLS_TAXONOMY_PLAN: CollectionPlan = {
+  name: "skills_taxonomy",
+  seederOwnedFilter: {},
+  idField: "skillId",
+  buildText: (doc) =>
+    String(doc.embeddingText ?? [doc.name, doc.description].filter(Boolean).join(". ")),
+};
+
+const COMPENSATION_PLAN: CollectionPlan = {
+  name: "compensation_data",
+  seederOwnedFilter: {},
+  idField: "benchmarkId",
+  buildText: (doc) =>
+    String(doc.embeddingText ?? [doc.role, doc.seniority, doc.locationLabel].filter(Boolean).join(" ")),
+};
+
+const COMPANIES_PLAN: CollectionPlan = {
+  name: "companies",
+  seederOwnedFilter: {},
+  idField: "companyId",
+  buildText: (doc) =>
+    String(doc.embeddingText ?? [doc.name, doc.industry, doc.description].filter(Boolean).join(". ")),
+};
+
 // ---------------------------------------------------------------------------
 // Embedding functions
 // ---------------------------------------------------------------------------
@@ -222,7 +261,16 @@ type CollectionStats = {
 
 const stats: CollectionStats[] = [];
 
-for (const plan of [PRODUCTS_PLAN, TROUBLESHOOTING_PLAN]) {
+const PLANS: CollectionPlan[] = [
+  PRODUCTS_PLAN,
+  TROUBLESHOOTING_PLAN,
+  CAREER_PATHS_PLAN,
+  SKILLS_TAXONOMY_PLAN,
+  COMPENSATION_PLAN,
+  COMPANIES_PLAN,
+];
+
+for (const plan of PLANS) {
   const col = db.collection(plan.name);
 
   // How many rows the KB owns (skipped by us). For products this is 0; for
@@ -310,7 +358,7 @@ for (const plan of [PRODUCTS_PLAN, TROUBLESHOOTING_PLAN]) {
 // fails loud.
 let postCheckMissing = 0;
 const missingDetail: string[] = [];
-for (const plan of [PRODUCTS_PLAN, TROUBLESHOOTING_PLAN]) {
+for (const plan of PLANS) {
   const col = db.collection(plan.name);
   const missing = await col.countDocuments({
     ...(plan.seederOwnedFilter as never),

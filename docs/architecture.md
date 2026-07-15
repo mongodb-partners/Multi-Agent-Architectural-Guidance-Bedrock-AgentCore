@@ -56,7 +56,7 @@ flowchart LR
 | **AgentCore Memory** | An AWS-managed memory store | Authoritative short-term conversation memory backend in deployed AWS (`SHORT_TERM_MEMORY_BACKEND=agentcore`); LTM fallback if Mongo write fails |
 | **Bedrock KB** | A vector-search knowledge base | RAG over uploaded manuals. Ingestion path is mode-aware (PL NLB by default in privatelink mode; peering NLB by default in peering mode — both private) |
 
-For a dedicated Mermaid diagram page: [`diagrams/01-aws-infrastructure.md`](diagrams/01-aws-infrastructure.md). The Mermaid diagram above is the current truth.
+For the editable historical diagram: [`diagrams/01-aws-infrastructure.drawio`](diagrams/01-aws-infrastructure.drawio) — note this drawio source is **historical** and may show the older orchestrator-hop topology. The Mermaid diagram above is the current truth.
 
 ---
 
@@ -118,7 +118,7 @@ sequenceDiagram
   end
 ```
 
-For a dedicated Mermaid diagram page: [`diagrams/02-request-flow.md`](diagrams/02-request-flow.md). The current request flow is the Mermaid above.
+For the editable historical version: [`diagrams/02-request-flow.drawio`](diagrams/02-request-flow.drawio) — **historical**; the current request flow is the Mermaid above.
 
 **Key things to notice:**
 
@@ -143,10 +143,10 @@ flowchart TB
   subgraph aws[AWS · region]
     subgraph network[envs/network — singleton per region]
       subgraph vpc[Shared VPC]
-        subgraph pub[Public Subnets ×2]
+        subgraph pub[Public Subnets ×3]
           IGW[Internet Gateway]
         end
-        subgraph priv[Private Subnets ×2]
+        subgraph priv[Private Subnets ×3]
           VPCE[Atlas Interface VPCE<br/>privatelink mode]
           PEER[VPC Peering accepter<br/>peering mode]
         end
@@ -203,7 +203,7 @@ flowchart TB
   end
 ```
 
-For a dedicated Mermaid diagram page: [`diagrams/01-aws-infrastructure.md`](diagrams/01-aws-infrastructure.md); defer to the Mermaid above for the current truth.
+For the editable historical version: [`diagrams/01-aws-infrastructure.drawio`](diagrams/01-aws-infrastructure.drawio) — **historical**; defer to the Mermaid above.
 
 ### Resource inventory
 
@@ -347,13 +347,12 @@ The API and UI run as Docker containers managed by systemd. ECR is the image reg
 <a id="private-atlas-connectivity"></a>
 ### 7.4 Private Atlas connectivity — PrivateLink (default) or VPC peering
 
-MongoDB credentials traversing the public internet would be a security concern, so for any real environment Atlas access is private. The framework supports **three mutually-exclusive connectivity modes** selected by `NETWORK_MODE` in `.env` (default `privatelink`) — two private, plus one **demo-only** public path:
+MongoDB credentials traversing the public internet would be a security concern, so Atlas access is always private. The framework supports **two mutually-exclusive connectivity modes** selected by `NETWORK_MODE` in `.env` (default `privatelink`):
 
 * **PrivateLink mode** (`NETWORK_MODE=privatelink`, default) — Atlas Interface VPCE + per-cluster Route 53 private zone + VPC endpoint. partner-validated, recommended.
 * **VPC peering mode** (`NETWORK_MODE=peering`) — AWS-side VPC peering accepter + route entries in both route tables + Atlas-side `mongodbatlas_network_peering` + Atlas Private DNS for Peering (auto-enabled via Admin API). The `-pri.mongodb.net` SRV resolves directly to private peering IPs.
-* **Public mode — Bring your own MongoDB Atlas cluster** (`NETWORK_MODE=public` + `ATLAS_CLUSTER_SOURCE=byo`, **DEMO ONLY**) — no Atlas cluster is provisioned and no private networking is created; the stack points at your *own* existing cluster over public SRV (`MONGODB_BYO_URI`) with the Atlas IP access list set to `0.0.0.0/0`. AgentCore runs in PUBLIC egress, the EC2 host uses an auto-assigned public IP (no EIP). For demos/evals only — see [`deployment-guide.md` § Public mode](deployment-guide.md#public-byo-mode).
 
-The three modes are **mutually exclusive per account** — there is no hybrid path. Switching modes requires destroy + redeploy (mode-specific wrappers under [`deploy/destroy/`](../deploy/destroy/): project script then shared script, then re-run the matching orchestrator). SSM canary `/{SHARED_VPC_NAME}/{REGION}/network_mode` guards against silent mode swaps; an `envs/ec2` `check` block also fails plan when the tfvars mode disagrees with the SSM canary.
+The two modes are **mutually exclusive per account** — there is no hybrid path. Switching modes requires destroy + redeploy (mode-specific wrappers under [`deploy/destroy/`](../deploy/destroy/): project script then shared script, then re-run the matching orchestrator). SSM canary `/{SHARED_VPC_NAME}/{REGION}/network_mode` guards against silent mode swaps; an `envs/ec2` `check` block also fails plan when the tfvars mode disagrees with the SSM canary.
 
 Use the matching orchestrator:
 
@@ -361,7 +360,6 @@ Use the matching orchestrator:
 |---|---|
 | `privatelink` | [`deploy/deploy-full-with-privatelink.sh`](../deploy/deploy-full-with-privatelink.sh) |
 | `peering` | [`deploy/deploy-full-with-vpc-peering.sh`](../deploy/deploy-full-with-vpc-peering.sh) |
-| `public` (Bring your own MongoDB Atlas cluster, demo) | [`deploy/deploy-full-public.sh`](../deploy/deploy-full-public.sh) |
 
 See [`docs/deployment-guide.md` § VPC peering mode](deployment-guide.md#vpc-peering-mode) for the runtime URI selection, security-group narrowing, KB ingestion caveats (NLB-over-peering is experimental, mongod IP drift recovery), and CIDR pre-flight rules.
 
@@ -409,7 +407,7 @@ Voyage AI on SageMaker is the **active** embedding provider for both online quer
 | **Offline corpus** | [`db-seeding/seed-embeddings.ts`](../db-seeding/seed-embeddings.ts) using `input_type: "document"` | `bun db-seeding/seed-embeddings.ts` (re-runnable via `REWIRE_EMBEDDINGS=1`) for both `products` and `troubleshooting_docs`. |
 | **Bedrock KB ingestion** | Bedrock Titan v2 (no Voyage support yet on the KB side) | Bedrock KB sync. |
 
-`deploy/scripts/deploy-project.sh` writes `VOYAGE_SAGEMAKER_ENDPOINT` into both the EC2 API's `.env.live` and into each AgentCore Runtime's env vars, so Voyage is reachable from every place that needs an embedding. Embedding dimension defaults to 1024 (`VOYAGE_DEFAULT_EMBEDDING_DIMS`) and is configurable via `VOYAGE_OUTPUT_DIM`, resolved in `getVoyageEmbeddingDims()` in [`api/src/adapters/voyage-embedding.ts`](../api/src/adapters/voyage-embedding.ts) — see [`docs/reference/voyage.md`](reference/voyage.md). If the SageMaker endpoint is unconfigured or fails, the wrapper falls back to Bedrock Titan / Cohere via `EMBEDDING_MODEL_ID`; if neither is available the tool returns a structured `status: "error"` so the LLM can degrade to keyword search via `mongodb_query`.
+`deploy/scripts/deploy-project.sh` writes `VOYAGE_SAGEMAKER_ENDPOINT` into both the EC2 API's `.env.live` and into each AgentCore Runtime's env vars, so Voyage is reachable from every place that needs an embedding. Embedding dimension is a code constant (`VOYAGE_EMBEDDING_DIMS` in [`api/src/adapters/voyage-embedding.ts`](../api/src/adapters/voyage-embedding.ts) — see [`docs/reference/voyage.md`](reference/voyage.md)). If the SageMaker endpoint is unconfigured or fails, the wrapper falls back to Bedrock Titan / Cohere via `EMBEDDING_MODEL_ID`; if neither is available the tool returns a structured `status: "error"` so the LLM can degrade to keyword search via `mongodb_query`.
 
 The Voyage **model name** historically (`voyage-3.5-lite` vs `voyage-multimodal-3`) is pinned to `voyage-multimodal-3` in `.env.sample`; see [`docs/reference/voyage.md`](reference/voyage.md) for supported models.
 
@@ -458,7 +456,7 @@ See [`deployment-guide.md`](deployment-guide.md) for current deployment status.
 - **HTTP:** `api/src/middleware/request-id.ts` + `api/src/middleware/otel.ts` run on the Hono app (`api/src/app.ts`). Responses expose **`X-Request-Id`** and **`X-Trace-Id`** (W3C trace id hex) for support correlation and CloudWatch Logs Insights filters. CORS exposes these headers to the Streamlit origin.
 - **EC2 shipping:** Terraform creates the log groups in `envs/shared`; EC2 `user_data` installs **amazon-cloudwatch-agent** and tails **journald** for `multiagent-api.service` and `multiagent-ui.service` into `/<SHARED_RESOURCE_PREFIX>/<env>/api` and `/<SHARED_RESOURCE_PREFIX>/<env>/ui` respectively.
 - **UI:** `ui/lib/log.py` mirrors JSON lines to stdout; `stream_chat_events` logs the response `X-Trace-Id`. The main chat page shows the last trace id in a footer caption for copy/paste. The Streamlit container launches via `opentelemetry-instrument`, so HTTP server spans and outbound `requests` calls auto-export to the same ADOT sidecar.
-- **CloudWatch GenAI Observability + fleet dashboards:** `modules/cloudwatch-genai`, `modules/bedrock-invocation-logging`, `modules/cloudwatch-fleet-dashboards`, and `modules/cloudwatch-atlas-dashboard` together produce: the managed AgentCore + Model Invocations tabs, three custom dashboards (`<project>-{fleet,mongo,cost}-<env>`), seven alarms wired to an SNS topic, a PII Data Protection Policy on `/aws/bedrock/invocations` (body logging **OFF** by default), optional AgentCore vended `APPLICATION_LOGS` delivery (also **OFF** by default because those AWS-managed records include raw request/response payloads), and an optional MongoDB Atlas Prometheus scrape via the ADOT sidecar. See [observability-runbook.md](observability-runbook.md) for day-2 ops.
+- **CloudWatch GenAI Observability + fleet dashboards:** `modules/cloudwatch-genai`, `modules/bedrock-invocation-logging`, `modules/cloudwatch-fleet-dashboards`, and `modules/cloudwatch-atlas-dashboard` together produce: the managed AgentCore + Model Invocations tabs, three custom dashboards (`<project>-{fleet,mongo,cost}-<env>`), seven alarms wired to an SNS topic, a PII Data Protection Policy on `/aws/bedrock/invocations` (body logging **OFF** by default), and an optional MongoDB Atlas Prometheus scrape via the ADOT sidecar. See [observability-runbook.md](observability-runbook.md) for day-2 ops.
 
 ### Trace collector (product trace)
 

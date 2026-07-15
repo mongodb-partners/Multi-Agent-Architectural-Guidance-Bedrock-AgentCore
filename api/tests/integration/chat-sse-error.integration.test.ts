@@ -73,7 +73,7 @@ describe("POST /chat SSE error event (mocked invokeAgentRuntime)", () => {
       body: JSON.stringify({
         message: "hello",
         sessionId: "sse_err_sess",
-        agentId: "order-management",
+        agentId: "job-match",
       }),
     });
     expect(res.status).toBe(200);

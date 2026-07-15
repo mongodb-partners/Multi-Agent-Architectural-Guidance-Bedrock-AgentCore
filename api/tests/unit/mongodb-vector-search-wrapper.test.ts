@@ -522,7 +522,7 @@ describe("VectorSearchEmbedTool.stream — full embed-then-call path", () => {
     const collector = new TraceCollector({
       sessionId: "s",
       messageId: "m",
-      agentId: "product-recommendation",
+      agentId: "company-intel",
     });
 
     const result = (await withTrace(collector, () =>
@@ -581,7 +581,7 @@ describe("VectorSearchEmbedTool.stream — full embed-then-call path", () => {
     const collector = new TraceCollector({
       sessionId: "s",
       messageId: "m",
-      agentId: "product-recommendation",
+      agentId: "company-intel",
     });
 
     // No queryText / no queryVector — transform short-circuits with missing_query.
@@ -639,7 +639,7 @@ describe("VectorSearchEmbedTool.stream — full embed-then-call path", () => {
     const collector = new TraceCollector({
       sessionId: "s",
       messageId: "m",
-      agentId: "product-recommendation",
+      agentId: "company-intel",
     });
 
     const ctx = {
@@ -700,7 +700,7 @@ describe("VectorSearchEmbedTool.stream — full embed-then-call path", () => {
     const collector = new TraceCollector({
       sessionId: "s",
       messageId: "m",
-      agentId: "product-recommendation",
+      agentId: "company-intel",
     });
     const ctx = {
       toolUse: {
