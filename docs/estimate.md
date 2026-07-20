@@ -82,16 +82,16 @@ Today's per-agent model selection (see [`config/agents/*.agent.md`](../config/ag
 | Agent | Model | Input $/M | Output $/M |
 |---|---|---|---|
 | orchestrator | Claude Haiku 4.5 | $1.00 | $5.00 |
-| order-management | Claude Haiku 4.5 | $1.00 | $5.00 |
-| troubleshooting | Claude Sonnet 4.6 | $3.00 | $15.00 |
-| product-recommendation | Claude Sonnet 4.6 | $3.00 | $15.00 |
+| job-match | Claude Haiku 4.5 | $1.00 | $5.00 |
+| career-coach | Claude Haiku 4.5 | $1.00 | $5.00 |
+| company-intel | Claude Sonnet 4.6 | $3.00 | $15.00 |
 | classifier fallback (in-API) | Claude Haiku 4.5 | $1.00 | $5.00 |
 | LTM fact extractor | Claude Haiku 4.5 | $1.00 | $5.00 |
 
 For a POC with ~500 turns/day split evenly across specialists:
 - Per turn: ~2,000 input tokens (system + memory + history + question) + 400 output tokens
-- Half the turns hit Sonnet (troubleshooting + product) at ~$0.012 per turn
-- Half hit Haiku (order-management) at ~$0.004 per turn
+- A third of the turns hit Sonnet (company-intel) at ~$0.012 per turn
+- Two thirds hit Haiku (job-match + career-coach) at ~$0.004 per turn
 - Plus per-turn classifier + extractor on Haiku (~$0.001)
 
 Daily: 500 × (~$0.008 avg) = ~$4/day = **~$120/month** at this rate.

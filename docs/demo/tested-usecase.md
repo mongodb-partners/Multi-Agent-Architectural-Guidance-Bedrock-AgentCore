@@ -1,4 +1,15 @@
-# POC Demo — Live Test Results
+# POC Demo — Live Test Results (retired customer-support use case)
+
+> ⚠️ **Historical record — do not use as a current demo script.** This file is a verbatim
+> transcript of a real test run against the previous **customer-support** agent set
+> (`troubleshooting`, `order-management`, `product-recommendation`), which no longer exists
+> in `config/agents/`. It is kept as evidence of that run and has deliberately **not** been
+> rewritten — inventing a transcript for the current agents would misrepresent results that
+> were never produced.
+>
+> For the current `job-match` / `career-coach` / `company-intel` agents, use
+> [`demo-script.md`](demo-script.md). Re-run these scenarios against the new agents and
+> replace this file with the real output when you need a current test record.
 
 **Environment:** `http://52.22.173.198:8501/` (Streamlit UI → AWS Bedrock + MongoDB Atlas + AgentCore session store)
 **Tester account:** `alex@example.com` (Cognito-authenticated, standard persona)

@@ -172,7 +172,7 @@ Renders when the in-API orchestrator selected one or more specialists via `class
 
 Renders when an older trace (or a non-orchestrator turn) only carries a `handoff.decision` event:
 
-- **From → To** — `orchestrator → order-management`.
+- **From → To** — `orchestrator → job-match`.
 - **Trigger** — the heuristic span that fired (e.g. `keyword: "order"` with `score=1.79`).
 - **Runner-up** — second-best specialist + its score, so you can see how close the decision was.
 - **Confidence** — the score gap that produced the pick.

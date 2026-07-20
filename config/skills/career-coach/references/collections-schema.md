@@ -43,7 +43,7 @@ collection.
       "estimatedWeeks": 4
     }
   ],
-  "embedding":      [<768-dimensional float array>]
+  "embedding":      [<1024-dimensional float array>]
 }
 ```
 
@@ -57,7 +57,7 @@ collection.
 | `seniority` | enum | `junior` \| `mid` \| `senior` \| `staff` — level of the target role |
 | `requiredSkills` | object[] | Each has `skillId`, `name` (lowercase), `importance`, and a `note`. `importance` is `core` \| `important` \| `nice`. |
 | `milestones` | object[] | Ordered by `order`; each has `title`, `skills` (array of `skillId`), and `estimatedWeeks` |
-| `embedding` | float[] | 768-dimensional vector; used by `career_paths_vector_index` |
+| `embedding` | float[] | 1024-dimensional vector; used by `career_paths_vector_index` |
 
 ### Indexes
 
@@ -65,7 +65,7 @@ collection.
 ```json
 {
   "fields": [
-    { "numDimensions": 768, "path": "embedding", "similarity": "cosine", "type": "vector" },
+    { "numDimensions": 1024, "path": "embedding", "similarity": "cosine", "type": "vector" },
     { "path": "seniority", "type": "filter" }
   ]
 }
@@ -109,7 +109,7 @@ retrieves from this collection.
     { "title": "Deep Learning with PyTorch (book)", "provider": "External", "url": null, "estimatedHours": 30 }
   ],
   "embeddingText": "<concatenated text used to generate the embedding>",
-  "embedding":     [<768-dimensional float array>]
+  "embedding":     [<1024-dimensional float array>]
 }
 ```
 
@@ -123,7 +123,7 @@ retrieves from this collection.
 | `prerequisites` | string[] | Array of `skillId` values that should be learned first |
 | `resourceType` | string | e.g. `course`, `book`, `project`, `certification` |
 | `resources` | object[] | Each has `title`, `provider`, `url` (nullable), and `estimatedHours` |
-| `embedding` | float[] | 768-dimensional vector; used by `skills_taxonomy_vector_index` |
+| `embedding` | float[] | 1024-dimensional vector; used by `skills_taxonomy_vector_index` |
 
 ### Index
 
@@ -131,7 +131,7 @@ retrieves from this collection.
 ```json
 {
   "fields": [
-    { "numDimensions": 768, "path": "embedding", "similarity": "cosine", "type": "vector" },
+    { "numDimensions": 1024, "path": "embedding", "similarity": "cosine", "type": "vector" },
     { "path": "category", "type": "filter" }
   ]
 }
@@ -166,7 +166,7 @@ never writes to this collection. Used by the compensation workflow (Steps 5–7)
   "equityNote":    "Typical RSU grant 0.05%–0.12% vesting over 4 years for this level.",
   "sampleSize":    142,
   "embeddingText": "<concatenated text used to generate the embedding>",
-  "embedding":     [<768-dimensional float array>]
+  "embedding":     [<1024-dimensional float array>]
 }
 ```
 
@@ -186,7 +186,7 @@ never writes to this collection. Used by the compensation workflow (Steps 5–7)
 | `benefits` | string[] | Documented benefits norms; present verbatim |
 | `equityNote` | string | Equity/RSU norm for this level; present verbatim |
 | `sampleSize` | int | Number of data points; a small `sampleSize` warrants a lower-confidence note |
-| `embedding` | float[] | 768-dimensional vector; used by `compensation_vector_index` |
+| `embedding` | float[] | 1024-dimensional vector; used by `compensation_vector_index` |
 
 ### Region enum (map candidate location → `region`)
 
@@ -209,7 +209,7 @@ When the candidate's location does not clearly map, use `remote-us` (for US cont
 ```json
 {
   "fields": [
-    { "numDimensions": 768, "path": "embedding", "similarity": "cosine", "type": "vector" },
+    { "numDimensions": 1024, "path": "embedding", "similarity": "cosine", "type": "vector" },
     { "path": "seniority", "type": "filter" },
     { "path": "region",    "type": "filter" }
   ]

@@ -92,9 +92,9 @@ These are typically set in `.env.live` by `deploy-project.sh`. For local dev wit
 |---|---|---|
 | `AWS_REGION` | `us-east-1` | All AWS SDK calls |
 | `AGENTCORE_ORCHESTRATOR_ARN` | `arn:aws:bedrock-agentcore:<region>:<account>:runtime/<project>-orchestrator-<env>-...` | API → orchestrator runtime (required at boot; used for classifier roster + `USE_ORCHESTRATOR_RUNTIME=1` rollback) |
-| `AGENTCORE_RUNTIME_ARN_TROUBLESHOOTING` | `arn:aws:bedrock-agentcore:...troubleshooting...` | API + orchestrator → specialist (injected on both surfaces) |
-| `AGENTCORE_RUNTIME_ARN_ORDER_MANAGEMENT` | `arn:aws:bedrock-agentcore:...order_management...` | Same |
-| `AGENTCORE_RUNTIME_ARN_PRODUCT_RECOMMENDATION` | `arn:aws:bedrock-agentcore:...product_recommendation...` | Same |
+| `AGENTCORE_RUNTIME_ARN_JOB_MATCH` | `arn:aws:bedrock-agentcore:...job_match...` | API + orchestrator → specialist (injected on both surfaces) |
+| `AGENTCORE_RUNTIME_ARN_CAREER_COACH` | `arn:aws:bedrock-agentcore:...career_coach...` | Same |
+| `AGENTCORE_RUNTIME_ARN_COMPANY_INTEL` | `arn:aws:bedrock-agentcore:...company_intel...` | Same |
 | `AGENTCORE_MEMORY_STORE_ID` | `<project>_memory_<env>-<suffix>` | AgentCore short-term memory store in deployed AWS; also used as the LTM fallback if MongoDB is unavailable |
 | `AGENTCORE_GATEWAY_URL` | `https://<project>-gw-<env>-...gateway.bedrock-agentcore.<region>.amazonaws.com/mcp` | Required Gateway MCP endpoint for deployed runtimes. Mongo tool calls use this path. |
 | `MONGODB_MCP_RUNTIME_ARN` | `arn:aws:bedrock-agentcore:...:runtime/<project>-mongodb-mcp-runtime-<env>-...` | Infrastructure output used to wire the AgentCore Gateway target to the MongoDB MCP runtime. Not used by app runtimes for tool calls. |

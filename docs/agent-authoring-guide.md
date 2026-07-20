@@ -29,9 +29,9 @@ The agent's identity and behavior are defined entirely in its `.agent.md` file. 
 ```
 config/agents/
 ├── orchestrator.agent.md
-├── order-management.agent.md
-├── product-recommendation.agent.md
-└── troubleshooting.agent.md
+├── job-match.agent.md
+├── career-coach.agent.md
+└── company-intel.agent.md
 ```
 
 - One file per agent
@@ -48,33 +48,34 @@ Every `.agent.md` file starts with a YAML frontmatter block:
 
 ```yaml
 ---
-name: Order Management Agent
+name: Job Match Agent
 description: >-
-  Handles order lookups, status checks, shipment tracking, cancellations, and
-  return requests for logged-in customers.
-id: order-management
+  Matches candidate CVs to open job listings using hybrid search on the jobs
+  collection, and provides interview prep from the interview_prep collection.
+id: job-match
 skills:
-  - order-management
+  - job-match
 tools:
   - mongodb_query
   - mongodb_vector_search
-  - run_skill_script
   - read_skill_resource
-  - order-management/notify_fulfillment_lambda   # per-skill HTTP tool (Lambda Function URL)
-model: us.anthropic.claude-haiku-4-5-20251001-v1:0
+  - job-match/notify_recruiter_lambda   # illustrative per-skill HTTP tool (Lambda Function URL)
+model: global.anthropic.claude-haiku-4-5-20251001-v1:0
 temperature: 0.3
 memory:
   shortTerm: true
   longTerm: true
 handoffs:
-  - label: Billing question
-    agent: billing-agent
-    prompt: The customer has a billing question related to order {{ orderId }}.
-  - label: Product question
-    agent: product-recommendation
-    prompt: The customer wants to know more about a product from their order.
+  - label: Company research
+    agent: company-intel
+    prompt: The candidate wants to know what a company behind their match is like.
+  - label: Career development & compensation
+    agent: career-coach
+    prompt: The candidate wants a skill-gap plan or salary expectations for a role.
 ---
 ```
+
+> The `job-match/notify_recruiter_lambda` entry is **illustrative** — no shipped skill currently defines an `http-tools.json`. It shows the `skill-folder/localToolName` syntax only.
 
 **Frontmatter fields:**
 
@@ -84,7 +85,7 @@ handoffs:
 | `description` | Yes | One or two sentences describing what this agent handles. The orchestrator reads this to decide routing. |
 | `id` | Yes | Unique slug. Must match the filename (without `.agent.md`). |
 | `skills` | Yes | List of skill names. Instructions from each skill's `SKILL.md` are injected into the system prompt. |
-| `tools` | Yes | Tool names the agent can call: built-ins (`mongodb_query`, …), `read_skill_resource`, `run_skill_script`, optional **skill HTTP tools** as **`skill-folder/localToolName`** (e.g. `order-management/notify_fulfillment_lambda`), and optional **global** HTTP tools by short name from root `config/http-tools.json`. See [Available Tools](#available-tools). |
+| `tools` | Yes | Tool names the agent can call: built-ins (`mongodb_query`, …), `read_skill_resource`, `run_skill_script`, optional **skill HTTP tools** as **`skill-folder/localToolName`** (e.g. `job-match/notify_recruiter_lambda`), and optional **global** HTTP tools by short name from root `config/http-tools.json`. See [Available Tools](#available-tools). |
 | `model` | No | Bedrock model ID. Defaults to the configured global model. |
 | `maxTokens` | No | Maximum tokens per response. Default: 4096. |
 | `temperature` | No | Sampling temperature (0–1). Lower = more precise. Default: 0.7. |
@@ -115,22 +116,22 @@ Structure the body to cover:
 Start with a clear, direct statement of the agent's role. Avoid vague phrases like "helpful assistant". Be specific about the domain.
 
 ```markdown
-You are the Order Management specialist for Acme Commerce. Your sole focus is
-helping customers with their orders: finding them, checking their status,
-tracking shipments, processing cancellations, and initiating returns.
+You are the Job Match specialist for a career and recruitment assistant. Your sole
+focus is helping candidates find relevant openings that match their experience,
+and preparing them for interviews.
 ```
 
 ### Tone and style
 
-Define how the agent communicates. Different domains warrant different tones — a troubleshooting agent should be methodical and calm; a product recommendation agent can be warmer and more conversational.
+Define how the agent communicates. Different domains warrant different tones — a company-intel agent should be balanced and neutral; a career-coach agent can be encouraging and specific.
 
 ```markdown
 ## Communication Style
 
-- Be direct and factual. Customers asking about orders are often anxious — get to the answer quickly.
-- Use plain language. Avoid internal status codes and jargon.
-- Acknowledge frustration before jumping to solutions when an order is delayed or missing.
-- Keep responses concise. If there are multiple pieces of information, use a short list.
+- Be encouraging and professional. Candidates are often anxious about job hunting — acknowledge profile strengths quickly.
+- Use plain language. Avoid internal identifiers and jargon.
+- Present job matches as a clear ranked list with concise explanations.
+- Keep responses concise. If there are multiple results, use a short list.
 ```
 
 ### Guardrails
@@ -140,13 +141,13 @@ Explicit guardrails prevent the agent from drifting into territory it should not
 ```markdown
 ## Boundaries
 
-- Handle order-related questions only. If the user asks about products, billing,
-  or account management, use the appropriate handoff — do not attempt to answer.
-- Never fabricate order data. If a query returns no results, say so honestly and
-  suggest the user verify their order number or email.
-- Never reveal internal system details, query structures, or error messages to users.
-- Do not offer compensation, refunds, or exceptions without explicit policy backing
-  from the skill instructions.
+- Handle job-matching and interview-prep questions only. If the candidate asks about
+  compensation, skill gaps, or a specific company, use the appropriate handoff — do
+  not attempt to answer.
+- Never fabricate job listings or interview questions. If a query returns no results,
+  say so honestly and suggest the candidate rephrase.
+- Never reveal internal system details, query structures, or error messages to candidates.
+- Never reveal raw `_id` values; use `jobId`, `prepId`, or `candidateId`.
 ```
 
 ### Escalation
@@ -156,10 +157,10 @@ Tell the agent when to use handoffs. Be specific — vague conditions lead to mi
 ```markdown
 ## When to Hand Off
 
-- The user asks about a product from their order → hand off to Product Recommendation
-- The user disputes a charge → hand off to Billing
-- The issue cannot be resolved with available tools → acknowledge limitations and
-  suggest the user contact human support
+- The candidate asks what a company behind a match is like → hand off to Company Intel
+- The candidate asks about salary or a skill-gap plan → hand off to Career Coach
+- The request cannot be resolved with available tools → acknowledge limitations and
+  suggest the candidate rephrase
 ```
 
 ---
@@ -170,18 +171,18 @@ Handoffs allow an agent to delegate a conversation to another agent when the req
 
 ```yaml
 handoffs:
-  - label: Product question          # Text shown on the button in the UI
-    agent: product-recommendation    # id of the target agent
+  - label: Company research          # Text shown on the button in the UI
+    agent: company-intel             # id of the target agent
     prompt: >-
-      The customer is asking about {{ productName }} from order {{ orderId }}.
+      The candidate is asking about {{ companyName }} behind job {{ jobId }}.
       Continue from this context.
 ```
 
 **Tips for effective handoffs:**
 
-- The `prompt` is passed to the receiving agent as context. Include the relevant entities (order ID, product name, issue description) so the receiving agent does not have to ask the user to repeat themselves.
+- The `prompt` is passed to the receiving agent as context. Include the relevant entities (job ID, company name, target role) so the receiving agent does not have to ask the candidate to repeat themselves.
 - Use template variables (`{{ variableName }}`) to inject runtime values. The framework fills these from the current conversation context.
-- Define handoffs symmetrically — if Order Management can hand off to Billing, consider whether Billing should be able to hand back.
+- Define handoffs symmetrically — if Job Match can hand off to Company Intel, consider whether Company Intel should be able to hand back.
 - Avoid creating circular handoffs between two agents without a resolution path.
 
 ---
@@ -192,8 +193,7 @@ Each agent should reference the skills that match its domain. A skill gives the 
 
 ```yaml
 skills:
-  - order-management        # primary domain
-  - return-policy           # secondary — loaded when return topics arise
+  - job-match               # primary domain
 ```
 
 **How skills are loaded at runtime:**
@@ -219,7 +219,7 @@ Tools include **built-in** Strands tools (MongoDB, KB, embeddings, ...), **skill
 | `activate_skill` | Loads the full `SKILL.md` body for a named skill into the current context | Always registered (not listed in `tools:`) |
 | `read_skill_resource` | Loads a file from `references/` or `scripts/` under a skill; **skill must be on this agent's `skills:` list and activated** | Live |
 | `run_skill_script` | Dynamically imports `scripts/*.mjs` for a **skillName** + args; same allowlist/activation as `read_skill_resource` | Live |
-| **`{skill}/{localName}`** | **Per-skill HTTP tool** — `POST`/`GET`/… to a URL (e.g. Lambda Function URL). Defined in `config/skills/<skill>/http-tools.json`. Listed in `tools:` as **`order-management/notify_fulfillment_lambda`**. Same **allowlist + activation** as `read_skill_resource`. SSRF allowlists live in root `config/http-tools.json` → `security`. | Live — see [Skills authoring guide](skills-authoring-guide.md#file-structure) |
+| **`{skill}/{localName}`** | **Per-skill HTTP tool** — `POST`/`GET`/… to a URL (e.g. Lambda Function URL). Defined in `config/skills/<skill>/http-tools.json`. Listed in `tools:` as **`job-match/notify_recruiter_lambda`** (illustrative). Same **allowlist + activation** as `read_skill_resource`. SSRF allowlists live in root `config/http-tools.json` → `security`. | Live — see [Skills authoring guide](skills-authoring-guide.md#file-structure) |
 | **Short name** (no `/`) | **Global HTTP tool** from root `config/http-tools.json` → `tools` (optional). No skill activation gate. | Live |
 | `mongodb_query` | Runs find / findOne / aggregate / updateOne against MongoDB | Live — proxied through AgentCore Gateway to the dedicated MongoDB MCP AgentCore Runtime |
 | `mongodb_vector_search` | Performs semantic/vector search against a MongoDB Atlas collection | Live — Atlas `$vectorSearch` via the same Gateway-backed MongoDB MCP runtime |
@@ -250,36 +250,36 @@ When writing the orchestrator agent definition:
 ```markdown
 ---
 name: Orchestrator
-description: Routes customer messages to the appropriate specialist agent.
+description: Routes candidate messages to the appropriate specialist agent.
 id: orchestrator
 skills: []
 tools: []
 handoffs:
-  - label: Order question
-    agent: order-management
+  - label: Job matching & interview prep
+    agent: job-match
     prompt: "{{ userMessage }}"
-  - label: Product question
-    agent: product-recommendation
+  - label: Career development, skill gap & compensation
+    agent: career-coach
     prompt: "{{ userMessage }}"
-  - label: Troubleshooting
-    agent: troubleshooting
+  - label: Company research
+    agent: company-intel
     prompt: "{{ userMessage }}"
 ---
 
 # Orchestrator
 
-You receive every customer message first. Your job is to route the message to
+You receive every candidate message first. Your job is to route the message to
 the right specialist — not to answer it yourself.
 
 ## Routing Rules
 
 Read the `description` of each available agent. Route the message to the agent
-whose description best matches the user's intent.
+whose description best matches the candidate's intent.
 
 If the message is ambiguous, ask one clarifying question before routing. Do not
 ask more than one question.
 
-If no specialist matches the message, tell the user clearly what the system can
+If no specialist matches the message, tell the candidate clearly what the system can
 help with and what it cannot.
 
 ## What You Never Do
@@ -295,60 +295,63 @@ help with and what it cannot.
 
 ```markdown
 ---
-name: Troubleshooting Agent
+name: Company Intel Agent
 description: >-
-  Diagnoses product and service issues, walks customers through resolution steps,
-  and escalates when the issue requires human intervention. Use this agent when
-  the customer reports something is broken, not working, or behaving unexpectedly.
-id: troubleshooting
+  Researches hiring companies — culture, engineering practices, funding stage,
+  and employee sentiment — and grounds every claim in a retrieved document. Use
+  this agent when a candidate asks about a specific company by name, whether it
+  is a good place to work, or wants to compare the companies behind their matches.
+id: company-intel
 skills:
-  - troubleshooting
+  - company-intel
 tools:
   - bedrock_kb_retrieve
   - mongodb_query
+  - mongodb_vector_search
   - read_skill_resource
 model: us.anthropic.claude-sonnet-4-6
-temperature: 0.2
+temperature: 0.3
 memory:
   shortTerm: true
   longTerm: false
 handoffs:
-  - label: Replacement or refund
-    agent: order-management
+  - label: Salary or negotiation question
+    agent: career-coach
     prompt: >-
-      The customer has a confirmed defective product ({{ productName }}) and
-      needs to start a replacement or return. Issue summary: {{ issueSummary }}.
+      The candidate is asking about compensation at {{ companyName }} rather than
+      its culture. Original question: {{ userMessage }}.
 ---
 
-# Troubleshooting Agent
+# Company Intel Agent
 
-You are the Troubleshooting specialist. You help customers diagnose and resolve
-issues with products and services.
+You are the Company Intel specialist. You help candidates understand what it is
+actually like to work at a given company.
 
 ## Communication Style
 
-- Be calm, methodical, and patient. Customers reaching troubleshooting are often
-  frustrated — validate the issue before diving into steps.
-- Present resolution steps one at a time. Wait for the customer to confirm each
-  step before moving to the next.
-- Avoid technical jargon unless the customer demonstrates technical familiarity.
+- Be balanced and evidence-led. Candidates make life decisions on this — never
+  oversell or undersell an employer.
+- Present pros and cons together, in the same response, every time.
+- Quote documented culture signals verbatim rather than paraphrasing them into
+  stronger claims than the source supports.
 
 ## Process
 
-1. Understand the issue fully before suggesting a fix. Ask clarifying questions
-   if necessary.
-2. Search the knowledge base for known issues and documented resolutions.
-3. Walk the customer through the resolution steps.
-4. If the issue is unresolved after documented steps, acknowledge the limitation
-   and offer escalation options.
+1. Resolve which company the candidate means before searching. Ask if ambiguous.
+2. Hybrid-search the `companies` collection; call `bedrock_kb_retrieve` for
+   anything the company document does not cover.
+3. Lead with the signals that match what the candidate said they want from an
+   employer.
+4. State `sentimentScore` alongside the summary, and flag `asOf` if the data is
+   stale.
 
 ## Boundaries
 
-- Handle diagnostic and resolution steps only.
-- Do not promise outcomes (e.g., "this will definitely fix it").
-- If the issue requires a replacement or refund, use the handoff — do not try
-  to process it yourself.
-- Never speculate about causes if you have no knowledge base result to reference.
+- Handle company research only.
+- Do not infer a company's culture from its industry, name, or funding stage.
+- If the candidate asks about salary, use the handoff — compensation benchmarks
+  live in `compensation_data`, not in the company profile.
+- Never speculate about a company with no retrieved document to reference.
 ```
 
 ---
@@ -418,7 +421,7 @@ Fix: Make each agent's `description` precise and distinct. Include the specific 
 
 The orchestrator roster is generated from every non-orchestrator `.agent.md`. If the agent exists but messages do not reach it, the generated routing corpus probably lacks distinctive words for that domain.
 
-Fix: Make the agent's `name`, `description`, and first part of its body precise and distinct. Include the specific entities, symptoms, actions, or product area it handles.
+Fix: Make the agent's `name`, `description`, and first part of its body precise and distinct. Include the specific entities, signals, actions, or domain area it handles.
 
 **3. The orchestrator is answering directly instead of routing**
 

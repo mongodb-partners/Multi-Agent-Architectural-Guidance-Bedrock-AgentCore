@@ -25,21 +25,21 @@ flowchart LR
   CLS -->|InvokeAgentRuntime| SPEC{Specialist<br/>Runtime}
   API -.->|USE_ORCHESTRATOR_RUNTIME=1| ORCH[AgentCore Runtime<br/>orchestrator hop]
   ORCH -.->|InvokeAgentRuntime| SPEC
-  SPEC --> TS[troubleshooting]
-  SPEC --> OM[order-management]
-  SPEC --> PR[product-recommendation]
-  TS -->|MCP via AGENTCORE_GATEWAY_URL| GW[AgentCore Gateway<br/>Cognito JWT auth]
-  OM -->|MCP via AGENTCORE_GATEWAY_URL| GW
-  PR -->|MCP via AGENTCORE_GATEWAY_URL| GW
+  SPEC --> CI[company-intel]
+  SPEC --> JM[job-match]
+  SPEC --> CC[career-coach]
+  CI -->|MCP via AGENTCORE_GATEWAY_URL| GW[AgentCore Gateway<br/>Cognito JWT auth]
+  JM -->|MCP via AGENTCORE_GATEWAY_URL| GW
+  CC -->|MCP via AGENTCORE_GATEWAY_URL| GW
   GW -->|mongodb-mcp target| MCPRT[mongodb-mcp-runtime<br/>AgentCore Runtime]
   MCPRT -->|PrivateLink or Peering| ATLAS[(MongoDB Atlas)]
   API -->|long-term memory<br/>hybrid retrieval| LTM[(MongoDB Atlas<br/>agent_memory_facts +<br/>chat_messages)]
   API -->|short-term memory<br/>current session| MEM[(AgentCore Memory)]
-  TS -.->|Retrieve| KB[(Bedrock KB<br/>troubleshooting docs)]
+  CI -.->|Retrieve| KB[(Bedrock KB<br/>company docs)]
   CLS -.->|InvokeModel| BEDROCK[Bedrock<br/>Haiku 4.5 + Sonnet 4.x]
-  TS -.->|InvokeModel| BEDROCK
-  OM -.->|InvokeModel| BEDROCK
-  PR -.->|InvokeModel| BEDROCK
+  CI -.->|InvokeModel| BEDROCK
+  JM -.->|InvokeModel| BEDROCK
+  CC -.->|InvokeModel| BEDROCK
 ```
 
 | Piece | What it is | What it does |
@@ -48,13 +48,13 @@ flowchart LR
 | **Hono API** | A TypeScript web server (Bun runtime) | Receives `/chat` calls, classifies them, routes to the specialist AgentCore Runtime, owns sessions + memory |
 | **In-API classifier** | `api/src/lib/agent-classifier.ts` | Heuristic (token + bigram overlap) over the orchestrator's `handoffs:` roster with Bedrock Haiku 4.5 fallback when the heuristic margin is below `CLASSIFIER_HEURISTIC_MARGIN` |
 | **AgentCore Runtimes** | AWS-managed agent containers (5 total) | One per specialist (3) + a legacy orchestrator hop + a dedicated MongoDB MCP runtime |
-| **Specialist agents** | 3 specialist runtimes | Each is an expert: `order-management`, `troubleshooting`, `product-recommendation` |
-| **Bedrock** | AWS's foundation model service | Models per agent: orchestrator + `order-management` = Claude Haiku 4.5; `troubleshooting` + `product-recommendation` = Claude Sonnet 4.x. Source of truth: [`config/agents/*.agent.md`](../config/agents/) |
+| **Specialist agents** | 3 specialist runtimes | Each is an expert: `job-match`, `career-coach`, `company-intel` |
+| **Bedrock** | AWS's foundation model service | Models per agent: orchestrator + `job-match` + `career-coach` = Claude Haiku 4.5; `company-intel` = Claude Sonnet 4.x. Source of truth: [`config/agents/*.agent.md`](../config/agents/) |
 | **MongoDB MCP Runtime** | A dedicated AgentCore Runtime ([`mcp-runtimes/mongodb-mcp/`](../mcp-runtimes/mongodb-mcp/)) | The only thing that talks to MongoDB. Exposes `mongodb_query`, `mongodb_vector_search`, `mongodb_aggregate` and the internal `mongodb_hybrid_search`. Reached through the AgentCore Gateway target — never `lambda:InvokeFunction`. The legacy Lambda host was deleted in CLIENT_REVIEW Phase 7e. |
-| **MongoDB Atlas** | Managed MongoDB cluster (M10 default) | Stores customers, orders, products, troubleshooting docs, long-term memory collections (`agent_memory_facts`, `chat_messages`), session mirrors (`chat_sessions`), and traces |
+| **MongoDB Atlas** | Managed MongoDB cluster (M10 default) | Stores the recruitment collections (`jobs`, `candidates`, `interview_prep`, `career_paths`, `skills_taxonomy`, `compensation_data`, `companies`), long-term memory collections (`agent_memory_facts`, `chat_messages`), session mirrors (`chat_sessions`), and traces. The legacy demo collections (`customers`, `orders`, `products`, `troubleshooting_docs`) are still seeded but no longer consumed by any agent |
 | **Long-term memory** | `agent_memory_facts` + `chat_messages` with hybrid retrieval | Vector + BM25 fused with RRF, weighted, recency-decayed, MMR-diversified. See [`docs/long-term-memory-design.md`](long-term-memory-design.md) |
 | **AgentCore Memory** | An AWS-managed memory store | Authoritative short-term conversation memory backend in deployed AWS (`SHORT_TERM_MEMORY_BACKEND=agentcore`); LTM fallback if Mongo write fails |
-| **Bedrock KB** | A vector-search knowledge base | RAG over uploaded manuals. Ingestion path is mode-aware (PL NLB by default in privatelink mode; peering NLB by default in peering mode — both private) |
+| **Bedrock KB** | A vector-search knowledge base | RAG over uploaded company documents (used by `company-intel`). Ingestion path is mode-aware (PL NLB by default in privatelink mode; peering NLB by default in peering mode — both private) |
 
 For the editable historical diagram: [`diagrams/01-aws-infrastructure.drawio`](diagrams/01-aws-infrastructure.drawio) — note this drawio source is **historical** and may show the older orchestrator-hop topology. The Mermaid diagram above is the current truth.
 
@@ -65,16 +65,16 @@ For the editable historical diagram: [`diagrams/01-aws-infrastructure.drawio`](d
 You could put all the agent logic in one big container. We don't, for two reasons:
 
 1. **Separation of concerns.** The reference architecture shows the orchestrator as a separate AgentCore Runtime from the specialists.
-2. **Isolation.** Each runtime has its own IAM role, its own log group, its own scaling envelope. If the troubleshooting agent crashes or hangs, the order-management agent keeps serving requests.
+2. **Isolation.** Each runtime has its own IAM role, its own log group, its own scaling envelope. If the company-intel agent crashes or hangs, the job-match agent keeps serving requests.
 
 The **5 AgentCore Runtimes** are:
 
 | Runtime | Source | What it does |
 |---|---|---|
 | `<project>-orchestrator-<env>` | `agent-runtime-code.js` with `AGENT_ID=orchestrator` | Legacy hop. Invoked only when `USE_ORCHESTRATOR_RUNTIME=1`. Default path bypasses it via the in-API classifier. |
-| `<project>-troubleshooting-<env>` | Same bundle, `AGENT_ID=troubleshooting` | Diagnoses device problems, queries KB |
-| `<project>-order-management-<env>` | Same bundle, `AGENT_ID=order-management` | Looks up orders, processes returns, tracks shipments |
-| `<project>-product-recommendation-<env>` | Same bundle, `AGENT_ID=product-recommendation` | Recommends products, vector-searches the catalog |
+| `<project>-job-match-<env>` | Same bundle, `AGENT_ID=job-match` | Matches candidate CVs to open jobs, surfaces interview prep |
+| `<project>-career-coach-<env>` | Same bundle, `AGENT_ID=career-coach` | Skill-gap analysis + learning roadmap + compensation benchmarks |
+| `<project>-company-intel-<env>` | Same bundle, `AGENT_ID=company-intel` | Researches hiring companies, queries KB |
 | `<project>-mongodb-mcp-runtime-<env>` | `mcp-runtimes/mongodb-mcp/` | Dedicated MCP server fronting the MongoDB driver. `server_protocol=MCP`. |
 
 The agent runtimes (orchestrator + 3 specialists) share the **same code bundle**; the `AGENT_ID` environment variable selects the persona at boot. The MongoDB MCP runtime is a separate container with its own image and lifecycle.
@@ -85,29 +85,29 @@ The agent runtimes (orchestrator + 3 specialists) share the **same code bundle**
 
 ## 4. The end-to-end request flow
 
-Here is what happens when a user types **"Where is my order ORD-1234?"**:
+Here is what happens when a user types **"Here's my CV — which jobs fit me?"**:
 
 ```mermaid
 sequenceDiagram
   participant U as User (UI)
   participant API as Hono API on EC2
   participant LTM as MongoDB LTM<br/>(hybrid retrieval)
-  participant SPEC as order-management Runtime
+  participant SPEC as job-match Runtime
   participant BED as Bedrock
   participant MCPRT as mongodb-mcp-runtime
   participant DB as MongoDB Atlas
 
   U->>API: POST /chat {message, sessionId}<br/>Authorization: Bearer <jwt>
   API->>API: verifyJwt() → userId=jwt.sub<br/>appendUserMessage() · getSession() → priorTurns
-  API->>API: classifyAgent(message) → handoff: order-management
+  API->>API: classifyAgent(message) → handoff: job-match
   API->>LTM: readLongTermMemoryContext(userId, message)<br/>hybrid $vectorSearch + Atlas Search → fused RRF + MMR
   LTM-->>API: ## Relevant prior context (string)
   API->>SPEC: InvokeAgentRuntime(specialistArn, payload, Accept: text/event-stream)
   SPEC->>BED: InvokeModel — reason about question
-  BED-->>SPEC: tool_use: mongodb_query
+  BED-->>SPEC: tool_use: mongodb_vector_search
   SPEC->>MCPRT: MCP tools/call via InvokeAgentRuntime (stream)
-  MCPRT->>DB: db.orders.findOne({orderId: "ORD-1234"})
-  DB-->>MCPRT: order document
+  MCPRT->>DB: hybrid $vectorSearch + Atlas Search on jobs
+  DB-->>MCPRT: ranked job documents
   MCPRT-->>SPEC: MCP response {documents: [...]}
   SPEC->>BED: InvokeModel — compose answer (stream)
   BED-->>SPEC: token stream
@@ -213,7 +213,7 @@ Per-environment resource names are emitted into `deploy-manifest.json` after eac
 |---|---|---|
 | EC2 | Instance, EIP, security group | `<project>-ec2-<env>` |
 | ECR | API / UI / MCP repos | `<project>-{api,ui,mongodb-mcp}-<env>` |
-| AgentCore | 5 runtimes | `<project>-{orchestrator,troubleshooting,order-management,product-recommendation,mongodb-mcp-runtime}-<env>` |
+| AgentCore | 5 runtimes | `<project>-{orchestrator,job-match,career-coach,company-intel,mongodb-mcp-runtime}-<env>` |
 | AgentCore | Memory store | `<project>_memory_<env>-<auto-suffix>` |
 | AgentCore | Gateway | `<project>-gw-<env>-<auto-suffix>` (target: `mongodb-mcp` → `mongodb-mcp-runtime`; additional non-Mongo target slots when wired) |
 | Bedrock | KB | KB id from `module.bedrock_kb.knowledge_base_id` |
@@ -389,9 +389,9 @@ The original design specified Amazon Nova. Per a verbal product decision, the ag
 | Agent | Model | Why |
 |---|---|---|
 | `orchestrator` | `us.anthropic.claude-haiku-4-5-20251001-v1:0` | Classifier fallback only — cheap, fast |
-| `order-management` | `us.anthropic.claude-haiku-4-5-20251001-v1:0` | Structured order-lookup queries; Haiku is sufficient |
-| `troubleshooting` | `us.anthropic.claude-sonnet-4-6` | Long KB-anchored diagnostic narratives benefit from Sonnet quality |
-| `product-recommendation` | `us.anthropic.claude-sonnet-4-6` | Comparison + ranking explanations benefit from Sonnet quality |
+| `job-match` | `global.anthropic.claude-haiku-4-5-20251001-v1:0` | Structured CV → job ranking over hybrid search results; Haiku is sufficient |
+| `career-coach` | `global.anthropic.claude-haiku-4-5-20251001-v1:0` | Skill-gap diffs and compensation bands are structured lookups; Haiku is sufficient |
+| `company-intel` | `us.anthropic.claude-sonnet-4-6` | Long KB-anchored company narratives and balanced pros/cons benefit from Sonnet quality |
 
 The in-API classifier (`api/src/lib/agent-classifier.ts`) uses the orchestrator's model for the Bedrock-LLM fallback when the heuristic margin is below `CLASSIFIER_HEURISTIC_MARGIN` (default `0.15`). The fact-extractor for long-term memory uses `MEMORY_EXTRACTION_MODEL_ID` (defaults to `us.anthropic.claude-haiku-4-5-20251001-v1:0`).
 

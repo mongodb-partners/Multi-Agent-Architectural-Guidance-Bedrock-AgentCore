@@ -1,357 +1,200 @@
 # MongoDB + AWS Bedrock Multi-Agent Framework
 
-A **configuration-driven multi-agent reference architecture** on **AWS Bedrock** (Strands Agents TypeScript SDK), **MongoDB Atlas**, and **JWT-secured** HTTP APIs. Add specialists by editing markdown config — no code changes needed.
+### Table of Contents
 
----
+1. [Overview](#overview)
+2. [Key Objectives](#key-objectives)
+3. [Use Case: Career & Recruitment Assistant](#use-case-career--recruitment-assistant)
+4. [Agents Involved](#agents-involved)
+5. [Runtime Chatbot](#runtime-chatbot)
+6. [Architecture Design](#architecture-design)
+7. [Demo Scope](#demo-scope)
+8. [Getting started](#getting-started)
+9. [Cost](#cost)
+10. [Model access](#model-access)
+11. [Pre-Requisites](#pre-requisites)
+12. [Setup](#setup)
+    * [Clone repo & install dependencies](#clone-repo--install-dependencies)
+    * [Configure agents and skills](#configure-agents-and-skills)
+    * [Deployment](#deployment)
+    * [Run webapp locally](#run-webapp-locally)
+13. [Project Structure](#project-structure)
+14. [Cleanup](#cleanup)
+15. [Built With](#built-with)
 
-## Architecture
+## Overview
 
-![Architecture Diagram](/docs/architecture/Multi-agent-architecture-bedrock-agentcore.png)
+This project provides guidance and a reference architecture on how to deploy agents at scale using AWS Bedrock AgentCore and MongoDB Atlas. It features a configuration-driven multi-agent framework utilizing the Strands Agents TypeScript SDK and JWT-secured HTTP APIs. 
 
-## What this is
+The framework is designed so developers can easily add specialists by editing markdown configurations (`.agent.md`) without requiring underlying application code changes. 
 
-A user types a question into a Streamlit UI → the Hono API receives it → an **in-API classifier** picks the right specialist agent → that specialist runs as an **AgentCore Runtime** on AWS Bedrock and streams the answer back over SSE. Mongo tools route through a **dedicated MongoDB MCP AgentCore Runtime**. Domain behavior lives in `.agent.md` + `SKILL.md` files — add a new vertical = add a new agent + skill, redeploy.
+### Key Objectives
 
-**Five AgentCore Runtimes:** orchestrator + 3 specialists (order-management, product-recommendation, troubleshooting) + 1 MongoDB MCP runtime. Default path: **single-hop** (in-API classifier → specialist). `USE_ORCHESTRATOR_RUNTIME=1` enables a two-hop rollback through the orchestrator.
+* Provide a scalable, configuration-driven multi-agent architecture on AWS Bedrock.
+* Abstract complex agent configurations using markdown (`.agent.md` and `SKILL.md`).
+* Provide seamless database integration with MongoDB Atlas for both operational data and memory (short-term and long-term vector/BM25 hybrid search).
+* Offer flexible and secure networking deployments out of the box (AWS PrivateLink, VPC Peering, or Public paths).
+* Ensure enterprise-grade observability and JWT-secured access controls.
 
-**Connectivity** (mutually exclusive per account): `NETWORK_MODE=privatelink` (default) or `NETWORK_MODE=peering`. Switching requires destroy + redeploy.
+## Use Case: Career & Recruitment Assistant
 
----
+To demonstrate the capabilities of our multi-agent system on AWS Bedrock and MongoDB Atlas, we've built a career and recruitment assistant. This use case showcases how specialized agents can collaborate to match candidates to open roles via hybrid search, plan a candidate's skill development and compensation expectations, and research hiring companies through retrieval-augmented generation (RAG).
 
-## Getting started (new clone)
+### Agents Involved
 
-### Prerequisites
+1. **Orchestrator Agent**: Handles the fallback routing path and directs candidate messages to the proper specialists.
+2. **Job Match Agent**: Matches candidate CVs to open job listings using hybrid search, and supplies interview preparation material.
+3. **Career Coach Agent**: Produces skill-gap reports and phased learning roadmaps, and provides grounded compensation benchmarks and negotiation framing.
+4. **Company Intel Agent**: Researches hiring companies — culture, engineering practices, funding stage, and employee sentiment — over the `companies` collection and Bedrock Knowledge Bases.
+5. **MongoDB MCP Runtime**: A dedicated Model Context Protocol (MCP) runtime hosting tools like `mongodb_query`, `mongodb_vector_search`, and `mongodb_aggregate` utilized by the specialists.
 
-| Tool | Version | Install |
-|---|---|---|
-| [Bun](https://bun.sh) | latest | `curl -fsSL https://bun.sh/install \| bash` then `export PATH="$HOME/.bun/bin:$PATH"` |
-| Python | 3.10+ | `python3 --version` |
-| AWS CLI | v2 | [Install guide](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html) |
-| Terraform | ≥ 1.6 | [Install guide](https://developer.hashicorp.com/terraform/install) |
-| Docker | latest | Required for EC2 deploys |
-| `zip` / `curl` | — | Usually preinstalled |
+## Runtime Chatbot
 
-You also need an **AWS account** ([`deploy/iam/policy.json`](deploy/iam/policy.json), [`deploy/iam/README.md`](deploy/iam/README.md)) and a **MongoDB Atlas** API key + existing project.
+The frontend is a React-like **Streamlit** UI that provides chat interfaces, session management, and a trace viewer for runtime inspection. 
 
-### First-time setup
+The backend relies on a **Bun + Hono API** architecture. The API receives inquiries, leverages an in-API classifier to instantly pick the right specialist, and triggers the specialist as an AgentCore Runtime on AWS Bedrock. The API streams the agent's reasoning and responses back to the UI over Server-Sent Events (SSE).
+
+## Architecture Design
+
+![Diagram Placeholder: High-level GenAI Multi-Agent Architecture showing Streamlit, Hono API, AWS Bedrock AgentCore Runtimes, and MongoDB Atlas](/docs/architecture/Multi-agent-architecture-bedrock-agentcore.png)
+
+1. The user types a question into the **Streamlit UI**, secured by **Amazon Cognito**.
+2. The **Hono API** receives the request, and an in-API classifier dynamically selects the best specialist agent for the task (Single-hop default path). 
+   * *Note: Enabling `USE_ORCHESTRATOR_RUNTIME=1` creates a two-hop rollback path routing through the Orchestrator.*
+3. The selected specialist agent runs as an **AgentCore Runtime** on AWS Bedrock, reasoning through the prompt and streaming the answer back via SSE.
+4. If a specialist needs to query a database, perform hybrid search, or aggregate metrics, it triggers tools that route through the dedicated **MongoDB MCP AgentCore Runtime**.
+5. **MongoDB Atlas** serves as the system's operational database, vector store, and long-term memory backend.
+6. System logs and traces are emitted through **OpenTelemetry (ADOT)** to **Amazon CloudWatch**.
+
+## Demo Scope
+
+1. **Skill-Gap Analysis and Learning Roadmaps**: The Career Coach Agent hybrid-searches `career_paths` and `skills_taxonomy` to diff a candidate's skills against a target role and return a phased plan.
+2. **Compensation Intelligence**: The same Career Coach Agent pre-filters `compensation_data` by seniority and region to return percentile pay bands with currency, sample size, and freshness.
+3. **Company Research**: The Company Intel Agent combines hybrid search over the `companies` collection with Bedrock Knowledge Bases to answer "what is it actually like to work there".
+4. **CV-to-Job Matching**: The Job Match Agent ranks open listings against a submitted CV and supplies interview prep. *(Requires `jobs` / `candidates` / `interview_prep` fixtures — see the seed-data note in [`docs/reference/data-model.md`](docs/reference/data-model.md).)*
+5. **Configuration-Driven Runtimes**: Expanding the demo is as simple as adding a new `<name>.agent.md` file in `config/agents/` along with a `SKILL.md` domain package. 
+
+## Getting started
+
+### Cost
+You are responsible for the cost of the AWS services and MongoDB Atlas infrastructure used while running this guidance. Primary cost drivers include AWS Bedrock model inference, EC2 instances hosting the API/UI, and the MongoDB Atlas cluster tier.
+
+### Model access
+Navigate to the Amazon Bedrock console, and ensure you have enabled access to the following models:
+* `Claude Haiku 4.5` (Orchestrator, Job Match, and Career Coach default)
+* `Claude Sonnet 4.6` (Company Intel default)
+* `Titan Embeddings` (Or your preferred embeddings provider like Voyage)
+
+![Diagram Placeholder: AWS Bedrock Model Access UI snippet showing the Claude models enabled](/docs/assets/bedrock-model-access-ui.png)
+
+## Pre-Requisites
+
+Before you begin, ensure you have the following installed and configured:
+* **Bun** (latest) - Required for API workflows.
+* **Python** (3.10+) - Used for smoke and support scripts.
+* **AWS CLI** (v2) - Configured with your AWS credentials.
+* **Terraform** (1.6+) - Required for infrastructure deployment.
+* **Docker** (latest) - Required for EC2 deployments.
+* **MongoDB Atlas Account** - You will need an Atlas API key and an existing project.
+
+## Setup
+
+### Clone repo & install dependencies
+
+Clone the repository and set up your local environment file:
 
 ```bash
-git clone <repo-url>
-cd mongodb-aws-bedrock-multi-agent-framework
-
+git clone https://github.com/mongodb-partners/Multi-Agent-Architectural-Guidance-Bedrock-AgentCore.git
+cd Multi-Agent-Architectural-Guidance-Bedrock-AgentCore
 cp .env.sample .env
-# Edit .env — AWS creds, Atlas keys, PROJECT_NAME, ENVIRONMENT, AWS_REGION, SHARED_VPC_NAME
-# Simplest first deploy: EMBEDDINGS_PROVIDER=titan (.env.sample defaults to voyage)
-
-source .env
-aws sts get-caller-identity
 ```
+Edit the `.env` file with your AWS credentials, Atlas keys, `PROJECT_NAME`, `ENVIRONMENT`, `AWS_REGION`, and preferred embeddings provider.
 
-Full env catalog: [`.env.sample`](.env.sample) and [`docs/reference/env-vars.md`](docs/reference/env-vars.md). Role-based getting started: [`docs/README.md`](docs/README.md).
+### Configure agents and skills
 
-Ready to deploy? Jump to [Deployment](#deployment).
+Most customization happens via markdown and requires no API or runtime code changes:
+* **Agents** live in `config/agents/<name>.agent.md`. You can define custom instructions, required skills, and memory preferences here.
+* **Skills** live in `config/skills/<skill-name>/SKILL.md`. They can include optional HTTPS tools (`http-tools.json`), reference documents, and execution scripts.
 
----
+### Deployment
 
-## Configure agents and skills
+Deploy scripts run centralized preflight checks before applying infrastructure. You must source the `.env` file before executing them.
 
-Most customization is **markdown only** — no API or runtime code changes.
-
-### Agents
-
-Specialists live in `config/agents/<name>.agent.md`. The reference ships **1 orchestrator + 3 specialists**:
-
-| Agent | Default model | What it does |
-|---|---|---|
-| Orchestrator | Claude Haiku 4.5 | (Rollback path) routing to specialists |
-| Order Management | Claude Haiku 4.5 | Order lookups, status, tracking, returns |
-| Product Recommendation | Claude Sonnet 4.6 | Semantic search over `products` |
-| Troubleshooting | Claude Sonnet 4.6 | RAG over `troubleshooting_docs` + Bedrock KB |
-
-**Add or change an agent:** edit or add `.agent.md`, then run `./deploy/deploy-agents.sh --auto-approve` (see below). Authoring guide: [`docs/agent-authoring-guide.md`](docs/agent-authoring-guide.md).
-
-Enable long-term memory per agent:
-
-```yaml
-# config/agents/<name>.agent.md frontmatter
-memory:
-  longTerm: true
-```
-
-Tune retrieval via env vars — see [`docs/reference/env-vars.md`](docs/reference/env-vars.md) and [`docs/long-term-memory-design.md`](docs/long-term-memory-design.md).
-
-### Skills
-
-A **skill** is domain knowledge an agent loads on demand ([agentskills.io](https://agentskills.io/specification)):
-
-```
-config/skills/order-management/
-├── SKILL.md              ← instructions the agent follows
-├── http-tools.json       ← optional HTTPS tools (Lambda URLs, etc.)
-├── scripts/
-│   └── validate-return.mjs
-└── references/
-    └── order-schema.md
-```
-
-**Progressive disclosure:** name + description at startup; body on activation; references/scripts on demand.
-
-**HTTP tools without TypeScript:** add `http-tools.json` next to `SKILL.md`. SSRF allowlists in root `config/http-tools.json`. Guide: [`docs/skills-authoring-guide.md`](docs/skills-authoring-guide.md).
-
-### Tools
-
-Agents use configuration-driven tools:
-
-- MongoDB: `mongodb_query`, `mongodb_vector_search`, `mongodb_aggregate` (MongoDB MCP runtime)
-- Bedrock: `bedrock_kb_retrieve`, `embed_multimodal_content` (multimodal — text + image_url + image_base64)
-- Skills: `activate_skill`, `read_skill_resource`, `run_skill_script`
-- HTTP: `config/http-tools.json` and per-skill `http-tools.json`
-
-Catalog: [`docs/reference/tools.md`](docs/reference/tools.md).
-
----
-
-## Deployment
-
-Always `source .env` (or `--env-file`) before deploy scripts. Targeted redeploys require a prior successful full deploy.
-
-### First deploy (full stack)
-
-The API needs `AUTH_JWKS_URI`, `AUTH_ISSUER`, and AgentCore ARNs from `.env.live` — a full deploy writes those.
-
-| Goal | Command |
-|---|---|
-| **PrivateLink** (recommended) | `./deploy/deploy-full-with-privatelink.sh --auto-approve` |
-| **VPC peering** | `./deploy/deploy-full-with-vpc-peering.sh --auto-approve` |
-
+**1. AWS PrivateLink (Recommended)**
 ```bash
 source .env
-
 ./deploy/deploy-full-with-privatelink.sh --auto-approve
-
-# Common flags
-./deploy/deploy-full-with-privatelink.sh --auto-approve --skip-docker
-./deploy/deploy-full-with-privatelink.sh --auto-approve --skip-network
-./deploy/deploy-full-with-privatelink.sh --auto-approve --skip-shared
-./deploy/deploy-full-with-privatelink.sh --auto-approve --skip-smoke
-./deploy/deploy-full-with-privatelink.sh --env-file /path/to/.env
 ```
 
-| Flag | Effect |
-|---|---|
-| `--auto-approve` | Non-interactive Terraform |
-| `--skip-docker` | Skip image build/push |
-| `--skip-network` | VPC already deployed |
-| `--skip-shared` | Shared stack already applied |
-| `--env-file PATH` | Alternate credentials file |
-
-**After deploy:**
-
-Full post-deploy smoke runs automatically at the end of `deploy-project.sh` (Phase 11). To re-run manually:
-
+**2. VPC Peering**
 ```bash
-source .env && python3 e2e-smoke/post-deploy-smoke.py
-```
-
-Open the **UI URL** from the deploy summary (Streamlit on EC2, port 8501). Sign in with the Cognito test user from the output.
-
-**VPC peering** — mutually exclusive with PrivateLink; set `ATLAS_PEERING_CIDR` in `.env` (default `192.168.248.0/21`):
-
-```bash
+source .env
 ./deploy/deploy-full-with-vpc-peering.sh --auto-approve
 ```
 
-Deploy scripts run centralized preflight checks before applying infrastructure.
-
-### `deploy-agents.sh`
-
-**When:** only `config/agents/*.agent.md` or `config/skills/` changed.
-
+**3. Public Path (Demo Only - Bring Your Own Cluster)**
 ```bash
 source .env
-
-./deploy/deploy-agents.sh --auto-approve
-./deploy/deploy-agents.sh --auto-approve --skip-smoke
-./deploy/deploy-agents.sh --auto-approve --allow-destroy
-./deploy/deploy-agents.sh --auto-approve --force
+./deploy/deploy-full-public.sh --auto-approve
 ```
 
-| Flag | Effect |
-|---|---|
-| `--allow-destroy` | Confirm specialist removal |
-| `--force` | Skip orchestrator handoff check |
-| `--skip-smoke` | Skip post-deploy agent smoke |
+After a successful deployment, the `.env.live` file will be generated with your `AUTH_JWKS_URI`, `AUTH_ISSUER`, and `AgentCore ARNs`. A post-deployment smoke test will automatically run.
 
-The API rescans `config/agents/` for metadata, but **AgentCore runtime behavior** requires this script to rebuild the code artifact.
+### Run webapp locally
 
-### `deploy-api.sh` / `deploy-ui.sh`
+Once you have completed a full EC2 deploy (which merges `.env.live`), you can run the application locally. 
 
-**When:** application code changed (not agent config).
-
-```bash
-./deploy/deploy-api.sh              # api/ only; refreshes .env.live
-./deploy/deploy-ui.sh               # ui/ only
-```
-
-Use `deploy-api.sh` first if Cognito, Atlas, or OTel env vars changed.
-
-### Other scripts
-
-```bash
-./deploy/scripts/deploy-local.sh --auto-approve    # Atlas + KB only — NOT a full chat stack
-./deploy/scripts/deploy-shared.sh --auto-approve
-
-# Teardown (project first, then shared/network — match your NETWORK_MODE)
-./deploy/destroy/destroy-project-with-privatelink.sh --auto-approve
-./deploy/destroy/destroy-shared-with-privatelink.sh --auto-approve
-# Peering variants: destroy-project-with-vpc-peering.sh / destroy-shared-with-vpc-peering.sh
-```
-
-Full runbook: [`docs/deployment-guide.md`](docs/deployment-guide.md). Script reference: [`docs/reference/deploy-scripts.md`](docs/reference/deploy-scripts.md).
-
----
-
-## Documentation
-
-| Document | What it covers |
-|---|---|
-| [`docs/README.md`](docs/README.md) | **Getting started** — checklist, reading orders |
-| [`docs/agent-authoring-guide.md`](docs/agent-authoring-guide.md) | `.agent.md` schema |
-| [`docs/skills-authoring-guide.md`](docs/skills-authoring-guide.md) | `SKILL.md`, scripts, http-tools |
-| [`docs/configuration-guide.md`](docs/configuration-guide.md) | `config/` folder — agent + skill schema |
-| [`docs/advanced/deploy-tweak-guide.md`](docs/advanced/deploy-tweak-guide.md) | **Advanced** — deploy/runtime env tuning |
-| [`docs/deployment-guide.md`](docs/deployment-guide.md) | Deploy, CI/CD, teardown |
-| [`docs/reference/env-vars.md`](docs/reference/env-vars.md) | Every env var |
-| [`docs/reference/tools.md`](docs/reference/tools.md) | Every agent-facing tool |
-
-More (architecture, API, memory, observability, debugging): see the full table in [For developers](#for-developers-working-on-this-project) below.
-
----
-
-## For developers working on this project
-
-The sections below apply when you are **changing framework code**, running the API/UI on a laptop, or debugging infrastructure — not for the typical “configure agents and deploy” workflow above.
-
-> **Start here for getting started:** [`docs/README.md`](docs/README.md) is the single getting started entry point — first-day checklist, doc map, authoritative source files.
-
-
-### Run API and UI locally
-
-**After a full EC2 deploy.** Requires `.env.live` (JWKS, ARNs, Mongo URIs).
-
+**Terminal 1 (Hono API):**
 ```bash
 source .env
 source .env.live
-
 export PATH="$HOME/.bun/bin:$PATH"
-cd api && bun run typecheck && bun run validate:bun && bun run validate:agentcore && bun run dev
 
-# separate terminal
-cd ui && streamlit run app.py
+cd api
+bun run typecheck && bun run validate:bun && bun run validate:agentcore && bun run dev
 ```
 
-Open `http://localhost:8501`. Cognito JWT required (`STREAMLIT_COGNITO_*` = same pool as `AUTH_JWKS_URI`). No anonymous mode.
-
-**Docker Compose** (still needs JWKS + AgentCore ARNs in `.env`):
-
+**Terminal 2 (Streamlit UI):**
 ```bash
-docker compose up --build
+cd ui
+streamlit run app.py
 ```
+Visit `http://localhost:8501`. Note: Cognito JWT is required to sign in; there is no anonymous mode.
 
-`deploy-local.sh` provisions Atlas + KB but **not** runtimes or Cognito — API still won't boot until a full EC2 deploy merges `.env.live`.
+## Project Structure
 
-### Memory (implementation)
-
-**Short-term:** AgentCore Memory in production (`SHORT_TERM_MEMORY_BACKEND=agentcore`). Mongo `chat_sessions` mirror for Sessions page and fallback.
-
-**Long-term:** hybrid vector + BM25 in Atlas (`agent_memory_facts` + `chat_messages`), RRF + recency + MMR. Keyed by JWT `sub`.
-
-Architecture: [`docs/memory-architecture.md`](docs/memory-architecture.md), [`docs/long-term-memory-design.md`](docs/long-term-memory-design.md).
-
-### Authentication
-
-JWKS is mandatory — API won't start without `AUTH_JWKS_URI` + `AUTH_ISSUER`. JWT `sub` → `userId` for sessions and LTM. No auth bypass.
-
-### Observability
-
-- JSON logs: `api/src/lib/logger.ts`, `LOG_LEVEL`
-- OTel + X-Ray when `OTEL_EXPORTER_OTLP_ENDPOINT` set (EC2: ADOT `http://127.0.0.1:4318`)
-- CloudWatch log groups, dashboards, EMF metrics
-- Trace Viewer: `ui/pages/2_Trace_Viewer.py`
-
-Runbook: [`docs/observability-runbook.md`](docs/observability-runbook.md).
-
-### Project layout
-
-```
-api/             — Bun + Hono API (SSE, JWT, AgentCore adapters)
-ui/              — Streamlit (Chat, Sessions, Trace Viewer)
-mcp-runtimes/    — MongoDB MCP AgentCore Runtime
+```text
+api/              Bun + Hono API (SSE, JWT, AgentCore adapters)
+ui/               Streamlit (Chat, Sessions, Trace Viewer)
+mcp-runtimes/     MongoDB MCP AgentCore Runtime
 config/
-  agents/        — .agent.md specialists
-  skills/        — SKILL.md domain packages
-deploy/          — Terraform + deploy scripts
-db-seeding/      — Atlas demo data + indexes
-e2e/             — Playwright (live API)
-e2e-smoke/       — Post-deploy AWS smoke
-docs/            — Getting started pack
+  agents/         .agent.md specialists
+  samples/        Reference-only config examples
+  skills/         SKILL.md domain packages
+deploy/           Terraform + deploy scripts
+db-seeding/       Atlas demo data + indexes
+e2e/              Playwright (live API)
+e2e-smoke/        Post-deploy AWS smoke
+docs/             Getting started, architecture, and runbooks
 ```
 
-Rationale: [`PROJECT_STRUCTURE.md`](PROJECT_STRUCTURE.md). Contributor conventions: [`AGENTS.md`](AGENTS.md).
+## Cleanup
 
-### Terraform stack split
-
-| Env | Scope | Singleton |
-|---|---|---|
-| `envs/network` | VPC + Atlas connectivity + SSM | account + region |
-| `envs/shared` | Voyage SageMaker + CloudWatch + Bedrock logging | account + region + env |
-| `envs/ec2` | Atlas + KB + EC2 + Cognito + 5 AgentCore runtimes | per-project |
-| `envs/local` | Laptop Atlas + KB + memory (no EC2/runtimes) | per-laptop |
-
-Design: [`deploy/terraform/.design.md`](deploy/terraform/.design.md). Modules: [`docs/reference/terraform-modules.md`](docs/reference/terraform-modules.md).
-
-### Full documentation index
-
-| Document | What it covers |
-|---|---|
-| [`docs/architecture.md`](docs/architecture.md) | System design, 5-runtime topology |
-| [`docs/api-reference.md`](docs/api-reference.md) | HTTP + SSE, auth, projections |
-| [`docs/deployment-preflight-checks.md`](docs/deployment-preflight-checks.md) | Pre/post-apply guards |
-| [`docs/hybrid-search.md`](docs/hybrid-search.md) | Vector + BM25 hybrid search |
-| [`docs/logging-architecture.md`](docs/logging-architecture.md) | Logs, OTel |
-| [`docs/trace-ui-system-overview.md`](docs/trace-ui-system-overview.md) | Trace UI |
-| [`docs/agentcore-runtime-design.md`](docs/agentcore-runtime-design.md) | Runtime topology, artifacts |
-| [`docs/status/debugging.md`](docs/status/debugging.md) | EC2 access, pitfalls, validation |
-| [`docs/estimate.md`](docs/estimate.md) | Monthly AWS cost estimate |
-| [`docs/demo/demo-script.md`](docs/demo/demo-script.md) | Demo walkthrough |
-| [`docs/reference/terraform-modules.md`](docs/reference/terraform-modules.md) | Terraform modules |
-| [`docs/reference/ssm-parameters.md`](docs/reference/ssm-parameters.md) | Cross-stack SSM |
-| [`docs/reference/data-model.md`](docs/reference/data-model.md) | Mongo collections |
-| [`docs/reference/smoke-tests.md`](docs/reference/smoke-tests.md) | e2e-smoke scripts |
-| [`docs/reference/deploy-scripts.md`](docs/reference/deploy-scripts.md) | Every deploy script |
-
----
-
-## Built with
-
-- [Strands Agents SDK](https://github.com/strands-agents/sdk-typescript) — agent orchestration
-- [Hono](https://hono.dev/) — HTTP API + SSE
-- [MongoDB Atlas](https://www.mongodb.com/atlas) — data + vector search + long-term memory
-- [AWS Bedrock](https://aws.amazon.com/bedrock/) — Claude + Titan embeddings + Knowledge Bases
-- [Bedrock AgentCore](https://docs.aws.amazon.com/bedrock-agentcore/) — Runtime, Gateway, Memory
-- [Agent Skills](https://agentskills.io/specification) — skill format
-- [Streamlit](https://streamlit.io/) — chat + Trace Viewer
-- [OpenTelemetry](https://opentelemetry.io/) + ADOT — tracing
-
----
-
-## Troubleshooting
-
-### `session-manager-plugin not on PATH` (preflight `pf_check_session_manager_plugin` fails)
-
-Deploy preflight (and any post-deploy `aws ssm start-session`) fails when the AWS Session Manager plugin is missing. Install it, then re-run the deploy:
+To avoid incurring future charges, destroy the deployed infrastructure. Match the destroy script with your deployed network mode:
 
 ```bash
-# macOS
-brew install --cask session-manager-plugin
+# Example for PrivateLink teardown
+./deploy/destroy/destroy-project-with-privatelink.sh --auto-approve
+./deploy/destroy/destroy-shared-with-privatelink.sh --auto-approve
 ```
+
+## Built With
+
+* **Strands Agents SDK** - Agent orchestration
+* **Hono** - HTTP API + Server-Sent Events (SSE)
+* **MongoDB Atlas** - Operational data, vector search, and long-term memory
+* **AWS Bedrock** - Claude models, Titan embeddings, and Knowledge Bases
+* **Bedrock AgentCore** - Runtimes, Gateway, and Memory
+* **Agent Skills** - Modular skill formatting
+* **Streamlit** - Chat interface and Trace Viewer
+* **OpenTelemetry + ADOT** - Infrastructure tracing and logging

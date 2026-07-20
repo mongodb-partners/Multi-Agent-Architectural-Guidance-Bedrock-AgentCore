@@ -40,7 +40,7 @@ tools:
   - read_skill_resource
   - run_skill_script
   - bedrock_kb_retrieve
-  - order-management/notify_fulfillment_lambda
+  - job-match/notify_ats_lambda
 ```
 
 Rules:
@@ -71,7 +71,13 @@ Use for deterministic reads and small guarded writes against MongoDB Atlas.
 | Public collections | `products`, `troubleshooting_docs` by default; override with `MONGODB_PUBLIC_COLLECTIONS` |
 | Trace/debug events | `tool.mcp`, `mongo.query`, `mongo.result` |
 
-Prefer this for exact filters such as order IDs, customer records, status checks, and counts. Prefer `mongodb_vector_search` for semantic lookup.
+Prefer this for exact filters such as `pathId`, `skillId`, `benchmarkId`, `companyId`, and counts. Prefer `mongodb_vector_search` for semantic lookup.
+
+> **Public-collection caveat.** The default public list in `api/src/adapters/mongodb-mcp-client.ts` is still `products, troubleshooting_docs` — the legacy demo collections. The recruitment collections (`career_paths`, `skills_taxonomy`, `compensation_data`, `companies`, and the planned `jobs` / `interview_prep`) are shared catalog data with no per-user owner, so they must be listed too or the wrapper injects a `userId` predicate and they return nothing. Set:
+>
+> ```
+> MONGODB_PUBLIC_COLLECTIONS=career_paths,skills_taxonomy,compensation_data,companies,jobs,interview_prep
+> ```
 
 ### `mongodb_vector_search`
 
@@ -84,7 +90,7 @@ Use for semantic retrieval over Atlas Vector Search indexes. Agents pass natural
 | API wrapper | `api/src/adapters/mongodb-mcp-client.ts` (`VECTOR_SEARCH_TOOL_SPEC`) |
 | Input agents should prefer | `collection`, `queryText`, optional `limit`, optional `hybrid: true` |
 | Embedding provider | Voyage SageMaker when configured; Bedrock embedding fallback |
-| Known vector indexes | `products-vector-index`, `troubleshooting-vector-index`, `agent_memory_facts-vector-index`, `chat_messages-vector-index` |
+| Known vector indexes | `career_paths_vector_index`, `skills_taxonomy_vector_index`, `compensation_vector_index`, `companies_vector_index`, `agent_memory_facts-vector-index`, `chat_messages-vector-index`, plus the legacy `products-vector-index` / `troubleshooting-vector-index` |
 | Hybrid mode | `hybrid: true` fuses vector + Atlas Search BM25 with Reciprocal Rank Fusion |
 | Trace/debug events | `tool.mcp`, `mongo.vector_search`, `mongo.result` |
 
@@ -92,8 +98,12 @@ Known collection defaults are inferred by the wrapper:
 
 | Collection | Vector index | Lexical index for hybrid mode |
 |---|---|---|
-| `products` | `products-vector-index` | Product text index seeded by `db-seeding/seed-indexes.ts` |
-| `troubleshooting_docs` | `troubleshooting-vector-index` | Troubleshooting text index seeded by `db-seeding/seed-indexes.ts` |
+| `career_paths` | `career_paths_vector_index` | `career_paths_text_index` (`lexicalPath: "description"`) |
+| `skills_taxonomy` | `skills_taxonomy_vector_index` | — (no text index; use `mongodb_query` for exact `skillId`/`name`) |
+| `compensation_data` | `compensation_vector_index` | `compensation_text_index` (`lexicalPath: "role"`) |
+| `companies` | `companies_vector_index` | `companies_text_index` (`lexicalPath: "name"`) |
+| `products` *(legacy)* | `products-vector-index` | Product text index seeded by `db-seeding/seed-indexes.ts` |
+| `troubleshooting_docs` *(legacy)* | `troubleshooting-vector-index` | Troubleshooting text index seeded by `db-seeding/seed-indexes.ts` |
 | `agent_memory_facts` | `agent_memory_facts-vector-index` | Memory facts BM25 index |
 | `chat_messages` | `chat_messages-vector-index` | Chat messages BM25 index |
 
@@ -136,10 +146,10 @@ Retrieves passages from an Amazon Bedrock Knowledge Base.
 | Runtime implementation | `api/src/lib/base-tools.ts` -> `api/src/adapters/bedrock-retrieval.ts` |
 | Input | `query`, optional `knowledgeBaseId`, optional `numberOfResults` |
 | Default KB | `BEDROCK_KB_ID` |
-| Used by | Troubleshooting/RAG flows |
+| Used by | `company-intel` (company research / RAG flows) |
 | Trace/debug events | `tool.call`, Bedrock retrieval events in trace |
 
-Use this when the answer should come from the Bedrock KB corpus, not directly from MongoDB product/order collections.
+Use this when the answer should come from the Bedrock KB corpus of company documents, not directly from the MongoDB `companies` collection.
 
 ### `embed_multimodal_content`
 
@@ -216,12 +226,12 @@ Defined in `config/skills/<skill>/http-tools.json`.
 {
   "tools": [
     {
-      "name": "notify_fulfillment_lambda",
-      "description": "POST order event to the fulfillment Lambda.",
+      "name": "notify_ats_lambda",
+      "description": "POST an application event to the ATS Lambda.",
       "method": "POST",
-      "url": "${ORDER_NOTIFY_LAMBDA_URL}",
+      "url": "${ATS_NOTIFY_LAMBDA_URL}",
       "parameters": [
-        { "name": "orderId", "type": "string", "description": "Order id", "required": true }
+        { "name": "jobId", "type": "string", "description": "Job listing id", "required": true }
       ]
     }
   ]
@@ -232,7 +242,7 @@ Attach it to an agent as:
 
 ```yaml
 tools:
-  - order-management/notify_fulfillment_lambda
+  - job-match/notify_ats_lambda
 ```
 
 Rules:
@@ -289,8 +299,8 @@ Global HTTP tools are not skill-activation gated. Use them only when the tool is
 
 | Need | Prefer this tool |
 |---|---|
-| Exact record lookup by id/status | `mongodb_query` |
-| Semantic product/troubleshooting/memory search | `mongodb_vector_search` |
+| Exact record lookup by id (`pathId`, `skillId`, `companyId`, …) | `mongodb_query` |
+| Semantic career-path / job / company / memory search | `mongodb_vector_search` |
 | Semantic + rare keyword recall | `mongodb_vector_search` with `hybrid: true` |
 | Bounded aggregation | `mongodb_aggregate` |
 | Bedrock KB/RAG passages | `bedrock_kb_retrieve` |

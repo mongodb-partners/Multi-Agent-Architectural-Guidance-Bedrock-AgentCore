@@ -16,6 +16,99 @@ Run [`bun db-seeding/seed-indexes.ts`](../../db-seeding/seed-indexes.ts) once pe
 
 These are the demo collections seeded by [`db-seeding/seed-all.ts`](../../db-seeding/seed-all.ts).
 
+Embedding dimension for every vector index is the SSOT constant `VOYAGE_EMBEDDING_DIMS` in [`api/src/adapters/voyage-embedding.ts`](../../api/src/adapters/voyage-embedding.ts) — currently **1024**.
+
+### 1a. Recruitment collections (current specialists)
+
+### `career_paths`
+| Field | Type | Notes |
+|---|---|---|
+| `pathId` | string | **Unique** human-readable ID; cite this in responses, not `_id` |
+| `targetRole` | string | The role this path leads to |
+| `fromRoles` | string[] | Typical starting roles this path applies to |
+| `seniority` | string | `junior` \| `mid` \| `senior` \| `staff` (filterable) |
+| `description` | string | Narrative of the transition |
+| `requiredSkills` | object[] | `{ skillId, name, importance, note }[]`; `importance` is `core` \| `important` \| `nice` |
+| `milestones` | object[] | `{ order, title, skills[], estimatedWeeks }[]` |
+| `embeddingText` | string | Concatenated text the embedding is generated from |
+| `embedding?` | number[] | 1024-d |
+
+**Regular indexes:** `{ pathId: 1 }` (unique), `{ targetRole: 1 }`, `{ seniority: 1 }`.
+**Vector index `career_paths_vector_index`:** `embedding` + filter on `seniority`.
+**Atlas Search `career_paths_text_index`:** `description` + `targetRole` + `fromRoles` (string), `seniority` (token).
+**Access:** `career-coach` skill → MCP `mongodb_vector_search` (hybrid, `lexicalPath: "description"`).
+
+### `skills_taxonomy`
+| Field | Type | Notes |
+|---|---|---|
+| `skillId` | string | **Unique**; matches `career_paths.requiredSkills[].skillId` |
+| `name` | string | Lowercase skill name |
+| `category` | string | `machine-learning` / `backend` / `leadership` / … (filterable) |
+| `description` | string | |
+| `prerequisites` | string[] | `skillId` values to learn first |
+| `resourceType` | string | `course` \| `book` \| `project` \| `certification` |
+| `resources` | object[] | `{ title, provider, url?, estimatedHours }[]` |
+| `embedding?` | number[] | 1024-d |
+
+**Regular indexes:** `{ skillId: 1 }` (unique), `{ name: 1 }`, `{ category: 1 }`.
+**Vector index `skills_taxonomy_vector_index`:** `embedding` + filter on `category`.
+**Access:** `career-coach` skill — usually `mongodb_query` → `find` on `skillId`/`name` (`$in`); vector search only for fuzzy skill descriptions.
+
+### `compensation_data`
+| Field | Type | Notes |
+|---|---|---|
+| `benchmarkId` | string | **Unique**; cite this in responses |
+| `role` | string | Role title (BM25 lexical path) |
+| `seniority` | string | `junior` \| `mid` \| `senior` \| `staff` (filterable) |
+| `region` | string | `us-west` \| `us-south` \| `us-east` \| `us-central` \| `remote-us` \| `emea` \| `apac` (filterable) |
+| `locationLabel` | string | Human-readable location |
+| `currency` | string | ISO code; always stated with figures |
+| `asOf` | string (date) | Benchmark date; flag if stale |
+| `baseSalary` | object | `{ p25, p50, p75, p90 }` |
+| `totalComp` | object | `{ p25, p50, p75, p90 }` incl. bonus/equity |
+| `benefits` | string[] | Present verbatim |
+| `equityNote` | string | Present verbatim |
+| `sampleSize` | number | Small values warrant a lower-confidence note |
+| `embedding?` | number[] | 1024-d |
+
+**Regular indexes:** `{ benchmarkId: 1 }` (unique), `{ role: 1, seniority: 1, region: 1 }`, `{ seniority: 1 }`, `{ region: 1 }`.
+**Vector index `compensation_vector_index`:** `embedding` + filters on `seniority`, `region`.
+**Atlas Search `compensation_text_index`:** `role` + `locationLabel` (string), `seniority` + `region` (token).
+**Access:** `career-coach` skill (compensation workflow) → MCP `mongodb_vector_search` (hybrid, `lexicalPath: "role"`).
+
+### `companies`
+| Field | Type | Notes |
+|---|---|---|
+| `companyId` | string | **Unique**; cite this in responses |
+| `name` | string | Company name (BM25 lexical path) |
+| `industry` | string | Sector label (filterable) |
+| `stage` | string | `Seed` \| `Series A`–`Series D` \| `Public` \| `Bootstrapped` (filterable) |
+| `foundedYear` | number | |
+| `headcount` | string | Employee band, e.g. `1,000–5,000` |
+| `fundingTotal` | string | Display string; may be `null` |
+| `headquarters` | string | |
+| `description` | string | Narrative overview |
+| `cultureSignals` | string[] | Present verbatim |
+| `engineeringPractices` | string[] | Present verbatim |
+| `sentimentSummary` | string | Balanced summary; present verbatim |
+| `pros` / `cons` | string[] | Always presented together |
+| `sentimentScore` | number | 1.0–5.0 |
+| `asOf` | string (date) | Freshness; flag if stale |
+| `embedding?` | number[] | 1024-d |
+
+**Regular indexes:** `{ companyId: 1 }` (unique), `{ name: 1 }`, `{ industry: 1 }`, `{ stage: 1 }`.
+**Vector index `companies_vector_index`:** `embedding` + filters on `industry`, `stage`.
+**Atlas Search `companies_text_index`:** `name` + `industry` + `description` (string), `stage` (token).
+**Access:** `company-intel` skill → MCP `mongodb_vector_search` (hybrid, `lexicalPath: "name"`) + `bedrock_kb_retrieve`.
+
+### `jobs`, `candidates`, `interview_prep` — declared, not yet seeded
+
+The `job-match` skill documents these three collections in [`config/skills/job-match/references/collections-schema.md`](../../config/skills/job-match/references/collections-schema.md), but `db-seeding/` has **no seeder and no index definitions** for them yet. Until seeders land, `job-match` has no data to search on a fresh cluster. See that skill reference for the intended schemas.
+
+### 1b. Legacy demo collections (still seeded, no longer consumed)
+
+These belong to the previous customer-support demo. `seed-all.ts` still creates and indexes them, but no agent in `config/agents/` reads them. They are safe to drop once the seeders are pruned.
+
 ### `products`
 | Field | Type | Notes |
 |---|---|---|
@@ -36,7 +129,7 @@ These are the demo collections seeded by [`db-seeding/seed-all.ts`](../../db-see
 **Regular indexes:** `{ sku: 1 }` (unique), `{ category: 1 }`, `{ tags: 1 }`.
 **Vector index `products-vector-index`:** `embedding` (1024-d, cosine) + filters on `category`, `tags`, `price`.
 **Atlas Search `products-text-index`:** `title` + `description` (string), `sku` + `category` (token).
-**Access:** `product-recommendation` skill → MCP `mongodb_vector_search` and `mongodb_hybrid_search`.
+**Access:** none — the legacy `product-recommendation` skill was removed.
 
 ### `orders`
 | Field | Type | Notes |
@@ -55,7 +148,7 @@ These are the demo collections seeded by [`db-seeding/seed-all.ts`](../../db-see
 | `notes?` | string | Customer-service annotations |
 
 **Regular indexes:** `{ orderId: 1 }` (unique), `{ customerEmail: 1 }`, `{ status: 1 }`, `{ customerEmail: 1, status: 1 }`.
-**Access:** `order-management` skill → MCP `mongodb_query`, `mongodb_aggregate`.
+**Access:** none — the legacy `order-management` skill was removed.
 
 ### `customers`
 | Field | Type | Notes |
@@ -68,7 +161,7 @@ These are the demo collections seeded by [`db-seeding/seed-all.ts`](../../db-see
 | `preferences` | object | `{ contactMethod, language }` |
 
 **Regular index:** `{ email: 1 }` (unique).
-**Access:** `order-management` skill (lookup by email).
+**Access:** none — the legacy `order-management` skill was removed.
 
 ### `troubleshooting_docs`
 Hosts both seed playbooks (with `docId`) and Bedrock KB chunked documents (without `docId`).
@@ -90,7 +183,7 @@ Hosts both seed playbooks (with `docId`) and Bedrock KB chunked documents (witho
 **Regular indexes:** `{ docId: 1 }` (partial-unique), `{ errorCodes: 1 }`, `{ affectedSkus: 1 }`.
 **Vector index `troubleshooting-vector-index`:** `embedding` (1024-d, cosine) + filters on `category`, `affectedSkus`.
 **Atlas Search `troubleshooting-text-index`:** `title` + `body` (string), `category` (token).
-**Access:** `troubleshooting` skill → MCP `mongodb_vector_search` + KB ingestion writes here.
+**Access:** no agent reads this — the legacy `troubleshooting` skill was removed. Bedrock KB ingestion still writes here.
 
 ---
 

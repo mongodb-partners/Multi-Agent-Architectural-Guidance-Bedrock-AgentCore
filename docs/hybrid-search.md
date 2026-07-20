@@ -87,8 +87,8 @@ Key points:
 | MCP handler — vector | `mongodb_vector_search` in [`handlers.mjs`](../mcp-runtimes/mongodb-mcp/src/vendor/handlers.mjs) | Single-leg `$vectorSearch` with `numCandidates` default 200, optional `minScore`. |
 | MCP handler — hybrid | `mongodb_hybrid_search` in [`handlers.mjs`](../mcp-runtimes/mongodb-mcp/src/vendor/handlers.mjs) | Parallel `$vectorSearch` + `$search` BM25, RRF merge with `k=60`, supports per-leg `fetchK` over-fetch, `minScore` floor on the merged score, propagates `filter` into both legs. |
 | MCP server registration | [`mcp-runtimes/mongodb-mcp/src/server.ts`](../mcp-runtimes/mongodb-mcp/src/server.ts) | Registers both handlers with their Zod input schemas. The runtime **does** advertise `mongodb_hybrid_search` over MCP — the filtering is API-side, so the wrapper can still discover and call it. |
-| Default indexes | `DEFAULT_VECTOR_INDEX_BY_COLLECTION` + `DEFAULT_LEXICAL_INDEX_BY_COLLECTION` | Per-collection convention map: `products → products-vector-index` / `products-text-index`, `agent_memory_facts → agent_memory_facts-vector-index` / `agent_memory_facts-text-index`, etc. Lets the LLM call `{collection: "products", queryText: "...", hybrid: true}` without spelling out index names. |
-| Index seeding | [`db-seeding/seed-indexes.ts`](../db-seeding/seed-indexes.ts) | Creates the matching Atlas Vector Search + Atlas Search (BM25) indexes for `products`, `troubleshooting_docs`, `agent_memory_facts`, `chat_messages`. |
+| Default indexes | `DEFAULT_VECTOR_INDEX_BY_COLLECTION` + `DEFAULT_LEXICAL_INDEX_BY_COLLECTION` | Per-collection convention map: `career_paths → career_paths_vector_index` / `career_paths_text_index`, `companies → companies_vector_index` / `companies_text_index`, `agent_memory_facts → agent_memory_facts-vector-index` / `agent_memory_facts-text-index`, etc. Lets the LLM call `{collection: "companies", queryText: "...", hybrid: true}` without spelling out index names. |
+| Index seeding | [`db-seeding/seed-indexes.ts`](../db-seeding/seed-indexes.ts) | Creates the matching Atlas Vector Search + Atlas Search (BM25) indexes for `career_paths`, `skills_taxonomy`, `compensation_data`, `companies`, `agent_memory_facts`, `chat_messages`, plus the legacy `products` / `troubleshooting_docs`. |
 | Unit tests | [`api/tests/unit/mongodb-vector-search-wrapper.test.ts`](../api/tests/unit/mongodb-vector-search-wrapper.test.ts) | Pins the routing decision: `hybrid: true` → `mongodb_hybrid_search`, missing helper → structured `hybrid_unsupported` error, internal-only filter dropping `mongodb_hybrid_search` from the agent-visible list. |
 | Ranking eval | [`api/tests/unit/retrieval-eval.test.ts`](../api/tests/unit/retrieval-eval.test.ts) | Deterministic fixtures showing the qualitative wins hybrid adds over pure vector (polarity, recency, collection weight, additivity). |
 
@@ -147,11 +147,11 @@ Typical agent-side invocations:
 ```jsonc
 // Pure-vector — unchanged from before the refactor.
 { "name": "mongodb_vector_search",
-  "input": { "collection": "products", "queryText": "lightweight running shoes", "limit": 5 } }
+  "input": { "collection": "skills_taxonomy", "queryText": "deep learning frameworks", "limit": 5 } }
 
 // Hybrid — same tool name; opt-in flag.
 { "name": "mongodb_vector_search",
-  "input": { "collection": "troubleshooting_docs", "queryText": "device error PWR-001", "hybrid": true, "limit": 5 } }
+  "input": { "collection": "companies", "queryText": "Lumen Retail", "hybrid": true, "limit": 5 } }
 
 // Hybrid with explicit overrides — escape hatch.
 { "name": "mongodb_vector_search",
@@ -195,7 +195,7 @@ If the LLM hallucinates a call to `mongodb_hybrid_search` directly, Strands will
 
 ## 8. What this is *not*
 
-- **Not a query router.** `mongodb_vector_search` does not auto-choose hybrid vs vector based on heuristics about the query. The flag is opt-in. Personas / SKILLs that benefit from rare-keyword recall (troubleshoot codes, SKU IDs, named entities) should pass `hybrid: true`; personas doing pure semantic browsing can leave it off.
+- **Not a query router.** `mongodb_vector_search` does not auto-choose hybrid vs vector based on heuristics about the query. The flag is opt-in. Personas / SKILLs that benefit from rare-keyword recall (company names, role titles, `pathId` / `skillId` values) should pass `hybrid: true`; personas doing pure semantic browsing can leave it off.
 - **Not a re-ranker.** The runtime performs RRF only. Cross-encoder re-ranking (Cohere Rerank, Voyage rerank-2, etc.) is a future extension and would fit as another optional flag (`rerank: true`) on the same tool — no new agent-visible tool would need to be added.
 - **Not a replacement for `mongodb_query` / `mongodb_aggregate`.** Structured key-based lookups (`{ orderId: "ORD-1234" }`) belong on those tools. Hybrid is only useful when the query is unstructured natural language.
 - **Not a leak of internal helpers.** `mongodb_hybrid_search` is registered with the MCP server only so the API-side wrapper can call it through the same MCP transport as everything else. The runtime filters it from `tools/list` for agent-facing consumers by participating in the same `INTERNAL_ONLY_TOOL_NAMES` convention; the API-side filter (`isInternalOnlyMcpTool`) is defence in depth. Both layers would have to fail for the LLM to ever see this tool.

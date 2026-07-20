@@ -20,7 +20,7 @@ Stores all open job listings. **Read-only** — the agent never writes to this c
   "minYearsExperience": 3,
   "salaryRange":       "$140k–$175k",
   "skills":            ["python", "machine learning", "vector search", "pytorch"],
-  "embedding":         [<768-dimensional float array>]
+  "embedding":         [<1024-dimensional float array>]
 }
 ```
 
@@ -33,7 +33,7 @@ Stores all open job listings. **Read-only** — the agent never writes to this c
 | `remote` | boolean | Use as a filter when the candidate specifies remote-only preference |
 | `minYearsExperience` | int | Match against candidate's `yearsExperience` |
 | `skills` | string[] | Lowercase; use for keyword overlap scoring |
-| `embedding` | float[] | 768-dimensional vector; used by `jobs_vector_index` |
+| `embedding` | float[] | 1024-dimensional vector; used by `jobs_vector_index` |
 
 ### Indexes
 
@@ -41,7 +41,7 @@ Stores all open job listings. **Read-only** — the agent never writes to this c
 ```json
 {
   "fields": [
-    { "numDimensions": 768, "path": "embedding", "similarity": "cosine", "type": "vector" },
+    { "numDimensions": 1024, "path": "embedding", "similarity": "cosine", "type": "vector" },
     { "path": "seniority", "type": "filter" },
     { "path": "remote",    "type": "filter" }
   ]
@@ -108,7 +108,7 @@ Stores candidate profiles extracted from submitted CVs. The agent writes new doc
     ],
     "certifications": ["AWS Certified Solutions Architect – Associate"]
   },
-  "embedding": [<768-dimensional float array>]
+  "embedding": [<1024-dimensional float array>]
 }
 ```
 
@@ -120,7 +120,7 @@ Stores candidate profiles extracted from submitted CVs. The agent writes new doc
 | `profile.seniority` | enum | `junior` \| `mid` \| `senior` \| `staff` |
 | `profile.yearsExperience` | int | Parsed from CV; used for job seniority/experience matching |
 | `profile.skills` | string[] | Lowercase; used to build the full-text search query |
-| `embedding` | float[] | 768-dimensional embedding of the candidate's `embeddingText` |
+| `embedding` | float[] | 1024-dimensional embedding of the candidate's `embeddingText` |
 
 ### Index
 
@@ -128,7 +128,7 @@ Stores candidate profiles extracted from submitted CVs. The agent writes new doc
 ```json
 {
   "fields": [
-    { "numDimensions": 768, "path": "embedding", "similarity": "cosine", "type": "vector" }
+    { "numDimensions": 1024, "path": "embedding", "similarity": "cosine", "type": "vector" }
   ]
 }
 ```
@@ -150,7 +150,7 @@ Holds interview preparation material (tips, frameworks, sample questions). **Rea
   "content":      "<full prep content>",
   "embeddingText":"<concatenated text used to generate the embedding>",
   "tags":         ["behavioral", "star", "storytelling"],
-  "embedding":    [<768-dimensional float array>]
+  "embedding":    [<1024-dimensional float array>]
 }
 ```
 
@@ -162,7 +162,7 @@ Holds interview preparation material (tips, frameworks, sample questions). **Rea
 | `category` | string | e.g. `behavioral`, `technical`, `system-design`, `coding` |
 | `tags` | string[] | Keywords; useful for building the vector search query |
 | `content` | string | The full prep material to present to the candidate verbatim |
-| `embedding` | float[] | 768-dimensional vector; used by `prep_vector_index` |
+| `embedding` | float[] | 1024-dimensional vector; used by `prep_vector_index` |
 
 ### Index
 
@@ -170,7 +170,7 @@ Holds interview preparation material (tips, frameworks, sample questions). **Rea
 ```json
 {
   "fields": [
-    { "numDimensions": 768, "path": "embedding", "similarity": "cosine", "type": "vector" },
+    { "numDimensions": 1024, "path": "embedding", "similarity": "cosine", "type": "vector" },
     { "path": "category", "type": "filter" }
   ]
 }

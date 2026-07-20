@@ -80,7 +80,7 @@ The stack supports two **mutually exclusive per account** connectivity modes for
 | `MONGODB_MCP_RUNTIME_ENDPOINT` | — | Streamable-HTTP endpoint for the MongoDB MCP runtime | Terraform/deploy wiring for the AgentCore Gateway target | `deploy/terraform/envs/ec2`, `deploy/scripts/deploy-project.sh` |
 | `MONGODB_ALLOW_WRITE` | `false` | MCP write gate. When false, the MCP runtime rejects `updateOne`/`insertOne`/`replaceOne`/`deleteOne` | Set to `true` for explicit write workloads | MCP runtime |
 | `MONGODB_MAX_LIMIT` | `200` | Cap on `mongodb_query` result size | Always | MCP runtime |
-| `MONGODB_PUBLIC_COLLECTIONS` | — (all collections allowed) | Comma-separated allow-list of collection names the MCP runtime is permitted to read | Tenant isolation | `api/src/adapters/mongodb-mcp-client.ts` |
+| `MONGODB_PUBLIC_COLLECTIONS` | `products,troubleshooting_docs` | Comma-separated list of collections **exempt** from the injected `userId` predicate (shared catalog / KB data with no per-user owner). Collections not listed here are tenant-filtered. The default is the legacy demo pair — set this to the recruitment collections or they return nothing. | Tenant isolation | `api/src/adapters/mongodb-mcp-client.ts` |
 | `MCP_LOG_RAW_ARGS` | `false` | Disable PII redaction of MCP tool args in logs | Debug only — leave OFF in prod | MCP runtime |
 
 ---

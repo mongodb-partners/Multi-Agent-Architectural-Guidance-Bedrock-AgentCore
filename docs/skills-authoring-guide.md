@@ -30,7 +30,7 @@ config/skills/<skill-name>/
 
 The `SKILL.md` file is always loaded when the skill is activated. Files in `references/` are loaded on demand — only when the agent explicitly requests them during a conversation. Keep `SKILL.md` focused and delegate detail to `references/`.
 
-**`http-tools.json`** (optional) declares Strands tools that invoke **HTTPS endpoints** — typically **AWS Lambda Function URLs** or **API Gateway** HTTP APIs. Same trust model as `scripts/*.mjs`: colocated with the skill, reviewed like code. Agents enable each tool by listing **`skill-folder/localToolName`** in `.agent.md` `tools:` (e.g. `order-management/notify_fulfillment_lambda`). The skill must be **allowed and activated** before a call succeeds (like `read_skill_resource`). SSRF **host allowlists** belong in repo-root `config/http-tools.json` → `security`. Details: [Configuration Guide § 3 — Skill configuration](configuration-guide.md#3-skill-configuration-configskillsskill) and [§ 4 — HTTP tool configuration](configuration-guide.md#4-http-tool-configuration), plus the canonical [tool catalog](reference/tools.md).
+**`http-tools.json`** (optional) declares Strands tools that invoke **HTTPS endpoints** — typically **AWS Lambda Function URLs** or **API Gateway** HTTP APIs. Same trust model as `scripts/*.mjs`: colocated with the skill, reviewed like code. Agents enable each tool by listing **`skill-folder/localToolName`** in `.agent.md` `tools:` (e.g. `job-match/notify_ats_lambda`). The skill must be **allowed and activated** before a call succeeds (like `read_skill_resource`). SSRF **host allowlists** belong in repo-root `config/http-tools.json` → `security`. Details: [Configuration Guide § 3 — Skill configuration](configuration-guide.md#3-skill-configuration-configskillsskill) and [§ 4 — HTTP tool configuration](configuration-guide.md#4-http-tool-configuration), plus the canonical [tool catalog](reference/tools.md).
 
 **Minimal `http-tools.json` example** (inside a skill folder):
 
@@ -38,13 +38,13 @@ The `SKILL.md` file is always loaded when the skill is activated. Files in `refe
 {
   "tools": [
     {
-      "name": "notify_fulfillment_lambda",
-      "description": "POST order event to the fulfillment Lambda.",
+      "name": "notify_ats_lambda",
+      "description": "POST an application event to the ATS Lambda.",
       "method": "POST",
-      "url": "${ORDER_NOTIFY_LAMBDA_URL}",
+      "url": "${ATS_NOTIFY_LAMBDA_URL}",
       "parameters": [
-        { "name": "orderId", "type": "string", "description": "Order ID", "required": true },
-        { "name": "event",   "type": "string", "description": "e.g. shipped, cancelled", "required": true }
+        { "name": "jobId", "type": "string", "description": "Job listing ID", "required": true },
+        { "name": "event", "type": "string", "description": "e.g. viewed, applied", "required": true }
       ]
     }
   ]
@@ -66,23 +66,24 @@ Every `SKILL.md` starts with a YAML frontmatter block:
 
 ```yaml
 ---
-name: order-management
+name: job-match
 version: "1.0"
 description: >-
-  Handles order lookups, status checks, tracking updates, cancellations, and
-  return requests for logged-in customers. Use this skill whenever the user
-  asks about a specific order, a list of their orders, or a return.
-tags: [orders, fulfillment, returns]
+  Matches candidate CVs to job openings using hybrid search on the jobs
+  collection, and provides interview preparation questions. Use this skill
+  whenever a candidate submits a CV, asks about job matches, or requests
+  interview prep for a specific role.
+tags: [jobs, matching, interview-prep]
 resources:
-  - name: Order Schema
-    file: references/order-schema.md
-    description: Field definitions and status enum values for the orders collection
-  - name: Return Policy
-    file: references/return-policy.md
-    description: Return eligibility rules and processing times
+  - name: Collections Schema
+    file: references/collections-schema.md
+    description: Field definitions and index names for the jobs, candidates, and interview_prep collections
+  - name: Ranking Policy
+    file: references/ranking-policy.md
+    description: How to weight skill overlap, seniority, and location when ranking matches
 scripts:
-  - name: validate-return
-    file: scripts/validate-return.mjs
+  - name: score-match
+    file: scripts/score-match.mjs
     description: Pure JS policy; API loads via run_skill_script tool (dynamic import)
 ---
 ```
@@ -125,7 +126,7 @@ Skills use three loading levels to manage context window size:
 
 **How activation works in practice:**
 
-- **Specialist agents** (e.g. `order-management`) pre-activate all their listed skills before the first model call. The full `SKILL.md` body is in the system prompt from the start.
+- **Specialist agents** (e.g. `job-match`) pre-activate all their listed skills before the first model call. The full `SKILL.md` body is in the system prompt from the start.
 - **The orchestrator** (no `skills:` listed) gets the discovery index only — a compact list of all skill names and descriptions so it can route intelligently.
 - **At runtime**, any agent can call the `activate_skill` tool to load a skill body mid-conversation. The full instructions are returned in the tool result and the model uses them immediately.
 
@@ -134,11 +135,11 @@ This means you can have detailed, lengthy reference material without inflating t
 In the skill body, signal to the agent when to load a reference file:
 
 ```markdown
-## Handling Unusual Statuses
+## Handling Unfamiliar Job Fields
 
-If you encounter a status code not described here, use read_skill_resource
-with skillName "order-management" and path "references/order-schema.md"
-(after this skill is activated — automatic for the order-management specialist).
+If you encounter a job document field not described here, use read_skill_resource
+with skillName "job-match" and path "references/collections-schema.md"
+(after this skill is activated — automatic for the job-match specialist).
 ```
 
 ---
@@ -147,15 +148,17 @@ with skillName "order-management" and path "references/order-schema.md"
 
 ### Be specific about data access
 
-Don't say "look up the order". Say exactly which collection to query and which fields to use:
+Don't say "look up the career path". Say exactly which collection to query and which fields to use:
 
 ```markdown
-## Looking Up an Order
+## Looking Up a Career Path
 
-To find a specific order, query the `orders` collection:
-- Use `orderId` if the user provides an order number
-- Use `customerId` + sort by `createdAt` descending if the user asks for recent orders
-- Always include `status`, `lineItems`, `shippingAddress`, and `estimatedDelivery` in the projection
+To find a specific path, query the `career_paths` collection:
+- Use `pathId` if you already resolved one from a previous turn
+- Use `targetRole` + filter on `seniority` if the candidate named a goal role
+- Fall back to `mongodb_vector_search` on `career_paths_vector_index` when the
+  goal is described loosely rather than named
+- Always include `pathId`, `targetRole`, `requiredSkills`, and `milestones` in the projection
 ```
 
 ### Tell the agent what to do with what it finds
@@ -163,13 +166,13 @@ To find a specific order, query the `orders` collection:
 Don't assume the agent knows how to format a result. Be explicit:
 
 ```markdown
-## Presenting Order Status
+## Presenting a Skill Gap
 
-After retrieving an order:
-1. Lead with the current status in plain language (not the raw enum value)
-2. Show estimated delivery date if status is SHIPPED or IN_TRANSIT
-3. Show tracking number only if the user explicitly asks for it
-4. If status is CANCELLED, always mention the refund timeline
+After retrieving a career path:
+1. Lead with the count of `core` skills the candidate is missing, in plain language
+2. Show each missing skill with its `importance` and the `note` explaining why it matters
+3. Show the milestone sequence only after the gap itself is clear
+4. Always state total `estimatedWeeks` so the candidate can judge the commitment
 ```
 
 ### Define the boundaries
@@ -179,11 +182,11 @@ Specify what this skill does not do and what happens instead:
 ```markdown
 ## Out of Scope
 
-This skill handles order status, tracking, and returns only.
+This skill handles job matching and interview prep only.
 
-- Billing disputes → hand off to `billing-agent`
-- Product questions about items in an order → hand off to `product-agent`
-- Complaints about delivery experience → acknowledge and escalate to `support-agent`
+- Salary and compensation questions → hand off to `career-coach`
+- Skill-gap analysis and learning roadmaps → hand off to `career-coach`
+- Questions about a specific hiring company's culture or funding → hand off to `company-intel`
 ```
 
 ### Document edge cases explicitly
@@ -193,14 +196,14 @@ Edge cases are where agents fail most often without guidance:
 ```markdown
 ## Edge Cases
 
-**Order not found:** The customer may have used a different email. Ask them to
-confirm the email on their account before saying the order doesn't exist.
+**No career path found:** The candidate may have named the role differently.
+Ask them to describe the work they want to do before saying no path exists.
 
-**Multiple matching orders:** Ask the user to confirm the order date or item
-description before proceeding.
+**Multiple matching paths:** Ask the candidate to confirm their target
+seniority before proceeding.
 
-**Order in HOLD status:** Do not reveal the hold reason. Tell the customer
-their order is being reviewed and suggest they contact support if urgent.
+**Benchmark `sampleSize` is small:** Do not present the percentile band as
+authoritative. State the sample size and frame the figure as indicative.
 ```
 
 ---
@@ -209,71 +212,74 @@ their order is being reviewed and suggest they contact support if urgent.
 
 ```markdown
 ---
-name: product-recommendation
+name: company-intel
 version: "1.0"
 description: >-
-  Recommends products based on user preferences, browsing history, and semantic
-  similarity. Use this skill when the user is looking for a product, asking
-  "what should I buy", or requesting alternatives to something they already have.
-tags: [products, recommendations, search]
+  Researches hiring companies — culture, engineering practices, funding stage,
+  and employee sentiment. Use this skill when a candidate asks about a specific
+  company by name, whether it is a good place to work, or wants to compare the
+  companies behind their job matches.
+tags: [companies, research, culture]
 resources:
-  - name: Product Catalog Schema
-    file: references/product-schema.md
-    description: Field definitions, category taxonomy, and attribute types
+  - name: Collections Schema
+    file: references/collections-schema.md
+    description: Field definitions and index names for the companies collection
 ---
 
-# Product Recommendation Skill
+# Company Intel Skill
 
 ## What You Can Do
 
-Find products from the MongoDB Atlas `products` collection using semantic
-vector search. Use the user's intent, stated preferences, and conversation
-history to generate relevant recommendations.
+Research companies from the MongoDB Atlas `companies` collection using hybrid
+search (vector + BM25), enriched by the Bedrock knowledge base. Ground every
+claim in a retrieved document.
 
-## Finding Products
+## Finding a Company
 
-Use the `mongodb_vector_search` tool to find semantically similar products.
-Pass a natural language description of what the user wants as the query.
+Use the `mongodb_vector_search` tool with `hybrid: true` against the
+`companies` collection, `lexicalIndex: "companies_text_index"` and
+`lexicalPath: "name"`. Pre-filter on `industry` or `stage` when the candidate
+names one.
 
-Include these fields in the result: `name`, `description`, `price`,
-`category`, `rating`, `inStock`.
+Include these fields in the result: `name`, `industry`, `stage`, `headcount`,
+`fundingTotal`, `cultureSignals`, `engineeringPractices`, `sentimentSummary`,
+`pros`, `cons`, `sentimentScore`, `asOf`.
 
-Only return products where `inStock` is true unless the user explicitly
-asks to see out-of-stock items.
+Call `bedrock_kb_retrieve` when the candidate asks something the company
+document does not cover.
 
-## Personalizing Recommendations
+## Personalizing the Answer
 
-Check long-term memory for previously stated preferences before running
-search. If preferences exist, weight the search query to reflect them.
-
-If the user has viewed or purchased products in this session, factor those
-into the next recommendation.
+Check long-term memory for what the candidate said they want from an employer
+(remote, mentorship, equity upside, stability). Lead with the signals that
+match those stated priorities.
 
 ## Presenting Results
 
-- Present at most 3 products per response unless the user asks for more
-- Lead with the most relevant one and explain briefly why it fits their need
-- Always mention price and in-stock status
-- If all results are expensive, acknowledge that and offer to search a lower
-  price range
+- Always present `pros` and `cons` together — never one without the other
+- Quote `cultureSignals` and `engineeringPractices` verbatim; do not paraphrase
+  them into stronger claims
+- State `sentimentScore` alongside the summary, and flag `asOf` if stale
+- Cite `companyId`, not `_id`
 
 ## Edge Cases
 
-**No results found:** Broaden the search query and try again once. If still
-no results, ask the user to describe their need differently.
+**Company not in the collection:** Say so plainly. Do not infer a company's
+culture from its industry or name.
 
-**User wants a brand you don't carry:** Acknowledge it honestly and offer
-the closest alternative. Do not fabricate a product.
+**Candidate asks about salary at the company:** Hand off to `career-coach` —
+compensation benchmarks live in `compensation_data`, not here.
 
-**User is comparing options:** Use `mongodb_vector_search` for each option
-and present side-by-side, highlighting the key differentiator.
+**Candidate is comparing companies:** Run one search per company and present
+side-by-side, highlighting the differentiator that matters to their stated
+priorities.
 
 ## Out of Scope
 
-This skill covers product discovery only.
-- Purchasing → not handled by this framework
-- Price negotiation → decline politely
-- Inventory forecasting → hand off to `inventory-agent` if present
+This skill covers company research only.
+- Job matching and interview prep → hand off to `job-match`
+- Salary benchmarks and negotiation → hand off to `career-coach`
+- Applying to a role → not handled by this framework
 ```
 
 ---
@@ -290,23 +296,21 @@ Reference files live in `references/` and are loaded only when the agent request
 A reference file is plain markdown. There is no special format requirement beyond being human-readable and useful to an LLM.
 
 ```markdown
-# Order Status Reference
+# Seniority Reference
 
-| Status | Meaning | Next Possible Statuses |
+| `seniority` | Meaning | Typical years |
 |--------|---------|----------------------|
-| PENDING | Order received, not yet processed | PROCESSING, CANCELLED |
-| PROCESSING | Being picked and packed | SHIPPED, CANCELLED |
-| SHIPPED | In transit with carrier | DELIVERED, RETURNED |
-| DELIVERED | Confirmed delivered | RETURNED |
-| CANCELLED | Cancelled before shipment | — |
-| RETURNED | Return accepted | — |
+| junior | Executes scoped tasks with review | 0–2 |
+| mid | Owns features end to end | 2–5 |
+| senior | Owns systems, mentors others | 5–9 |
+| staff | Owns cross-team technical direction | 9+ |
 ```
 
 ---
 
 ## Scripts
 
-Scripts live in `scripts/`. Deterministic policy can be **ESM (`.mjs`)** exported functions that the API imports via the generic **`run_skill_script`** tool (see `validate-return.mjs`). Heavier automation can later use the AgentCore Code Interpreter. Use scripts for:
+Scripts live in `scripts/`. Deterministic policy can be **ESM (`.mjs`)** exported functions that the API imports via the generic **`run_skill_script`** tool. (No skill in `config/skills/` ships a script today — the examples below are illustrative.) Heavier automation can later use the AgentCore Code Interpreter. Use scripts for:
 
 - Input validation with complex rules
 - Multi-step data transformations
@@ -316,12 +320,12 @@ Scripts live in `scripts/`. Deterministic policy can be **ESM (`.mjs`)** exporte
 In the skill body, tell the agent when to use a script:
 
 ```markdown
-## Validating a Return Request
+## Scoring a CV Against a Job
 
-Before telling a user their return is eligible, call **`run_skill_script`** with
-`skillName='order-management'`, `scriptPath='scripts/validate-return.mjs'`,
-`exportName='validateReturnEligibility'`, `args={…order object}`. Do not confirm
-eligibility from memory alone — always run the validation.
+Before telling a candidate how well they match, call **`run_skill_script`** with
+`skillName='job-match'`, `scriptPath='scripts/score-match.mjs'`,
+`exportName='scoreCandidateAgainstJob'`, `args={…candidate, …job}`. Do not compute
+the score from memory alone — always run the script.
 ```
 
 Scripts should be narrow and deterministic. They should not make decisions — that is the agent's job. They should perform a calculation or lookup and return a structured result.
@@ -418,11 +422,11 @@ Update `SKILL.md` in response to these patterns. Increment the `version` field a
 
 ```markdown
 ---
-name: order-management
+name: job-match
 version: "1.2"
 # Changelog:
-# 1.2 - Added HOLD status edge case. Clarified return eligibility check requires script.
-# 1.1 - Added multiple-matching-orders edge case.
+# 1.2 - Added remote-only filter edge case. Clarified match scoring requires the script.
+# 1.1 - Added ambiguous-seniority edge case.
 # 1.0 - Initial version.
 ---
 ```

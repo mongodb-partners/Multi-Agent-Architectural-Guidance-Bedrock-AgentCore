@@ -5,9 +5,9 @@
 Production EC2 mode uses **five** AgentCore runtimes:
 
 - `orchestrator` — legacy classification hop, invoked only when `USE_ORCHESTRATOR_RUNTIME=1`
-- `troubleshooting` — specialist
-- `order-management` — specialist
-- `product-recommendation` — specialist
+- `job-match` — specialist
+- `career-coach` — specialist
+- `company-intel` — specialist
 - `mongodb-mcp-runtime` — dedicated MCP server fronting the MongoDB driver (separate code base under [`mcp-runtimes/mongodb-mcp/`](../mcp-runtimes/mongodb-mcp/))
 
 The four agent runtimes (orchestrator + 3 specialists) share **one code bundle** ([`api/src/agent-runtime-code.ts`](../api/src/agent-runtime-code.ts)). The `AGENT_ID` env var on each runtime selects the persona at boot. The MongoDB MCP runtime is built and deployed independently as an ARM64 Docker image.

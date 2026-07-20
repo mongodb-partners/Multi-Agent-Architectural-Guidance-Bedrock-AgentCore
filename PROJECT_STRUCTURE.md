@@ -136,22 +136,19 @@ mcp-runtimes/mongodb-mcp/
 config/
 ├── agents/
 │   ├── orchestrator.agent.md         Haiku 4.5 — rollback two-hop classifier
-│   ├── order-management.agent.md     Haiku 4.5
-│   ├── product-recommendation.agent.md   Sonnet 4.6
-│   └── troubleshooting.agent.md      Sonnet 4.6
+│   ├── job-match.agent.md            Haiku 4.5
+│   ├── career-coach.agent.md         Haiku 4.5
+│   └── company-intel.agent.md        Sonnet 4.6
 ├── skills/
-│   ├── order-management/
+│   ├── job-match/
 │   │   ├── SKILL.md
-│   │   ├── scripts/validate-return.mjs
-│   │   ├── references/order-schema.md
-│   │   └── http-tools.example.json
-│   ├── product-recommendation/
+│   │   └── references/collections-schema.md
+│   ├── career-coach/
 │   │   ├── SKILL.md
-│   │   └── references/
-│   └── troubleshooting/
+│   │   └── references/collections-schema.md
+│   └── company-intel/
 │       ├── SKILL.md
-│       ├── references/{common-issues,error-codes}.md
-│       └── scripts/{build-ticket,escalation-checklist}.mjs
+│       └── references/collections-schema.md
 ├── environment.yaml                  API port + CORS defaults
 ├── demo-prompts.yaml                 Streamlit "Try a prompt" entries
 └── http-tools.json                   Optional global HTTP tools + SSRF host allowlist
@@ -163,7 +160,7 @@ The API rescans this folder on every chat request, so config-only edits hot-relo
 
 ## `db-seeding/` — Atlas seeders
 
-`bun db-seeding/seed-all.ts` seeds customers, products, troubleshooting docs, orders, then runs `seed-indexes.ts` (TTL on `agent_memory_facts`, unique `{userId, factHash}`, partial-unique `troubleshooting_docs.docId`, Atlas vector + Search BM25 indexes on 4 collections). `seed-embeddings.ts` backfills `embedding` via Voyage or Bedrock Titan.
+`bun db-seeding/seed-all.ts` seeds the recruitment collections the specialists use (`career_paths`, `skills_taxonomy`, `compensation_data`, `companies`) plus the legacy demo collections that are still seeded but no longer consumed by any agent (`customers`, `products`, `troubleshooting_docs`, `orders`), then runs `seed-indexes.ts` (TTL on `agent_memory_facts`, unique `{userId, factHash}`, partial-unique `troubleshooting_docs.docId`, Atlas vector + Search BM25 indexes on the recruitment + memory-mirror collections). `seed-embeddings.ts` backfills `embedding` via Voyage or Bedrock Titan.
 
 Idempotent — `deploy-project.sh` and `deploy-api.sh` re-run `seed-indexes.ts` on every deploy.
 
@@ -313,5 +310,5 @@ Documented in [`docs/deployment-guide.md` § CI/CD](docs/deployment-guide.md).
 |---|---|
 | **`AGENTS.md`** at the repo root | Instructions for **coding agents / human contributors** |
 | **`PROJECT_STRUCTURE.md`** (this file) | Per-folder map of the repo |
-| **`config/agents/*.agent.md`** | Runtime LLM agent personas (orchestrator, order, product, troubleshoot) |
+| **`config/agents/*.agent.md`** | Runtime LLM agent personas (orchestrator, job-match, career-coach, company-intel) |
 | **`config/skills/<name>/SKILL.md`** | Runtime skill instructions for a domain |

@@ -178,7 +178,7 @@ This is why specialist flows can personalize from facts learned in a different s
 
 ### Memory-recall instructions (uniform across personas)
 
-The system prompt's "Memory recall rules" block is the **single source** of memory-recall instructions for every memory-enabled agent. It lives in [`api/src/lib/prompt.ts → LONG_TERM_MEMORY_RECALL_RULES`](../api/src/lib/prompt.ts) and is appended by `withLongTermMemory(...)`. Persona files MUST NOT copy these rules inline — `api/tests/unit/orchestrator-ltm-flag.test.ts` enforces that the orchestrator and order-management personas stay clean. To change the recall behavior, update the constant (and its lock-down test), not the persona files.
+The system prompt's "Memory recall rules" block is the **single source** of memory-recall instructions for every memory-enabled agent. It lives in [`api/src/lib/prompt.ts → LONG_TERM_MEMORY_RECALL_RULES`](../api/src/lib/prompt.ts) and is appended by `withLongTermMemory(...)`. Persona files MUST NOT copy these rules inline — `api/tests/unit/orchestrator-ltm-flag.test.ts` enforces that the orchestrator and career-coach personas stay clean. To change the recall behavior, update the constant (and its lock-down test), not the persona files.
 
 ### Memory-write surface in the UI
 

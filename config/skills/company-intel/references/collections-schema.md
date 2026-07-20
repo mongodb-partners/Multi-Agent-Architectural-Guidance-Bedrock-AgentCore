@@ -28,7 +28,7 @@ writes to this collection.
   "cons":           ["Seasonal crunch", "Rapidly changing priorities"],
   "sentimentScore": 4.1,
   "asOf":           "2026-01-01",
-  "embedding":      [<768-dimensional float array>]
+  "embedding":      [<1024-dimensional float array>]
 }
 ```
 
@@ -49,7 +49,7 @@ writes to this collection.
 | `pros` / `cons` | string[] | Balanced signal lists; always present both together |
 | `sentimentScore` | number | 1.0–5.0 aggregate rating; state alongside the summary |
 | `asOf` | string (date) | Freshness of the sentiment data; flag if stale |
-| `embedding` | float[] | 768-dimensional vector; used by `companies_vector_index` |
+| `embedding` | float[] | 1024-dimensional vector; used by `companies_vector_index` |
 
 ### Indexes
 
@@ -57,7 +57,7 @@ writes to this collection.
 ```json
 {
   "fields": [
-    { "numDimensions": 768, "path": "embedding", "similarity": "cosine", "type": "vector" },
+    { "numDimensions": 1024, "path": "embedding", "similarity": "cosine", "type": "vector" },
     { "path": "industry", "type": "filter" },
     { "path": "stage",    "type": "filter" }
   ]

@@ -148,7 +148,7 @@ Four surfaces must line up:
 3. **Runtime IAM role** grants `sagemaker:InvokeEndpoint` on the endpoint ARN — wired by the `voyage_sagemaker_endpoint_arn` input in `modules/agentcore-agent-runtime`. Without it the runtime gets `AccessDenied` and `embedQueryText` silently falls back to Bedrock Titan (visible in traces as `embeddingSource: "bedrock"`).
 4. **Vector index dimensions** match the request `output_dimension`. This stack pins `voyage-multimodal-3` at 1024-d; index must be 1024-d. When changing provider/dim, re-seed with `REWIRE_EMBEDDINGS=1`.
 
-Regression check: against the `product-recommendation` agent, send "I need waterproof outdoor headphones, IP67, under $80" and look for `mongo.vector_search` events with `embeddingSource: "voyage"`, `length: 1024`, top scores in `0.7–0.8`.
+Regression check: against the `career-coach` agent, send "I'm a backend engineer — what do I need to learn to become an ML engineer?" and look for `mongo.vector_search` events with `embeddingSource: "voyage"`, `length: 1024`, top scores in `0.7–0.8`.
 
 ### `memory.long_term_skip` with `reason: "llm_extractor_failed"`
 Bedrock model access denied for the fact-extractor model. The default is `us.anthropic.claude-haiku-4-5-20251001-v1:0` (CRI form). On freshly granted accounts, the older `claude-3-5-haiku-20241022` is deprecated and ticking it in the Bedrock console does not actually grant access. Set `MEMORY_EXTRACTION_MODEL_ID` on the API process (not the runtime — the extractor runs in the API container) to a model that is enabled and supports tool use.
@@ -614,7 +614,7 @@ force_mcp_runtime_image_sync "$RUNTIME_ID" "$REPO_NAME" "latest" "$GATEWAY_ID" "
 Or, equivalently, re-run `./deploy/deploy-full-with-privatelink.sh --auto-approve` (skip-network and skip-shared are safe shortcuts).
 
 ### MongoDB MCP prewarm singleton race — boot connects without a JWT lock the runtime degraded
-**Symptom.** Specialist runtimes (especially less-frequently-used ones like `product-recommendation`) refuse to run with SSE `stream_error` `TOOLS_UNAVAILABLE` and missing `mongodb_query`/`mongodb_vector_search`. CloudWatch logs show *two* `[mcp] connect failed with auth error — will retry on next call` entries ~140 ms apart, immediately followed by `[chat] refusing to run turn against degraded template`. The same runtime worked seconds earlier for another agent.
+**Symptom.** Specialist runtimes (especially less-frequently-used ones like `company-intel`) refuse to run with SSE `stream_error` `TOOLS_UNAVAILABLE` and missing `mongodb_query`/`mongodb_vector_search`. CloudWatch logs show *two* `[mcp] connect failed with auth error — will retry on next call` entries ~140 ms apart, immediately followed by `[chat] refusing to run turn against degraded template`. The same runtime worked seconds earlier for another agent.
 
 **Cause.** `api/src/lib/prewarm.ts::runStartupPrewarm()` used to call `getMcpTools()` at container boot to warm the MCP connection. Boot has no caller-scoped JWT, so the gateway rejected the unauthenticated connect with `Missing Bearer token`. Worse, `getMcpTools()` cached the in-flight promise as a process-wide singleton — if a real chat request arrived during the ~100 ms boot window, it awaited the *prewarm's* JWT-less promise instead of starting its own JWT-scoped load, inheriting the empty tools list and degrading its template.
 

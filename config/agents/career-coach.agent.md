@@ -30,7 +30,7 @@ model: global.anthropic.claude-haiku-4-5-20251001-v1:0
 maxTokens: 4096
 temperature: 0.3
 memory:
-  shortTerm: true
+  shortTerm: false
   longTerm: true
 handoffs: []
 ---

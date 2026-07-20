@@ -218,7 +218,7 @@ if (ltm) blocks.push(`## Relevant prior context\n\n${ltm}`);
    {
      "scope": "scoped",
      "userId": "...",
-     "agentId": "product-recommendation",
+     "agentId": "career-coach",
      "entryCount": 4,
      "bytesInjected": 312,
      "collectionsQueried": ["agent_memory_facts", "chat_messages"],
@@ -275,8 +275,8 @@ In the agent's `.agent.md` frontmatter:
 
 ```yaml
 ---
-name: Product Recommendation Specialist
-id: product-recommendation
+name: Career Coach Agent
+id: career-coach
 memory:
   longTerm: true       # opt in; default false
   # longTermCollection: agent_memory_facts   # override only if you renamed the collection

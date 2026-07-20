@@ -21,7 +21,8 @@ It should take ~5–7 minutes.
 | Cognito email | `alex@example.com` |
 | Cognito password | `DemoUser#2026` |
 | Cognito pool id | `us-east-1_oPpqw8ty0` (`STREAMLIT_COGNITO_POOL_ID` in [`.env.live`](../../.env.live)) |
-| Seeded order id used in step 1 + 2 | `ORD-1001` (from [`db-seeding/seed-orders.ts:14`](../../db-seeding/seed-orders.ts)) |
+| Seeded company used in steps 2 + 3 | `Lumen Retail` / `co-lumen-retail` (from [`db-seeding/seed-companies.ts`](../../db-seeding/seed-companies.ts)) |
+| Seeded career path used in step 3 | `path-backend-to-ml-engineer` (from [`db-seeding/seed-career-paths.ts`](../../db-seeding/seed-career-paths.ts)) |
 
 > The Streamlit UI lives on port **8501**. The API on port **3000** is not directly browseable.
 
@@ -53,7 +54,7 @@ aws cognito-idp admin-set-user-password \
 2. Sign in with the credentials above.
 3. In the left sidebar, **select the "Orchestrator" persona**.
 
-> **Why this matters:** if you pick a specialist (Order Management, Product Recommendation, Troubleshooting) directly, the API skips the classifier entirely. The multi-specialist layout and the new trace events never appear. Steps 2 and 3 below rely on the orchestrator path.
+> **Why this matters:** if you pick a specialist (Job Match, Career Coach, Company Intel) directly, the API skips the classifier entirely. The multi-specialist layout and the new trace events never appear. Steps 2 and 3 below rely on the orchestrator path.
 
 ---
 
@@ -62,15 +63,15 @@ aws cognito-idp admin-set-user-password \
 **Send this prompt:**
 
 ```
-Where is my order ORD-1001?
+What's it like to work at Lumen Retail?
 ```
 
 **Expected:**
 
 - One assistant bubble appears.
-- The agent badge on the bubble resolves to **Order Management** (the orchestrator hands off via the fast path).
+- The agent badge on the bubble resolves to **Company Intel** (the orchestrator hands off via the fast path).
 - **No specialist-draft cards** are rendered (only single-specialist routing happened).
-- The reply mentions order `ORD-1001` and its shipping/tracking status.
+- The reply mentions Lumen Retail's culture signals and presents pros alongside cons.
 
 **Capture for the test log:** the `x-trace-id` from this turn (visible in the trace card or via "View full trace" → URL).
 
@@ -81,13 +82,13 @@ Where is my order ORD-1001?
 **Send this prompt:**
 
 ```
-Track my order ORD-1001 AND recommend a waterproof outdoor headphone under $80
+What skills do I need to become a Machine Learning Engineer AND is Lumen Retail a good place to do it?
 ```
 
 **Expected (watch the streaming behavior closely):**
 
-- Two **specialist-draft blocks** render live as the specialists stream their answers — one attributed to Order Management, one to Product Recommendation.
-- After both specialists finish, the two draft blocks are **replaced** (or collapsed/superseded) by a single **synthesized final answer**. The synthesized answer should mention both the order status AND a headphone recommendation.
+- Two **specialist-draft blocks** render live as the specialists stream their answers — one attributed to Career Coach, one to Company Intel.
+- After both specialists finish, the two draft blocks are **replaced** (or collapsed/superseded) by a single **synthesized final answer**. The synthesized answer should mention both the skill gap AND the company assessment.
 - Only the **synthesized final answer** is persisted in the chat history (refresh and re-open the session to confirm — the specialist drafts should not appear in the persisted thread).
 
 **Capture for the test log:** the `x-trace-id` from this turn.
@@ -99,10 +100,10 @@ Track my order ORD-1001 AND recommend a waterproof outdoor headphone under $80
 1. On the cross-domain reply from step 3, click **"View full trace"**.
 2. In the Routing Decisions section, confirm the **multi-specialist layout** renders. Specifically:
    - A **path label** (e.g. "synthesis").
-   - **Chips** for each selected specialist (Order Management, Product Recommendation).
+   - **Chips** for each selected specialist (Career Coach, Company Intel).
    - A **specialist-drafts expander** showing both drafts with their attribution.
    - A **synthesizer agent block** showing the synthesizer's role and contribution.
-   - A **rejected alternatives** list (any specialists the classifier considered but did not pick — Troubleshooting is the likely candidate here).
+   - A **rejected alternatives** list (any specialists the classifier considered but did not pick — Job Match is the likely candidate here).
 
 Reference: [`docs/trace-viewer-guide.md`](../trace-viewer-guide.md).
 

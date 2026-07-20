@@ -17,7 +17,7 @@ This checks:
 - SageMaker endpoint existence and `InService` status when `EMBEDDINGS_PROVIDER=voyage`.
 - Terraform outputs for Voyage endpoint and Bedrock KB PrivateLink.
 - Bedrock KB `ACTIVE` status with Atlas `-pl` endpoint and `endpointServiceName`.
-- Authenticated `/chat` flows for `orchestrator`, `order-management`, `product-recommendation`, and `troubleshooting`.
+- Authenticated `/chat` flows for `orchestrator`, `job-match`, `career-coach`, and `company-intel`.
 
 Useful overrides:
 

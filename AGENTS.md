@@ -12,7 +12,7 @@ A **configuration-driven multi-agent reference** on **AWS Bedrock** (via [Strand
 
 **Request path (production):** Streamlit UI → Hono API → **in-API classifier** (`agent-classifier.ts`) → specialist **AgentCore Runtime** (single hop). Mongo tools go through a dedicated **MongoDB MCP AgentCore Runtime**. `USE_ORCHESTRATOR_RUNTIME=1` enables a two-hop rollback through the orchestrator runtime.
 
-**Five AgentCore Runtimes:** orchestrator + 3 specialists (`order-management`, `product-recommendation`, `troubleshooting`) + MongoDB MCP.
+**Five AgentCore Runtimes:** orchestrator + 3 specialists (`job-match`, `career-coach`, `company-intel`) + MongoDB MCP.
 
 **Connectivity modes** (mutually exclusive per account+region): `NETWORK_MODE=privatelink` (default) or `NETWORK_MODE=peering`. Switching requires destroy + redeploy.
 
@@ -498,6 +498,6 @@ Full catalog: [`docs/reference/env-vars.md`](docs/reference/env-vars.md).
 | Name | Meaning |
 |---|---|
 | **This file (`AGENTS.md`)** | Instructions for **coding agents / developers** working on the repo |
-| **`config/agents/*.agent.md`** | **Runtime** LLM agent definitions (orchestrator, order, product, troubleshoot) |
+| **`config/agents/*.agent.md`** | **Runtime** LLM agent definitions (orchestrator, job-match, career-coach, company-intel) |
 
 If a task says “add an agent,” it usually means a **new `.agent.md` + skill**, not editing `AGENTS.md`.

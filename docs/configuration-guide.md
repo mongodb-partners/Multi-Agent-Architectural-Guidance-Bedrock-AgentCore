@@ -42,32 +42,33 @@ Each agent is a markdown file with YAML frontmatter. The file name (without `.ag
 
 ```yaml
 ---
-id: order-management
-name: Order Management Agent
-description: Query and manage customer orders from MongoDB Atlas (lookups, status, returns).
-model: us.anthropic.claude-haiku-4-5-20251001-v1:0
-maxTokens: 2048
-temperature: 0.2
+id: job-match
+name: Job Match Agent
+description: Matches candidate CVs to open job listings using hybrid search on the jobs collection, and provides interview prep from the interview_prep collection.
+model: global.anthropic.claude-haiku-4-5-20251001-v1:0
+maxTokens: 4096
+temperature: 0.3
 tools:
   - mongodb_query
-  - mongodb_aggregate
+  - mongodb_vector_search
   - read_skill_resource
-  - run_skill_script
-  - order-management/notify_fulfillment_lambda   # skill-scoped HTTP tool: <skillId>/<localName>
+  - job-match/notify_recruiter_lambda   # illustrative skill-scoped HTTP tool: <skillId>/<localName>
 skills:
-  - order-management
+  - job-match
 memory:
   shortTerm: true
   longTerm: true
   longTermCollection: agent_memory_facts          # optional override
 handoffs:                                         # used by orchestrator/roster surfaces
-  - label: Order issues
-    agent: order-management
-    prompt: My order #12345 has not arrived
+  - label: Job matching & interview prep
+    agent: job-match
+    prompt: "{{ userMessage }}"
 ---
 
-You are the Order Management Agent. You help customers...
+You are the Job Match Agent. You help candidates find relevant openings...
 ```
+
+> The `job-match/notify_recruiter_lambda` entry above is **illustrative** — it shows the `<skillId>/<localName>` syntax for a per-skill HTTP tool. No shipped skill currently defines an `http-tools.json`; see [§ 4](#4-http-tool-configuration) to add one.
 
 ### Frontmatter schema
 
@@ -78,7 +79,7 @@ Validated by [`api/src/lib/schemas.ts`](../api/src/lib/schemas.ts) (`agentFrontm
 | `id` | string (≥ 1 char) | yes | — | Must match the file/directory name |
 | `name` | string (≥ 1 char) | yes | — | Human-readable label shown in the UI |
 | `description` | string | yes | — | Short blurb shown in the agents catalog and used by the in-API classifier (`agent-classifier.ts`). Empty string passes the schema but defeats classification — write a real sentence. |
-| `model` | string | no | (none — Bedrock SDK default) | Bedrock inference profile or model ID. Today's defaults: orchestrator + order-management = `us.anthropic.claude-haiku-4-5-20251001-v1:0`; troubleshooting + product-recommendation = `us.anthropic.claude-sonnet-4-6`. Source of truth: [`config/agents/`](../config/agents/). |
+| `model` | string | no | (none — Bedrock SDK default) | Bedrock inference profile or model ID. Today's defaults: orchestrator = `us.anthropic.claude-haiku-4-5-20251001-v1:0`; job-match + career-coach = `global.anthropic.claude-haiku-4-5-20251001-v1:0`; company-intel = `us.anthropic.claude-sonnet-4-6`. Source of truth: [`config/agents/`](../config/agents/). |
 | `maxTokens` | int (> 0) | no | `4096` | Cap on output tokens |
 | `temperature` | number `[0, 2]` | no | `0.7` | Sampling temperature |
 | `tools` | string[] | no | `[]` | Names of tools to attach. Built-ins: `mongodb_query`, `mongodb_vector_search`, `mongodb_aggregate`, `bedrock_kb_retrieve`, `embed_multimodal_content`, `activate_skill`, `read_skill_resource`, `run_skill_script`. Skill-scoped HTTP tools: `<skillId>/<localName>`. Complete catalog: [`reference/tools.md`](reference/tools.md). |
@@ -105,16 +106,18 @@ Skills are bundles of instructions, scripts, references, and HTTP tool definitio
 ### Directory layout
 
 ```
-config/skills/order-management/
+config/skills/job-match/
 ├── SKILL.md                       # Skill instructions + frontmatter (loaded when agent activates)
 ├── http-tools.json                # Optional. Per-skill HTTP tool definitions (e.g. Lambda function URLs)
 ├── http-tools.example.json        # Optional. Reference template, ignored by the loader
 ├── scripts/
-│   └── validate-return.mjs        # Imported by run_skill_script
+│   └── example-script.mjs         # Imported by run_skill_script
 └── references/
-    ├── return-policy.md           # Read by read_skill_resource
+    ├── collections-schema.md      # Read by read_skill_resource
     └── faq.md
 ```
+
+> The shipped recruitment skills (`job-match`, `career-coach`, `company-intel`) currently ship only `SKILL.md` + a `references/` folder — no `http-tools.json` or `scripts/`. The layout above shows every directory the loader supports; add the optional pieces as needed.
 
 ### `SKILL.md` frontmatter
 
@@ -122,19 +125,19 @@ Validated by `skillFrontmatterSchema` in [`api/src/lib/schemas.ts`](../api/src/l
 
 ```yaml
 ---
-name: order-management
+name: job-match
 description: >-
-  Query and manage customer orders from MongoDB Atlas. Use for order lookups,
-  status, tracking, and returns.
+  Match candidate CVs to open job listings using hybrid search on the jobs
+  collection, and provide interview prep from the interview_prep collection.
 metadata:
   author: peerislands
   version: "1.0"
-  domain: e-commerce
+  domain: recruitment
 ---
 
-# Order Management
+# Job Match
 
-Use `mongodb_query` on the `orders` collection ...
+Use `mongodb_vector_search` on the `jobs` collection ...
 ```
 
 | Field | Type | Required | Notes |
@@ -189,20 +192,22 @@ Each entry in `tools[]`:
 
 ```json
 {
-  "name": "notify_fulfillment_lambda",
-  "description": "POST order payload to a Lambda Function URL",
+  "name": "notify_recruiter_lambda",
+  "description": "POST candidate match payload to a Lambda Function URL",
   "method": "POST",
-  "url": "${ORDER_NOTIFY_LAMBDA_URL}",
+  "url": "${RECRUITER_NOTIFY_LAMBDA_URL}",
   "headers": {
     "Content-Type": "application/json"
   },
   "timeoutMs": 30000,
   "parameters": [
-    { "name": "orderId", "type": "string",  "description": "Order id",            "required": true },
-    { "name": "event",   "type": "string",  "description": "shipped | cancelled", "required": true }
+    { "name": "candidateId", "type": "string", "description": "Candidate id",          "required": true },
+    { "name": "jobId",       "type": "string", "description": "Matched job id",         "required": true }
   ]
 }
 ```
+
+> This is an **illustrative** example — no shipped skill currently defines this tool.
 
 | Field | Type | Required | Default | Notes |
 |---|---|---|---|---|
@@ -240,7 +245,7 @@ A request URL whose hostname matches none of the allowed entries is rejected bef
 
 ### Wiring tools to agents
 
-After defining a per-skill tool, expose it on an agent by listing **`<skillId>/<localName>`** in that agent's `tools:` (e.g. `order-management/notify_fulfillment_lambda`). The skill must also be in the agent's `skills:` list so the activation gate passes. Global tools (root `http-tools.json`) are listed by their bare `name`.
+After defining a per-skill tool, expose it on an agent by listing **`<skillId>/<localName>`** in that agent's `tools:` (e.g. `job-match/notify_recruiter_lambda`). The skill must also be in the agent's `skills:` list so the activation gate passes. Global tools (root `http-tools.json`) are listed by their bare `name`.
 
 `GET /http-tools` lists configured tools and whether each `url` resolves to a non-empty value after `${VAR}` expansion — useful for sanity checks. It is **not** the full tool catalog; for that see [`reference/tools.md`](reference/tools.md).
 
@@ -277,10 +282,10 @@ Served verbatim by `GET /demo-prompts` ([`api/src/routes/demo-prompts.ts`](../ap
 groups:
   - title: Routing & handoff
     prompts:
-      - label: Order status
-        text: Where is my order #12345?
-      - label: Product question
-        text: What's the difference between the X-2 and X-3 models?
+      - label: Skill gap
+        text: What skills do I need to become an engineering manager?
+      - label: Company research
+        text: What's the engineering culture like at Lumen Retail?
   - title: Memory
     prompts:
       - label: Identity fact

@@ -31,7 +31,7 @@ Checks:
 - Terraform outputs for Voyage endpoint + Bedrock KB connectivity.
 - Bedrock KB in `ACTIVE` state with the correct Atlas endpoint service.
 - **AgentCore Runtime env wiring** — every runtime (orchestrator + 3 specialists) has its full env set (≥ 18 vars on specialists, ≥ 22 on orchestrator). Catches the post-apply env-drift class permanently. See `docs/status/debugging.md` "AgentCore Runtime env vars get reset…".
-- **Authenticated `/chat` flows** for `orchestrator`, `order-management`, `product-recommendation`, `troubleshooting`. Each turn must yield `token`, `done`, **no `stream_error`**, a `trace_id`, and either a `trace` event or a `handoff`. `product-recommendation` must also emit a real `mongo.vector_search` trace event; `troubleshooting` and `orchestrator` must emit `tool.mcp` (proves the AgentCore Gateway → MongoDB MCP path is live, with `_meta` passthrough working).
+- **Authenticated `/chat` flows** for `orchestrator`, `job-match`, `career-coach`, `company-intel`. Each turn must yield `token`, `done`, **no `stream_error`**, a `trace_id`, and either a `trace` event or a `handoff`. `career-coach` must also emit a real `mongo.vector_search` trace event; `company-intel` and `orchestrator` must emit `tool.mcp` (proves the AgentCore Gateway → MongoDB MCP path is live, with `_meta` passthrough working).
 - **LTM cross-session recall** — plant turn writes a uniquely-tokened fact (e.g. `HELIOTROPE-LANTERN`), a second session in a fresh chat must surface that token. Verifies `agent_memory_facts` write + hybrid retrieval end-to-end.
 - **CloudWatch trace_id join** — picks the live `x-trace-id` from the smoke chat and confirms `/multiagent/<env>/api` log streams contain ≥ 1 matching event in the smoke window. Validates `_trace` propagation from API → CloudWatch (the parallel scan against `/aws/bedrock-agentcore/runtimes/*` log groups is best-effort and warns rather than fails when AgentCore-side propagation is still in progress).
 - The Phase 9b deterministic backend smoke (`deploy/scripts/backend-smoke.py`, invoked by `deploy-project.sh`) wraps two chat turns in a **3-attempt retry with 15s × attempt back-off** so a freshly-restarted API container doesn't fail the gate on cold-start latency.
@@ -67,6 +67,8 @@ Covers:
 3. **Product recommendation** chat — asserts `mongodb_vector_search` fires via Voyage.
 4. **Troubleshooting** chat — asserts `mongodb_vector_search` + optional `bedrock_kb_retrieve`.
 5. **Order management** chat — asserts the `mongodb_query` path (no embedding).
+
+> ⚠️ **`e2e-smoke.sh` is not migrated.** Steps 3–5 still target the retired `product-recommendation`, `troubleshooting`, and `order-management` agents, which no longer exist in `config/agents/`. These steps will fail against a current deployment. `post-deploy-smoke.py` (above) *is* migrated and is the authoritative post-deploy gate. Port steps 3–5 to `job-match` / `career-coach` / `company-intel` before relying on this script.
 6. **Long-term memory** — turn 1 sets a fact, turn 2 in a fresh session recalls it.
 7. **Trace assertions** — `mongo.vector_search` events have the expected payload shape.
 

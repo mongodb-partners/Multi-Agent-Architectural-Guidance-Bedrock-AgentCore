@@ -45,7 +45,7 @@ The full implementation lives in [`api/src/lib/logger.ts`](../api/src/lib/logger
 ### Example line
 
 ```json
-{"level":"info","ts":"2026-05-15T08:51:22.396Z","msg":"[chat] routing to AgentCore Runtime","service":"mongodb-multiagent-api","channel":"app","trace_id":"706ad3686485be1c2fcb30cb9cf63e0a","span_id":"964d438f51291531","trace_flags":"01","requestId":"req_41f11217-198","userId":"user-stream","sessionId":"stream_sess","requestedAgent":"orchestrator","agentId":"order-management","mode":"ec2_to_specialist","hasRuntimeOverride":true,"traceCollectorId":"d1108cec-a305-414c-8d47-b60a7943bb8a"}
+{"level":"info","ts":"2026-05-15T08:51:22.396Z","msg":"[chat] routing to AgentCore Runtime","service":"mongodb-multiagent-api","channel":"app","trace_id":"706ad3686485be1c2fcb30cb9cf63e0a","span_id":"964d438f51291531","trace_flags":"01","requestId":"req_41f11217-198","userId":"user-stream","sessionId":"stream_sess","requestedAgent":"orchestrator","agentId":"job-match","mode":"ec2_to_specialist","hasRuntimeOverride":true,"traceCollectorId":"d1108cec-a305-414c-8d47-b60a7943bb8a"}
 ```
 
 ---

@@ -76,7 +76,7 @@ Content-Type: application/json
 Accept: text/event-stream
 
 {
-  "message": "Where is my order ORD-1234?",
+  "message": "Here's my CV — which open roles fit me?",
   "sessionId": "session-abc-123",
   "agentId": "orchestrator"
 }
@@ -86,7 +86,7 @@ Accept: text/event-stream
 |---|---|---|
 | `message` | yes | The user's question |
 | `sessionId` | yes | Any string ≥ 1 char. The API pads it to ≥ 33 chars internally before invoking AgentCore (runtime session-id requirement). |
-| `agentId` | no | Default: in-API classifier picks the specialist (heuristic + Haiku fallback). Pass an explicit specialist id (e.g. `troubleshooting`) to bypass classification, or `orchestrator` to force the in-API classifier path even when an upstream caller pinned a different agent. When `USE_ORCHESTRATOR_RUNTIME=1`, every request goes through the orchestrator runtime regardless of this field. |
+| `agentId` | no | Default: in-API classifier picks the specialist (heuristic + Haiku fallback). Pass an explicit specialist id (e.g. `company-intel`) to bypass classification, or `orchestrator` to force the in-API classifier path even when an upstream caller pinned a different agent. When `USE_ORCHESTRATOR_RUNTIME=1`, every request goes through the orchestrator runtime regardless of this field. |
 
 **Response:** `text/event-stream` with a sequence of named events.
 
@@ -105,35 +105,35 @@ Accept: text/event-stream
 | `error` | `{code, message, requestId}` | Terminal failure. Followed by `done`. |
 | `done` | `{sessionId, messageId, traceId?, error?}` | Always emitted last. `traceId` set when tracing is enabled. |
 
-**Example: order tracking question (default path — in-API classifier → AgentCore Runtime, true SSE streaming)**
+**Example: job matching question (default path — in-API classifier → AgentCore Runtime, true SSE streaming)**
 
 ```
 event: agent_info
-data: {"agentId": "order-management", "agentName": "Order Management Agent"}
+data: {"agentId": "job-match", "agentName": "Job Match Agent"}
 
 event: handoff
-data: {"from": "orchestrator", "to": "order-management", "label": "classifier:heuristic"}
+data: {"from": "orchestrator", "to": "job-match", "label": "classifier:heuristic"}
 
 event: stream
-data: {"type": "token", "text": "Your order "}
+data: {"type": "token", "text": "Based on your CV, "}
 
 event: stream
-data: {"type": "token", "text": "ORD-1234 is currently in transit"}
+data: {"type": "tool_call", "tool": "mongodb_vector_search", "status": "started"}
 
 event: stream
-data: {"type": "tool_call", "tool": "mongodb_query", "status": "started"}
+data: {"type": "tool_call", "tool": "mongodb_vector_search", "status": "completed"}
 
 event: stream
-data: {"type": "tool_call", "tool": "mongodb_query", "status": "completed"}
+data: {"type": "token", "text": "the three strongest matches are Senior Platform Engineer, "}
 
 event: stream
-data: {"type": "token", "text": " and is expected to arrive on 2026-05-04."}
+data: {"type": "token", "text": "Backend Engineer (Payments), and Staff SRE."}
 
 event: done
 data: {"sessionId": "session-abc-123", "messageId": "msg_a1b2c3d4e5f6", "traceId": "..."}
 ```
 
-**Example: troubleshooting question (Path B — Strands Swarm in local dev)**
+**Example: company research question (Path B — Strands Swarm in local dev)**
 
 ```
 event: agent_info
@@ -143,13 +143,13 @@ event: agent_active
 data: {"agentId": "orchestrator", "agentName": "Orchestrator Agent"}
 
 event: token
-data: {"text": "I see you have error PWR-001. "}
+data: {"text": "You're asking about Northwind Robotics. "}
 
 event: handoff
-data: {"from": "orchestrator", "to": "troubleshooting", "label": "PWR-001"}
+data: {"from": "orchestrator", "to": "company-intel", "label": "company:Northwind Robotics"}
 
 event: agent_active
-data: {"agentId": "troubleshooting", "agentName": "Troubleshooting Agent"}
+data: {"agentId": "company-intel", "agentName": "Company Intel Agent"}
 
 event: tool_call
 data: {"tool": "bedrock_kb_retrieve", "status": "started"}
@@ -158,10 +158,10 @@ event: tool_call
 data: {"tool": "bedrock_kb_retrieve", "status": "completed"}
 
 event: token
-data: {"text": "PWR-001 indicates a power supply issue. "}
+data: {"text": "Northwind Robotics is a Series B company of ~180 people. "}
 
 event: token
-data: {"text": "First, verify the wall outlet is working by..."}
+data: {"text": "Engineers report high ownership and a flat structure..."}
 
 event: done
 data: {"sessionId": "session-abc-123", "messageId": "msg_..."}
@@ -192,7 +192,7 @@ Common error codes:
 ```bash
 curl -N -X POST http://localhost:3000/chat \
   -H "Content-Type: application/json" \
-  -d '{"message": "Where is my order ORD-1234?", "sessionId": "test-001"}'
+  -d '{"message": "Here's my CV — which open roles fit me?", "sessionId": "test-001"}'
 ```
 
 ### Python example
@@ -202,7 +202,7 @@ import requests
 
 with requests.post(
     "http://localhost:3000/chat",
-    json={"message": "Where is my order ORD-1234?", "sessionId": "test-001"},
+    json={"message": "Here's my CV — which open roles fit me?", "sessionId": "test-001"},
     stream=True,
     headers={"Accept": "text/event-stream"},
 ) as r:
@@ -257,15 +257,15 @@ Fetches a single session with all messages.
     {
       "id": "msg_a1b2c3d4",
       "role": "user",
-      "content": "Where is my order ORD-1234?",
+      "content": "Here's my CV — which open roles fit me?",
       "timestamp": "2026-05-01T13:42:11Z"
     },
     {
       "id": "msg_e5f6g7h8",
       "role": "assistant",
-      "content": "Your order ORD-1234 is in transit...",
+      "content": "Based on your CV, the three strongest matches are...",
       "timestamp": "2026-05-01T13:42:14Z",
-      "agentId": "order-management"
+      "agentId": "job-match"
     }
   ]
 }
@@ -319,11 +319,11 @@ Request body:
 ```json
 {
   "files": {
-    "agents/order-management.agent.md": "...",
-    "skills/order-management/SKILL.md": "..."
+    "agents/job-match.agent.md": "...",
+    "skills/job-match/SKILL.md": "..."
   },
   "specialistArns": {
-    "order-management": "arn:aws:bedrock-agentcore:..."
+    "job-match": "arn:aws:bedrock-agentcore:..."
   }
 }
 ```
@@ -342,13 +342,11 @@ Returns all loaded skills with their tool counts:
 {
   "skills": [
     {
-      "name": "order-management",
+      "name": "job-match",
       "description": "...",
-      "scriptCount": 1,
-      "referenceCount": 2,
-      "httpTools": [
-        {"name": "calculate_shipping", "urlConfigured": true}
-      ]
+      "scriptCount": 0,
+      "referenceCount": 1,
+      "httpTools": []
     }
   ]
 }
@@ -369,9 +367,9 @@ This endpoint only reports **configured HTTP tools** (root `config/http-tools.js
   ],
   "skillTools": [
     {
-      "skill": "order-management",
+      "skill": "job-match",
       "tools": [
-        {"name": "calculate_shipping", "urlConfigured": true}
+        {"name": "<localToolName>", "urlConfigured": true}
       ]
     }
   ]
