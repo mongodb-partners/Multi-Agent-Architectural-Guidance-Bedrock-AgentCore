@@ -185,6 +185,33 @@ describe("Trace routes — auth ownership matrix", () => {
     expect(ids).not.toContain("trc-list-unscoped");
   });
 
+  test("GET /traces folds chat.turn.end durationMs into each summary", async () => {
+    await persistTrace(
+      makeTrace({
+        traceId: "trc-dur",
+        sessionId: "s-dur",
+        messageId: "m-dur",
+        userId: "user-a",
+        events: [
+          {
+            id: "e-end",
+            ts: Date.now(),
+            type: "chat.turn.end",
+            payload: { durationMs: 2500, summary: {} } as never,
+          },
+        ],
+      }),
+    );
+    const tok = await jwtFor("user-a");
+    const res = await app.request("http://localhost/traces?sessionId=s-dur", {
+      headers: { Authorization: `Bearer ${tok}` },
+    });
+    const body = (await res.json()) as { traces: Array<{ summary: { durationMs?: number; mongoQueries: number } }> };
+    expect(body.traces[0]?.summary.durationMs).toBe(2500);
+    // the rest of the summary must survive the fold
+    expect(body.traces[0]?.summary.mongoQueries).toBe(1);
+  });
+
   test("GET /traces/:id returns 404 when trace.userId mismatches caller userId", async () => {
     await persistTrace(makeTrace({ traceId: "trc-other", userId: "user-other" }));
     const tok = await jwtFor("user-a");

@@ -27,21 +27,26 @@ def render_metrics_block(api_base: str, token: str | None) -> None:
     total_tokens = 0
     total_mongo = 0
     n = len(traces)
-    avg_latency = 0
+    total_latency = 0
+    timed = 0
     for t in traces:
         summ = t.get("summary") or {}
         c = summ.get("estimatedCostUsd")
         if c is not None:
             total_cost += float(c)
         total_tokens += int(summ.get("totalTokens") or 0)
-        total_mongo += int(summ.get("mongoQueriesCount") or 0)
-        avg_latency += int(summ.get("durationMs") or 0)
-    if n:
-        avg_latency //= n
+        total_mongo += int(summ.get("mongoQueries") or 0)
+        d = int(summ.get("durationMs") or 0)
+        if d:
+            total_latency += d
+            timed += 1
+    # Average over the turns that actually reported a duration, so older
+    # traces without one don't drag the number toward zero.
+    avg_latency = total_latency // timed if timed else 0
 
     with st.expander(f"Live metrics — last {n} turn(s)", expanded=False):
         st.metric("Total cost (USD)", f"${total_cost:.4f}")
         st.metric("Total tokens", f"{total_tokens:,}")
         st.metric("Avg latency", f"{avg_latency / 1000:.2f}s")
-        st.metric("Mongo ops", str(total_mongo))
+        st.metric("MongoDB ops", str(total_mongo))
         st.caption("Cached for 10 s — refresh page to recompute.")

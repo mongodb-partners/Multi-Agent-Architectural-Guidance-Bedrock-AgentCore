@@ -83,7 +83,7 @@ describe("TraceCollector — tiered truncation caps", () => {
     expect(seed[0].contentPreview.length).toBe(8_000);
   });
 
-  test("PII keys are always redacted (independent of TRACE_REDACT)", () => {
+  test("PII keys reach the trace verbatim when TRACE_REDACT is unset", () => {
     delete process.env.TRACE_REDACT;
     const c = makeCollector();
     c.event("auth.context_build", {
@@ -94,11 +94,31 @@ describe("TraceCollector — tiered truncation caps", () => {
     });
     const ev = c.getEvents()[0];
     const claims = (ev.payload as any).jwtClaims;
-    expect(claims.email).toBe("[redacted]");
-    expect(claims.phone).toBe("[redacted]");
-    expect(claims.name).toBe("[redacted]");
-    // Non-PII keys survive verbatim.
+    expect(claims.email).toBe("x@y.z");
+    expect(claims.phone).toBe("+1-555");
+    expect(claims.name).toBe("Alice");
     expect(claims.sub).toBe("u");
+  });
+
+  test("TRACE_REDACT=1 restores the PII stomp, nested included", () => {
+    process.env.TRACE_REDACT = "1";
+    try {
+      const c = makeCollector();
+      c.event("auth.context_build", {
+        userId: "u",
+        customersResolved: 1,
+        ordersResolved: 0,
+        jwtClaims: { sub: "u", email: "x@y.z", phone: "+1-555", name: "Alice" },
+      });
+      const claims = (c.getEvents()[0].payload as any).jwtClaims;
+      expect(claims.email).toBe("[redacted]");
+      expect(claims.phone).toBe("[redacted]");
+      expect(claims.name).toBe("[redacted]");
+      // Non-PII keys survive verbatim.
+      expect(claims.sub).toBe("u");
+    } finally {
+      delete process.env.TRACE_REDACT;
+    }
   });
 
   test("strings on non-debug event types stay clamped at 512 chars", () => {

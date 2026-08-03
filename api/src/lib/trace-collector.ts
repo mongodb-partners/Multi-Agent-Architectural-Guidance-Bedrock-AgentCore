@@ -107,7 +107,9 @@ function approxBytes(ev: TraceEvent): number {
   return safeStringify(ev).length;
 }
 
-// PII redaction keys (lower-case match).
+// PII redaction keys (lower-case match). Applied only when `TRACE_REDACT=1`
+// — see the `redactPii` parameter threaded through `redactPayload` /
+// `redactValue`. Truncation caps are orthogonal and always run.
 const PII_KEYS = new Set(["email", "phone", "address", "name", "dob", "ssn"]);
 
 /**
@@ -177,16 +179,16 @@ function capString(s: string, cap: number): string {
  * array (or `responseBody` object tree) gets the debug cap, not just the
  * top-level string.
  */
-function redactValue(value: unknown, cap: number, depth = 0): unknown {
+function redactValue(value: unknown, cap: number, redactPii: boolean, depth = 0): unknown {
   if (depth > 6) return value;
   if (value == null) return value;
   if (typeof value === "string") return capString(value, cap);
-  if (Array.isArray(value)) return value.map((v) => redactValue(v, cap, depth + 1));
+  if (Array.isArray(value)) return value.map((v) => redactValue(v, cap, redactPii, depth + 1));
   if (typeof value === "object") {
     const out: Record<string, unknown> = {};
     for (const [k, v] of Object.entries(value)) {
-      if (PII_KEYS.has(k.toLowerCase())) out[k] = "[redacted]";
-      else out[k] = redactValue(v, cap, depth + 1);
+      if (redactPii && PII_KEYS.has(k.toLowerCase())) out[k] = "[redacted]";
+      else out[k] = redactValue(v, cap, redactPii, depth + 1);
     }
     return out;
   }
@@ -194,23 +196,23 @@ function redactValue(value: unknown, cap: number, depth = 0): unknown {
 }
 
 /**
- * Apply PII redaction + tiered truncation caps to a payload, using the
- * event type to look up the per-field cap allow-list.
+ * Apply PII redaction (only when `redactPii`) + tiered truncation caps to a
+ * payload, using the event type to look up the per-field cap allow-list.
  */
-function redactPayload(type: TraceEventType, payload: unknown): unknown {
+function redactPayload(type: TraceEventType, payload: unknown, redactPii: boolean): unknown {
   if (payload == null || typeof payload !== "object" || Array.isArray(payload)) {
-    return redactValue(payload, TRUNCATION_CAP_DEFAULT);
+    return redactValue(payload, TRUNCATION_CAP_DEFAULT, redactPii);
   }
   const debugFields = DEBUG_CAP_FIELDS[type];
   const piiExempt = PII_EXEMPT_FIELDS[type];
   const out: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(payload as Record<string, unknown>)) {
-    if (PII_KEYS.has(k.toLowerCase()) && !piiExempt?.has(k)) {
+    if (redactPii && PII_KEYS.has(k.toLowerCase()) && !piiExempt?.has(k)) {
       out[k] = "[redacted]";
       continue;
     }
     const cap = debugFields?.has(k) ? TRUNCATION_CAP_DEBUG : TRUNCATION_CAP_DEFAULT;
-    out[k] = redactValue(v, cap);
+    out[k] = redactValue(v, cap, redactPii);
   }
   return out;
 }
@@ -220,7 +222,7 @@ function redactPayload(type: TraceEventType, payload: unknown): unknown {
  * but kept for any out-of-tree caller that imports `redactDeep` directly.
  */
 function redactDeep(value: unknown, depth = 0): unknown {
-  return redactValue(value, TRUNCATION_CAP_DEFAULT, depth);
+  return redactValue(value, TRUNCATION_CAP_DEFAULT, true, depth);
 }
 void redactDeep;
 
@@ -691,16 +693,19 @@ export class TraceCollector {
   }
 
   /**
-   * Apply tiered per-event-type truncation caps. PII keys are always
-   * redacted (independent of `TRACE_REDACT`); truncation caps run on every
-   * event so debug payloads never silently exceed the per-event byte cap.
-   * When `TRACE_REDACT=1`, the underlying value-level pass still strips PII
-   * field by field. The `this.redact` flag is preserved for back-compat but
-   * the tiered cap path now runs unconditionally — pre-PR1 behavior of
-   * "no caps at all" was the silent-bloat bug we're fixing.
+   * Apply tiered per-event-type truncation caps, plus PII key redaction when
+   * `TRACE_REDACT=1`. The caps run on every event regardless of the flag so
+   * debug payloads never silently exceed the per-event byte cap — pre-PR1
+   * behavior of "no caps at all" was the silent-bloat bug we're fixing.
+   *
+   * `TRACE_REDACT` defaults to 0, i.e. PII fields (`email`, `phone`, `name`,
+   * …) reach the Trace Viewer verbatim. That's deliberate for the demo stack
+   * — the whole point of the viewer is showing what the agents actually saw.
+   * Set `TRACE_REDACT=1` in `.env` for any deployment carrying real customer
+   * data; see the trace-value gating block in `.env.sample`.
    */
   private applyRedaction(ev: TraceEvent): TraceEvent {
-    return { ...ev, payload: redactPayload(ev.type, ev.payload) as never };
+    return { ...ev, payload: redactPayload(ev.type, ev.payload, this.redact) as never };
   }
 
   /**

@@ -138,8 +138,7 @@ def summary_tiles(trace: dict) -> list[str]:
     mongo_results = _events_of(events, "mongo.result")
     vector_searches = _events_of(events, "mongo.vector_search")
     mongo_count = (
-        _as_int(summary.get("mongoQueriesCount"))
-        or _as_int(summary.get("mongoQueries"))
+        _as_int(summary.get("mongoQueries"))
         or len(mongo_results) + len(vector_searches)
     )
     if mongo_count:

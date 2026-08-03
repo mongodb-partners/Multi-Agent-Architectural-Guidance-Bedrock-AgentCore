@@ -49,6 +49,22 @@ function userOwnsTrace(trace: Trace | undefined, userId: string | undefined): bo
   return !!trace.userId && trace.userId === userId;
 }
 
+/**
+ * Turn latency lives on the `chat.turn.end` event payload, not in `summary`.
+ * The `/traces` list ships no events, so fold it into the summary there —
+ * that's the field name `client_trace_view` / `metrics_sidebar` already read.
+ */
+function turnDurationMs(trace: Trace): number | undefined {
+  for (let i = trace.events.length - 1; i >= 0; i--) {
+    const ev = trace.events[i];
+    if (ev.type === "chat.turn.end") {
+      const d = (ev.payload as { durationMs?: unknown } | undefined)?.durationMs;
+      return typeof d === "number" ? d : undefined;
+    }
+  }
+  return undefined;
+}
+
 function notFound(c: Context, requestId: string) {
   return c.json(
     {
@@ -194,7 +210,7 @@ traceRoutes.get("/traces", async (c) => {
       messageId: t.messageId,
       agentId: t.agentId,
       createdAt: t.createdAt,
-      summary: t.summary,
+      summary: t.summary && { ...t.summary, durationMs: turnDurationMs(t) },
       truncated: t.truncated,
       eventsDropped: t.eventsDropped,
     })),

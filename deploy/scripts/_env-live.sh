@@ -148,7 +148,8 @@ MEMORY_EXTRACTION_MODEL_ID=us.anthropic.claude-haiku-4-5-20251001-v1:0
 # (no SSH/SSM hand-editing of /opt/multiagent/.env.docker on EC2).
 #   MEMORY_TRACE_VALUES=1 → raw fact strings in trace events. Default 0 = "<redacted>".
 #   TRACE_PROMPT_BODY=1   → prompt.assembled.body attached (full system prompt).
-#   TRACE_REDACT=1        → blanket redactDeep pass over every event payload.
+#   TRACE_REDACT=1        → stomp PII keys (email/phone/name/…) to "[redacted]"
+#                           in every event payload. Default 0 = PII visible.
 MEMORY_TRACE_VALUES=${MEMORY_TRACE_VALUES:-0}
 TRACE_PROMPT_BODY=${TRACE_PROMPT_BODY:-0}
 TRACE_REDACT=${TRACE_REDACT:-0}

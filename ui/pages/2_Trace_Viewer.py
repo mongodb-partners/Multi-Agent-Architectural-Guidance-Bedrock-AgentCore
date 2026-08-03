@@ -100,16 +100,19 @@ if not trace_id and not (session_id and message_id):
 
 with st.spinner("Loading trace…"):
     try:
-        # The page loads the slim "core" projection so client demos stay fast.
-        # The full dev payload is fetched on demand when the user clicks
-        # "Show developer details" inside `render_developer_details`.
+        # "full" — the identity projection, so no field arrives as an
+        # `_omittedForCoreMode` sentinel. The slim "core" projection is the
+        # faster option for big traces but greys out every heavy payload
+        # until the user opens Developer details; switch back to
+        # `include="core"` if page-load time on large traces matters more
+        # than seeing every field inline.
         trace = get_trace(
             settings.api_base,
             trace_id=trace_id,
             session_id=session_id,
             message_id=message_id,
             access_token=api_token,
-            include="core",
+            include="full",
         )
     except Exception as exc:
         st.error(f"Could not fetch trace: {exc}")

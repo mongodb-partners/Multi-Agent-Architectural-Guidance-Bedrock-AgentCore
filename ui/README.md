@@ -26,7 +26,7 @@ The UI runs on `http://localhost:8501`. With `DEV_MOCK_BACKENDS=1` on the API an
 |---|---|
 | `app.py` | Streamlit entrypoint — chat panel, demo prompts, sidebar agent picker. |
 | `pages/1_Sessions.py` | Lists past sessions for the signed-in user; resume / delete actions. |
-| `pages/2_Trace_Viewer.py` | Debug-grade Trace Viewer — fetches `?include=core` by default and `?include=dev` on demand. |
+| `pages/2_Trace_Viewer.py` | Debug-grade Trace Viewer — fetches `?include=full` by default and `?include=dev` on demand. |
 | `lib/api_client.py` | Typed HTTP API wrapper for the API (SSE chat, sessions, agents, traces, health). |
 | `lib/cognito_gate.py` | Hosted-UI redirect or embedded login (uses `streamlit-cognito-auth` when configured). |
 | `lib/inline_summary.py` | Per-turn summary card on the chat panel (skills, vector search previews, LTM toast). |
@@ -52,7 +52,9 @@ All authenticated modes send `Authorization: Bearer <cognito-access-token>` to t
 
 ## Trace Viewer modes
 
-The Trace Viewer fetches `?include=core` on initial load (lite projection — dev-only event types + heavy fields replaced with `{ _omittedForCoreMode: true, bytesAvailable: N, wasRedacted? }` sentinels) and `?include=dev` on demand when the user clicks **Show developer details**.
+The Trace Viewer fetches `?include=full` on initial load (identity projection — every field inline, nothing replaced with an `_omittedForCoreMode` sentinel) and `?include=dev` on demand when the user clicks **Show developer details**.
+
+`?include=core` is still served by the API and is the faster choice for large traces (lite projection — dev-only event types dropped, heavy fields replaced with `{ _omittedForCoreMode: true, bytesAvailable: N, wasRedacted? }` sentinels). Switch `pages/2_Trace_Viewer.py` back to it if initial page load matters more than seeing every field without a click.
 
 `lib/api_client.py:get_trace` asserts the response header `X-Trace-Include: core|dev|full` matches the requested projection so a routing regression that silently downgrades a request becomes a UI-test failure. Audit log channel emits `[trace] fetch` with the `include` field for SOC2 review.
 
