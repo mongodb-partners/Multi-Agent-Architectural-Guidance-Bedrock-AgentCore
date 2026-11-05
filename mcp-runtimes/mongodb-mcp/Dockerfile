@@ -13,7 +13,7 @@
 # the AgentCore Gateway target back to a Lambda variant.
 
 # ── Stage 1: build ────────────────────────────────────────────────────────────
-FROM --platform=linux/arm64 node:22.23.4-alpine AS builder
+FROM --platform=linux/arm64 node:26.13.0-alpine AS builder
 
 WORKDIR /app
 
@@ -30,7 +30,7 @@ COPY src/lib        src/lib
 RUN npx tsc
 
 # ── Stage 2: runtime ──────────────────────────────────────────────────────────
-FROM --platform=linux/arm64 node:22.23.4-alpine
+FROM --platform=linux/arm64 node:26.13.0-alpine
 
 WORKDIR /app
 
