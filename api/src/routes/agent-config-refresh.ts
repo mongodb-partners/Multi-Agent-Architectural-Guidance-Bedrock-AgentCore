@@ -46,7 +46,6 @@ function validateRelativeConfigPath(relPath: string): string {
     parsed.startsWith("agents/") ||
     parsed.startsWith("skills/") ||
     parsed === "http-tools.json" ||
-    parsed === "environment.yaml" ||
     parsed === "demo-prompts.yaml";
   if (!allowed) {
     throw new Error(`unsupported config path: ${relPath}`);

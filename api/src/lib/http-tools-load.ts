@@ -115,10 +115,6 @@ export function loadHttpToolsFile(force = false): HttpToolsFile {
   return normalized;
 }
 
-export function listHttpToolDefinitions(): HttpToolDefinition[] {
-  return loadHttpToolsFile().tools;
-}
-
 /** Test helper: clear load cache. */
 export function resetHttpToolsLoadCacheForTests(): void {
   cached = null;

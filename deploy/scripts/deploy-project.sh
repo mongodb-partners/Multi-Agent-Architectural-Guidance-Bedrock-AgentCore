@@ -1098,7 +1098,7 @@ assert_mongo_reachable "$MONGODB_URI" "$ATLAS_DB_NAME" 300 \
   || err "Mongo reachability assertion failed before Phase 5b seed gate (see diagnostic envelope above)"
 
 log "Checking MongoDB seed state..."
-SEED_NEEDED="$(MONGODB_URI="$MONGODB_URI" MONGODB_DB="$ATLAS_DB_NAME" bun -e '
+SEED_NEEDED="$(MONGODB_URI="$MONGODB_URI" MONGODB_DB="$ATLAS_DB_NAME" mongo_bun_e '
 import { MongoClient } from "mongodb";
 const uri = process.env.MONGODB_URI;
 const dbName = process.env.MONGODB_DB;

@@ -43,10 +43,13 @@ module "mongodb_atlas" {
 
   atlas_project_id = var.atlas_project_id
   cluster_name     = "${var.project_name}-${var.environment}"
-  db_name          = var.atlas_db_name
-  db_username      = var.atlas_db_user
-  db_password      = var.atlas_db_password
-  project_tag      = var.project_name
+  # Public endpoint here (no peering), but keep the cluster co-located with the
+  # AWS region so local and EC2 deploys land in the same place.
+  atlas_region = upper(replace(var.aws_region, "-", "_"))
+  db_name      = var.atlas_db_name
+  db_username  = var.atlas_db_user
+  db_password  = var.atlas_db_password
+  project_tag  = var.project_name
 }
 
 # Atlas Search indexes that belong to application data are reconciled through

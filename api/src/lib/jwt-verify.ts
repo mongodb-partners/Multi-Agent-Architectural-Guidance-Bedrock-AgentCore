@@ -6,7 +6,7 @@ import {
 } from "jose";
 
 /** True when `AUTH_JWKS_URI` and `AUTH_ISSUER` are set — JWT signature and claims are verified. */
-export function isJwksAuthConfigured(): boolean {
+function isJwksAuthConfigured(): boolean {
   const jwks = process.env.AUTH_JWKS_URI?.trim();
   const iss = process.env.AUTH_ISSUER?.trim();
   return Boolean(jwks && iss);

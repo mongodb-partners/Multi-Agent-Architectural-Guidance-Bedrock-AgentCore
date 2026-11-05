@@ -199,7 +199,7 @@ type MemoryFact = {
   embeddingModel?: string;
 };
 
-export function computeFactHash(userId: string, agentId: string, fact: string): string {
+function computeFactHash(userId: string, agentId: string, fact: string): string {
   const normalized = fact.normalize("NFKC").trim().toLowerCase().replace(/\s+/g, " ");
   return createHash("sha256")
     .update(`${userId}|${agentId}|${normalized}`)
@@ -269,7 +269,7 @@ export function clearFactExtractorForTests(): void {
  * return an empty result with `extractorError` set; the caller (`mongoWriteFacts`)
  * treats that as a skip. Extractor never throws.
  */
-export async function extractFactCandidates(
+async function extractFactCandidates(
   userMessage: string,
 ): Promise<ExtractFactCandidatesResult> {
   if (_factExtractorOverride) return _factExtractorOverride(userMessage);
@@ -758,7 +758,7 @@ export async function writeLongTermMemory(
  * Returns a formatted string for injection into the system prompt,
  * or null if there is nothing to inject.
  */
-export async function readLongTermMemory(
+async function readLongTermMemory(
   userId: string,
   agentId: string,
 ): Promise<string | null> {
@@ -1254,7 +1254,7 @@ export async function readLongTermMemoryContext(
  * This helps orchestrator/specialists personalize "my ..." requests even when
  * prior facts were learned in a different specialist conversation.
  */
-export async function readSharedLongTermMemory(userId: string): Promise<string | null> {
+async function readSharedLongTermMemory(userId: string): Promise<string | null> {
   if (!userId) return null;
   const limit = Math.max(3, maxInjectTurns());
   const trace = currentTrace();

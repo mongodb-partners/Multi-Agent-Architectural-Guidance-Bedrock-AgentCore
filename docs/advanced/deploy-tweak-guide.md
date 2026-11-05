@@ -2,7 +2,7 @@
 
 > **Audience:** advanced operators tuning the deployed system — switching between local/EC2 modes, swapping models, enabling auth, adjusting tool routing, or wiring local dev to live AWS. Most contributors will not need this guide; routine deploys are covered in [`../deployment-guide.md`](../deployment-guide.md), and `config/`-folder edits live in [`../configuration-guide.md`](../configuration-guide.md).
 >
-> **Companion:** [`../configuration-guide.md`](../configuration-guide.md) covers the `config/` folder (agent personas, skill bundles, `environment.yaml`, `http-tools.json`). [`../reference/env-vars.md`](../reference/env-vars.md) catalogs **every** environment variable read by the stack with defaults and the file that consumes it. This guide is the prose explanation of the most-touched knobs and how they interact.
+> **Companion:** [`../configuration-guide.md`](../configuration-guide.md) covers the `config/` folder (agent personas, skill bundles, `demo-prompts.yaml`, `http-tools.json`). [`../reference/env-vars.md`](../reference/env-vars.md) catalogs **every** environment variable read by the stack with defaults and the file that consumes it. This guide is the prose explanation of the most-touched knobs and how they interact.
 
 Every operational behavior is controlled by **environment variables** read at boot. There is no GUI config, no database-stored settings, and no hot-reloadable `.json` for runtime behavior.
 
@@ -269,7 +269,7 @@ curl -sN -X POST "http://$EC2_IP:3000/chat" -H "Authorization: Bearer $JWT" \
 | Variable | Default | Purpose |
 |---|---|---|
 | `PORT` / `API_PORT` | `3000` | API listen port |
-| `CORS_ORIGINS` | from `environment.yaml` | Comma-separated allowed origins |
+| `CORS_ORIGINS` | `http://localhost:8501,http://127.0.0.1:8501` | Comma-separated allowed origins |
 | `RATE_LIMIT_PER_MIN` | `60` | Per-IP rate limit. Set `RATE_LIMIT_DISABLED=1` to turn off. |
 | `LOG_LEVEL` | `info` | `error` / `warn` / `info` / `debug` |
 | `SWARM_MAX_STEPS` | `8` | Max iterations in local swarm mode |
@@ -353,7 +353,6 @@ curl -s http://localhost:3000/agents | jq '.[] | {id, name, model}'
 
 | File | Purpose |
 |---|---|
-| [`api/src/lib/environment-config.ts`](../../api/src/lib/environment-config.ts) | Reads YAML defaults + env vars at boot |
 | [`api/src/lib/orchestrator-mode.ts`](../../api/src/lib/orchestrator-mode.ts) | Decides Strands Swarm vs single-agent routing inside the orchestrator runtime |
 | [`api/src/adapters/agentcore-runtime.ts`](../../api/src/adapters/agentcore-runtime.ts) | `invokeAgentRuntime` + the `AGENTCORE_ORCHESTRATOR_ARN` startup guard |
 | [`api/src/adapters/mongodb-mcp-client.ts`](../../api/src/adapters/mongodb-mcp-client.ts) | StreamableHTTP MCP client used by the API to call the MongoDB MCP AgentCore Runtime, with Gateway fallback |

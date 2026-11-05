@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const agentHandoffSchema = z.object({
+const agentHandoffSchema = z.object({
   label: z.string(),
   agent: z.string(),
   prompt: z.string().optional(),

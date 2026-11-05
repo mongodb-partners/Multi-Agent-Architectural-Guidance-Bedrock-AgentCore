@@ -67,7 +67,7 @@ function emitterEnabled(): boolean {
  * it up. We deliberately do NOT write through `logger.ts` because EMF needs
  * the `_aws` envelope at the top level, not nested under our usual fields.
  */
-export function emitMetric(opts: EmitOptions): void {
+function emitMetric(opts: EmitOptions): void {
   if (!emitterEnabled()) return;
   try {
     const dims = Object.keys(opts.dimensions).filter((k) => opts.dimensions[k] != null && opts.dimensions[k] !== "");

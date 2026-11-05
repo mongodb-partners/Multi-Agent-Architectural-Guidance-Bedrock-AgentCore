@@ -160,7 +160,7 @@ export async function resolveAgentcoreDependencyStatus(): Promise<AgentcoreStatu
 }
 
 /** Probe the mongodb-mcp-server via the MCP client adapter. */
-export async function resolveMcpDependencyStatus(): Promise<McpStatus> {
+async function resolveMcpDependencyStatus(): Promise<McpStatus> {
   try {
     return await Promise.race([
       probeMcpServer(),

@@ -78,7 +78,7 @@ const notConfigured = (hint: string) =>
     hint,
   }) as const;
 
-export function makeReadSkillResourceTool(registry: SkillRegistry): Tool {
+function makeReadSkillResourceTool(registry: SkillRegistry): Tool {
   return tool({
     name: "read_skill_resource",
     description:
@@ -101,7 +101,7 @@ export function makeReadSkillResourceTool(registry: SkillRegistry): Tool {
  * and call a named export. Same allowlist/activation gates as `read_skill_resource`.
  * The export's return value becomes the Strands tool result (model sees it on next step).
  */
-export function makeRunSkillScriptTool(registry: SkillRegistry): Tool {
+function makeRunSkillScriptTool(registry: SkillRegistry): Tool {
   return tool({
     name: "run_skill_script",
     description:
@@ -228,7 +228,7 @@ function isPlainRecord(value: unknown): value is Record<string, JSONValue> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-export const bedrockKbRetrieveTool = tool({
+const bedrockKbRetrieveTool = tool({
   name: "bedrock_kb_retrieve",
   description:
     "Retrieve relevant chunks from an Amazon Bedrock Knowledge Base (RAG). " +
@@ -390,7 +390,7 @@ export const embedMultimodalContentTool = tool({
  * The activated body is available to subsequent tool calls and the final
  * answer within the same agent loop turn.
  */
-export function makeActivateSkillTool(registry: SkillRegistry): Tool {
+function makeActivateSkillTool(registry: SkillRegistry): Tool {
   return tool({
     name: "activate_skill",
     description:

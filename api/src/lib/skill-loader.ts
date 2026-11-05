@@ -93,7 +93,7 @@ type SkillBodyCacheEntry = { mtimeMs: number; body: string | undefined };
 const skillBodyCache = new Map<string, SkillBodyCacheEntry>();
 
 /** Load the markdown body (after frontmatter) of a single skill. */
-export function loadSkillInstructions(skillName: string): string | undefined {
+function loadSkillInstructions(skillName: string): string | undefined {
   const skillPath = path.join(skillsRoot(), skillName, "SKILL.md");
   if (!fs.existsSync(skillPath)) return undefined;
   let mtimeMs = -1;
@@ -111,9 +111,6 @@ export function loadSkillInstructions(skillName: string): string | undefined {
   skillBodyCache.set(skillPath, { mtimeMs, body });
   return body;
 }
-
-/** Test helper: drop the SKILL.md body cache. */
-export const clearSkillInstructionsCacheForTests = clearSkillCaches;
 
 // ---------------------------------------------------------------------------
 // Phase 3 — On-demand resources (references/, scripts/)

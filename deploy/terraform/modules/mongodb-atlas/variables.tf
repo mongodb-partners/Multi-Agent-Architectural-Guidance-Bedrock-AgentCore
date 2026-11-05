@@ -8,6 +8,16 @@ variable "cluster_name" {
   description = "Atlas cluster name"
 }
 
+variable "atlas_region" {
+  type        = string
+  description = "Atlas region for the cluster, underscored uppercase (e.g. US_WEST_2). MUST match the AWS region of the peered VPC: the Atlas network container is per (project, region), so a cluster placed in a different region than the container is unreachable over the peering — its nodes get private IPs from the other container's CIDR and no route exists for them."
+
+  validation {
+    condition     = can(regex("^[A-Z0-9_]+$", var.atlas_region))
+    error_message = "atlas_region must be underscored uppercase, e.g. US_WEST_2 (not us-west-2)."
+  }
+}
+
 variable "db_name" {
   type        = string
   description = "MongoDB database name. Caller must supply a project+env-scoped value, e.g. <PROJECT_NAME>_<ENVIRONMENT> (underscored), so multiple deployments don't collide on a shared Atlas project."

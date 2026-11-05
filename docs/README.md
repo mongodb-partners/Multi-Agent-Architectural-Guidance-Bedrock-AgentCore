@@ -41,7 +41,7 @@ Pick the path that matches your role.
 
 ### 3.1 Operator / SRE (deploy + run + debug)
 1. [`deployment-guide.md`](deployment-guide.md) — prerequisites, the two orchestrators, teardown (`deploy/destroy/`), CI/CD
-2. [`configuration-guide.md`](configuration-guide.md) — `config/` folder: agent personas, skills, `environment.yaml`
+2. [`configuration-guide.md`](configuration-guide.md) — `config/` folder: agent personas, skills, `demo-prompts.yaml`
 3. [`observability-runbook.md`](observability-runbook.md) — finding traces, log groups, dashboards, alarms, emergency knobs
 4. [`reference/smoke-tests.md`](reference/smoke-tests.md) — every `e2e-smoke/*` script
 5. [`status/debugging.md`](status/debugging.md) — fix things when they break
@@ -79,7 +79,7 @@ Pick the path that matches your role.
 |---|---|---|
 | [`architecture.md`](architecture.md) | System overview, 5-runtime topology, AWS infra, request flow, classifier path | 2026-05-20 |
 | [`deployment-guide.md`](deployment-guide.md) | How to deploy (PrivateLink + VPC peering), CI/CD, teardown, prerequisites | 2026-05-20 |
-| [`configuration-guide.md`](configuration-guide.md) | `config/` folder — agent personas, skills, `environment.yaml`, `http-tools.json` | 2026-05-24 |
+| [`configuration-guide.md`](configuration-guide.md) | `config/` folder — agent personas, skills, `demo-prompts.yaml`, `http-tools.json` | 2026-05-24 |
 | [`advanced/deploy-tweak-guide.md`](advanced/deploy-tweak-guide.md) | **Advanced** — deploy/runtime tuning: mode flags, ARNs, embeddings, operational env knobs | 2026-05-24 |
 | [`api-reference.md`](api-reference.md) | HTTP + SSE contract, projections, auth error codes | 2026-05-20 |
 | [`agent-authoring-guide.md`](agent-authoring-guide.md) | `.agent.md` frontmatter + body | 2026-05-20 |

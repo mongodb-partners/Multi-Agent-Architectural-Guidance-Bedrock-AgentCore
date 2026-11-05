@@ -629,7 +629,7 @@ Runs on every push and pull request against `main` / `master`. Four jobs in para
 | Job | What it runs |
 |---|---|
 | `api` | `bun install --frozen-lockfile`, `bun run typecheck`, `bun run validate:bun`, `bun run validate:agentcore`, `bun run test:all` |
-| `ui` | `pip install -r requirements.txt`, `python -m pytest tests/ -v` |
+| `ui` | `pip install -r requirements-dev.txt`, `python -m pytest tests/ -v` |
 | `e2e` | `bunx playwright install --with-deps chromium` then `API_URL=http://localhost:3000 bun run test` — requires a **live** API (no in-tree stub server; health/agents/skills smoke only unless you add chat specs) |
 | `docker-images` | `docker build` for both `api/Dockerfile` (context = repo root) and `ui/Dockerfile` (context = `ui/`) — verifies images build cleanly |
 

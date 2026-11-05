@@ -29,7 +29,7 @@
  *     persisted answer + path taken.
  */
 
-import { listAgents, getAgent } from "./config-scan.ts";
+import { getAgent } from "./config-scan.ts";
 import { logger } from "./logger.ts";
 import {
   classifyAgents,
@@ -42,8 +42,6 @@ import type { TraceCollector } from "./trace-collector.ts";
 import type { TraceEvent } from "./trace-types.ts";
 import {
   runSynthesizerAgent,
-  SYNTHESIZER_AGENT_ID,
-  SYNTHESIZER_AGENT_NAME,
   type SpecialistAnswer,
 } from "./specialist-answer-synthesizer.ts";
 
@@ -596,16 +594,3 @@ export async function* runMultiSpecialistFlow(
   };
 }
 
-// -- helpers exported for tests --------------------------------------------
-
-/** Names of all currently-routable specialists. Used by tests / docs. */
-export function listKnownSpecialists(): string[] {
-  return listAgents()
-    .map((a) => a.id)
-    .filter((id) => id !== "orchestrator" && id !== SYNTHESIZER_AGENT_ID);
-}
-
-export const _internal = {
-  SYNTHESIZER_AGENT_ID,
-  SYNTHESIZER_AGENT_NAME,
-};

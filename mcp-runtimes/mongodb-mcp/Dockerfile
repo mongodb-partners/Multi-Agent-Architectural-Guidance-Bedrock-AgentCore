@@ -13,7 +13,7 @@
 # the AgentCore Gateway target back to a Lambda variant.
 
 # ── Stage 1: build ────────────────────────────────────────────────────────────
-FROM --platform=linux/arm64 node:20-alpine AS builder
+FROM --platform=linux/arm64 node:22.23.4-alpine AS builder
 
 WORKDIR /app
 
@@ -30,9 +30,13 @@ COPY src/lib        src/lib
 RUN npx tsc
 
 # ── Stage 2: runtime ──────────────────────────────────────────────────────────
-FROM --platform=linux/arm64 node:20-alpine
+FROM --platform=linux/arm64 node:22.23.4-alpine
 
 WORKDIR /app
+
+# Pick up the Alpine ca-certificates fix (INFOSEC-122760 / eMudhra CA distrust).
+# See docs/status/infosec-122760-emudhra-ca-remediation.md § F4.
+RUN apk upgrade --no-cache ca-certificates
 
 ENV NODE_ENV=production \
     PORT=8000 \

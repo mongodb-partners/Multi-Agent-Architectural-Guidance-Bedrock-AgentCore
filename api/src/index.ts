@@ -1,7 +1,6 @@
 import { initOtel } from "./lib/otel.ts";
 import { installStrandsConsoleRedirect } from "./lib/strands-console-redirect.ts";
 import { createApp } from "./app.ts";
-import { resolveApiListenPort } from "./lib/environment-config.ts";
 import { assertAgentcoreOrchestratorArn } from "./adapters/agentcore-runtime.ts";
 import { assertJwksAuthConfigured } from "./lib/jwt-verify.ts";
 import { assertShortTermBackendConfigured } from "./lib/short-term-memory.ts";
@@ -24,7 +23,7 @@ void runStartupPrewarm({ source: "api" });
 
 const app = createApp();
 
-const port = resolveApiListenPort();
+const port = Number(process.env.PORT ?? process.env.API_PORT) || 3000;
 
 logger.info("api listening", { port });
 

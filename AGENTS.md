@@ -138,7 +138,6 @@ Deploy scripts write runtime ARNs, Cognito JWKS, and memory store IDs into `.env
 | `config/agents/` | `.agent.md` — persona YAML frontmatter + markdown body (4 shipped: orchestrator + 3 specialists) |
 | `config/skills/` | `SKILL.md` + optional `references/`, `scripts/`, `http-tools.json` |
 | `config/http-tools.json` | Optional global HTTP tools + `security` host allowlist |
-| `config/environment.yaml` | API defaults (port, CORS) |
 | `config/demo-prompts.yaml` | Sidebar "Try a prompt" entries for Streamlit |
 | `db-seeding/` | Atlas demo data + vector/BM25 index seed scripts (`seed-all.ts`, `seed-indexes.ts`, …) |
 | `deploy/` | Terraform (`envs/`, `modules/`, `bootstrap/`), deploy/destroy shell scripts, IAM policy, KB doc sources |
@@ -227,7 +226,7 @@ bun run test                       # unit tests
 bun run test:all                   # unit + integration (integration is env-gated)
 
 # UI — run from ui/
-cd ui && pip install -r requirements.txt && python -m pytest tests/ -v
+cd ui && pip install -r requirements-dev.txt && python -m pytest tests/ -v
 
 # Playwright — against a live API only (no in-tree stub server)
 cd e2e && bun install && bunx playwright install chromium
@@ -459,7 +458,7 @@ Full catalog: [`docs/reference/env-vars.md`](docs/reference/env-vars.md).
 
 **Still open:** AgentCore Code Interpreter for skill scripts; customer-scoped multi-tenancy on ops collections; browser/Streamlit E2E in CI; ECS/ALB automation beyond EC2.
 
-**Implemented:** Streamlit Cognito (`ui/lib/cognito_gate.py`); TTL + vector/BM25 indexes via `db-seeding/seed-indexes.ts`; `config/environment.yaml` → `lib/environment-config.ts`.
+**Implemented:** Streamlit Cognito (`ui/lib/cognito_gate.py`); TTL + vector/BM25 indexes via `db-seeding/seed-indexes.ts`; API port/CORS via `PORT` / `CORS_ORIGINS` env vars.
 
 ---
 

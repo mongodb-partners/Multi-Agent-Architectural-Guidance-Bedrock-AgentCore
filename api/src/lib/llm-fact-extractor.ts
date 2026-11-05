@@ -60,7 +60,7 @@ export type FactCandidate = {
 // `record_facts` tool-use schema this extractor requires.
 // Override via `MEMORY_EXTRACTION_MODEL_ID` env var if you've enabled a
 // different extraction model in your account.
-export const DEFAULT_LLM_EXTRACTOR_MODEL_ID =
+const DEFAULT_LLM_EXTRACTOR_MODEL_ID =
   "us.anthropic.claude-haiku-4-5-20251001-v1:0";
 
 const MAX_FACT_LEN = 220;

@@ -143,7 +143,7 @@ export type ScoredHit = {
   doc: Document;
 };
 
-export async function runVectorSearch(
+async function runVectorSearch(
   db: Db,
   collection: string,
   queryVector: number[],
@@ -174,7 +174,7 @@ export async function runVectorSearch(
   }
 }
 
-export async function runLexicalSearch(
+async function runLexicalSearch(
   db: Db,
   collection: string,
   queryText: string,

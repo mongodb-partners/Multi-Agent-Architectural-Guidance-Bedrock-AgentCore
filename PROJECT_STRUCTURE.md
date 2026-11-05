@@ -17,7 +17,6 @@ A per-folder map of the repository as it ships today. Each entry explains **what
 ├── config/
 │   ├── agents/             *.agent.md — runtime LLM agent definitions
 │   ├── skills/             SKILL.md folders — domain knowledge + scripts + http-tools
-│   ├── environment.yaml    API defaults (port, CORS, etc.)
 │   ├── demo-prompts.yaml   Sidebar "Try a prompt" entries
 │   └── http-tools.json     Optional global HTTP tools + SSRF allowlist
 ├── db-seeding/             Atlas data + Atlas Search/vector index seed scripts
@@ -25,11 +24,9 @@ A per-folder map of the repository as it ships today. Each entry explains **what
 ├── e2e/                    Playwright API smoke specs
 ├── e2e-smoke/              Python live-AWS smoke + memory recall diagnostic
 ├── docs/                   Canonical getting started pack (read docs/README.md first)
-├── .github/workflows/      ci.yml + deploy.yml
 ├── compose.yaml            Local docker-compose for API + UI
 ├── Makefile                docker-up / docker-build / docker-down / docker-logs shortcuts
 ├── .env.sample             Every env var, commented (copy to .env)
-├── .env.docker.example     Docker-compose overrides
 ├── README.md               Project overview (points at docs/README.md for getting started)
 ├── AGENTS.md               Contributor conventions (AI + human)
 └── PROJECT_STRUCTURE.md    This file
@@ -149,7 +146,6 @@ config/
 │   └── company-intel/
 │       ├── SKILL.md
 │       └── references/collections-schema.md
-├── environment.yaml                  API port + CORS defaults
 ├── demo-prompts.yaml                 Streamlit "Try a prompt" entries
 └── http-tools.json                   Optional global HTTP tools + SSRF host allowlist
 ```
@@ -290,17 +286,6 @@ docs/
     ├── smoke-tests.md
     └── deploy-scripts.md
 ```
-
----
-
-## `.github/workflows/`
-
-| Workflow | Trigger | What it does |
-|---|---|---|
-| `ci.yml` | push / PR | `bun run typecheck` + `bun run validate:bun` + `bun run validate:agentcore` + `bun test tests/unit` |
-| `deploy.yml` | manual / tag | Mirror of `deploy-full-with-privatelink.sh` / `deploy-full-with-vpc-peering.sh` against a long-lived AWS environment |
-
-Documented in [`docs/deployment-guide.md` § CI/CD](docs/deployment-guide.md).
 
 ---
 

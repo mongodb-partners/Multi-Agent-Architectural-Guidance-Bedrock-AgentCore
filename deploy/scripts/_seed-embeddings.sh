@@ -119,7 +119,7 @@ _se_should_rewire() {
     return 0
   fi
   local probe_out
-  probe_out="$(MONGO_URI="$mongo_uri" MONGO_DB="$db_name" CURRENT_DIM="$current_dim" CURRENT_PROVIDER="$provider" bun -e '
+  probe_out="$(MONGO_URI="$mongo_uri" MONGO_DB="$db_name" CURRENT_DIM="$current_dim" CURRENT_PROVIDER="$provider" mongo_bun_e '
 import { MongoClient } from "mongodb";
 const uri = process.env.MONGO_URI;
 const dbName = process.env.MONGO_DB;

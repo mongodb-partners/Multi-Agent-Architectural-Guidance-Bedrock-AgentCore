@@ -5,7 +5,6 @@ import { rateLimitMiddleware } from "./middleware/rate-limit.ts";
 import { requestIdMiddleware } from "./middleware/request-id.ts";
 import { otelServerSpanMiddleware } from "./middleware/otel.ts";
 import { accessLogMiddleware } from "./middleware/access-log.ts";
-import { resolveCorsOrigins } from "./lib/environment-config.ts";
 import { logger } from "./lib/logger.ts";
 import { agentsRoutes } from "./routes/agents.ts";
 import { chatRoutes } from "./routes/chat.ts";
@@ -37,7 +36,10 @@ export function createApp(): Hono {
     );
   });
 
-  const corsOrigins = resolveCorsOrigins();
+  // CORS allowlist: comma-separated `CORS_ORIGINS`, else the local Streamlit defaults.
+  const corsOrigins = process.env.CORS_ORIGINS?.trim()
+    ? process.env.CORS_ORIGINS.split(",").map((s) => s.trim()).filter(Boolean)
+    : ["http://localhost:8501", "http://127.0.0.1:8501"];
 
   app.use("*", requestIdMiddleware);
   app.use("*", otelServerSpanMiddleware);

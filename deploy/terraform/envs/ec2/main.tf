@@ -254,8 +254,12 @@ check "network_mode_matches_shared" {
 module "mongodb_atlas" {
   source = "../../modules/mongodb-atlas"
 
-  atlas_project_id        = var.atlas_project_id
-  cluster_name            = "${var.project_name}-${var.environment}"
+  atlas_project_id = var.atlas_project_id
+  cluster_name     = "${var.project_name}-${var.environment}"
+  # Cluster region follows the AWS region. In peering mode the Atlas network
+  # container is per (project, region), so a cluster in any other region would
+  # sit behind a different container CIDR with no route over the peering.
+  atlas_region            = upper(replace(var.aws_region, "-", "_"))
   db_name                 = var.atlas_db_name
   db_username             = var.atlas_db_user
   db_password             = var.atlas_db_password

@@ -14,7 +14,6 @@
 flowchart LR
   AGENT[config/agents/*.agent.md<br/>Agent personas] --> API
   SKILL[config/skills/*/SKILL.md<br/>Skill definitions + scripts/ + references/] --> API
-  YAML[config/environment.yaml<br/>API port + CORS defaults] --> API
   DEMO[config/demo-prompts.yaml<br/>Streamlit sidebar prompts] --> API
   HTTP[config/http-tools.json<br/>Global HTTP tools + SSRF allowlist] --> API
   SHTTP[config/skills/*/http-tools.json<br/>Per-skill HTTP tools] --> API
@@ -27,7 +26,6 @@ flowchart LR
 | `config/skills/<id>/SKILL.md` | Skill instructions + `metadata` block | `api/src/lib/skill-loader.ts` | Discovery cached by skills-dir mtime; body cached by file mtime |
 | `config/skills/<id>/scripts/*.mjs` | Dynamically imported by `run_skill_script` | `api/src/lib/base-tools.ts` (on demand) | Node ESM cache — process restart to re-import |
 | `config/skills/<id>/references/*.md` | Read by `read_skill_resource` | `api/src/lib/skill-loader.ts` (on demand) | Re-read on each call; capped by `SKILL_RESOURCE_MAX_BYTES` |
-| `config/environment.yaml` | API port, CORS origins (defaults if env vars unset) | `api/src/lib/environment-config.ts` | Memoized per process — restart to reload |
 | `config/demo-prompts.yaml` | Sidebar "Try a prompt" entries served via `GET /demo-prompts` | `api/src/routes/demo-prompts.ts` | Mtime cache |
 | `config/http-tools.json` | Global HTTP tools + `security` host allowlist | `api/src/lib/http-tools-load.ts` | Mtime cache; override path with `HTTP_TOOLS_CONFIG_PATH` |
 | `config/skills/<id>/http-tools.json` | Per-skill HTTP tools (no `security` block — root file owns SSRF) | `api/src/lib/skill-http-tools-load.ts` | Mtime cache (per skill) |
@@ -251,26 +249,16 @@ After defining a per-skill tool, expose it on an agent by listing **`<skillId>/<
 
 ---
 
-## 5. App defaults (`config/environment.yaml`)
+## 5. App defaults (env vars)
 
-Loaded by [`api/src/lib/environment-config.ts`](../api/src/lib/environment-config.ts). Validated against:
+Port and CORS are read straight from the environment at boot — there is no config file for them.
 
-```yaml
-api:
-  port: 3000                              # int > 0; overridden by PORT / API_PORT env
-  corsOrigins:                            # string[]; overridden by CORS_ORIGINS (comma-separated)
-    - http://localhost:8501
-    - http://127.0.0.1:8501
-```
-
-| Key | Type | Default | Override env |
+| Setting | Env var | Default | Read by |
 |---|---|---|---|
-| `api.port` | positive int | `3000` (built-in) | `PORT`, then `API_PORT` |
-| `api.corsOrigins` | string[] | `["http://localhost:8501","http://127.0.0.1:8501"]` (built-in) | `CORS_ORIGINS` (comma-separated) |
+| Listen port | `PORT`, then `API_PORT` | `3000` | [`api/src/index.ts`](../api/src/index.ts) |
+| CORS allowlist | `CORS_ORIGINS` (comma-separated) | `http://localhost:8501,http://127.0.0.1:8501` | [`api/src/app.ts`](../api/src/app.ts) |
 
-Lookup order (first non-empty wins): env var → `environment.yaml` → built-in default.
-
-The file is **memoized per process** — a restart is required to pick up edits. A missing or invalid file is logged once and ignored (defaults still apply). Unknown keys are tolerated. Other operational tunables (rate limits, log level, etc.) live in env vars only — see [`advanced/deploy-tweak-guide.md` § 5](advanced/deploy-tweak-guide.md#5-operational-tunables).
+Both are read once at boot — restart to pick up a change. Other operational tunables (rate limits, log level, etc.) are also env-only — see [`advanced/deploy-tweak-guide.md` § 5](advanced/deploy-tweak-guide.md#5-operational-tunables).
 
 ---
 
@@ -317,9 +305,7 @@ The loader is mtime-cached and tolerant: missing file or parse failure → `{ gr
 | [`api/src/lib/http-tools-schema.ts`](../api/src/lib/http-tools-schema.ts) | Zod schemas for global + per-skill HTTP tool files |
 | [`api/src/lib/http-tools-load.ts`](../api/src/lib/http-tools-load.ts) | Loads root `config/http-tools.json` (or `HTTP_TOOLS_CONFIG_PATH`); `${VAR}` expansion |
 | [`api/src/lib/skill-http-tools-load.ts`](../api/src/lib/skill-http-tools-load.ts) | Loads per-skill `config/skills/<id>/http-tools.json`; `<skillId>/<localName>` parser |
-| [`api/src/lib/environment-config.ts`](../api/src/lib/environment-config.ts) | Loads `config/environment.yaml`; `resolveApiListenPort`, `resolveCorsOrigins` |
 | [`api/src/routes/demo-prompts.ts`](../api/src/routes/demo-prompts.ts) | Loads + serves `config/demo-prompts.yaml` |
-| [`config/environment.yaml`](../config/environment.yaml) | API port, CORS, defaults |
 | [`config/demo-prompts.yaml`](../config/demo-prompts.yaml) | Sidebar suggested prompts |
 | [`config/http-tools.json`](../config/http-tools.json) + [`config/http-tools.example.json`](../config/http-tools.example.json) | Global HTTP tools + SSRF allowlist; example template |
 | [`config/agents/`](../config/agents/) | Agent personas |

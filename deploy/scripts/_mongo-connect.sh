@@ -41,9 +41,32 @@ sanitize_mongo_uri() {
 # message. The <host> on success is the actual node the driver connected to
 # (from hello.me) so callers can verify NETWORK_MODE-correct DNS resolution.
 # Inlined so callers don't need an extra file on disk.
+# mongo_bun_e <js-source>
+#
+# Run `bun -e` with module resolution anchored at db-seeding/, whose bun.lock +
+# package.json overrides pin bson to 7.2.0. USE THIS INSTEAD OF A BARE `bun -e`
+# for anything that imports `mongodb`.
+#
+# Why: `bun -e` has no source file, so Bun resolves modules from the CWD. Run
+# from the repo root or deploy/terraform/envs/ec2 — neither of which has a
+# node_modules in its ancestry — Bun auto-installs the newest mongodb, which
+# pulls bson >= 7.3.0. Those call node:v8 isBuildingSnapshot in an ObjectId
+# static initializer; Bun defines that function and throws ERR_NOT_IMPLEMENTED
+# when called, killing the process at import before any Mongo work happens.
+#
+# A root package.json carrying `overrides` does NOT fix this — Bun's
+# auto-install ignores it (verified 2026-08-10). Only real node_modules works,
+# hence the cd. Runs in a subshell so the caller's CWD is untouched.
+mongo_bun_e() {
+  local _mc_pkg_dir
+  _mc_pkg_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/db-seeding"
+  ( cd "$_mc_pkg_dir" 2>/dev/null || { printf 'ERR cannot cd to %s for bun mongo helper' "$_mc_pkg_dir"; exit 0; }
+    bun -e "$1" )
+}
+
 _mc_run_bun_ping() {
   # URI/DB come from MONGO_URI / MONGO_DB env (set by assert_mongo_reachable caller).
-  bun -e '
+  mongo_bun_e '
 import { MongoClient } from "mongodb";
 const uri = process.env.MONGO_URI;
 const dbName = process.env.MONGO_DB;

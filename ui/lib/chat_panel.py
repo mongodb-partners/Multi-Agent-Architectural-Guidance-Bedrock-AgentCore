@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import streamlit as st
 
-from lib.avatars import BOT_AVATAR, USER_AVATAR
 from lib.api_client import (
     AgentActiveEvent,
     ChatStreamError,
@@ -24,6 +23,10 @@ from lib.inline_summary import (
     merge_post_done_memory_events,
     render_inline_summary,
 )
+
+# Chat-message avatars, passed straight to st.chat_message(avatar=...).
+USER_AVATAR = "👤"   # neutral person silhouette
+BOT_AVATAR = "🍃"    # MongoDB leaf — assistant identity
 
 _TOOL_ICON = ":material/build:"
 _SKILL_ICON = ":material/menu_book:"

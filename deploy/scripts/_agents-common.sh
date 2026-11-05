@@ -576,11 +576,18 @@ cfg = json.loads(os.environ["CFG_JSON"])
 env = dict(cfg.get("environmentVariables") or {})
 env["MONGODB_URI"] = os.environ["MONGO_URI"]
 env["MONGODB_DB"] = os.environ["MONGO_DB"]
+net = cfg.get("networkConfiguration") or {"networkMode": "PUBLIC"}
+# get-agent-runtime reports networkModeConfig.requireServiceS3Endpoint, but
+# UpdateAgentRuntime REJECTS it for runtimes created after the 2026-06-11
+# rollout ("Agents created after ... cannot modify requireServiceS3Endpoint").
+# Drop it from the replay: this repo never sets it, so omitting it leaves the
+# service default in place on older runtimes too.
+(net.get("networkModeConfig") or {}).pop("requireServiceS3Endpoint", None)
 out = {
     "agentRuntimeId": os.environ["RUNTIME_ID"],
     "roleArn": cfg["roleArn"],
     "agentRuntimeArtifact": cfg["agentRuntimeArtifact"],
-    "networkConfiguration": cfg.get("networkConfiguration") or {"networkMode": "PUBLIC"},
+    "networkConfiguration": net,
     "protocolConfiguration": cfg.get("protocolConfiguration") or {"serverProtocol": "MCP"},
     "environmentVariables": env,
 }
@@ -817,11 +824,16 @@ print((artifact.get('containerConfiguration') or {}).get('containerUri') or '')
 import json, os, sys
 
 cfg = json.loads(os.environ['CFG_JSON'])
+net = cfg.get('networkConfiguration') or {'networkMode': 'PUBLIC'}
+# See the note in update_mcp_runtime_mongodb_env: UpdateAgentRuntime rejects
+# networkModeConfig.requireServiceS3Endpoint for runtimes created after the
+# 2026-06-11 rollout, even though get-agent-runtime returns it.
+(net.get('networkModeConfig') or {}).pop('requireServiceS3Endpoint', None)
 out = {
     'agentRuntimeId':     os.environ['RUNTIME_ID'],
     'roleArn':            cfg['roleArn'],
     'agentRuntimeArtifact': cfg['agentRuntimeArtifact'],
-    'networkConfiguration':  cfg.get('networkConfiguration')  or {'networkMode': 'PUBLIC'},
+    'networkConfiguration':  net,
     'protocolConfiguration': cfg.get('protocolConfiguration') or {'serverProtocol': 'MCP'},
     'environmentVariables':  cfg.get('environmentVariables', {}),
 }

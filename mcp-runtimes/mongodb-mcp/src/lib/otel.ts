@@ -8,7 +8,7 @@ import { context, propagation, trace, type Context } from "@opentelemetry/api";
 import { AsyncLocalStorageContextManager } from "@opentelemetry/context-async-hooks";
 import { W3CTraceContextPropagator } from "@opentelemetry/core";
 import { BasicTracerProvider } from "@opentelemetry/sdk-trace-base";
-import { Resource } from "@opentelemetry/resources";
+import { resourceFromAttributes } from "@opentelemetry/resources";
 import { ATTR_SERVICE_NAME } from "@opentelemetry/semantic-conventions";
 
 let bootstrapped = false;
@@ -24,7 +24,7 @@ export function initOtel(opts: InitOtelOptions): void {
   process.env.OTEL_SERVICE_NAME = opts.serviceName;
 
   const provider = new BasicTracerProvider({
-    resource: new Resource({
+    resource: resourceFromAttributes({
       [ATTR_SERVICE_NAME]: opts.serviceName,
       "service.version": process.env.GIT_SHA?.trim() || "dev",
       "deployment.environment": process.env.ENVIRONMENT?.trim() || "dev",

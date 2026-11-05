@@ -30,7 +30,7 @@ import type { TraceCollector } from "./trace-collector.ts";
 
 /** Agent id reported in trace events / Bedrock requestMetadata for synthesis. */
 export const SYNTHESIZER_AGENT_ID = "synthesizer";
-export const SYNTHESIZER_AGENT_NAME = "Synthesizer";
+const SYNTHESIZER_AGENT_NAME = "Synthesizer";
 
 /**
  * Synthesizer system prompt. Composed in this file (not loaded from a

@@ -372,7 +372,7 @@ for name in include_roots:
         rel = path.relative_to(root).as_posix()
         files[rel] = path.read_text(encoding="utf-8")
 
-for name in ["http-tools.json", "environment.yaml", "demo-prompts.yaml"]:
+for name in ["http-tools.json", "demo-prompts.yaml"]:
     path = root / name
     if path.exists() and path.is_file():
         files[name] = path.read_text(encoding="utf-8")

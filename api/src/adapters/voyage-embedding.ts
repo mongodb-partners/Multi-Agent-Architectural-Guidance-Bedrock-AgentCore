@@ -157,11 +157,6 @@ export function hasImageSegment(item: MultimodalItem): boolean {
   return item.some((s) => s.type === "image_url" || s.type === "image_base64");
 }
 
-/** Has any item in this batch got an image segment? */
-export function anyItemHasImage(items: MultimodalItem[]): boolean {
-  return items.some(hasImageSegment);
-}
-
 /** Redact base64 image bytes from a MultimodalItem before logging. We
  *  keep the header (so the mime type is visible) and append a `<elided NB>`
  *  marker so payloads of any size produce bounded log lines. */
@@ -236,7 +231,7 @@ export function assertSupportedVoyageModel(name: string): void {
  *  parsed — catches mid-stream container/model swaps that silently return
  *  a different dim (the failure mode the legacy EMBEDDING_DIMENSIONS
  *  preflight existed to catch). */
-export function assertExpectedEmbeddingDims(actual: number): void {
+function assertExpectedEmbeddingDims(actual: number): void {
   if (actual !== VOYAGE_EMBEDDING_DIMS) {
     throw new Error(
       `Voyage embedding dimension mismatch: got ${actual}, expected ${VOYAGE_EMBEDDING_DIMS}. ` +
@@ -354,7 +349,7 @@ export type VoyageBatchOk = {
 };
 
 /** Batched form. Returns one embedding per input item, in order. */
-export async function voyageGenerateEmbeddings(
+async function voyageGenerateEmbeddings(
   items: MultimodalItem[],
   endpointName: string,
   inputType: VoyageInputType = "document",

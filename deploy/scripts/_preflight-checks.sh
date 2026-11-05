@@ -3188,8 +3188,17 @@ try {
 process.stdout.write(JSON.stringify(out));
 JS
 
+  # Resolve modules from db-seeding/ (pins bson 7.2.0). A bare `bun -e` here
+  # auto-installs bson >= 7.3.0, which throws ERR_NOT_IMPLEMENTED on Bun at
+  # import time (node:v8 isBuildingSnapshot) — that would be swallowed by the
+  # 2>/dev/null below and silently degrade to "bun probe failed".
+  # Same rationale as mongo_bun_e in _mongo-connect.sh, inlined because this
+  # file does not source that helper. The cd is safe: $( ) is already a subshell.
+  local _pf_seed_dir
+  _pf_seed_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/db-seeding"
+
   local probe_json
-  probe_json="$(MONGODB_URI="$uri" \
+  probe_json="$(cd "$_pf_seed_dir" 2>/dev/null && MONGODB_URI="$uri" \
     MONGODB_DB="$db" \
     EXPECTED_DIM="$expected_dim" \
     EXPECTED_PREFIX="$expected_model_prefix" \

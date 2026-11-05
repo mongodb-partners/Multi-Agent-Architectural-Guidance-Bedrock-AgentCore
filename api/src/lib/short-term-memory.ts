@@ -84,7 +84,7 @@ function asChatMessagesFromEvents(
   return out;
 }
 
-export async function readShortTermMessages(
+async function readShortTermMessages(
   sessionId: string,
   userId: string,
   limit = 40,
@@ -104,7 +104,7 @@ export async function readShortTermMessages(
   return asChatMessagesFromEvents(sessionId, res.events ?? []).slice(-limit);
 }
 
-export async function writeShortTermUserMessage(
+async function writeShortTermUserMessage(
   sessionId: string,
   userId: string,
   content: string,
@@ -130,7 +130,7 @@ export async function writeShortTermUserMessage(
   );
 }
 
-export async function writeShortTermAssistantMessage(
+async function writeShortTermAssistantMessage(
   sessionId: string,
   userId: string,
   content: string,

@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const httpToolParameterSchema = z.object({
+const httpToolParameterSchema = z.object({
   name: z.string().min(1),
   type: z.enum(["string", "number", "boolean", "object"]),
   description: z.string(),
@@ -9,7 +9,7 @@ export const httpToolParameterSchema = z.object({
 
 export type HttpToolParameter = z.infer<typeof httpToolParameterSchema>;
 
-export const httpToolDefinitionSchema = z
+const httpToolDefinitionSchema = z
   .object({
     name: z
       .string()

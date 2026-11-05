@@ -35,7 +35,6 @@ import re
 from typing import Any
 
 import streamlit as st
-from lib.display_labels import DB_DATA_INFO_LABEL
 
 from lib.trace_view_helpers import (
     _VECTOR_SCORE_BINS,
@@ -658,7 +657,7 @@ def render_mongo_dashboard(events: list[dict]) -> None:
             _render_vector_document_previews(_vector_document_previews(vp, result_payload))
 
     if schemas:
-        with st.expander(f"{DB_DATA_INFO_LABEL} ({len(schemas)})", expanded=False):
+        with st.expander(f"DB Data info ({len(schemas)})", expanded=False):
             for s in schemas:
                 sp = s.get("payload") or {}
                 st.markdown(

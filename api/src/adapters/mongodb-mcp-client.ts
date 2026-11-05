@@ -545,7 +545,7 @@ export function extractScoresFromResult(result: ToolResultBlock): number[] {
 }
 
 /** Scores from MCP runtime trace events (`mongo.result.sampleDocs`). */
-export function extractScoresFromMcpTraceEvents(
+function extractScoresFromMcpTraceEvents(
   traces: Array<{ type?: string; payload?: Record<string, unknown> } | null | undefined>,
 ): number[] {
   const scores: number[] = [];
@@ -625,7 +625,7 @@ function patchVectorSearchPayload<T extends { type: string; payload?: unknown }>
 /** Set by `extractAndReplayMcpTraces` for the in-flight MCP tool call. */
 let pendingMcpVectorScores: number[] | undefined;
 
-export function takePendingMcpVectorScores(): number[] {
+function takePendingMcpVectorScores(): number[] {
   const scores = pendingMcpVectorScores ?? [];
   pendingMcpVectorScores = undefined;
   return scores;
@@ -1558,12 +1558,6 @@ async function runDeepProbe(): Promise<
       error: err instanceof Error ? err.message : String(err),
     };
   }
-}
-
-/** Reset the cached client (for tests). */
-export function resetMcpClientForTests(): void {
-  _mcpClient = null;
-  _mcpTools = null;
 }
 
 // ---------------------------------------------------------------------------

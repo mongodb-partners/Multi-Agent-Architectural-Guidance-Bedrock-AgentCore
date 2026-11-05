@@ -8,7 +8,7 @@ import { currentTrace } from "./trace-context.ts";
 import { logger } from "./logger.ts";
 
 /** When `HTTP_TOOLS_MOCK=1`, HTTP tools return a mock payload without calling the network. */
-export function isHttpToolsMockMode(): boolean {
+function isHttpToolsMockMode(): boolean {
   const v = process.env.HTTP_TOOLS_MOCK?.trim().toLowerCase();
   return v === "1" || v === "true" || v === "yes";
 }

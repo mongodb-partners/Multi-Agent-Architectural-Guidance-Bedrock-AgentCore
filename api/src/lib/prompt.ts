@@ -9,7 +9,7 @@ import type { SkillDiscovery } from "./skill-loader.ts";
  * Used for the orchestrator and any agent that needs to know what skills exist
  * before deciding which to activate.
  */
-export function withSkillDiscoverySection(
+function withSkillDiscoverySection(
   basePrompt: string,
   discoveries: SkillDiscovery[],
 ): string {
@@ -33,7 +33,7 @@ export function withSkillDiscoverySection(
  * Append activated skill instruction blocks to a base prompt.
  * Called after Phase 1 when the agent (or the framework) has activated skills.
  */
-export function withActivatedSkills(
+function withActivatedSkills(
   basePrompt: string,
   activatedBlocks: { name: string; body: string }[],
 ): string {
