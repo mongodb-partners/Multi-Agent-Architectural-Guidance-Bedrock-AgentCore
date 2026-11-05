@@ -1,7 +1,7 @@
 streamlit>=1.32,<2
 requests>=2.31,<3
 streamlit-cognito-auth>=1.3,<2
-boto3>=1.34,<2
+boto3>=1.43.123,<2
 # OpenTelemetry — auto-instruments `requests`, `urllib3`, and Streamlit's
 # Tornado server so HTTP server spans + outbound API calls land in the same
 # /aws/spans trace tree as the Bun API. `opentelemetry-distro` resolves a
