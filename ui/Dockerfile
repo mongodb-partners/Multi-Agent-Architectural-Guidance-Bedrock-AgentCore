@@ -1,7 +1,7 @@
 # Streamlit UI — typical builds:
 #   docker build -f ui/Dockerfile -t multi-agent-streamlit:local ui
 #   docker compose up --build   (from repo root; see compose.yaml)
-FROM python:3.13-slim-bookworm
+FROM python:3.15-slim-bookworm
 
 WORKDIR /app
 
