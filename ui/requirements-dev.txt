@@ -1,4 +1,4 @@
 # Dev/test-only deps. Not installed into the runtime image (ui/Dockerfile
 # installs requirements.txt only).
 -r requirements.txt
-pytest>=8,<10
+pytest>=9.2.0,<10
