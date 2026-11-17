@@ -26,7 +26,7 @@ import { W3CTraceContextPropagator } from "@opentelemetry/core";
 import { BatchSpanProcessor } from "@opentelemetry/sdk-trace-base";
 import { NodeTracerProvider } from "@opentelemetry/sdk-trace-node";
 import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-http";
-import { Resource } from "@opentelemetry/resources";
+import { resourceFromAttributes } from "@opentelemetry/resources";
 import { ATTR_SERVICE_NAME } from "@opentelemetry/semantic-conventions";
 
 let bootstrapped = false;
@@ -51,28 +51,29 @@ export function initOtel(opts: InitOtelOptions): void {
 
   process.env.OTEL_SERVICE_NAME = opts.serviceName;
 
+  const tracesEndpoint = resolveTracesEndpoint();
+  const spanProcessors = tracesEndpoint
+    ? [
+        // BatchSpanProcessor batches span exports — gentler on the sidecar than
+        // SimpleSpanProcessor and matches AWS reference architecture for ADOT.
+        new BatchSpanProcessor(
+          new OTLPTraceExporter({
+            url: tracesEndpoint,
+            // Headers/sampling/timeout default to OTEL_EXPORTER_OTLP_HEADERS /
+            // OTEL_EXPORTER_OTLP_TIMEOUT / OTEL_TRACES_SAMPLER* env vars.
+          }),
+        ),
+      ]
+    : [];
+
   const provider = new NodeTracerProvider({
-    resource: new Resource({
+    resource: resourceFromAttributes({
       [ATTR_SERVICE_NAME]: opts.serviceName,
       "service.version": process.env.GIT_SHA?.trim() || "dev",
       "deployment.environment": process.env.ENVIRONMENT?.trim() || "dev",
     }),
+    spanProcessors,
   });
-
-  const tracesEndpoint = resolveTracesEndpoint();
-  if (tracesEndpoint) {
-    // BatchSpanProcessor batches span exports — gentler on the sidecar than
-    // SimpleSpanProcessor and matches AWS reference architecture for ADOT.
-    provider.addSpanProcessor(
-      new BatchSpanProcessor(
-        new OTLPTraceExporter({
-          url: tracesEndpoint,
-          // Headers/sampling/timeout default to OTEL_EXPORTER_OTLP_HEADERS /
-          // OTEL_EXPORTER_OTLP_TIMEOUT / OTEL_TRACES_SAMPLER* env vars.
-        }),
-      ),
-    );
-  }
 
   const cm = new AsyncLocalStorageContextManager();
   cm.enable();
